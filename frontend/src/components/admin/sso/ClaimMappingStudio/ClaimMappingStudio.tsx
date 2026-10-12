@@ -311,6 +311,8 @@ function displayValue(
     resolved: {
         external_id: string; email: string; first_name: string
         last_name: string; groups: string[]; auth_time: number | null
+        display_name?: string | null
+        avatar_url?: string | null
         attributes: Record<string, unknown>
     },
     field: string,
@@ -323,9 +325,14 @@ function displayValue(
         case 'groups': return resolved.groups.join(', ')
         case 'auth_time':
             return resolved.auth_time === null ? '' : String(resolved.auth_time)
-        // The mapper folds display_name into first/last and email_verified
-        // into a boolean it does not echo, so neither has a resolved value
-        // of its own to show. Provenance still says which key was read.
+        // The server echoes the resolved full-name string (it seeds the
+        // display override and fuels the split) — showing it here fixes
+        // the row that read "Paste a sample to see this resolve" while
+        // its winning chip sat highlighted green.
+        case 'display_name': return resolved.display_name ?? ''
+        case 'avatar_url': return resolved.avatar_url ?? ''
+        // email_verified folds into a boolean the mapper does not echo;
+        // provenance still says which key was read.
         default: return undefined
     }
 }

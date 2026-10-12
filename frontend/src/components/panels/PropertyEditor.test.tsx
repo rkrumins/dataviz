@@ -56,7 +56,12 @@ vi.mock('react-markdown', () => ({
   default: ({ children }: { children: React.ReactNode }) => <div data-testid="md">{children}</div>,
 }))
 vi.mock('remark-gfm', () => ({ default: () => undefined }))
-vi.mock('@/components/docs/MarkdownComponents', () => ({ markdownComponents: {} }))
+// Both maps: the editor renders user-authored text, so it uses the
+// narrowed one (no mermaid / lineage-demo / tour widgets).
+vi.mock('@/components/docs/MarkdownComponents', () => ({
+  markdownComponents: {},
+  userContentMarkdownComponents: {},
+}))
 
 // TipTap can't render in jsdom; stub the WYSIWYG editor as a controlled
 // textarea that round-trips its value. Covers both the inline + modal (rich)

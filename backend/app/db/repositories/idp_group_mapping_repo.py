@@ -33,13 +33,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
+    GroupMemberORM,
     GroupORM,
     IdpGroupRoleMappingORM,
     IdpProviderORM,
+    RoleBindingORM,
     RoleORM,
 )
 from backend.app.db.repositories.idp_provider_repo import decrypt_settings
@@ -191,9 +193,57 @@ async def _validate_role_binding_target(
             )
 
 
+async def roles_granted_by_group(
+    session: AsyncSession, group_id: str,
+) -> set[str]:
+    """Every role a member of ``group_id`` inherits through the group.
+
+    Group bindings resolve into a member's effective permissions exactly
+    as their own bindings do, so "which roles does this group hand out"
+    is the question a group-membership mapping has to answer before it
+    can be judged safe.
+
+    ``expires_at`` is deliberately ignored. An expired binding grants
+    nothing today, but it is a standing row an admin can extend without
+    anything re-checking the SSO mappings that point at the group — so
+    for a guard, a lapsed route to ``super_admin`` is still a route.
+    Refusing an odd configuration is the cheap direction to be wrong in.
+    """
+    rows = (await session.execute(
+        select(RoleBindingORM.role_name).where(
+            RoleBindingORM.subject_type == "group",
+            RoleBindingORM.subject_id == group_id,
+        )
+    )).scalars().all()
+    return {r for r in rows if r}
+
+
 async def _validate_group_membership_target(
-    session: AsyncSession, *, target_group_id: str,
+    session: AsyncSession,
+    *,
+    target_group_id: str,
+    provider_id: Optional[str] = None,
 ) -> None:
+    """Hold a group-membership mapping to the same bar as a role mapping.
+
+    A ``role_binding`` mapping is refused when it names a role we never
+    auto-grant, and again when a platform-admin role comes from a
+    provider that cannot prove who anyone is. A ``group_membership``
+    mapping was checked for none of that — it asked whether the group
+    existed and whether it was flagged protected, and never asked what
+    the group actually *grants*.
+
+    That left the whole guard walkable: point an IdP group at an
+    internal group that holds a global ``super_admin`` binding, and
+    whoever the IdP puts in that group becomes platform admin on their
+    next login. The ``is_protected`` flag did not help — it is read in
+    four places and written in none, so every group reachable through
+    the API has it false.
+
+    The refusal is stated in terms of what the group grants rather than
+    what it is called, because that is the property that matters and the
+    only one an operator cannot accidentally leave unset.
+    """
     if not target_group_id:
         raise MappingValidationError("target_group_id is required for group_membership targets")
     result = await session.execute(
@@ -208,6 +258,22 @@ async def _validate_group_membership_target(
         raise MappingValidationError(
             f"group {target_group_id!r} is marked protected; SSO group "
             f"mappings may not auto-add members to it."
+        )
+
+    granted = await roles_granted_by_group(session, target_group_id)
+    forbidden = sorted(granted & FORBIDDEN_AUTO_ROLES)
+    if forbidden:
+        raise ForbiddenSsoRoleError(
+            f"group '{group.name}' grants {', '.join(forbidden)}, which IdP "
+            "groups may not auto-grant — mapping into it would hand that "
+            "role to whoever your IdP puts in the source group. Grant it "
+            "via the standard admin role-binding flow instead."
+        )
+    # A platform-admin role reached through a group is the same grant as
+    # one named directly, so it answers to the same assurance rule.
+    for role_name in sorted(granted & PLATFORM_ADMIN_ROLES):
+        await _validate_provider_assurance(
+            session, provider_id=provider_id, role_name=role_name,
         )
 
 
@@ -255,7 +321,7 @@ async def create_group_membership_mapping(
 ) -> IdpGroupRoleMappingORM:
     """Create a mapping IdP group -> internal Group membership."""
     await _validate_group_membership_target(
-        session, target_group_id=target_group_id,
+        session, target_group_id=target_group_id, provider_id=provider_id,
     )
     row = IdpGroupRoleMappingORM(
         provider_id=provider_id,
@@ -273,11 +339,163 @@ async def create_group_membership_mapping(
     return row
 
 
+async def update_mapping(
+    session: AsyncSession,
+    mapping_id: str,
+    *,
+    idp_group: str,
+    target_type: str,
+    role_name: Optional[str] = None,
+    scope_type: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    target_group_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+) -> Optional[IdpGroupRoleMappingORM]:
+    """Replace a mapping's rule in place, held to the same bar as create.
+
+    A full replacement rather than a field patch, because a rule is one
+    sentence: validating a fragment against a row mid-edit would approve
+    combinations the create path refuses. The row keeps its id,
+    ``created_at`` and ``created_by`` — the audit trail's anchor — and
+    every guard the two create paths run runs here too, so an edit can
+    never reach a target a create could not.
+
+    Grants already made under the old rule are not swept here: the
+    reconciler re-reads the mappings on every sign-in and every session
+    refresh, so they adjust within minutes — exactly as after a delete.
+
+    Returns ``None`` for an unknown id; raises the same validation
+    errors as the create paths.
+    """
+    row = await get_mapping(session, mapping_id)
+    if row is None:
+        return None
+
+    if target_type == "role_binding":
+        await _validate_role_binding_target(
+            session, role_name=role_name, scope_type=scope_type,
+            scope_id=scope_id, provider_id=provider_id,
+        )
+        row.target_type = "role_binding"
+        row.role_name = (role_name or "").strip()
+        row.scope_type = scope_type
+        row.scope_id = scope_id
+        row.target_group_id = None
+    elif target_type == "group_membership":
+        await _validate_group_membership_target(
+            session, target_group_id=target_group_id or "",
+            provider_id=provider_id,
+        )
+        row.target_type = "group_membership"
+        row.target_group_id = target_group_id
+        row.role_name = None
+        row.scope_type = None
+        row.scope_id = None
+    else:
+        raise MappingValidationError(
+            "target_type must be 'role_binding' or 'group_membership', "
+            f"got {target_type!r}"
+        )
+
+    row.idp_group = idp_group.strip()
+    row.provider_id = provider_id
+    await session.flush()
+    return row
+
+
 async def delete_mapping(session: AsyncSession, mapping_id: str) -> bool:
     result = await session.execute(
         delete(IdpGroupRoleMappingORM).where(IdpGroupRoleMappingORM.id == mapping_id)
     )
     return (result.rowcount or 0) > 0
+
+
+async def remove_orphaned_sso_grants(
+    session: AsyncSession,
+    *,
+    role_keys: Iterable[tuple[str, Optional[str], str]] = (),
+    group_ids: Iterable[str] = (),
+) -> dict:
+    """Clear ``source='sso'`` grants whose last mapping just went away.
+
+    The reconciler's revocation is deliberately scoped to targets some
+    mapping still reaches — grant rows carry no provider, so revoking
+    outside that scope could strip another provider's grants. The cost
+    of that scoping: when an edit or a delete removes the LAST mapping
+    referencing a target, the grants already made under it fall outside
+    every future reconcile and would linger forever.
+
+    This is the safe complement, run at edit/delete time with the old
+    target in hand. For each candidate it first re-checks whether ANY
+    mapping still references the target — another rule (any provider,
+    any IdP group) keeps it alive — and only a target nothing references
+    is swept. That is safe by construction: ``source='sso'`` rows exist
+    only because some mapping targeted them, so with no mapping left,
+    every one of them is stale.
+
+    Bindings are soft-revoked (``expires_at``), matching the
+    reconciler's own idiom so a future rule for the same target
+    reactivates them; memberships are deleted, as the reconciler
+    deletes them. Returns ``{"bindings_expired": n, "memberships_removed": n}``.
+    """
+    now = _now()
+    bindings_expired = 0
+    memberships_removed = 0
+
+    for scope_type, scope_id, role_name in role_keys:
+        still = await session.execute(
+            select(IdpGroupRoleMappingORM.id).where(
+                IdpGroupRoleMappingORM.target_type == "role_binding",
+                IdpGroupRoleMappingORM.role_name == role_name,
+                IdpGroupRoleMappingORM.scope_type == scope_type,
+                (IdpGroupRoleMappingORM.scope_id == scope_id)
+                if scope_id is not None
+                else IdpGroupRoleMappingORM.scope_id.is_(None),
+            ).limit(1)
+        )
+        if still.first() is not None:
+            continue
+        result = await session.execute(
+            update(RoleBindingORM)
+            .where(
+                RoleBindingORM.source == "sso",
+                RoleBindingORM.subject_type == "user",
+                RoleBindingORM.role_name == role_name,
+                RoleBindingORM.scope_type == scope_type,
+                (RoleBindingORM.scope_id == scope_id)
+                if scope_id is not None
+                else RoleBindingORM.scope_id.is_(None),
+                RoleBindingORM.expires_at.is_(None),
+            )
+            .values(expires_at=now)
+        )
+        bindings_expired += int(result.rowcount or 0)
+
+    for group_id in group_ids:
+        if not group_id:
+            continue
+        still = await session.execute(
+            select(IdpGroupRoleMappingORM.id).where(
+                IdpGroupRoleMappingORM.target_type == "group_membership",
+                IdpGroupRoleMappingORM.target_group_id == group_id,
+            ).limit(1)
+        )
+        if still.first() is not None:
+            continue
+        result = await session.execute(
+            delete(GroupMemberORM).where(
+                GroupMemberORM.group_id == group_id,
+                GroupMemberORM.source == "sso",
+            )
+        )
+        memberships_removed += int(result.rowcount or 0)
+
+    if bindings_expired or memberships_removed:
+        await session.flush()
+    return {
+        "bindings_expired": bindings_expired,
+        "memberships_removed": memberships_removed,
+    }
 
 
 async def get_mapping(
@@ -313,6 +531,34 @@ async def list_mappings(
         IdpGroupRoleMappingORM.target_group_id,
     )
     result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_active_for_provider(
+    session: AsyncSession,
+    *,
+    provider_id: Optional[str],
+) -> list[IdpGroupRoleMappingORM]:
+    """Every mapping the acting provider governs: its own rows plus the
+    NULL-provider wildcards (``provider_id=None`` returns wildcards
+    only, matching ``list_active_for_groups``).
+
+    This is the reconciler's REVOCATION scope. Granted rows carry no
+    provider of their own, so "no longer asserted" can only be judged
+    against the mappings this provider could have granted through —
+    otherwise logging in through provider B reads provider A's grants
+    as stale and strips them.
+    """
+    if provider_id is not None:
+        where = or_(
+            IdpGroupRoleMappingORM.provider_id == provider_id,
+            IdpGroupRoleMappingORM.provider_id.is_(None),
+        )
+    else:
+        where = IdpGroupRoleMappingORM.provider_id.is_(None)
+    result = await session.execute(
+        select(IdpGroupRoleMappingORM).where(where)
+    )
     return list(result.scalars().all())
 
 

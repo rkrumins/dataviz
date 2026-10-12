@@ -54,3 +54,39 @@ describe('isDriftError / cluster_mode_mismatch mapping', () => {
         expect(msg.toLowerCase()).toContain('standalone')
     })
 })
+
+
+describe('a graph store node being replaced', () => {
+    it('reads as a reconnection, and the breaker text never reaches a person', () => {
+        const failing = friendlyError(JSON.stringify({
+            detail: {
+                code: 'PROVIDER_FAILING_OVER',
+                endpoint: '10.0.0.3:6379',
+                reason: 'the graph store node holding this graph is restarting or failing over — retrying automatically',
+                technical: 'the graph store node 10.0.0.3:6379 holding this graph is restarting or failing over',
+                retryAfterSeconds: 3,
+            },
+        }))
+        expect(failing.toLowerCase()).toContain('restarting')
+        expect(failing.toLowerCase()).toContain('reconnecting')
+        expect(failing.toLowerCase()).not.toContain('circuit')
+
+        // The generic outage keeps its own words, and the breaker's are
+        // parked under ``technical`` where only an operator looks.
+        const down = friendlyError(JSON.stringify({
+            detail: {
+                code: 'PROVIDER_UNAVAILABLE',
+                reason: 'the graph store for this provider is not answering; retrying automatically',
+                technical: 'Circuit open; will probe downstream again in ~28s',
+                retryAfterSeconds: 30,
+            },
+        }))
+        expect(down).toBe(friendlyError('provider_unavailable'))
+        expect(down).not.toContain('Circuit open')
+    })
+
+    it('still keys on a reason that IS a code, the way older envelopes send it', () => {
+        expect(friendlyError(JSON.stringify({ detail: { code: 'PROVIDER_UNAVAILABLE', reason: 'dns_unresolvable' } })))
+            .toBe(friendlyError('dns_unresolvable'))
+    })
+})

@@ -248,6 +248,61 @@ async def test_trigger_with_timeout_secs_and_max_retries_lands_on_orm(
     assert (job.timeout_secs or 7200) == 300
 
 
+async def test_trigger_without_timeout_takes_the_fleet_stall_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine-queued rebuild sends no ``timeoutSecs``; when the fleet
+    Defaults carry ``stallTimeoutSecs`` the job row gets THAT (not NULL), so
+    the watchdog honours the operator's fleet-wide choice. An explicit
+    request value still wins."""
+    import json as _json
+    import types as _types
+
+    _patch_resolution_and_claim(monkeypatch)
+    service = _make_service()
+
+    class _SettingsSession(_FakeSession):
+        async def get(self, model, _pk):
+            if model.__name__ == "AggregationSettingsORM":
+                return _types.SimpleNamespace(
+                    tuning_json=_json.dumps({"stall_timeout_secs": 21_600}),
+                )
+            return None
+
+    def _capture_response(job: AggregationJobORM):
+        _seed_required_orm_defaults(job)
+        return AggregationService._to_response(job)
+
+    monkeypatch.setattr(service, "_to_response", _capture_response)
+
+    session = _SettingsSession()
+    await service.trigger(
+        "ds_xyz", AggregationTriggerRequest(batch_size=1000, projection_mode="in_source"),
+        "reconcile", session,
+    )
+    job = [o for o in session.added if isinstance(o, AggregationJobORM)][0]
+    assert job.timeout_secs == 21_600
+    assert _json.loads(job.tuning_json)["stall_timeout_secs"] == 21_600
+
+    session = _SettingsSession()
+    await service.trigger(
+        "ds_xyz",
+        AggregationTriggerRequest(batch_size=1000, projection_mode="in_source", timeout_secs=900),
+        "manual", session,
+    )
+    job = [o for o in session.added if isinstance(o, AggregationJobORM)][0]
+    assert job.timeout_secs == 900
+
+
+def test_timeout_bounds_allow_a_week() -> None:
+    """Very large graphs in the Gentle profile can legitimately need more
+    than a day; the stall window and the wall clock go up to 7 days."""
+    assert AggregationTriggerRequest(timeout_secs=604_800).timeout_secs == 604_800
+    with pytest.raises(ValidationError):
+        AggregationTriggerRequest(timeout_secs=604_801)
+    assert ResumeOverrides(timeout_secs=172_800).timeout_secs == 172_800
+
+
 # ── Node-identity property freeze (URN-equivalent) ──────────────────────
 
 
@@ -559,7 +614,7 @@ def test_trigger_request_rejects_timeout_below_minimum() -> None:
 def test_trigger_request_rejects_timeout_above_maximum() -> None:
     with pytest.raises(ValidationError):
         AggregationTriggerRequest(
-            timeout_secs=99999,
+            timeout_secs=604_801,
             batch_size=1000,
             projection_mode="in_source",
         )

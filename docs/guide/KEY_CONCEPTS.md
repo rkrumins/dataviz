@@ -1,129 +1,211 @@
 # Key Concepts
 
-{brand} has a small vocabulary. Learn these ten words and the whole platform
-becomes predictable. Read top to bottom — each concept builds on the one before.
+*For everyone new to {brand}.*
+{brand} has a small vocabulary. This page walks through it in the order the
+pieces fit together — from where your data lives, to the views you open every
+day, to who can do what — so the rest of the guide reads easily. It explains the
+*what* and *why*; each section links to the page that shows you *how*. Every
+term is also in the [Glossary & Acronyms](/guide/glossary).
 
-> **Note:** *The one-sentence model* — A **Provider** holds graphs, which become
-> **Catalog Items**, which are bound into a **Workspace** as a **Data Source**,
-> interpreted through an **Ontology**, explored on a **canvas**, and saved as a
-> **View**.
+> **Note:** *The model in one sentence* — a **workspace** holds **data
+> sources**; each data source is a graph of **entities** joined by
+> **relationships** and given meaning by a **semantic layer**; a **view** is a
+> curated picture of part of that graph, and the **Explorer** is where you find
+> views.
 
 ```mermaid
 flowchart LR
-  P[Provider<br/>graph database] --> C[Catalog Item<br/>a discovered graph]
-  C --> W[Workspace<br/>team context]
-  O[Ontology<br/>semantic layer] --> W
-  W --> DS[Data Source<br/>graph + ontology]
-  DS --> EX[Explorer / Canvas]
-  EX --> V[View<br/>saved exploration]
+  P["Provider"] -->|"stores the graph of"| DS["Data source"]
+  SL["Semantic layer"] -->|"gives meaning to"| DS
+  W["Workspace"] -->|"contains"| DS
+  DS -->|"is made of"| E["Entities and relationships"]
+  E -->|"curated into"| V["View"]
+  V -->|"listed in"| X["Explorer"]
 ```
 
 ---
 
-## The data plumbing
+## Workspaces
 
-### Provider
-A **Provider** is a *connection to a graph database* where your lineage data
-actually lives — for example a FalkorDB, Neo4j, DataHub, or Spanner instance. It stores
-the host, credentials, and health status. You'll only deal with Providers if
-you're an administrator; everyone else benefits from them invisibly.
+A **workspace** is a team's or a project's area in {brand}. It holds that
+team's **data sources**, the **views** built on them, and its **members** — the
+people and groups who can use it, each with a role. You can belong to several
+workspaces and hold a different role in each.
 
-### Catalog Item
-When a Provider is connected, {brand} *discovers* the graphs inside it and
-registers each one as a **Catalog Item** — a named, governed dataset that can be
-shared into workspaces. Think of the catalog as the **shelf of available
-datasets** that admins curate.
+You see the workspaces you belong to. Find them under **Workspaces** in the
+sidebar, or on the Dashboard under **Your business areas**.
 
-### Workspace
-A **Workspace** is a *team or project context*. It's the unit of isolation: the
-people, data sources, and views inside one workspace are kept separate from
-others. Open **Workspaces** from the sidebar to see the ones you have access to,
-then enter the one you want to work in — each screen shows you which workspace
-you're in, there's no separate global switcher to keep in sync. Entering a
-workspace changes everything you see on the canvas.
+## Data sources and providers
 
-### Data Source
-Inside a workspace, a **Data Source** binds a Catalog Item (the graph) to an
-**Ontology** (the meaning). It's the *actual thing you explore*. One workspace
-can have several data sources.
+A **data source** is one graph of your data, attached to a workspace — for
+example, the lineage of a data warehouse. A workspace can hold several.
 
----
+Behind every data source is a **provider**: the connection to the graph
+database that stores it — FalkorDB, Neo4j, DataHub or Google Spanner Graph.
+Providers are administrator territory: only a Super Admin can register one
+(**Ingestion → Providers → Register Provider**). Everyone else simply uses the
+data sources built on them. Setting this up is covered in
+[Admin Setup](/guide/admin-setup).
 
-## The meaning layer
+## Entities and relationships
 
-### Ontology (the Semantic Layer)
-An **Ontology** defines *what your data means*: the **entity types** (e.g.
-Domain, Dataset, Table, Column) and **relationship types** (e.g. "feeds",
-"contains"), plus the colour and icon for each. It's why a graph from a raw
-database becomes a *readable* picture instead of anonymous dots.
+Inside a data source, every thing is an **entity** — a domain, a system, a
+dataset, a table, a column, a dashboard — joined to other entities by
+**relationships**. Every relationship type is marked as one of two kinds (or
+both):
 
-- Ontologies are **versioned** — published versions are immutable, so a View
-  always renders the same way it did when it was saved.
-- They can be **shared** across workspaces, giving your whole organisation one
-  consistent visual language.
-
-Learn more in [The Semantic Layer](/guide/semantic-layer).
-
-### Granularity
-Real lineage exists at several **levels of detail**. {brand} lets you zoom
-between them without losing your place:
-
-| Level | You see… | Best for |
+| Kind | It means | What you do with it |
 | --- | --- | --- |
-| **Column / Field** | individual fields | precise impact analysis |
-| **Table / Dataset** | tables and datasets | day-to-day tracing |
-| **Domain / Business** | business areas | the executive overview |
+| **Containment** | A parent holds a child: a schema contains tables, a table contains columns | Open a container to see what's inside it |
+| **Lineage** | Data flows from one entity to another: a table feeds a dashboard | Trace it upstream and downstream |
 
-Changing granularity is a *lens*, not a new query — the picture re-aggregates
-around the same underlying graph.
+## Views and the Explorer
 
-### Persona toggle (Business vs Technical)
-A switch in the top bar re-frames the same graph for a **Business** audience
-(domains, products, plain names) or a **Technical** audience (schema fields,
-URNs, system detail). Use it to make the same View legible to different
-stakeholders.
+A **view** is a saved, curated picture of part of one data source: which
+entities appear, how they're laid out and grouped, and how they look. Someone
+builds a view once — with **New View** in the Explorer — and everyone who can
+see it opens it in one click. Views are how a team captures and shares what it
+knows.
 
----
+The **Explorer** (**Explore** in the sidebar) is the catalogue of every view you
+can open, across all your workspaces. Search it, filter it by workspace, type,
+tag or creator, and see what's **Trending**. You *find* views in the Explorer;
+you *work with the data* inside a view.
 
-## The things you create
+See [Finding Views (the Explorer)](/guide/browsing-views) and
+[Creating Views](/guide/creating-views).
 
-### Lineage
-**Lineage** is the network of connections itself — the lines between nodes that
-show how data flows. *Upstream* means "where this came from"; *downstream* means
-"what this feeds." Tracing lineage is the core activity in {brand}.
+## Three kinds of canvas
 
-### Canvas / Explorer
-The **canvas** is the interactive space where the graph is drawn. The
-**Explorer** is the open-ended canvas where you search, trace, expand, and
-filter freely. See [Exploring the Graph](/guide/exploring-graph).
+A view draws its entities on one of three canvas types, chosen in the
+**Layout** step when the view is created. Each view's card in the Explorer says
+which one it uses.
 
-### View
-A **View** is a *saved snapshot of an exploration*: which nodes are shown, the
-layout, the filters, the layers, and the granularity. Views are how knowledge is
-captured and shared. Each View has a **visibility**:
+| If you want to… | choose… | because it shows… |
+| --- | --- | --- |
+| read a pipeline from source to consumer | **Context View** — the recommended default | entities sorted into columns you define, with lineage drawn between them |
+| explore how things connect | **Graph** | entities and their relationships, positioned freely |
+| see what sits inside what | **Hierarchy** | entities nested inside their parents, as a tree you expand and collapse |
 
-- **Personal** — just you.
-- **Team** — everyone in the workspace.
-- **Enterprise** — everyone in the organisation.
+[Navigating Layers](/guide/navigating-layers) explains a Context View's columns.
 
-You can **favourite** views for one-click access. See
-[Browsing Views](/guide/browsing-views) and [Creating Views](/guide/creating-views).
+## Lineage: upstream, downstream and tracing
 
-### Context Lens / Layers
-A **Context Lens** organises a View's nodes into **layers** (rows or lanes) — for
-example by pipeline stage or ownership — so a busy graph reads like a tidy
-diagram. You set these up in the **Layer Studio** when creating a view.
+**Lineage** is the web of data-flow relationships. Pick any entity and its
+lineage runs two ways:
 
----
+- **Upstream** — where its data comes from. When a number looks wrong, this is
+  where you look for the *root cause*.
+- **Downstream** — what its data feeds. This is its *impact*, or *blast
+  radius*: everything a change to it would touch.
 
-## Who can do what (access in one paragraph)
+To **trace** an entity is to have {brand} follow its lineage for you and
+highlight the whole chain. Click the entity, then use **Root Cause** (upstream),
+**Impact** (downstream) or **Full Lineage** (both) in its details panel — or
+right-click it and choose **Trace Lineage**. In a Context View there's also a
+**Trace Lineage** button in the header.
 
-{brand} uses **role-based access control (RBAC)**. Every person has a **role** —
-typically **Admin**, **User**, or **Viewer** — granted globally or per-workspace.
-Roles map to fine-grained **permissions**. On top of that, individual Views can
-be **explicitly shared** with specific people. If you ever wonder *"what am I
-allowed to do?"*, every user has a **My Access** page that lays it out. Details
+Each trace has an **upstream depth** and a **downstream depth**: how many hops
+of the chain it shows. Set them low to see only the direct neighbours, high to
+see everything the trace found.
+
+How much detail you see also depends on what's open. In a Context View, a
+closed container carries the lineage of everything inside it, rolled up onto
+the container; open it and its children's own connections appear. The
+**Lineage Lens** — a focused view of one entity's connections — adds a
+**Density** control (**Overview**, **Grouped** or **Every card**) for how much
+it folds together.
+
+> **Admins:** Tracing depends on the **Lineage trace** feature switch, which is
+> on by default. With it off, the **Trace Lineage** button disappears and traces
+> are refused.
+
+See [Reading Lineage](/guide/reading-lineage),
+[Tracing Lineage on the Canvas](/guide/exploring-graph) and
+[The Lineage Lens & Context View](/guide/lineage-lens).
+
+## The semantic layer
+
+The **semantic layer** — also called the **ontology** — defines what your data
+*means*: the **entity types** (for example Domain, Dataset, Column), the
+**relationship types** and whether each is containment or lineage, and the
+name, colour and icon each type gets on the canvas. It's why a raw graph reads
+as a picture people recognise. A data source is assigned one, and several data
+sources can share one, so a whole organisation can speak the same visual
+language.
+
+Semantic layers are versioned: changes are drafted and then published as a new
+version. Browse them under **Semantic Layers** in the sidebar. See
+[The Semantic Layer](/guide/semantic-layer).
+
+## Who can see a view
+
+Every view has a **visibility** — **Private**, **Workspace** or **Enterprise** —
+that decides who can open it. A Private view is still open to the people it's
+shared with and to the workspace's admins. The full rules, and how to share a
+view, are in
+[Who can see a View](/guide/managing-views#who-can-see-a-view).
+
+## Who can do what: roles
+
+{brand} uses **role-based access control** (RBAC): your **role** decides what
+you can do, and there are two kinds.
+
+**Platform-wide roles** are set on your account by a Super Admin, under
+**Administration → User Management**:
+
+| Role | What it lets you do |
+| --- | --- |
+| **User** | The default. No organisation-wide powers: you work in the workspaces you're added to. |
+| **Org Auditor** | See every workspace and the activity log, without changing anything. |
+| **Org Admin** | Manage every workspace and create new ones. Doesn't manage user accounts or sign-in (SSO) settings. |
+| **Super Admin** | Everything, everywhere — including user accounts, sign-in and platform settings. |
+
+**Workspace roles** are granted per workspace — to you, or to a group you're
+in — by that workspace's admins, on its **Members** tab:
+
+| Role | What it lets you do in that workspace |
+| --- | --- |
+| **Workspace viewer** | Open its views and see its data sources and semantic layers. Read-only. |
+| **Workspace member** | Everything a viewer can, plus create, edit and delete views and manage data sources. |
+| **Data engineer** | Look after the workspace's data — data sources, semantic layers, catalog and views — without managing its members or settings. |
+| **Workspace admin** | Everything in the workspace, including its settings, its members, answering access requests, and deleting it. |
+
+Administrators can also create custom roles, which show up under their own
+names.
+
+To see what you can do, click your avatar in the top bar and choose **My
+access**: it lists every permission you hold and how you got it. On a
+workspace's page, the badge under your name in that same menu shows your role
+in that workspace. Missing something you need? See
+[Requesting Access](/guide/requesting-access). Administrators manage all of this
 in [Users & Access](/guide/users-access).
+
+## Drafts and change control
+
+Data in {brand} isn't edited in place. In a Context View, people allowed to
+change data click **Edit** in the header, which opens a private **draft**. Their
+changes stay invisible to everyone else until the draft is published — normally
+after someone reviews it — and every published change is recorded, so it can be
+undone or the graph restored to an earlier point. This is on by default; if your
+administrator turns off **Version control**, editing is switched off with it.
+See [Versioning & Change Control](/guide/versioning-change-control),
+[Editing in a Draft](/guide/editing-in-a-draft) and
+[The Review Center](/guide/review-center).
+
+## Business or Technical names
+
+The **Business** / **Technical** switch in the top bar changes how entities are
+named, everywhere at once:
+
+- **Business** — the name people use, and nothing else.
+- **Technical** — the same name, with each entity's qualified name (or its URN)
+  underneath, on the canvas and in the entity's details panel.
+
+It changes labels only: the graph, its lineage and your access stay the same.
+The words **Business View** or **Technical View** under the {brandShort} name at
+the top left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch
+it too (**Switch to Technical View** / **Switch to Business View**).
 
 ---
 
@@ -131,16 +213,30 @@ in [Users & Access](/guide/users-access).
 
 | Term | In one line |
 | --- | --- |
-| Provider | A connection to a graph database. |
-| Catalog Item | A discovered graph, governed and shareable. |
-| Workspace | An isolated team/project context. |
-| Data Source | A graph + ontology you actually explore. |
-| Ontology | The semantic layer: what your data *means*. |
-| Granularity | The zoom level: column → table → domain. |
-| Persona | Business vs Technical framing of the same graph. |
-| Lineage | The connections showing how data flows. |
-| View | A saved, shareable exploration. |
-| Lens / Layers | How a view's nodes are organised visually. |
+| Workspace | A team's or project's area: data sources, views and members. |
+| Data source | One graph of your data, attached to a workspace. |
+| Provider | The connection to the graph database behind a data source. |
+| Entity | One thing in the graph: a dataset, a table, a column, a dashboard… |
+| Relationship | A connection between entities — containment, lineage, or both. |
+| View | A saved, curated picture of part of a data source. |
+| Explorer | The catalogue of every view you can open. |
+| Context View / Graph / Hierarchy | The three canvas types a view can use. |
+| Lineage | How data flows between entities. |
+| Upstream / Downstream | Where data comes from / what it feeds. |
+| Trace | Having {brand} follow and highlight an entity's lineage. |
+| Semantic layer (ontology) | What your data means: types, names, colours and icons. |
+| Visibility | Who can open a view: Private, Workspace or Enterprise. |
+| Role | What you're allowed to do — platform-wide or in one workspace. |
+| Draft | A private copy of your changes, invisible until published. |
 
-Next: put it into practice with the [Quick Start](/guide/quick-start), or skim
-the full [Glossary](/guide/glossary) for every acronym.
+---
+
+## Where to next
+
+- [Quick Start — Your First 10 Minutes](/guide/quick-start) — when you want to
+  try all of this hands-on.
+- [Finding Views (the Explorer)](/guide/browsing-views) — when you're ready to
+  find your team's views.
+- [Reading Lineage](/guide/reading-lineage) — when you want to read a canvas
+  fluently.
+- [Glossary & Acronyms](/guide/glossary) — when a word trips you up.

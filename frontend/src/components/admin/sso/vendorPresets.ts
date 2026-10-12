@@ -400,9 +400,62 @@ const CORPORATE_PORTAL: VendorPreset = {
     weight: 90,
 }
 
+const ENTERPRISE_GATEWAY: VendorPreset = {
+    id: 'backchannel',
+    name: 'Enterprise gateway',
+    blurb: 'An internal service we ask for the user, using the session they already have.',
+    kind: 'backchannel',
+    connectLabel: 'The two calls we make',
+    claimMapping: {
+        external_id: ['sub', 'userId', 'employeeId', 'uid'],
+        email: ['email', 'emailAddress', 'mail', 'upn'],
+        first_name: ['firstName', 'givenName', 'given_name'],
+        last_name: ['lastName', 'surname', 'family_name'],
+        groups: ['groups', 'roles', 'memberOf'],
+        // Deliberately no ``iat``: there is no token being read here, so
+        // an ``iat`` in the response would be the response's own age
+        // rather than when the person signed in — and satisfying the
+        // daily re-authentication ceiling with it would defeat it.
+        auth_time: ['auth_time', 'authTime', 'authenticationTime'],
+    },
+    sampleClaims: {
+        sub: 'emp-100482',
+        email: 'ada.lovelace@corp.example',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        department: 'Engineering',
+        groups: ['engineering', 'staff'],
+        auth_time: 1700000000,
+    },
+    consoleSteps: [
+        {
+            title: 'Name the session cookie their portal already sets',
+            detail: 'It has to reach us, which means a cookie on a domain we share with the portal. We never read what is inside it.',
+        },
+        {
+            title: 'Point us at the endpoint that redeems it',
+            detail: 'We send the session, they send back a token. Tell us where the token sits in their response.',
+        },
+        {
+            title: 'Point us at the endpoint that returns the user',
+            detail: 'Optional — if the first call already returns the user, leave it blank and we will skip a round trip.',
+        },
+        {
+            title: 'Say who redeems the session, and how the answer arrives',
+            detail: 'If the cookie is scoped to the SSO host alone, switch the exchange to the browser and give us their JWKS URL — a browser-delivered token is verified against it. If their reply is a signed token (JWT) rather than a plain user object, say so and the claims are read from its payload. And if their translate endpoint wants the sign-in call\'s token POSTed back as JSON — the authenticate reply carries {"token": "eyJ…"} and translate expects that same field as its body — name the field in the browser-exchange section and it is forwarded.',
+        },
+        {
+            title: 'Allow the gateway host',
+            detail: 'These endpoints are internal, so they are unreachable until someone with the SSO hosts permission adds the host to the allowlist. The JWKS URL needs an entry too when it is internal.',
+        },
+    ],
+    weight: 95,
+}
+
 export const VENDOR_PRESETS: VendorPreset[] = [
     ENTRA, OKTA, AUTH0, KEYCLOAK, GOOGLE,
     ADFS, GENERIC_SAML, GENERIC_OIDC, CORPORATE_PORTAL,
+    ENTERPRISE_GATEWAY,
 ].sort((a, b) => a.weight - b.weight)
 
 export function presetById(id: string): VendorPreset | undefined {

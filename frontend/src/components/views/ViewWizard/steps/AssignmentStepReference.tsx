@@ -5,12 +5,15 @@
 import { LayerStudio } from '../../LayerStudio'
 import type { AssignmentStepProps } from './AssignmentStep'
 
-export function AssignmentStepReference({ formData, updateFormData }: AssignmentStepProps) {
+export function AssignmentStepReference({
+    formData, updateFormData, viewEntityScope,
+}: AssignmentStepProps) {
     return (
         <div className="h-[680px] flex flex-col">
             <LayerStudio
                 formData={formData}
                 updateFormData={updateFormData}
+                viewEntityScope={viewEntityScope}
             />
         </div>
     )

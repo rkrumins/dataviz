@@ -38,14 +38,31 @@ async def upsert_data_source_stats(
     edge_type_counts: str,
     schema_stats: str,
     ontology_metadata: str,
-    graph_schema: str
+    graph_schema: str,
+    *,
+    lane: str = "deep",
 ) -> DataSourceStatsORM:
     """Full-row upsert — the deep stats facet. Stamps both freshness
     markers: ``updated_at`` (counts) and ``schema_updated_at`` (schema/
-    ontology/graph_schema columns, read by the scheduler's deep due-check)."""
+    ontology/graph_schema columns, read by the scheduler's deep due-check).
+
+    ``lane`` names the collection lane for the history snapshot this write may
+    capture (see :func:`_capture_history`); it does not affect the row."""
     now_iso = datetime.now(timezone.utc).isoformat()
     # First see if it exists
     existing = await get_data_source_stats(session, ds_id)
+    # Before the overwrite: ``existing`` still holds the counts this
+    # observation is a delta from.
+    captured_at = await _capture_history(
+        session, ds_id,
+        lane=lane,
+        node_count=node_count,
+        edge_count=edge_count,
+        entity_type_counts=entity_type_counts,
+        edge_type_counts=edge_type_counts,
+        digest=_counts_digest(entity_type_counts, edge_type_counts),
+        previous=existing,
+    )
     if existing:
         existing.node_count = node_count
         existing.edge_count = edge_count
@@ -56,6 +73,8 @@ async def upsert_data_source_stats(
         existing.graph_schema = graph_schema
         existing.updated_at = now_iso
         existing.schema_updated_at = now_iso
+        if captured_at:
+            existing.last_snapshot_at = captured_at
         await session.flush()
         return existing
 
@@ -70,6 +89,7 @@ async def upsert_data_source_stats(
         ontology_metadata=ontology_metadata,
         graph_schema=graph_schema,
         schema_updated_at=now_iso,
+        last_snapshot_at=captured_at,
     )
     session.add(new_stats)
     await session.flush()
@@ -134,6 +154,59 @@ async def invalidate_schema_facets(
     await session.flush()
 
 
+async def _capture_history(
+    session: AsyncSession,
+    ds_id: str,
+    *,
+    lane: str,
+    node_count: int,
+    edge_count: int,
+    entity_type_counts: str,
+    edge_type_counts: str,
+    digest: str,
+    previous: Optional[DataSourceStatsORM],
+    property_key_count: Optional[int] = None,
+) -> Optional[str]:
+    """Record this observation into ``data_source_count_snapshots``.
+
+    Returns the snapshot's ``captured_at`` when one was written, else ``None``.
+    The caller stamps that onto ``data_source_stats.last_snapshot_at`` — it
+    owns the row in both the insert and the update branch, and on a first
+    write the row does not exist yet for the capture to stamp.
+
+    Called by BOTH upserts, and always BEFORE ``previous``'s count columns are
+    overwritten — those values are the delta baseline. Capture is change-gated
+    plus a heartbeat inside ``stats_history_repo``, so the 60s probe lane does
+    not turn into 1,440 identical rows a day.
+
+    In the caller's session on purpose. The alternative — a short session of
+    its own, the way ``emit_refresh_event`` records audit rows — would let
+    history land for a counts write that then rolled back. For an audit trail
+    whose entire job is to be trusted about what the counts were, disagreeing
+    with ``data_source_stats`` is worse than not being written: a capture
+    failure fails the poll, and the poll is already retried.
+    """
+    from . import stats_history_repo
+
+    policy = await stats_history_repo.resolve_history_policy(session)
+    if not policy.enabled:
+        return None
+    snapshot = await stats_history_repo.maybe_capture_snapshot(
+        session,
+        ds_id=ds_id,
+        lane=lane,
+        node_count=node_count,
+        edge_count=edge_count,
+        entity_type_counts=entity_type_counts,
+        edge_type_counts=edge_type_counts,
+        digest=digest,
+        previous=previous,
+        policy=policy,
+        property_key_count=property_key_count,
+    )
+    return snapshot.captured_at if snapshot is not None else None
+
+
 def _counts_digest(entity_type_counts: str, edge_type_counts: str) -> str:
     """Digest of the counts about to be written. The columns hold JSON text,
     so parse before hashing; an unparseable value hashes as empty, mirroring
@@ -158,7 +231,9 @@ async def upsert_data_source_stats_counts(
     entity_type_counts: str,
     edge_type_counts: str,
     *,
+    property_key_count: Optional[int] = None,
     probed: bool = False,
+    lane: str = "poll",
 ) -> DataSourceStatsORM:
     """Partial upsert — the cheap counts facet.
 
@@ -179,10 +254,43 @@ async def upsert_data_source_stats_counts(
     ``probed`` stamps ``last_probed_at``, claiming this write for the probe
     lane's cadence. The stats poll leaves it alone: the two lanes run at
     different frequencies and must not reset each other's clock.
+
+    ``lane`` names which collection lane observed these counts, carried onto
+    the history snapshot this write may capture. It is a label, not a
+    behaviour: nothing about the current-state row depends on it.
+
+    ``property_key_count`` is the graph's registered property-NAME count.
+    Two rules, both deliberate.
+
+    It is NOT part of ``counts_digest``. The digest decides whether an
+    observation counts as movement, and movement drives the change ledger and
+    the counts alerts. A name count that ticks while the counts stand still is
+    not a change to the DATA, and folding it in would raise a finding and a
+    bell notification every time a loader wrote one new key. The figure rides
+    along on whatever snapshot the counts justify, and the hourly heartbeat
+    gives it a floor of one reading an hour regardless.
+
+    ``None`` means NOT MEASURED and never overwrites a reading. A probe that
+    timed out, a provider with no property-name concept, a store that is not
+    FalkorDB: all answer None, and clobbering yesterday's known 64,000 with a
+    null because one poll failed would erase exactly the trend this exists to
+    show.
     """
     now = datetime.now(timezone.utc).isoformat()
     digest = _counts_digest(entity_type_counts, edge_type_counts)
     existing = await get_data_source_stats(session, ds_id)
+    # Before the overwrite, for the same reason as the deep facet above.
+    captured_at = await _capture_history(
+        session, ds_id,
+        lane=lane,
+        node_count=node_count,
+        edge_count=edge_count,
+        entity_type_counts=entity_type_counts,
+        edge_type_counts=edge_type_counts,
+        digest=digest,
+        previous=existing,
+        property_key_count=property_key_count,
+    )
     if existing:
         existing.node_count = node_count
         existing.edge_count = edge_count
@@ -190,8 +298,12 @@ async def upsert_data_source_stats_counts(
         existing.edge_type_counts = edge_type_counts
         existing.updated_at = now
         existing.counts_digest = digest
+        if property_key_count is not None:
+            existing.property_key_count = property_key_count
         if probed:
             existing.last_probed_at = now
+        if captured_at:
+            existing.last_snapshot_at = captured_at
         await session.flush()
         return existing
 
@@ -201,8 +313,10 @@ async def upsert_data_source_stats_counts(
         edge_count=edge_count,
         entity_type_counts=entity_type_counts,
         edge_type_counts=edge_type_counts,
+        property_key_count=property_key_count,
         counts_digest=digest,
         last_probed_at=now if probed else None,
+        last_snapshot_at=captured_at,
     )
     session.add(new_stats)
     await session.flush()

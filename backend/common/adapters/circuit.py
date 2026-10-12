@@ -37,10 +37,11 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +88,113 @@ def register_logical_exception(exc_type: type[BaseException]) -> None:
         _DEFAULT_IGNORED_EXCEPTIONS.append(exc_type)
 
 
+def _query_response_exceptions() -> tuple[type[BaseException], ...]:
+    """Redis/FalkorDB *reply* errors: the server ANSWERED, with an error.
+
+    A ``ResponseError`` — a Cypher syntax error, a query over the per-query
+    memory ceiling, an unknown command, an ACL refusal — proves the downstream
+    is reachable. Counting it toward the failure budget opened the breaker for
+    every reader of a provider after three heavy queries, which the canvas then
+    rendered as "graph service unavailable" while FalkorDB was serving fine.
+    Excluded on purpose: ``ReadOnlyError`` (a write reaching a demoted master
+    after a failover) is a topology problem the breaker SHOULD react to.
+
+    Two replies are CAPACITY signals rather than rejected queries and are
+    relabelled by ``breaker_guarded`` (see ``_capacity_reply``): the server's
+    queue-full rejection becomes ``ProviderBusy`` and its own query-timeout
+    kill becomes ``ProviderTimeout``. Neither is counted.
+    """
+    try:
+        from redis.exceptions import ReadOnlyError as _ReadOnlyError
+        from redis.exceptions import ResponseError as _ResponseError
+    except ImportError:  # pragma: no cover
+        return ()
+    _READ_ONLY_ERROR[0] = _ReadOnlyError
+    return (_ResponseError,)
+
+
+# Filled by _query_response_exceptions(); a one-slot list so the module-level
+# predicate below can reference it without a second redis import.
+_READ_ONLY_ERROR: list[type[BaseException] | None] = [None]
+
+
+def _is_query_response_error(exc: BaseException) -> bool:
+    """True for a server error REPLY that must not count as a breaker failure."""
+    if not _QUERY_RESPONSE_EXCEPTIONS or not isinstance(exc, _QUERY_RESPONSE_EXCEPTIONS):
+        return False
+    read_only = _READ_ONLY_ERROR[0]
+    return read_only is None or not isinstance(exc, read_only)
+
+
+# FalkorDB answers two CAPACITY conditions as ordinary error replies, so they
+# arrive as ``ResponseError`` exactly like a syntax error would — and used to
+# surface as HTTP 500 GRAPH_QUERY_ERROR, which no client retries. Both mean
+# "the server is up and busy": queue-full is ``MAX_QUEUED_QUERIES`` (the
+# thread pool's queue is at capacity — the shape of a cold-cache stampede or
+# of aggregation jobs and interactive reads sharing the instance), and the
+# timeout is the server killing ONE query at the ``TIMEOUT`` the provider
+# sent with it. Matched on the server's own message text
+# (``EMSG_MAX_PENDING_QUERIES`` / ``EMSG_QUERY_TIMEOUT`` in FalkorDB's
+# ``error_msgs.h``); case-insensitive so a prefix change upstream cannot
+# silently demote either back to a 500.
+_QUEUE_FULL_REPLY = "max pending queries exceeded"
+_SERVER_TIMEOUT_REPLY = "query timed out"
+
+
+def _capacity_reply(exc: BaseException) -> str | None:
+    """``"queue_full"`` / ``"server_timeout"`` for a capacity reply, else None."""
+    text = str(exc).lower()
+    if _QUEUE_FULL_REPLY in text:
+        return "queue_full"
+    if _SERVER_TIMEOUT_REPLY in text:
+        return "server_timeout"
+    return None
+
+
+def is_queue_full_reply(exc: BaseException) -> bool:
+    """True for the store's ``MAX_QUEUED_QUERIES`` refusal.
+
+    The proxy relabels this reply to ``ProviderBusy`` — but only for what
+    reaches it. Code INSIDE a provider that catches broadly (a read ladder
+    keeping the prefix it has, say) swallows the refusal first and answers
+    200 with part of the rollup. A shed is flow control, not a short
+    answer, so those call sites ask this and re-raise instead.
+    """
+    return _capacity_reply(exc) == "queue_full"
+
+
+# Client-side pool exhaustion. redis-py raises ``MaxConnectionsError`` when a
+# pool hands out its last socket, and it SUBCLASSES redis ``ConnectionError``
+# — so it landed in ``_NETWORK_EXCEPTIONS`` below and a healthy store read as
+# unreachable: three of them opened the breaker for every shard while the
+# only thing wrong was that this process asked for more sockets than its own
+# pool holds. It is the local mirror of the server's queue-full reply, and it
+# is treated the same way: shed as busy, never counted, never a reconnect
+# (rebuilding the client discards the pooled sockets that were the scarce
+# resource in the first place).
+def _pool_exhausted_exceptions() -> tuple[type[BaseException], ...]:
+    try:
+        from redis.exceptions import MaxConnectionsError as _MaxConnectionsError
+    except ImportError:  # pragma: no cover
+        return ()
+    return (_MaxConnectionsError,)
+
+
+# The caller's own deadline firing (``asyncio.wait_for`` around a Cypher
+# query) is NOT evidence that the downstream is unreachable — it is evidence
+# that ONE query was too slow for its budget. Keyed by class identity: redis's
+# socket ``TimeoutError`` subclasses ``RedisError``, not the builtin, so a
+# black-holed socket still lands in ``_NETWORK_EXCEPTIONS`` below. (On 3.11+
+# ``asyncio.TimeoutError`` IS the builtin ``TimeoutError``, an ``OSError``
+# subclass — which is why this clause must run BEFORE the network clause.)
+_DEADLINE_EXCEPTIONS: tuple[type[BaseException], ...] = (asyncio.TimeoutError, TimeoutError)
+
+
 def _default_network_exceptions() -> tuple[type[BaseException], ...]:
     """Build the tuple of exception classes treated as "downstream is sick"."""
     errors: list[type[BaseException]] = [
         ConnectionError,
         OSError,
-        TimeoutError,
-        asyncio.TimeoutError,
     ]
     try:
         from redis.exceptions import ConnectionError as _RedisConnectionError
@@ -138,6 +239,56 @@ def _default_network_exceptions() -> tuple[type[BaseException], ...]:
 
 
 _NETWORK_EXCEPTIONS = _default_network_exceptions()
+_QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
+_POOL_EXHAUSTED_EXCEPTIONS = _pool_exhausted_exceptions()
+
+
+# Process-wide counters, monotonic since boot, surfaced on /health/deps so a
+# release can be verified from a dashboard instead of a log grep: how often
+# the proxy was asked to judge a slow query or a rejected query and correctly
+# did NOT count it, versus how often it counted a real connection failure
+# and how often a breaker actually opened. Plain ints mutated on the event
+# loop — no lock needed.
+_STATS: dict[str, int] = {
+    "deadline_timeouts_not_counted": 0,
+    "queue_full_not_counted": 0,
+    "pool_exhaustion_not_counted": 0,
+    "query_errors_not_counted": 0,
+    "network_failures_counted": 0,
+    "breaker_opens": 0,
+    "breaker_pretrips": 0,
+}
+
+
+def breaker_stats() -> dict[str, int]:
+    """Snapshot of the process-wide breaker counters (see ``_STATS``)."""
+    return dict(_STATS)
+
+
+# ── Capacity-signal listeners ──────────────────────────────────────────
+# A capacity reply or a deadline miss is a fact about the DOWNSTREAM that
+# other processes can act on — the aggregation writers yield their write
+# duty cycle while interactive reads are being starved (see
+# backend/app/services/aggregation/read_pressure.py). This module is
+# generic and Redis-free, so it only publishes: the app registers a
+# listener at startup. A listener is called synchronously with
+# ``(kind, target)`` — kind is "queue_full", "server_timeout" or
+# "deadline", target the wrapped provider — and must be cheap; an
+# exception it raises is swallowed, never surfaced to the request.
+_CAPACITY_LISTENERS: list[Callable[[str, Any], None]] = []
+
+
+def register_capacity_listener(listener: Callable[[str, Any], None]) -> None:
+    if listener not in _CAPACITY_LISTENERS:
+        _CAPACITY_LISTENERS.append(listener)
+
+
+def _notify_capacity(kind: str, target: Any) -> None:
+    for listener in _CAPACITY_LISTENERS:
+        try:
+            listener(kind, target)
+        except Exception as exc:  # noqa: BLE001 — a listener must never fail a request
+            logger.debug("capacity listener %r failed on %s: %s", listener, kind, exc)
 
 
 class BreakerState(str, Enum):
@@ -220,11 +371,88 @@ class ProviderLoading(ProviderUnavailable):
     """
 
 
+class ProviderFailingOver(ProviderUnavailable):
+    """Flow-control signal — the node holding this graph is restarting or
+    failing over, NOT a store that is gone.
+
+    In a Redis Cluster a node that stops answering is a routine, bounded
+    event: the pod is rotated, the cluster notices after
+    ``cluster-node-timeout``, a replica is promoted and the slots move. The
+    right client behaviour is to come back in a few seconds, which is what
+    ``retry_after_seconds`` (3) says.
+
+    What used to happen instead: the refusal counted toward ``fail_max``,
+    three of them opened the breaker for its whole reset window, and every
+    user of that graph — not just the three who were unlucky — got
+    "Circuit open; will probe downstream again in ~28s" for 30 s at a
+    time, long after the promotion had finished. So this is registered as
+    a *logical* exception like :class:`ProviderLoading`: the breaker never
+    opens because a node is failing over, and it still opens for a store
+    that is genuinely unreachable.
+
+    Carries ``endpoint`` — the node that stopped answering — because the
+    breaker's own text names none, and it is the first thing an operator
+    needs.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        reason: str,
+        retry_after_seconds: int = 3,
+        endpoint: str | None = None,
+    ) -> None:
+        super().__init__(provider_name, reason, retry_after_seconds)
+        self.endpoint = endpoint
+
+
+class ProviderTimeout(ProviderUnavailable, TimeoutError):
+    """One operation exceeded its per-operation deadline — NOT an outage.
+
+    Raised by the proxy when the wrapped call's own ``asyncio.wait_for``
+    fires. Counting that toward ``fail_max`` opened the breaker after three
+    slow queries (a heavy ``/nodes/query`` on a large graph, or a burst that
+    queued behind the query semaphore) and then fast-failed EVERY read for
+    the reset window, reported the provider ``unhealthy`` on the status
+    endpoints and stamped ``X-Provider-Health: unreachable`` on responses —
+    the canvas showed "graph service unavailable" while FalkorDB was up.
+
+    Reachability is decided elsewhere: the manager's preflight PING and the
+    connection-class errors below. A slow query is a capacity signal, so it is
+    registered as a logical exception (the breaker ignores it) and mapped to
+    HTTP 504 + ``Retry-After`` with a distinct ``PROVIDER_TIMEOUT`` code.
+
+    Subclasses ``ProviderUnavailable`` so the stale-fallback cache and the
+    worker retry budget keep treating it as "the provider could not answer
+    right now", and ``TimeoutError`` so every existing
+    ``except asyncio.TimeoutError`` around a provider call still classifies
+    it as a timeout rather than a generic failure.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        reason: str,
+        retry_after_seconds: int = 2,
+    ) -> None:
+        super().__init__(provider_name, reason, retry_after_seconds)
+
+
 # Register at import time (before any CircuitBreakerProxy is constructed) so
 # the ``except proxy._ignored`` clause in breaker_guarded catches ProviderLoading
 # ahead of the ``except ProviderUnavailable`` counting clause — a warming
-# instance is re-raised untouched and its breaker stays closed.
+# instance is re-raised untouched and its breaker stays closed. The same holds
+# for every other signal that means "healthy, just not right now": a node
+# rotating (ProviderFailingOver), one slow query (ProviderTimeout) and flow
+# control (ProviderBusy) must all pass through a nested proxy uncounted.
+#
+# All four are load-bearing and were added by two different changes. Dropping
+# any one of them re-opens an outage the other change removed, which is why
+# backend/tests/test_logical_exceptions_registered.py pins the whole set.
 register_logical_exception(ProviderLoading)
+register_logical_exception(ProviderFailingOver)
+register_logical_exception(ProviderTimeout)
+register_logical_exception(ProviderBusy)
 
 
 class _AsyncCircuitBreaker:
@@ -249,6 +477,11 @@ class _AsyncCircuitBreaker:
         self._state = BreakerState.CLOSED
         self._fail_counter = 0
         self._opened_at: float | None = None
+        # monotonic() of the last successful guarded call. Lets the manager's
+        # request-path preflight skip its PING for a provider that real
+        # traffic just proved reachable — zero added latency on the hot path
+        # and no probe that could false-negative under load.
+        self._last_success_at: float | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -273,12 +506,18 @@ class _AsyncCircuitBreaker:
     def fail_counter(self) -> int:
         return self._fail_counter
 
+    @property
+    def last_success_at(self) -> float | None:
+        """``time.monotonic()`` of the last successful guarded call, or None."""
+        return self._last_success_at
+
     def open(self) -> None:
         """Manually trip the breaker (used by tests + diagnostics)."""
         self._state = BreakerState.OPEN
         self._opened_at = time.monotonic()
         if self._fail_counter < self.fail_max:
             self._fail_counter = self.fail_max
+        _STATS["breaker_pretrips"] += 1
 
     async def _acquire_call_slot(self) -> None:
         """Raise if the breaker will not permit a call right now.
@@ -308,6 +547,7 @@ class _AsyncCircuitBreaker:
             self._fail_counter = 0
             self._state = BreakerState.CLOSED
             self._opened_at = None
+            self._last_success_at = time.monotonic()
             return self._state.value, self._fail_counter
 
     async def _record_failure(self) -> tuple[str, int]:
@@ -319,6 +559,7 @@ class _AsyncCircuitBreaker:
                 # Probe failed — re-open immediately.
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
+                _STATS["breaker_opens"] += 1
                 logger.info(
                     "Circuit breaker '%s' transition HALF_OPEN -> OPEN "
                     "(probe failed; reset_timeout=%ds)",
@@ -332,6 +573,7 @@ class _AsyncCircuitBreaker:
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
                 if was_closed:
+                    _STATS["breaker_opens"] += 1
                     logger.info(
                         "Circuit breaker '%s' transition CLOSED -> OPEN "
                         "(fails=%d/%d; reset_timeout=%ds)",
@@ -481,7 +723,52 @@ class CircuitBreakerProxy:
                     proxy._breaker.fail_max,
                 )
                 raise
+            except _DEADLINE_EXCEPTIONS as exc:
+                # The wrapped call's OWN per-operation deadline fired: one
+                # query was too slow for its budget. Not a reachability
+                # signal — never counted, the breaker stays closed. Surfaced
+                # as ProviderTimeout (504 + Retry-After) so the client retries
+                # the request instead of treating the provider as down.
+                _STATS["deadline_timeouts_not_counted"] += 1
+                logger.info(
+                    "Provider %s deadline exceeded on %s: %s (breaker=%s, not counted)",
+                    proxy._name,
+                    name,
+                    exc,
+                    proxy._breaker.current_state,
+                )
+                _notify_capacity("deadline", proxy._target)
+                raise ProviderTimeout(
+                    provider_name=proxy._name,
+                    reason=f"{name} exceeded its deadline: {exc}" if str(exc) else f"{name} exceeded its deadline",
+                ) from exc
+            except _POOL_EXHAUSTED_EXCEPTIONS as exc:
+                # OUR pool ran out of sockets. That is a fact about this
+                # process's sizing, not about the store, so it must not
+                # count: the breaker is per provider and on a cluster a
+                # provider is every shard, so counting local saturation
+                # took a healthy fleet down. Shed as busy (429 +
+                # Retry-After) — the same answer the store's own queue-full
+                # gets — and leave the client alone.
+                _STATS["pool_exhaustion_not_counted"] += 1
+                logger.warning(
+                    "Provider %s connection pool exhausted on %s: %s (breaker=%s, "
+                    "not counted; shed as busy — raise FALKORDB_POOL_SIZE)",
+                    proxy._name,
+                    name,
+                    exc,
+                    proxy._breaker.current_state,
+                )
+                # Deliberately NOT a capacity signal: the capacity listener
+                # makes the aggregation writers yield to relieve the STORE,
+                # and this says nothing about the store.
+                raise ProviderBusy(
+                    provider_name=proxy._name,
+                    reason=f"{name} deferred: this process's connection pool is full",
+                    retry_after_seconds=1,
+                ) from exc
             except _NETWORK_EXCEPTIONS as exc:
+                _STATS["network_failures_counted"] += 1
                 state_after, fails_after = await proxy._breaker._record_failure()
                 logger.warning(
                     "Provider %s network error on %s: %s=%s (breaker=%s fails=%d/%d)",
@@ -499,6 +786,60 @@ class CircuitBreakerProxy:
                     retry_after_seconds=int(proxy._breaker.reset_timeout),
                 ) from exc
             except Exception as exc:
+                # A server error REPLY (bad Cypher, per-query memory cap,
+                # ACL refusal) proves the downstream answered. Re-raise it
+                # untouched: not counted, not relabelled as an outage.
+                if _is_query_response_error(exc):
+                    capacity = _capacity_reply(exc)
+                    if capacity == "queue_full":
+                        # MAX_QUEUED_QUERIES reached: shed this request as
+                        # busy (429 + Retry-After) so the client retries in
+                        # place, instead of a 500 it treats as a rejected
+                        # query. The breaker stays closed — the server
+                        # answered, it is merely full.
+                        _STATS["queue_full_not_counted"] += 1
+                        logger.warning(
+                            "Provider %s query queue full on %s: %s (breaker=%s, "
+                            "not counted; shed as busy)",
+                            proxy._name,
+                            name,
+                            exc,
+                            proxy._breaker.current_state,
+                        )
+                        _notify_capacity("queue_full", proxy._target)
+                        raise ProviderBusy(
+                            provider_name=proxy._name,
+                            reason=f"{name} rejected: the graph server's query queue is full",
+                            retry_after_seconds=1,
+                        ) from exc
+                    if capacity == "server_timeout":
+                        # The server killed one query at the deadline the
+                        # provider sent with it — the same slow-query case
+                        # as the client's own wait_for, and the same 504.
+                        _STATS["deadline_timeouts_not_counted"] += 1
+                        logger.info(
+                            "Provider %s server-side deadline exceeded on %s: %s "
+                            "(breaker=%s, not counted)",
+                            proxy._name,
+                            name,
+                            exc,
+                            proxy._breaker.current_state,
+                        )
+                        _notify_capacity("server_timeout", proxy._target)
+                        raise ProviderTimeout(
+                            provider_name=proxy._name,
+                            reason=f"{name} exceeded the server-side query deadline",
+                        ) from exc
+                    _STATS["query_errors_not_counted"] += 1
+                    logger.info(
+                        "Provider %s query rejected on %s: %s=%s (breaker=%s, not counted)",
+                        proxy._name,
+                        name,
+                        type(exc).__name__,
+                        exc,
+                        proxy._breaker.current_state,
+                    )
+                    raise
                 # Any other Exception subclass — count it (downstream is
                 # misbehaving in a way we don't have a specific class for)
                 # and re-raise as ProviderUnavailable. Note: Exception (not
@@ -525,6 +866,19 @@ class CircuitBreakerProxy:
                 await proxy._breaker._record_success()
                 return result
 
+        # Signature transparency is not cosmetic. Callers introspect the
+        # method they were handed to decide what to pass it — the drift probe
+        # asks whether get_schema_stats accepts ``budget_s`` before handing
+        # down its 5s deadline — and every provider reaches them through this
+        # proxy. A bare ``(*args, **kwargs)`` closure answered "no" to every
+        # such question, so the probe silently dropped its deadline and the
+        # node kept scanning for 30s per query, three per source, every 60s:
+        # precisely the abandoned-scan load the deadline exists to prevent.
+        # ``wraps`` sets ``__wrapped__``, which ``inspect.signature`` follows.
+        breaker_guarded = functools.wraps(attr)(breaker_guarded)
+        # ...but keep the proxy visible in logs and tracebacks, which is what
+        # the explicit name was for. Renaming after ``wraps`` is safe:
+        # ``signature`` reads ``__wrapped__``, not ``__name__``.
         breaker_guarded.__name__ = f"breaker_guarded_{name}"
         breaker_guarded.__qualname__ = breaker_guarded.__name__
         return breaker_guarded

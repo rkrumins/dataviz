@@ -10,12 +10,15 @@ Used by the perf plan ([../docs/audits/](../docs/audits/) / `~/.claude/plans/`) 
 loadtest/
 ├── README.md                # this file
 ├── Makefile                 # smoke-run targets — `make smoke` runs each scenario + mixed
+├── Dockerfile               # the generator as its own image (for the k8s run)
 ├── requirements.txt         # locust >= 2.27 (no backend deps)
 ├── locustfile.py            # default entry point — composes the plan's production mix
 ├── config.py                # env-driven settings (host, auth, think time)
 ├── lib/
 │   ├── auth.py              # bearer-token or cookie-login auth
 │   ├── data.py              # workspace/datasource ID discovery + pool
+│   ├── protection.py        # did the backend's own limits hold? (counter gate)
+│   ├── retry.py             # retry a shed request the way the real client does
 │   └── slo.py               # post-run SLO check (standalone script; `--smoke` flag)
 ├── runners/
 │   ├── views.py             # HttpUser wrapper around ViewsTasks (for `-f`)
@@ -25,7 +28,8 @@ loadtest/
 │   ├── graph_schema.py      # HttpUser wrapper around GraphSchemaTasks (heavy)
 │   ├── graph_lineage.py     # HttpUser wrapper around GraphLineageTasks (Tier-1 stress)
 │   ├── graph_walks.py       # HttpUser wrapper around GraphWalksTasks (Tier-1 stress)
-│   └── graph_children.py    # HttpUser wrapper around GraphChildrenTasks (Tier-1 stress)
+│   ├── graph_children.py    # HttpUser wrapper around GraphChildrenTasks (Tier-1 stress)
+│   └── canvas_open.py       # HttpUser wrapper around CanvasOpenTasks (the view open)
 └── scenarios/
     ├── views.py             # GET /views/ + /views/popular
     ├── workspaces.py        # GET /admin/workspaces/.../cached-stats
@@ -35,8 +39,9 @@ loadtest/
     ├── graph_lineage.py     # POST /{ws}/graph/trace/v2                (Tier-1 stress)
     ├── graph_walks.py       # GET /{ws}/graph/nodes/{urn}/ancestors    (Tier-1 stress)
     │                        # GET /{ws}/graph/nodes/{urn}/descendants
-    └── graph_children.py    # GET /{ws}/graph/nodes/{urn}/children     (Tier-1 stress)
-                             # GET /{ws}/graph/nodes/{urn}/children-with-edges
+    ├── graph_children.py    # GET /{ws}/graph/nodes/{urn}/children     (Tier-1 stress)
+    │                        # GET /{ws}/graph/nodes/{urn}/children-with-edges
+    └── canvas_open.py       # POST /{ws}/graph/nodes/query ×N + /edges/between (the view open)
 ```
 
 ## Install
@@ -133,6 +138,7 @@ make smoke-views
 make smoke-cached-stats        # will surface as failed SLO if no workspaces are seeded
 make smoke-aggregation-jobs    # Tier-2 heavy: admin jobs list (full-table scan)
 make smoke-graph-schema        # Tier-2 heavy: workspace schema introspection
+make smoke-canvas-open         # the view open: nodes/query batches + edges/between
 make smoke-mixed
 ```
 
@@ -185,8 +191,29 @@ python -m lib.slo --tier 500 results/sweep/tier_500/run_stats.csv
 | `GraphLineageTasks` | 1 | `POST /{ws}/graph/trace/v2` | **Tier-1 stress** — multi-hop traversal |
 | `GraphWalksTasks` | 1 | `GET /{ws}/graph/nodes/{urn}/ancestors` and `/descendants` | **Tier-1 stress** |
 | `GraphChildrenTasks` | 1 | `GET /{ws}/graph/nodes/{urn}/children` and `/children-with-edges` | **Tier-1 stress** |
+| `CanvasOpenTasks` | 2 | `POST /{ws}/graph/nodes/query` (100 URNs per request, 4 in flight) then `POST /{ws}/graph/edges/between` | **the view open** — the hydration path every canvas session starts with |
 
 The graph scenarios pick from a per-process pool of `(workspace, urn)` pairs discovered via `POST /{ws}/graph/nodes/query` (tunable via `SYNODIC_URN_POOL_WORKSPACES` and `SYNODIC_URNS_PER_WORKSPACE`). When the pool is empty — i.e. no graph data is seeded for any workspace — the scenarios emit a single `graph-*:no-node` stat row per call instead of 404-storming the backend, so a `make sweep` against an empty cluster still completes (and `lib.slo --tier N` will flag the missing graph rows under non-smoke gating).
+
+### The view open
+
+`CanvasOpenTasks` reproduces what the frontend does when a user opens a curated
+view (`useGraphHydration`): the assigned entities are fetched by URN, 100 per
+`POST /nodes/query` with four requests in flight, then one `POST /edges/between`
+asks for the edges among everything that loaded. Two stat rows: `canvas-open:nodes`
+(per batch) and `canvas-open:edges` (per open). The "view" is the pool's URN sample
+for the workspace, so its size is `SYNODIC_URNS_PER_WORKSPACE` — the default 20 is
+one batch; set 500 to emulate a 500-entity view (five batches plus the edge scan).
+
+A 429 counts as a failure here on purpose. The real canvas retries a shed request
+in place, but under load the shed *is* the signal: it means the pod's per-data-source
+slots (`PROVIDER_MAX_CONCURRENCY`, 8 per worker process) or FalkorDB's own queue
+(`MAX_QUEUED_QUERIES`) ran out. After a run, read `GET /api/v1/health/deps` on the
+backend: its `resilience` block carries process counters that say *where* capacity
+ran out — `breaker_opens` must stay at 0 (load never counts as an outage),
+`queue_full_not_counted` is FalkorDB rejecting at its queue cap, `slots_shed_*` is
+the pod shedding before the database, and `deadline_timeouts_not_counted` is
+queries exceeding their budgets.
 
 ## Per-graph-endpoint stress
 
@@ -196,7 +223,8 @@ When the mixed sweep shows a graph regression, isolate it with `make stress-*`. 
 make stress-trace         # POST /graph/trace/v2 only, at 10 → 1000 users
 make stress-walks         # ancestors + descendants only
 make stress-children      # children + children-with-edges only
-make stress               # all three sequentially
+make stress-canvas        # the view open (nodes/query batches + edges/between) only
+make stress               # all four sequentially
 ```
 
 Stress runs reuse `SWEEP_TIERS` / `SWEEP_RUN_TIME` / `SWEEP_SPAWN_RATE` by default; override with `STRESS_*` to vary independently of the mixed sweep:
@@ -205,7 +233,7 @@ Stress runs reuse `SWEEP_TIERS` / `SWEEP_RUN_TIME` / `SWEEP_SPAWN_RATE` by defau
 STRESS_TIERS='100 500' STRESS_RUN_TIME=2m make stress-trace
 ```
 
-CSVs land under `results/stress/<endpoint>/tier_<N>/`. Each tier is gated by the same `TIER_SLOS` table as the mixed sweep — the per-endpoint p95 entries (`graph-trace:v2`, `graph-ancestors:get`, `graph-descendants:get`, `graph-children:get`, `graph-children-edges:get`) carry deliberately loose ceilings at the 500 / 1000 tiers (these endpoints are FalkorDB-bound and high tail variance is expected). Re-tune the per-tier thresholds in [lib/slo.py](lib/slo.py) once you have a real baseline.
+CSVs land under `results/stress/<endpoint>/tier_<N>/`. Each tier is gated by the same `TIER_SLOS` table as the mixed sweep — the per-endpoint p95 entries (`graph-trace:v2`, `graph-ancestors:get`, `graph-descendants:get`, `graph-children:get`, `graph-children-edges:get`) carry deliberately loose ceilings at the 500 / 1000 tiers (these endpoints are FalkorDB-bound and high tail variance is expected), and so do `canvas-open:nodes` / `canvas-open:edges`. Re-tune the per-tier thresholds in [lib/slo.py](lib/slo.py) once you have a real baseline.
 
 `make stress-clean` removes `results/stress/`.
 
@@ -243,6 +271,58 @@ Aggregate failure rate must be `< 0.1%` (no 5xx storm).
 
 Edit `DEFAULT_SLOS` in `lib/slo.py` to tighten/relax targets for a specific run.
 
+## Validate the run — did the protection hold?
+
+A passing SLO check says the system was **fast**. It does not say the system
+was **protected**, and the cheapest way to be fast is to stop enforcing the
+limits.
+
+The counter that shows it is `aggregation_slot_fail_open_total`. The
+write-admission cap is fail-open by design — when the bus is unreachable, or
+no slot frees inside the wait deadline, the caller proceeds anyway rather than
+stalling a job forever. That is the right bias, and it means the state
+immediately before a node is over-admitted looks, from outside, exactly like a
+healthy run: latency fine, failure rate fine, cap not capping. Gated on the
+CSV alone, that run passes.
+
+So bracket the run with a counter snapshot:
+
+```bash
+export SYNODIC_METRICS_URLS=http://host:8000/api/v1/metrics   # METRICS_ENABLED must be on
+.venv/bin/python -m lib.protection --before results/protection.json
+#   …the run…
+.venv/bin/python -m lib.protection --check results/protection.json
+```
+
+`make sweep` does this per tier when `SYNODIC_METRICS_URLS` is set, so a
+failure names the concurrency at which the cap stopped capping. Unset, the
+sweep runs exactly as before and prints a note saying it was gated on latency
+only.
+
+**What fails, and what is only reported** ([lib/protection.py](lib/protection.py)):
+
+| Counter | Verdict | Why |
+|---|---|---|
+| `aggregation_slot_fail_open_total` | **fails** | one fail-open is one admission that was not admitted; there is no acceptable rate |
+| `metrics_series_dropped_total` | **fails** | the registry hit its series cap, so every number here is an undercount |
+| any counter going **backwards** | **fails** | counters only rise, so the process restarted mid-run — the deltas are void and the restart is itself the finding |
+| `aggregation_governor_holds_total` | reported | the governor paused the pipeline inside its memory envelope |
+| `aggregation_slot_waits_total` | reported | waiters waited for a slot — backpressure working |
+| `aggregation_read_pressure_yields_total` | reported | the pipeline yielded to reader latency |
+| `aggregation_write_budget_refusals_total` | reported | a budget refused a batch rather than risk the shard |
+
+The bottom four are the protection *working*. A gate that goes red when the
+system defends itself is a gate somebody switches off, and then nothing
+watches the one counter that matters.
+
+**One scrape is one pod.** The registry is per-process, so a single URL is a
+claim about whichever pod the Service picked. Pass them all for a fleet-wide
+answer — the check reports how many it read, and says so when it read one:
+
+```bash
+export SYNODIC_METRICS_URLS="$(kubectl -n synodic get pods   -l app.kubernetes.io/name=viz-service   -o jsonpath='{range .items[*]}http://{.status.podIP}:8000/api/v1/metrics {end}')"
+```
+
 ## Extending
 
 To add a new endpoint scenario:
@@ -267,9 +347,30 @@ locust -f locustfile.py --worker --master-host=<master>
 
 Aggregated stats are reported on the master. The plan calls for 2000 VUs — a single 4-core load-gen box handles that comfortably.
 
+### In the cluster, across nodes
+
+`deploy/k8s/loadtest/` runs the same master/worker pair as pods, with the
+affinity rules that keep the generator off the nodes it is measuring — see
+[that directory's README](../deploy/k8s/loadtest/README.md), which is where
+the reasoning lives. Build the image from this directory's `Dockerfile`:
+
+```bash
+docker build -t synodic/loadtest:latest loadtest/
+kubectl apply -k deploy/k8s/loadtest
+kubectl -n synodic logs -f deploy/loadtest-master
+kubectl delete -k deploy/k8s/loadtest
+```
+
+The one number to keep in step: the master's `LOCUST_EXPECT_WORKERS` must
+equal the worker Deployment's `replicas`, or the run either never starts or
+starts short-handed. `backend/tests/test_loadtest_manifests.py` fails if they
+drift.
+
 ## What this harness deliberately does NOT do
 
 - **No backend imports.** This is so the same harness runs against any deployed version, including ones that diverge from the current source tree.
 - **No data seeding.** Use the backend's seed scripts (`backend/scripts/...`) or hit a staging clone of prod. Load tests should be repeatable, but the seed is the backend's responsibility.
 - **No assertions during the run.** Locust runs to completion; SLO assertions happen post-run from the CSV. Keeps the request path tight and avoids per-request overhead.
-- **No retries inside scenarios.** If the backend fails, that's the signal — we want it visible in the failure rate, not papered over.
+- **No retries for a failure.** A 4xx that is not 429, or a malformed body, gets one attempt and is recorded as a failure — that is the signal, and we want it in the failure rate rather than papered over.
+
+  Backpressure is the exception, and it is not papering over anything: a 429, or a 5xx with `Retry-After`, is retried by `lib/retry.py` because the real client retries it. Firing once and counting the shed request a failure made the harness under-measure at exactly the point that matters — at saturation the real system's offered load goes **up**, because every shed request comes back, while the harness's went **down**, because the user recorded a failure and moved on to think-time. The shedding is still the capacity signal; it is now counted as shedding (`<name>:429`) and as retry traffic (`<name>:retry`) instead of being hidden inside a failure count.

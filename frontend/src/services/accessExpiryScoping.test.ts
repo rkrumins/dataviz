@@ -89,3 +89,27 @@ describe('access-expiry cookie scoping', () => {
         expect(readAccessExpiryMs()).not.toBeNull()
     })
 })
+
+describe('a rotation names the deployment it rotated for', () => {
+    it('so the keepalive can schedule a tab that never bootstrapped', async () => {
+        // A tab whose session came from an in-page SSO sign-in: nothing
+        // told it the suffix, so the expiry cookie was unreadable and
+        // proactive renewal was off. The refresh response names it.
+        const { refreshNow, resetSessionLostLatch } = await import('./fetchWithTimeout')
+        put('nx_access_exp_a', 900)
+        expect(readAccessExpiryMs()).toBeNull()
+        const original = globalThis.fetch
+        globalThis.fetch = (async () => new Response(
+            JSON.stringify({ user: {}, environment_id: 'a' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )) as typeof fetch
+        try {
+            resetSessionLostLatch()
+            expect(await refreshNow()).toBe('ok')
+        } finally {
+            globalThis.fetch = original
+        }
+
+        expect(readAccessExpiryMs()).not.toBeNull()
+    })
+})

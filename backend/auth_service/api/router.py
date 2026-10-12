@@ -38,6 +38,7 @@ import os
 import secrets
 import time
 from typing import Callable, Optional
+from urllib.parse import quote, unquote
 
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -67,24 +68,29 @@ from ..cookies import (
     read_oidc_cookie,
     read_refresh_cookie,
     read_saml_cookie,
+    set_csrf_cookie,
     set_mock_identity_cookie,
     set_oidc_cookie,
     set_saml_cookie,
     set_session_cookies,
 )
+from ..csrf import mint_csrf_token, verify_csrf_token
 # Module, not names: the key ring resolves on first access so this
 # module stays importable without a signing secret.
 from ..core import config as jwt_config
 from ..core.config import (
+    ALLOWED_HOSTS,
     AUTH_CUSTOM_PROVIDER_ENABLED,
     AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN,
     COOKIE_SAMESITE,
     COOKIE_SECURE,
     JWT_ISSUER,
+    JWT_REFRESH_EXPIRY_DAYS,
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
+    sso_auth_time_is_stale,
 )
 from ..core.tokens import (
     create_mock_identity_token,
@@ -96,6 +102,7 @@ from ..core.tokens import (
     decode_refresh_token,
     decode_saml_state_token,
     decode_token,
+    password_change_pending,
 )
 from ..interface import (
     IdentityService,
@@ -113,8 +120,15 @@ from ..providers import (
 )
 from ..providers.assurance import assurance_for
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
+from ..providers.backchannel import (
+    BackchannelConfigError,
+    BackchannelError,
+    BackchannelProvider,
+    assertion_verification,
+)
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,
+    CustomProfileConfigError,
     CustomProfileError,
     CustomProfileProvider,
 )
@@ -253,21 +267,59 @@ class SessionResponse(BaseModel):
     #: Which deployment answered, so the SPA can resolve the
     #: environment-scoped cookie names it has to read by name.
     #:
-    #: Only ``nx_access_exp`` needs this today. It is read from
-    #: JavaScript to schedule token renewal, and it is scoped because two
-    #: deployments under one parent domain otherwise write the same name
-    #: into one jar — leaving each tab scheduling against the other's
-    #: token. ``/auth/me`` carries it because that is the bootstrap call,
-    #: made before the keepalive can start.
+    #: Two are read from JavaScript: ``nx_csrf``, mirrored into the
+    #: ``X-CSRF-Token`` header on every write, and ``nx_access_exp``, which
+    #: schedules token renewal. Both are scoped because two deployments
+    #: under one parent domain otherwise share one jar (see ``cookies.py``).
+    #:
+    #: EVERY response that establishes or rotates a session carries it —
+    #: /login, /refresh, /me and each SSO completion that answers in JSON —
+    #: and the SPA adopts it from each. It used to be read from /me alone,
+    #: on the reasoning that the bootstrap call precedes any write. An SSO
+    #: sign-in completed on the page (the Enterprise Gateway, a portal)
+    #: never makes that call, so its tab read the unscoped name, found
+    #: nothing, and sent every write — graph reads included, which are
+    #: POSTs — without its CSRF token.
     #:
     #: ``None`` when ``AUTH_ENVIRONMENT_ID`` is unset, which is also the
     #: case where the names are unscoped — so the client's fallback and
     #: this field agree without either having to special-case it.
     environment_id: Optional[str] = None
+    #: Whether THIS session must change the account's password before it
+    #: can do anything else — true for a session signed in with a password
+    #: somebody else chose, false for one signed in through an identity
+    #: provider even when the account's own password is pending a change.
+    #: ``user.mustChangePassword`` is the account's flag; this is what the
+    #: SPA redirects on.
+    password_change_required: bool = Field(False, alias="passwordChangeRequired")
+
+
+def _session_response(user: User, access_token: Optional[str]) -> SessionResponse:
+    """The answer to a request that established, rotated or read a session."""
+    try:
+        payload = decode_token(access_token or "")
+    except Exception:  # noqa: BLE001 — no readable token, so nothing it could hold
+        payload = {}
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        password_change_required=password_change_pending(
+            payload, bool(user.must_change_password),
+        ),
+    )
 
 
 class _Ack(BaseModel):
     ok: bool = True
+
+
+class _CsrfHealed(_Ack):
+    """``GET /auth/csrf``'s answer: which environment the healed cookie
+    is named after. See ``SessionResponse.environment_id`` — a page that
+    has to repair its CSRF cookie is exactly a page that may not know the
+    name to read, and a heal that re-mints ``nx_csrf_<env>`` for a page
+    reading ``nx_csrf`` repairs nothing."""
+    environment_id: Optional[str] = None
 
 
 class ProviderSummary(BaseModel):
@@ -308,6 +360,43 @@ def _identity_service(request: Request) -> IdentityService:
     return svc
 
 
+#: Exactly the ``backchannel`` settings the sign-in page needs, and
+#: nothing else. A whitelist rather than a denylist because the dict this
+#: reads from also holds both endpoint URLs and whatever credentials
+#: their headers carry — a denylist would publish every setting added
+#: after it was written.
+#:
+#: Two families, gated separately in ``_public_config``: the trigger
+#: fields publish when a trigger is configured and enabled (either
+#: mode), and the ``browser_exchange_*`` fields publish only for rows
+#: whose exchange runs in the browser — they are the call the browser
+#: has to make there, and a deliberately public family for the same
+#: reason ``authenticate_headers`` is. ``gateway_*`` and ``exchange_*``
+#: are server-side facts under every mode and never appear here.
+_BACKCHANNEL_PUBLIC_FIELDS = {
+    "authenticate_url": "authenticateUrl",
+    "authenticate_method": "authenticateMethod",
+    "authenticate_headers": "authenticateHeaders",
+    "authenticate_token_path": "authenticateTokenPath",
+    "browser_exchange_url": "browserExchangeUrl",
+    "browser_exchange_method": "browserExchangeMethod",
+    "browser_exchange_headers": "browserExchangeHeaders",
+    "browser_exchange_token_path": "browserExchangeTokenPath",
+    "browser_exchange_body_field": "browserExchangeBodyField",
+    "auto_signin": "autoSignIn",
+}
+
+_BACKCHANNEL_TRIGGER_FIELDS = (
+    "authenticate_url", "authenticate_method", "authenticate_headers",
+    "authenticate_token_path",
+)
+_BACKCHANNEL_BROWSER_EXCHANGE_FIELDS = (
+    "browser_exchange_url", "browser_exchange_method",
+    "browser_exchange_headers", "browser_exchange_token_path",
+    "browser_exchange_body_field",
+)
+
+
 def _public_config(snap) -> dict:
     """Non-secret settings the login UI needs to start a flow.
 
@@ -315,10 +404,74 @@ def _public_config(snap) -> dict:
     from browser storage need the storage key client-side; nothing else
     from ``settings`` is ever exposed, because that dict also holds
     ``shared_secret``.
+
+    ``backchannel`` publishes nothing at all unless a sign-in trigger is
+    configured. When one is, the browser cannot make the call without
+    the URL, the method and the headers, so those are published — and
+    the whitelist above holds the only keys that ever are.
+    ``gateway_url``, ``exchange_url``, ``gateway_headers``,
+    ``exchange_headers`` and ``token_source_key`` are server-side facts
+    and stay that way.
     """
+    settings = snap.settings or {}
+
+    if snap.kind == "backchannel":
+        out: dict = {}
+
+        # The sign-in trigger. Disabled means the browser is told
+        # nothing about it, so it makes no call — the whole switch,
+        # enforced in the one place that can enforce it. Keeping the
+        # configuration while publishing none of it is the point:
+        # turning the trigger off must not cost an operator their
+        # integration.
+        #
+        # Read off the raw settings rather than the provider's typed
+        # view, and deliberately not mirrored onto the dataclass: this
+        # is the only reader, and a parsed copy that nothing consults is
+        # a second source of truth waiting to disagree with this one.
+        if (
+            settings.get("authenticate_enabled") is not False
+            and str(settings.get("authenticate_url") or "").strip()
+        ):
+            out.update({
+                _BACKCHANNEL_PUBLIC_FIELDS[key]: settings.get(key)
+                for key in _BACKCHANNEL_TRIGGER_FIELDS
+                if settings.get(key) not in (None, "", {})
+            })
+
+        # The browser-exchange call, for rows whose exchange the browser
+        # runs. Published regardless of the trigger switch: the trigger
+        # asks the corporate IdP for a session, the exchange redeems the
+        # one that exists, and someone arriving already signed in to the
+        # portal needs only the second.
+        if str(
+            settings.get("exchange_mode") or "server"
+        ).strip().lower() == "browser":
+            out.update({
+                _BACKCHANNEL_PUBLIC_FIELDS[key]: settings.get(key)
+                for key in _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS
+                if settings.get(key) not in (None, "", {})
+            })
+
+        # The login page's silent-attempt opt-out. Published only when
+        # the operator explicitly turned it off — absence means on, the
+        # original behaviour — and only for a row the sign-in page can
+        # attempt: one with a browser-driven flow, or a server-mode row
+        # reading the corporate session off the request, which the page
+        # attempts with an empty POST. Other rows stay byte-identical.
+        # Like ``authenticate_enabled``, a blob key with no dataclass
+        # mirror: the server never consults it; only the browser does.
+        reads_ambient_session = (
+            str(settings.get("exchange_mode") or "server").strip().lower()
+            == "server"
+            and bool(str(settings.get("token_source_key") or "").strip())
+        )
+        if (out or reads_ambient_session) and settings.get("auto_signin") is False:
+            out[_BACKCHANNEL_PUBLIC_FIELDS["auto_signin"]] = False
+        return out
+
     if snap.kind != "custom_profile":
         return {}
-    settings = snap.settings or {}
     source = str(settings.get("source") or "cookie")
     out: dict = {"source": source}
     if source in BROWSER_STORAGE_SOURCES:
@@ -326,12 +479,46 @@ def _public_config(snap) -> dict:
     return out
 
 
+#: Characters a browser folds into a path separator, or that let one
+#: hide inside a value that still looks relative to a prefix test.
+#: Backslash is the one that mattered: the WHATWG URL spec's
+#: relative-slash state treats it as "/", so "/\evil.com" — which
+#: starts with "/" and not "//" — is resolved by every major browser
+#: as https://evil.com/. Tab, newline and carriage return are stripped
+#: from URLs before parsing, so "/<TAB>/evil.com" arrives as
+#: "//evil.com".
+_UNSAFE_NEXT_CHARS = ("\\", "\t", "\n", "\r")
+
+
 def _safe_next(raw: str | None) -> str:
     """Only allow a same-site relative path. Anything that could escape
-    the origin (scheme, host, protocol-relative ``//``) falls back to
-    the app root — an open-redirect guard on the post-login bounce."""
-    if not raw or not raw.startswith("/") or raw.startswith("//"):
+    the origin — a scheme, a host, protocol-relative ``//``, or a
+    backslash the browser will read as ``/`` — falls back to the app
+    root. This is the open-redirect guard on the post-login bounce, and
+    it serves OIDC, the SAML ACS and both custom kinds.
+
+    The value is sealed into the signed flow cookie and consumed by
+    ``_session_redirect`` *after* the session is minted, so a bypass
+    here bounces an **authenticated** user to the attacker's origin.
+    That makes it phishing infrastructure rather than a cosmetic bug,
+    and it is why this rejects rather than sanitises: a value we cannot
+    read as unambiguously relative is not one to guess at.
+
+    One decode pass first, because ``%5c`` and ``%2f%2f`` survive the
+    naive prefix test and are decoded by the browser. Anything still
+    encoded after that pass is left alone — it is a legal path segment.
+    """
+    if not raw or not raw.startswith("/"):
         return "/"
+    try:
+        decoded = unquote(raw)
+    except (UnicodeDecodeError, ValueError):
+        return "/"
+    for candidate in (raw, decoded):
+        if not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+        if any(ch in candidate for ch in _UNSAFE_NEXT_CHARS):
+            return "/"
     return raw
 
 
@@ -351,10 +538,44 @@ def _failure_ref() -> str:
     return secrets.token_hex(4)
 
 
+#: Caps on the free text a failure record carries. The detail is an
+#: exception message or an upstream status line — enough to act on, and
+#: bounded so a hostile or runaway upstream cannot bloat the audit table.
+_FAILURE_DETAIL_MAX = 300
+_USER_AGENT_MAX = 200
+
+
+def _client_context(request: Optional[Request]) -> dict:
+    """Where a sign-in attempt came from, for the admin tracing it.
+
+    ``request.client`` is the peer the ASGI server trusted — behind the
+    shipped proxy that is the browser's address, because
+    ``--forwarded-allow-ips`` names the proxy.
+    """
+    if request is None:
+        return {}
+    out = {"path": request.url.path}
+    if request.client and request.client.host:
+        out["client_ip"] = request.client.host
+    agent = request.headers.get("user-agent")
+    if agent:
+        out["user_agent"] = agent[:_USER_AGENT_MAX]
+    return out
+
+
 async def _record_sso_failure(
     svc, *, ref: str, slug: str, provider_id: Optional[str], reason: str,
+    request: Optional[Request] = None,
+    detail: Optional[str] = None,
+    who: Optional[dict] = None,
 ) -> None:
     """Write the failure to the audit log keyed by ``ref``.
+
+    ``reason`` is the code a parser groups and explains; ``detail`` is the
+    free text behind it (an exception message, an upstream status), kept
+    in its own field so the code stays a closed vocabulary. ``who`` names
+    the person when the attempt got far enough to know: ``email``,
+    ``user_id``, ``external_id``.
 
     Best-effort: a login that already failed must not also 500 because the
     audit write did. Uses the standalone-transaction emitter so the record
@@ -363,15 +584,25 @@ async def _record_sso_failure(
     emit = getattr(svc, "emit_audit", None)
     if emit is None:
         return
+    payload = {
+        "ref": ref,
+        "provider_slug": slug,
+        "provider_id": provider_id,
+        # The precise reason is admin-only by construction: it lives
+        # here, never in the redirect the user sees.
+        "reason": reason,
+    }
+    who = who or {}
+    extra = {
+        "detail": detail[:_FAILURE_DETAIL_MAX] if detail else None,
+        "email": (who.get("email") or "").strip().lower() or None,
+        "user_id": who.get("user_id"),
+        "external_id": who.get("external_id"),
+        **_client_context(request),
+    }
+    payload.update({k: v for k, v in extra.items() if v})
     try:
-        await emit("user.sso_login_failed", {
-            "ref": ref,
-            "provider_slug": slug,
-            "provider_id": provider_id,
-            # The precise reason is admin-only by construction: it lives
-            # here, never in the redirect the user sees.
-            "reason": reason,
-        })
+        await emit("user.sso_login_failed", payload)
     except Exception as exc:  # noqa: BLE001 — audit is best-effort
         logger.warning("SSO failure audit failed (slug=%s): %s", slug, exc)
 
@@ -542,6 +773,61 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
     row("Existing account", outcome.get("user_email"))
     row("Groups asserted", outcome.get("groups"))
     row("Linking policy", outcome.get("linking_policy"))
+    auth_time_fact = outcome.get("auth_time") or {}
+    if auth_time_fact.get("present") is False:
+        # Only reachable on a row whose requirement is off — with it on,
+        # the sign-in refuses before any verdict. Worth a line: the
+        # ceiling silently changes what it measures.
+        row(
+            "Authentication time",
+            f"not in the claims — the "
+            f"{auth_time_fact.get('ceiling_hours', 24)}-hour "
+            "re-certification will measure from each sign-in",
+        )
+
+    # The avatar leg gets a verdict line in every state — silence is how
+    # this feature failed before: a refused fetch was one server log
+    # line, and the operator's only symptom was a 404 on the image.
+    avatar_fact = outcome.get("avatar") or {}
+    if avatar_fact:
+        if avatar_fact.get("url") is None:
+            row(
+                "Profile picture",
+                "no avatar URL resolved from the claims — either none "
+                "was sent, or avatar mapping is off for this connection",
+            )
+        elif avatar_fact.get("fetched"):
+            size_kib = max(1, round((avatar_fact.get("size") or 0) / 1024))
+            row(
+                "Profile picture",
+                f"would arrive — {avatar_fact.get('content_type', 'image')}, "
+                f"{size_kib} KiB from {avatar_fact['url']}. A real sign-in "
+                "would store it",
+            )
+        else:
+            reason = str(avatar_fact.get("reason") or "fetch_failed")
+            hint = {
+                "host_not_allowlisted":
+                    "add the host under Settings → Avatar image hosts",
+                "not_an_image":
+                    "supply a raster image URL (PNG, JPEG, GIF, WebP or "
+                    "AVIF)",
+                "too_many_redirects":
+                    "the URL redirects more than three times",
+                "tls_verify_failed":
+                    "the host's TLS answer does not validate against "
+                    "this deployment's trust — mount your corporate CA "
+                    "bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it "
+                    "(see the deployment guide)",
+                "fetch_unavailable":
+                    "this deployment has no avatar fetcher wired",
+            }.get(reason)
+            text = f"would NOT arrive ({reason})"
+            if hint:
+                text += f" — {hint}"
+            if avatar_fact.get("detail"):
+                text += f". {avatar_fact['detail']}"
+            row("Profile picture", text)
 
     if outcome.get("reason"):
         row("Refused because", outcome["reason"])
@@ -608,6 +894,7 @@ async def _dry_run_or_none(
     request: Request, *, svc, snap, slug: str, identity,
     clear_flow: Optional[Callable[[Response], None]] = None,
     as_json: bool = False,
+    extra: Optional[dict] = None,
 ) -> Optional[Response]:
     """If this flow is a rehearsal, render the outcome and stop.
 
@@ -628,6 +915,10 @@ async def _dry_run_or_none(
     outcome = await svc.preview_sso_login(
         identity, provider_id=snap.id, linking_policy=snap.linking_policy,
     )
+    if extra:
+        # Flow-specific facts the preview cannot know — e.g. which
+        # verification material judged a browser assertion.
+        outcome = {**outcome, **extra}
     resp: Response = (
         JSONResponse({"dryRun": True, "outcome": outcome}) if as_json
         else _dryrun_response(slug, outcome)
@@ -641,6 +932,7 @@ async def _dry_run_or_none(
 def _sso_failure_handler(
     svc, *, slug: str, snap, log_label: str,
     clear_flow: Optional[Callable[[Response], None]] = None,
+    request: Optional[Request] = None,
 ):
     """Build the ``_fail`` closure each redirect-based flow needs.
 
@@ -650,12 +942,21 @@ def _sso_failure_handler(
     lands everywhere at once.
     """
     async def _fail(reason: str, *, error_code: Optional[str] = None,
-                    email: Optional[str] = None) -> RedirectResponse:
+                    email: Optional[str] = None,
+                    detail: Optional[str] = None,
+                    who: Optional[dict] = None) -> RedirectResponse:
+        # ``reason`` stays a closed vocabulary — a parser groups and
+        # explains it. ``detail`` is the free text behind it and is
+        # recorded in its own field. ``email`` is the one value that goes
+        # back to the browser (the collision modal needs it); ``who`` is
+        # for the record only.
         ref = _failure_ref()
-        logger.info("%s failed (slug=%s, ref=%s): %s",
-                    log_label, slug, ref, reason)
+        logger.info("%s failed (slug=%s, ref=%s): %s%s",
+                    log_label, slug, ref, reason,
+                    f" — {detail}" if detail else "")
         await _record_sso_failure(
             svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+            request=request, detail=detail, who=who,
         )
         resp = RedirectResponse(
             _failure_redirect(ref, error_code=error_code, email=email),
@@ -668,9 +969,19 @@ def _sso_failure_handler(
     return _fail
 
 
+def _rejected_who(identity, exc: SSOAuthError) -> dict:
+    """The person a refused SSO sign-in was for, as the record names them."""
+    return {
+        "email": getattr(identity, "email", None),
+        "external_id": getattr(identity, "external_id", None),
+        "user_id": exc.user_id,
+    }
+
+
 async def _finish_sso_login(
     request: Request, *, svc, snap, slug: str, identity, next_path: str,
     fail, clear_flow: Optional[Callable[[Response], None]] = None,
+    reauth_forced: Optional[bool] = None,
 ) -> Response:
     """Everything between "we have a verified identity" and a response.
 
@@ -682,6 +993,13 @@ async def _finish_sso_login(
     this verbatim. It used to be copy-pasted, which is precisely why the
     dry-run reached two of the four: adding a step here meant remembering
     four call sites. Now it means one.
+
+    ``reauth_forced`` says whether this kind can ask its IdP for a fresh
+    authentication, and whether this flow already did: ``None`` for a kind
+    with no such lever (gateway, portal, custom), ``False`` for an OIDC or
+    SAML flow that has not asked yet, ``True`` for one that has. An
+    ``auth_time`` too old to survive the SSO re-auth ceiling's first check
+    earns one forced round trip while the flow can still ask for it.
     """
     rehearsal = await _dry_run_or_none(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -689,6 +1007,39 @@ async def _finish_sso_login(
     )
     if rehearsal is not None:
         return rehearsal
+
+    # A session minted from this identity would be refused at its first
+    # renewal — the IdP's session is older than our re-auth ceiling and it
+    # answered without re-authenticating. OIDC ``max_age`` and SAML's
+    # AuthnInstant make that the IdP's call, not the user's. Ask it once,
+    # properly (``prompt=login`` / ``ForceAuthn``), instead of handing out
+    # a session that ends a few minutes from now. Not on a forced flow —
+    # the IdP ignoring the request is not fixed by repeating it, and
+    # ``complete_sso_login`` measures from this sign-in in that case.
+    # After the rehearsal, which must report what the real sign-in would
+    # do rather than bounce, and before the link intent, whose cookie has
+    # to survive the round trip.
+    auth_time = getattr(identity, "auth_time", None)
+    if (
+        reauth_forced is False
+        and isinstance(auth_time, int) and auth_time > 0
+        and sso_auth_time_is_stale(auth_time, now=int(time.time()))
+    ):
+        logger.info(
+            "SSO sign-in carried a stale auth_time (kind=%s, slug=%s, "
+            "age=%ds); asking the IdP for a fresh authentication",
+            snap.kind, snap.slug, int(time.time()) - auth_time,
+        )
+        # ``snap.slug`` — the registry's own value for the provider this
+        # request resolved — not the path parameter it was looked up by.
+        bounce = RedirectResponse(
+            f"/api/v1/auth/{quote(snap.slug, safe='')}/login"
+            f"?next={quote(_safe_next(next_path), safe='/')}&force=1",
+            status_code=status.HTTP_302_FOUND,
+        )
+        if clear_flow is not None:
+            clear_flow(bounce)
+        return bounce
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -704,11 +1055,12 @@ async def _finish_sso_login(
             assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
+        who = _rejected_who(identity, exc)
         if str(exc) == "unsafe_auto_link":
             # The login page renders its collision modal off these params.
             return await fail(str(exc), error_code="unsafe_auto_link",
-                              email=identity.email)
-        return await fail(f"sso_login_rejected:{exc}")
+                              email=identity.email, who=who)
+        return await fail(f"sso_login_rejected:{exc}", who=who)
 
     logger.info("SSO login succeeded (kind=%s, slug=%s, user=%s)",
                 snap.kind, slug, user.id)
@@ -755,14 +1107,46 @@ async def _require_sso_enabled(request: Request) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
 
 
+#: Builder failures that mean the ROW is wrong rather than the code.
+#: Kept as a tuple next to the only place that catches them so adding a
+#: kind with its own config error is a visible one-line change rather
+#: than a silent 500 nobody notices for a month.
+_PROVIDER_CONFIG_ERRORS = (BackchannelConfigError, CustomProfileConfigError)
+
+
+def _holds_dryrun_cookie(request: Request) -> bool:
+    """Whether this request carries a valid rehearsal cookie.
+
+    ``nx_dryrun`` is signed with the platform key and minted only by the
+    admin-authed ``/admin/idp-providers/{id}/dry-run/start``, so holding
+    one is proof an operator started a rehearsal. That is what entitles
+    a request to resolve an unpublished provider — the whole point of a
+    dry-run is to exercise a draft before publishing it.
+
+    Deliberately coarser than ``_is_dryrun``, which also matches the
+    provider id: that check needs a resolved provider, and this one runs
+    to decide whether resolution is allowed at all. The narrower check
+    still happens afterwards.
+    """
+    raw = read_dryrun_cookie(request)
+    if not raw:
+        return False
+    try:
+        decode_dryrun_token(raw)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return False
+    return True
+
+
 async def _resolve_provider(slug: str, *, request: Request):
-    """Slug -> provider instance; raises 404 on unknown / disabled OR
-    when the platform master kill-switch is off."""
+    """Slug -> provider instance; raises 404 on unknown / disabled /
+    unpublished, OR when the platform master kill-switch is off."""
     await _require_sso_enabled(request)
+    allow_draft = _holds_dryrun_cookie(request)
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        provider = await registry.get(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        provider = await registry.get(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
     except RuntimeError as exc:  # registry not configured
@@ -771,21 +1155,71 @@ async def _resolve_provider(slug: str, *, request: Request):
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "SSO temporarily unavailable",
         )
+    except _PROVIDER_CONFIG_ERRORS as exc:
+        # A row whose settings cannot build a provider. Previously this
+        # escaped as a 500, which told the user nothing and told the
+        # operator less. The reason goes to the log; the caller gets the
+        # same answer an unknown provider gets, because this route is
+        # public and the message names settings fields.
+        #
+        # The operator's copy of this reason is the 400 that
+        # ``admin_idp_providers._assert_settings_usable`` now raises when
+        # the row is saved — which is where they can act on it.
+        logger.warning(
+            "Provider %r is misconfigured and cannot be built: %s", slug, exc,
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
     return provider
 
 
-async def _provider_snapshot(slug: str):
+async def _provider_snapshot(slug: str, *, request: Request | None = None):
     """Lookup helper used by the public catalog and by the linking-
-    policy / display_name pull-throughs in callbacks."""
+    policy / display_name pull-throughs in callbacks.
+
+    Takes ``request`` for one reason: the callback handlers call this
+    after ``_resolve_provider`` has already admitted the provider, so if
+    this refused drafts unconditionally it would 404 halfway through
+    every dry-run — the one flow that is supposed to exercise a draft.
+    """
+    allow_draft = bool(request is not None and _holds_dryrun_cookie(request))
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        return await registry.get_snapshot(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        return await registry.get_snapshot(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
+    except _PROVIDER_CONFIG_ERRORS as exc:
+        # Same treatment as ``_resolve_provider``, and needed for the
+        # same reason rather than by symmetry: BOTH ``resolve_slug`` and
+        # ``get_snapshot`` build the provider on a cache miss, so a
+        # "snapshot" lookup is not the read-only operation its name
+        # suggests and can fail on a bad row too.
+        logger.warning(
+            "Provider %r is misconfigured and cannot be built: %s", slug, exc,
+        )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
 
 
 # ── POST /auth/login ──────────────────────────────────────────────────
+
+
+async def _record_password_refusal(
+    svc, email: str, reason: str, client: dict,
+) -> None:
+    """Record a password sign-in refused before the password was checked.
+
+    The refusals decided after it are recorded by ``svc.login`` itself.
+    Best-effort: the caller is already answering with a refusal.
+    """
+    emit = getattr(svc, "emit_audit", None)
+    if emit is None:
+        return
+    try:
+        await emit("user.login_failed", {
+            "email": (email or "").strip().lower(), "reason": reason, **client,
+        })
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("Password refusal audit failed: %s", exc)
 
 
 @router.post(
@@ -807,11 +1241,13 @@ async def login(
     # control that stops one: it keys on the account under attack, so it
     # holds however many addresses the attempts arrive from.
     accounts = get_account_limiter()
+    client = _client_context(request)
     if not await accounts.check("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT):
         retry_after = await accounts.retry_after_seconds(
             "login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT,
         )
         logger.warning("Login throttled for account (too many failures)")
+        await _record_password_refusal(svc, body.email, "throttled", client)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed sign-in attempts. Try again shortly.",
@@ -819,14 +1255,24 @@ async def login(
         )
 
     try:
-        user, tokens = await svc.login(body.email, body.password)
+        user, tokens = await svc.login(body.email, body.password, client=client)
     except LocalLoginDisabled:
         # Phase 4: SSO-only mode. Don't leak the existence of any
         # account; respond with a structured 403 so the FE can
-        # redirect to the providers picker.
+        # redirect to the providers picker. (System accounts are the
+        # one carve-out, resolved inside ``svc.login`` — reaching this
+        # branch means the account is not one, or does not exist, and
+        # the two are deliberately indistinguishable.)
+        await _record_password_refusal(
+            svc, body.email, "local_login_disabled", client,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "local_login_disabled"},
+            detail={
+                "error": "local_login_disabled",
+                "message": "Password sign-in is switched off for this "
+                           "deployment — use single sign-on.",
+            },
         )
     except InvalidCredentials:
         # Only failures accumulate, so someone who signs in correctly
@@ -842,7 +1288,7 @@ async def login(
     await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────
@@ -852,12 +1298,36 @@ async def login(
 async def logout(request: Request, response: Response):
     svc = _identity_service(request)
     refresh = read_refresh_cookie(request)
-    await svc.logout(refresh)
+    # The access cookie carries the ``sid``, and the ``sid`` is what
+    # ``get_current_user`` checks on every request. Without it the
+    # sign-out revokes renewal but not the credential the caller is
+    # holding right now.
+    access = read_access_cookie(request)
+    await svc.logout(refresh, access)
     clear_session_cookies(response, request)
     return _Ack()
 
 
 # ── POST /auth/refresh ────────────────────────────────────────────────
+
+
+def _refresh_refused(request: Request, detail) -> JSONResponse:
+    """The 401 for a refused rotation, with the session cookies deleted ON IT.
+
+    Returned, never raised. Each refusal used to call
+    ``clear_session_cookies(response)`` and then raise ``HTTPException`` —
+    and FastAPI builds a fresh response for a raised exception, discarding
+    the injected one and every Set-Cookie on it. So no refusal ever cleared
+    anything: the access cookie outlived its own session, ``/auth/me`` kept
+    accepting it, and a user whose session had just ended was told
+    "You're already signed in" instead of why. The body is the same
+    ``{"detail": ...}`` shape a raised ``HTTPException`` produces.
+    """
+    refused = JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": detail},
+    )
+    clear_session_cookies(refused, request)
+    return refused
 
 
 @router.post(
@@ -870,26 +1340,26 @@ async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)
     if not token:
-        clear_session_cookies(response, request)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing refresh token",
-        )
+        return _refresh_refused(request, "Missing refresh token")
     try:
-        user, tokens = await svc.refresh(token)
-    except SsoReauthRequired as exc:
-        clear_session_cookies(response, request)
-        logger.info("SSO re-auth required (provider=%s)", exc.provider)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "error": "sso_reauth_required",
-                "provider": exc.provider,
-                "login_url": exc.login_url,
-            },
+        # The request's own cookies and headers ride along so a
+        # back-channel session can be re-confirmed with its IdP on this
+        # rotation. Nothing here contributes to identity — the service
+        # reads at most the one ambient token its provider row names,
+        # and hands it straight back to the IdP that issued it.
+        user, tokens = await svc.refresh(
+            token,
+            ambient_cookies=dict(request.cookies),
+            ambient_headers=dict(request.headers),
         )
+    except SsoReauthRequired as exc:
+        logger.info("SSO re-auth required (provider=%s)", exc.provider)
+        return _refresh_refused(request, {
+            "error": "sso_reauth_required",
+            "provider": exc.provider,
+            "login_url": exc.login_url,
+        })
     except InvalidRefreshToken as exc:
-        clear_session_cookies(response, request)
         if getattr(exc, "foreign", False):
             # The cookie was signed by a key outside this deployment's
             # ring, or carries another environment's issuer. Retrying
@@ -900,27 +1370,61 @@ async def refresh(request: Request, response: Response):
                 "cookies evicted across all scopes",
                 request.url.hostname, exc,
             )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": "session_foreign",
-                    "message": (
-                        "Session belongs to a different environment or "
-                        "signing key; please sign in again."
-                    ),
-                },
-            )
+            return _refresh_refused(request, {
+                "error": "session_foreign",
+                "message": (
+                    "Session belongs to a different environment or "
+                    "signing key; please sign in again."
+                ),
+            })
         logger.info("Refresh rejected: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token invalid or expired",
-        )
+        return _refresh_refused(request, "Refresh token invalid or expired")
 
     set_session_cookies(response, tokens)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────
+
+
+def _heal_csrf_cookie(request: Request, response: Response) -> None:
+    """Re-mint ``nx_csrf`` when a valid session presents none, or one
+    that does not verify for this session's ``sid``.
+
+    Nothing else mints this cookie outside a rotation, so a reload —
+    all GETs — used to change nothing and every write kept failing
+    "CSRF token missing or invalid" until something POST-shaped
+    happened to run. A VALID cookie is left strictly alone: rotation
+    stays the refresh path's job, and gratuitously re-minting here
+    would widen the header/cookie skew window the client already
+    races.
+    """
+    presented = request.cookies.get(CSRF_COOKIE_NAME)
+    try:
+        sid = decode_token(read_access_cookie(request) or "").get("sid")
+    except Exception:  # noqa: BLE001 — unreadable token; same fallback as the middleware
+        sid = None
+    if presented and verify_csrf_token(presented, sid):
+        return
+    set_csrf_cookie(
+        response,
+        mint_csrf_token(sid),
+        max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
+    )
+
+
+async def _signed_in_but_revoked(svc, request: Request) -> bool:
+    """A valid token whose session has since been revoked.
+
+    Refused with a plain 401 and NO cookie clearing: a revoked sid is also
+    how a role change forces the next request to re-mint its claims, and
+    that renewal needs the refresh cookie. The client refreshes on this
+    401 exactly as it does for any other; only a session that is really
+    over is refused there. Optional on the service, like the rest of the
+    injected hooks.
+    """
+    check = getattr(svc, "session_revoked", None)
+    return check is not None and await check(read_access_cookie(request))
 
 
 @router.get(
@@ -928,9 +1432,11 @@ async def refresh(request: Request, response: Response):
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-async def me(request: Request):
+async def me(request: Request, response: Response):
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
+    if user is not None and await _signed_in_but_revoked(svc, request):
+        user = None
     if user is None:
         # This is the first call the app makes after a page load, so it
         # is where a foreign cookie usually surfaces. Classify before
@@ -941,7 +1447,59 @@ async def me(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    # The bootstrap GET is where a lost CSRF cookie gets healed — the
+    # one moment we know the session is valid before any write happens.
+    _heal_csrf_cookie(request, response)
+    return _session_response(user, read_access_cookie(request))
+
+
+# ── GET /auth/csrf ────────────────────────────────────────────────────
+
+
+@router.get("/csrf", response_model=_CsrfHealed)
+async def csrf(request: Request, response: Response):
+    """Repair ``nx_csrf`` for the current session, in place — no rotation.
+
+    ``nx_csrf`` can go missing, or arrive as a sibling deployment's value,
+    while the session itself stays perfectly valid: a second instance's
+    sign-out sweeps the shared parent domain, or two deployments share one
+    cookie jar. The page cannot detect this — the token is bound to the
+    session's ``sid`` under a server secret, and the ``sid`` lives in the
+    HttpOnly access cookie the page cannot read — so a stale or absent
+    cookie 403s every write with nothing the page can do about it but a
+    full reload, which heals the cookie as a side effect of ``GET /me``.
+
+    This is that heal, made callable on its own. The client hits it the
+    moment a write fails ``csrf_failed`` (or pre-emptively when the cookie
+    is gone) and gets a correctly-bound cookie back without paying for a
+    token rotation — which is both wasteful and unsafe here, because a
+    rotation runs the session ceilings and can end the session outright,
+    turning "your CSRF cookie was evicted" into "you are signed out". It
+    reuses ``_heal_csrf_cookie``, so an already-valid cookie is left
+    untouched and only a missing or mis-bound one is re-minted.
+
+    401 when there is no live session to heal against, so the client falls
+    through to the refresh / login path rather than looping here. Being a
+    GET, it is a CSRF-safe method and needs no token of its own.
+
+    The answer names the environment the cookie is scoped to, so the
+    client can read the cookie it was just handed — see ``_CsrfHealed``.
+    """
+    svc = _identity_service(request)
+    user = await svc.validate_session(read_access_cookie(request))
+    if user is not None and await _signed_in_but_revoked(svc, request):
+        user = None
+    if user is None:
+        # Same classify-before-answering as ``/me``: a cookie from another
+        # environment can never be healed here, so evict it rather than
+        # letting the client retry a repair that cannot succeed.
+        raise_if_foreign_session(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    _heal_csrf_cookie(request, response)
+    return _CsrfHealed(environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 # ── GET /auth/diagnostics ─────────────────────────────────────────────
@@ -1215,19 +1773,56 @@ async def resolve_email_domain(request: Request, body: _ResolveBody):
 
 def _request_https_host(request: Request) -> tuple[str, bool, str]:
     """Extract (host, is_https, path) for python3-saml's request_data
-    builder. Honors X-Forwarded-* headers when running behind a proxy."""
+    builder. Honors X-Forwarded-* headers when running behind a proxy.
+
+    The host is not cosmetic here. python3-saml derives ``current_url``
+    from it and validates the assertion's ``Destination`` and
+    ``SubjectConfirmationData/@Recipient`` against that — so whoever
+    controls this value controls what those checks compare to. And it is
+    attacker-controllable by default: nginx forwards ``Host $host`` from
+    a catch-all ``server_name _``, and gunicorn's
+    ``--forwarded-allow-ips`` filters ``X-Forwarded-For`` but not
+    ``X-Forwarded-Host``. An assertion minted for a different SP can
+    therefore be replayed here with the header set to match its own
+    Destination.
+
+    ``ALLOWED_HOSTS`` closes it: a claimed host outside the list is
+    ignored in favour of the first configured one, so the SAML checks
+    compare against a URL the operator declared rather than one the
+    caller supplied. Unset, behaviour is unchanged — which is why the
+    deployment configs set it.
+    """
     fwd_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     https = fwd_proto.lower() == "https"
-    host = (
+    claimed = (
         request.headers.get("x-forwarded-host")
         or request.headers.get("host")
         or request.url.hostname or ""
     )
+    host = _allowed_host_or_default(claimed)
     path = request.url.path
     return host, https, path
 
 
+def _allowed_host_or_default(claimed: str) -> str:
+    """*claimed* if this deployment answers to it, else the canonical one."""
+    if not ALLOWED_HOSTS:
+        return claimed
+    # Compare without the port: an allowlist entry is a hostname, and a
+    # deployment reached on a non-default port is still itself.
+    bare = claimed.split(":", 1)[0].strip().lower()
+    if bare in ALLOWED_HOSTS:
+        return claimed
+    logger.warning(
+        "Ignoring unrecognised Host %r; using the configured host instead. "
+        "Add it to ALLOWED_HOSTS if this deployment really answers to it.",
+        claimed,
+    )
+    return ALLOWED_HOSTS[0]
+
+
 @router.get("/{slug}/login")
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def sso_login(
     slug: str,
     request: Request,
@@ -1236,6 +1831,12 @@ async def sso_login(
 ):
     """Slug-routed SSO entry point. Dispatches to the right provider
     kind based on the registry row.
+
+    Rate-limited like the other login entry points. It was not, which
+    was survivable while every kind either redirected the browser or
+    read a local cookie — but a ``backchannel`` row makes up to two
+    outbound calls per hit, so an unlimited entry point here is a lever
+    on somebody else's identity service as well as on ours.
 
     The ``force=1`` flag is set by the daily SSO re-auth bounce; we
     pass it through to the provider so OIDC adds ``prompt=login`` and
@@ -1260,6 +1861,8 @@ async def sso_login(
             state=flow["state"], nonce=flow["nonce"],
             code_verifier=flow["code_verifier"],
             next_path=flow["next"],
+            provider_id=provider.provider_id,
+            force_reauth=force_flag,
         )
         resp = RedirectResponse(auth_url, status_code=status.HTTP_302_FOUND)
         set_oidc_cookie(resp, state_token)
@@ -1268,7 +1871,7 @@ async def sso_login(
     if SamlProvider is not None and isinstance(provider, SamlProvider):
         host, https, path = _request_https_host(request)
         try:
-            redirect_url, relay_state = provider.build_authorization(
+            redirect_url, relay_state, request_id = provider.build_authorization(
                 host=host, https=https, path=path,
                 next_path=next_path, force_authn=force_flag,
             )
@@ -1280,6 +1883,8 @@ async def sso_login(
             )
         state_token = create_saml_state_token(
             relay_state=relay_state, next_path=next_path,
+            provider_id=provider.provider_id, request_id=request_id,
+            force_reauth=force_flag,
         )
         resp = RedirectResponse(redirect_url, status_code=status.HTTP_302_FOUND)
         set_saml_cookie(resp, state_token)
@@ -1295,7 +1900,33 @@ async def sso_login(
             request, slug=slug, provider=provider, next_path=next_path,
         )
 
+    if isinstance(provider, BackchannelProvider):
+        return await _backchannel_login_flow(
+            request, slug=slug, provider=provider, next_path=next_path,
+        )
+
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider kind")
+
+
+def _flow_belongs_to(flow: dict, provider) -> bool:
+    """Whether this flow cookie was minted for THIS provider.
+
+    There is one ``nx_oidc`` and one ``nx_saml`` cookie name for every
+    slug, so without this a handshake begun at provider B satisfied
+    provider A's state or RelayState check. Token validation still pins
+    ``iss``/``aud`` to A's configuration, which is why this was a
+    hardening gap rather than a live mixup — but it is the cheap half of
+    the pair RFC 9207 exists to complete.
+
+    A cookie with no ``pid`` predates this and is accepted: it
+    self-drains within the cookie's 10-minute life, and refusing it
+    would sign out every handshake in flight across the deploy for no
+    security gain.
+    """
+    claimed = flow.get("pid")
+    if not claimed:
+        return True
+    return hmac.compare_digest(str(claimed), str(provider.provider_id))
 
 
 # ── OIDC callback ─────────────────────────────────────────────────────
@@ -1313,15 +1944,16 @@ async def oidc_callback(
     if not isinstance(provider, OidcProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not an OIDC provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="OIDC callback",
         clear_flow=clear_oidc_cookie,
+        request=request,
     )
 
     if error or not code or not state:
-        return await _fail(f"idp_error={error or 'missing_code_or_state'}")
+        return await _fail("idp_error", detail=error or "missing_code_or_state")
 
     raw_cookie = read_oidc_cookie(request)
     if not raw_cookie:
@@ -1329,10 +1961,12 @@ async def oidc_callback(
     try:
         flow = decode_oidc_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return await _fail(f"bad_flow_cookie:{exc}")
+        return await _fail("bad_flow_cookie", detail=str(exc))
 
     if not hmac.compare_digest(str(flow.get("state", "")), state):
         return await _fail("state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     try:
         identity = await provider.fetch_identity(
@@ -1346,12 +1980,13 @@ async def oidc_callback(
             nonce=flow["nonce"],
         )
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
-        return await _fail(f"token_or_idtoken:{exc}")
+        return await _fail("token_or_idtoken", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=flow.get("next"), fail=_fail,
         clear_flow=clear_oidc_cookie,
+        reauth_forced=bool(flow.get("force")),
     )
 
 
@@ -1383,11 +2018,12 @@ async def saml_acs(slug: str, request: Request):
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="SAML ACS",
         clear_flow=clear_saml_cookie,
+        request=request,
     )
 
     form = await request.form()
@@ -1402,23 +2038,31 @@ async def saml_acs(slug: str, request: Request):
     try:
         flow = decode_saml_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return await _fail(f"bad_flow_cookie:{exc}")
+        return await _fail("bad_flow_cookie", detail=str(exc))
     if not hmac.compare_digest(str(flow.get("rs", "")), str(relay_state or "")):
         return await _fail("relay_state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     host, https, path = _request_https_host(request)
     try:
-        identity = provider.fetch_identity(
+        identity = await provider.fetch_identity(
             host=host, https=https, path=path,
             post_data={k: v for k, v in form.multi_items()},
+            # Binds the assertion to the AuthnRequest we sent. Absent on
+            # a cookie minted before this shipped, which reads as
+            # "cannot check" rather than "refuse" — the alternative
+            # breaks every handshake in flight across the deploy.
+            expected_request_id=flow.get("rid"),
         )
     except Exception as exc:  # noqa: BLE001
-        return await _fail(f"saml_validate:{exc}")
+        return await _fail("saml_validate", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=flow.get("next"), fail=_fail,
         clear_flow=clear_saml_cookie,
+        reauth_forced=bool(flow.get("force")),
     )
 
 
@@ -1447,10 +2091,11 @@ async def saml_sls(slug: str, request: Request):
         return resp
 
     refresh_token = read_refresh_cookie(request)
-    if refresh_token:
+    access_token = read_access_cookie(request)
+    if refresh_token or access_token:
         try:
             svc = _identity_service(request)
-            await svc.logout(refresh_token)
+            await svc.logout(refresh_token, access_token)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1508,7 +2153,7 @@ async def _custom_login_flow(
     if not AUTH_CUSTOM_PROVIDER_ENABLED:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Custom IdP disabled")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     raw = read_mock_identity_cookie(request)
     if not raw:
         from urllib.parse import quote
@@ -1518,12 +2163,13 @@ async def _custom_login_flow(
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Custom IdP login",
         clear_flow=clear_mock_identity_cookie,
+        request=request,
     )
 
     try:
         identity = provider.fetch_identity(raw)
     except CustomIdentityError as exc:
-        return await _fail(f"envelope_invalid:{exc}")
+        return await _fail("envelope_invalid", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -1617,7 +2263,7 @@ async def _custom_profile_login_flow(
     Both paths matter for the 24h SSO re-auth bounce, which sends the
     browser to this endpoint with ``force=1``.
     """
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     source = provider.settings.source
 
     if source in BROWSER_STORAGE_SOURCES:
@@ -1634,15 +2280,16 @@ async def _custom_profile_login_flow(
     svc = _identity_service(request)
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Custom profile login",
+        request=request,
     )
 
     if not raw:
         return await _fail(f"payload_missing_from_{source}")
 
     try:
-        identity = provider.fetch_identity(raw)
+        identity = await provider.fetch_identity(raw)
     except CustomProfileError as exc:
-        return await _fail(f"payload_rejected:{exc}")
+        return await _fail("payload_rejected", detail=str(exc))
 
     # The degraded-trust audit is this kind's own step; everything after
     # it is the shared tail.
@@ -1653,6 +2300,307 @@ async def _custom_profile_login_flow(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=next_path, fail=_fail,
     )
+
+
+def read_ambient_token(request: Request, provider: BackchannelProvider) -> str | None:
+    """Pull the enterprise's ambient session token off the request.
+
+    Deliberately the only thing the browser contributes to a
+    ``backchannel`` login. Its presence starts the flow; its *value* is
+    never parsed, only handed straight back to the issuing IdP. Nothing
+    read here influences which user we end up with — that comes from
+    the gateway's own answer.
+    """
+    key = provider.settings.token_source_key
+    if provider.settings.token_source == "header":
+        return request.headers.get(key)
+    return request.cookies.get(key)
+
+
+async def _backchannel_login_flow(
+    request: Request, *, slug: str, provider: BackchannelProvider,
+    next_path: str,
+) -> Response:
+    """``GET /auth/{slug}/login`` for a back-channel row.
+
+    A plain redirect flow with no handshake cookie, because there is no
+    handshake: the user is already signed in to the enterprise portal,
+    and the whole exchange happens server-to-server between this request
+    and the response to it. That also means it works with an HttpOnly
+    corporate cookie and needs no JavaScript.
+
+    ``force=1`` (the 24h SSO re-auth bounce) is accepted and has no
+    special effect — there is no upstream prompt to force. The exchange
+    does re-ask the IdP, but what comes back as ``auth_time`` is often the
+    corporate portal's ORIGINAL login (``lastLogin``), which can be days
+    old — so it is not assumed fresh. A value already past the ceiling is
+    measured from this sign-in instead (``complete_sso_login``), and the
+    gateway itself, re-asked on every renewal, decides when the session
+    ends.
+
+    Login-CSRF applies here and is benign: a hostile page can navigate
+    the user to this route and cause a session to be minted *as
+    themselves*. There is nothing to defend, and a state cookie would
+    only add a failure mode.
+    """
+    snap = await _provider_snapshot(slug, request=request)
+    svc = _identity_service(request)
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="Back-channel login",
+        request=request,
+    )
+
+    if provider.settings.exchange_mode == "browser":
+        # No server-readable ambient session exists in browser mode —
+        # the corporate cookie is scoped to the SSO host and never
+        # reaches us. The sign-in page drives that shape and POSTs the
+        # assertion; a bare navigation here can only fail, so it fails
+        # the standard way rather than pretending to look for a cookie.
+        return await _fail(
+            "backchannel_failed",
+            detail="browser-exchange rows complete via POST, not the "
+                   "redirect flow",
+        )
+
+    raw = read_ambient_token(request, provider)
+    if not raw:
+        return await _fail(
+            "backchannel_no_session",
+            detail=(
+                f"no {provider.settings.token_source} "
+                f"{provider.settings.token_source_key!r} on the request"
+            ),
+        )
+
+    try:
+        identity = await provider.fetch_identity(raw)
+    except BackchannelError as exc:
+        # Every failure lands here — a refused destination, a redirect,
+        # a timeout, an upstream rejection, an unmappable payload. None
+        # of them produce a partial identity.
+        #
+        # The CODE is audited, the message is logged. The message quotes
+        # whatever the failure was, up to and including the gateway's
+        # URL, and an audit summary is the wrong place for that.
+        return await _fail(exc.code, detail=str(exc))
+
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=next_path, fail=_fail,
+    )
+
+
+class _BackchannelHandleBody(BaseModel):
+    """What the browser contributes to a back-channel sign-in.
+
+    Three mutually exclusive shapes, each honoured only when the row
+    configures it:
+
+    * ``handle`` — the sign-in trigger's own response token. Named a
+      handle rather than a token on purpose: nothing here reads it. It
+      is passed straight to the provider's gateway, which is the only
+      party that can say what it means.
+    * ``assertion`` — browser mode: the JWT the corporate translate
+      endpoint answered the browser with. This one IS read — verified
+      against the connection's JWKS and enforced single-use.
+    * neither — server mode's JSON entry point: the ambient corporate
+      cookie on this very request is redeemed, exactly like the
+      redirect flow, but the session comes back as JSON. This is the
+      leg the silent re-sign-in uses, so recovery needs no navigation.
+    """
+    handle: str | None = None
+    assertion: str | None = None
+
+
+@router.post("/{slug}/backchannel", response_model=SessionResponse,
+             response_model_by_alias=True)
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
+async def backchannel_handle_login(
+    slug: str,
+    request: Request,
+    response: Response,
+    body: _BackchannelHandleBody,
+):
+    """Complete a back-channel login from what the browser contributed.
+
+    The redirect entry point reads the enterprise's session cookie off
+    the request and answers with a Location. This one covers the shapes
+    where the browser has something to *post* — a handle the sign-in
+    trigger answered with, or (browser mode) the JWT the corporate
+    translate endpoint gave it — plus the empty-body JSON variant of the
+    cookie read itself, which exists so a silent re-sign-in can finish
+    without a navigation.
+
+    **Taking a credential from the browser is safe here, and it is
+    worth being precise about why for each shape.** A *handle* is
+    opaque: nothing here reads it, it is immediately redeemed against
+    the provider's own gateway, and a value somebody invented does not
+    survive that call — nothing the browser says reaches the claim
+    mapper. An *assertion* IS read, which is exactly what
+    ``custom_profile`` warns about — so it is held to that bar and
+    higher: signature verification against the row's material (its
+    JWKS, a pasted public key, or a shared secret) is mandatory —
+    ``validate_settings`` refuses browser mode without one — with
+    ``exp`` required and the replay burn making it single-use. A forged
+    one fails verification; a captured one is spent. The one exception
+    is the explicit ``trust_unsigned`` opt-in, which accepts either
+    reply shape unverified: the row is rated ``unverified`` (the
+    assurance gates keep platform-admin mappings away from it), the
+    burn still applies, and every real acceptance is audited.
+
+    Each shape is refused unless the row actually configures it, so the
+    endpoint cannot be used to hand a credential to a provider whose
+    operator chose a different transport.
+    """
+    provider = await _resolve_provider(slug, request=request)
+    if not isinstance(provider, BackchannelProvider):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Not a back-channel provider",
+        )
+    if body.handle and body.assertion:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "handle and assertion are different transports; send the one "
+            "this connection is configured for",
+        )
+    # Each shape is refused unless the row actually configures it, so
+    # the endpoint cannot be used to hand a credential to a provider
+    # whose operator chose a different transport.
+    if body.assertion is not None:
+        if provider.settings.exchange_mode != "browser":
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider does not take a browser-delivered "
+                "assertion",
+            )
+    elif body.handle is not None:
+        if not provider.settings.authenticate_token_path:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider reads its session from the request, not "
+                "the sign-in trigger's response",
+            )
+    else:
+        if (
+            provider.settings.exchange_mode != "server"
+            or not provider.settings.token_source_key
+        ):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider does not read its session from the "
+                "request",
+            )
+    snap = await _provider_snapshot(slug, request=request)
+
+    try:
+        if body.assertion is not None:
+            identity = await provider.identity_from_assertion(body.assertion)
+        elif body.handle is not None:
+            identity = await provider.fetch_identity(body.handle)
+        else:
+            # The ambient cookie/header on this very request — the same
+            # read the redirect flow does, answering JSON instead of a
+            # Location. An absent cookie raises backchannel_no_session
+            # inside the provider, which the handler below turns into
+            # the 401 the silent recovery keys on.
+            identity = await provider.fetch_identity(
+                read_ambient_token(request, provider) or "",
+            )
+    except BackchannelError as exc:
+        # Same split as the redirect flow: the code and the message are
+        # recorded for the admin, and only the code and the ref reach the
+        # caller.
+        ref = _failure_ref()
+        logger.info(
+            "Back-channel handle login failed (slug=%s, ref=%s): %s [%s]",
+            snap.slug, ref, exc, exc.code,
+        )
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason=exc.code, request=request,
+            detail=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": exc.code, "ref": ref},
+        )
+
+    # JSON rather than the HTML page the redirect flows get: this
+    # endpoint is reached by fetch(), so a page would never be seen.
+    rehearsal = await _dry_run_or_none(
+        request, svc=_identity_service(request), snap=snap, slug=slug,
+        identity=identity, as_json=True,
+        # Which case the gateway turned out to be — a signed token
+        # verified against which material, or a reply trusted
+        # unverified. The verdict an operator rehearses FOR, when the
+        # reply shape varies by environment.
+        extra=(
+            {"verification": assertion_verification(
+                provider.settings, body.assertion,
+            )}
+            if body.assertion is not None else None
+        ),
+    )
+    if rehearsal is not None:
+        return rehearsal
+
+    svc = _identity_service(request)
+    if body.assertion is not None and provider.settings.trust_unsigned:
+        # The same degraded-trust record custom_profile writes: this
+        # REAL login was accepted on browser-written claims nobody
+        # verified. Rehearsals return above and are not recorded —
+        # nothing was accepted. Best-effort, like _audit_degraded_trust.
+        emit = getattr(svc, "emit_audit", None)
+        if emit is not None:
+            try:
+                await emit("user.sso_unsigned_accepted", {
+                    "provider_id": snap.id,
+                    "provider_slug": snap.slug,
+                    "source": "browser_assertion",
+                    "via": "browser_assertion",
+                })
+            except Exception as exc:  # noqa: BLE001 — audit is best-effort
+                logger.warning(
+                    "Degraded-trust audit failed (slug=%s): %s", slug, exc,
+                )
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
+    try:
+        user, tokens = await svc.complete_sso_login(
+            identity,
+            provider_id=snap.id,
+            provider_slug=snap.slug,
+            linking_policy=snap.linking_policy,
+            link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
+        )
+    except SSOAuthError as exc:
+        ref = _failure_ref()
+        logger.info("Back-channel login rejected (slug=%s, ref=%s): %s",
+                    snap.slug, ref, exc)
+        await _record_sso_failure(
+            svc, ref=ref, slug=snap.slug, provider_id=snap.id,
+            reason=f"sso_login_rejected:{exc}", request=request,
+            who=_rejected_who(identity, exc),
+        )
+        detail: dict = {"error": str(exc), "ref": ref}
+        if str(exc) == "unsafe_auto_link":
+            # The caller proved control of this email at the IdP — the
+            # address and the rule that refused the link are theirs to
+            # see, and the sign-in page needs both to explain.
+            detail["email"] = identity.email
+            if exc.deny_reasons:
+                detail["reasons"] = list(exc.deny_reasons)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
+        )
+
+    set_session_cookies(response, tokens)
+    if read_link_intent_cookie(request) is not None:
+        clear_link_intent_cookie(response)
+    logger.info("Back-channel login succeeded (slug=%s, user=%s)", slug, user.id)
+    return _session_response(user, tokens.access_token)
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
@@ -1686,17 +2634,24 @@ async def custom_profile_browser_login(
             status.HTTP_404_NOT_FOUND,
             "Provider does not read its profile from browser storage",
         )
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     try:
-        identity = provider.fetch_identity(body.payload)
+        identity = await provider.fetch_identity(body.payload)
     except CustomProfileError as exc:
         # The precise reason is audited, not returned — a caller poking
         # at this endpoint shouldn't learn why their payload failed.
-        logger.info("Custom profile login failed (slug=%s): %s", slug, exc)
+        ref = _failure_ref()
+        logger.info("Custom profile login failed (slug=%s, ref=%s): %s",
+                    snap.slug, ref, exc)
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason="payload_rejected", request=request,
+            detail=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "profile_rejected"},
+            detail={"error": "profile_rejected", "ref": ref},
         )
 
     # JSON rather than the HTML page the redirect flows get: this endpoint
@@ -1713,10 +2668,20 @@ async def custom_profile_browser_login(
             request, identity=identity, provider=provider, snap=snap,
         )
     except SSOAuthError as exc:
-        logger.info("Custom profile login rejected (slug=%s): %s", slug, exc)
-        detail: dict = {"error": str(exc)}
+        ref = _failure_ref()
+        logger.info("Custom profile login rejected (slug=%s, ref=%s): %s",
+                    snap.slug, ref, exc)
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason=f"sso_login_rejected:{exc}",
+            request=request, who=_rejected_who(identity, exc),
+        )
+        detail: dict = {"error": str(exc), "ref": ref}
         if str(exc) == "unsafe_auto_link":
+            # Same disclosure rule as the back-channel route above.
             detail["email"] = identity.email
+            if exc.deny_reasons:
+                detail["reasons"] = list(exc.deny_reasons)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
         )
@@ -1726,4 +2691,4 @@ async def custom_profile_browser_login(
         clear_link_intent_cookie(response)
     logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
                 slug, user.id, provider.settings.source)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)

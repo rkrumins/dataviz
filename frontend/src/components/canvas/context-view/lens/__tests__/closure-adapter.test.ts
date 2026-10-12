@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, beforeAll } from 'vitest'
 
-import { toLensClosure, mergeClosures, emptyWalkModel, type LensWalkModel } from '../closure-adapter'
+import { toLensClosure, mergeClosures, emptyWalkModel, unionWalkModels, withSelectionFocus, selectionFocusUrn, selectionMembers, type LensWalkModel } from '../closure-adapter'
 import { buildLensSubgraph } from '../lens-subgraph'
 import type {
     GraphNode,
@@ -520,4 +520,178 @@ describe('partiality is derived, never sticky', () => {
     }), 'F')
     expect(m.truncationReason).toBe('timeout')
   })
+})
+
+
+// ---------------------------------------------------------------------------
+// unionWalkModels — several seeds, one overlay
+// ---------------------------------------------------------------------------
+
+describe('unionWalkModels', () => {
+    const model = (focusUrn: string, over: Partial<LensWalkModel> = {}): LensWalkModel => ({
+        focusUrn,
+        nodes: [],
+        lineageEdges: [],
+        containmentEdges: [],
+        upstreamUrns: new Set(),
+        downstreamUrns: new Set(),
+        frontierUp: [],
+        frontierDown: [],
+        truncated: false,
+        truncationReason: null,
+        seedTruncated: false,
+        seedCursor: null,
+        ...over,
+    })
+
+    it('hands back the SAME model when there is one seed — no new path for a normal trace', () => {
+        const only = model('a', { nodes: [{ urn: 'a' } as never] })
+        expect(unionWalkModels([only])).toBe(only)
+    })
+
+    it('is null when there is nothing to union', () => {
+        expect(unionWalkModels([])).toBeNull()
+    })
+
+    it('dedupes a node two seeds both reached', () => {
+        const a = model('a', { nodes: [{ urn: 'shared' } as never, { urn: 'x' } as never] })
+        const b = model('b', { nodes: [{ urn: 'shared' } as never, { urn: 'y' } as never] })
+        const u = unionWalkModels([a, b])!
+        expect(u.nodes.map(n => n.urn).sort()).toEqual(['shared', 'x', 'y'])
+    })
+
+    it('dedupes a hop two seeds both found, by the pair it connects', () => {
+        const hop = { sourceUrn: 'p', targetUrn: 'q', edgeType: 'FLOWS_TO' }
+        const u = unionWalkModels([
+            model('a', { lineageEdges: [hop] }),
+            model('b', { lineageEdges: [{ ...hop }] }),
+        ])!
+        expect(u.lineageEdges).toHaveLength(1)
+    })
+
+    it('never counts one seed as another seed’s lineage', () => {
+        // 'b' is upstream of 'a' — but both are selected, so 'b' is hop 0 of
+        // its own walk and the SELECTION has no upstream from it.
+        const u = unionWalkModels([
+            model('a', { upstreamUrns: new Set(['b', 'outside']) }),
+            model('b', { downstreamUrns: new Set(['a']) }),
+        ])!
+        expect([...u.upstreamUrns]).toEqual(['outside'])
+        expect([...u.downstreamUrns]).toEqual([])
+    })
+
+    it('is incomplete if ANY seed is incomplete', () => {
+        const u = unionWalkModels([
+            model('a'),
+            model('b', { truncated: true, truncationReason: 'max_nodes' }),
+        ])!
+        expect(u.truncated).toBe(true)
+        expect(u.truncationReason).toBe('max_nodes')
+    })
+
+    it('carries a seedTruncated from any seed', () => {
+        const u = unionWalkModels([model('a'), model('b', { seedTruncated: true })])!
+        expect(u.seedTruncated).toBe(true)
+    })
+
+    it('keeps what any seed still owes on the frontier', () => {
+        const u = unionWalkModels([
+            model('a', { frontierUp: [{ urn: 'f1', totalCount: 3, nextCursor: null }] }),
+            model('b', { frontierUp: [{ urn: 'f2', totalCount: 1, nextCursor: null }] }),
+        ])!
+        expect(u.frontierUp.map(f => f.urn).sort()).toEqual(['f1', 'f2'])
+    })
+})
+
+
+// ---------------------------------------------------------------------------
+// A selection as a lens focus
+// ---------------------------------------------------------------------------
+
+/**
+ * The Lens is built around one focal and measures hops from the "focus
+ * side" — the focus plus everything CONTAINED in it. A selection becomes a
+ * focus by being exactly that: one synthetic node with a containment edge to
+ * each selected entity, so hop 1 is "anything the selection reaches" by the
+ * same rule that makes a table's columns hop 0 of the table's own lens.
+ */
+describe('selection focus', () => {
+    const base = (over: Partial<LensWalkModel> = {}): LensWalkModel => ({
+        focusUrn: 'a',
+        nodes: [],
+        lineageEdges: [],
+        containmentEdges: [],
+        upstreamUrns: new Set(),
+        downstreamUrns: new Set(),
+        frontierUp: [],
+        frontierDown: [],
+        truncated: false,
+        truncationReason: null,
+        seedTruncated: false,
+        seedCursor: null,
+        ...over,
+    })
+
+    it('reads the same selection the same way however it was built', () => {
+        expect(selectionFocusUrn(['b', 'a'])).toBe(selectionFocusUrn(['a', 'b']))
+    })
+
+    it('round-trips its members', () => {
+        expect(selectionMembers(selectionFocusUrn(['a', 'b']))).toEqual(['a', 'b'])
+    })
+
+    it('leaves a real urn alone', () => {
+        expect(selectionMembers('urn:li:table:orders')).toBeNull()
+        expect(selectionMembers(null)).toBeNull()
+    })
+
+    it('contains every selected entity the walk returned', () => {
+        const model = base({ nodes: [{ urn: 'a' } as never, { urn: 'b' } as never] })
+        const focused = withSelectionFocus(model, ['a', 'b'], '2 selected entities')
+
+        expect(focused.focusUrn).toBe(selectionFocusUrn(['a', 'b']))
+        const children = focused.containmentEdges
+            .filter(e => e.sourceUrn === focused.focusUrn)
+            .map(e => e.targetUrn)
+        expect(children.sort()).toEqual(['a', 'b'])
+    })
+
+    it('does not claim a member the walk never returned', () => {
+        const model = base({ nodes: [{ urn: 'a' } as never] })
+        const focused = withSelectionFocus(model, ['a', 'missing'], '2 selected entities')
+
+        const children = focused.containmentEdges
+            .filter(e => e.sourceUrn === focused.focusUrn)
+            .map(e => e.targetUrn)
+        expect(children).toEqual(['a'])
+    })
+
+    it('adds the focus node itself, so the lens has something to draw', () => {
+        const focused = withSelectionFocus(base({ nodes: [{ urn: 'a' } as never] }), ['a'], 'Selection')
+        expect(focused.nodes.find(n => n.urn === focused.focusUrn)?.displayName).toBe('Selection')
+    })
+
+    it('takes a member away from its real container, which no longer holds it', () => {
+        // buildLensSubgraph takes the FIRST parent it sees but lets every
+        // claimant keep the child in its own children list — so leaving the
+        // real container's edge in drew it as a second card insisting it
+        // still held the selected rows.
+        const model = base({
+            nodes: [{ urn: 'a' } as never],
+            containmentEdges: [{ sourceUrn: 'parent', targetUrn: 'a' }],
+        })
+        const focused = withSelectionFocus(model, ['a'], 'Selection')
+
+        expect(focused.containmentEdges).not.toContainEqual({ sourceUrn: 'parent', targetUrn: 'a' })
+        expect(focused.containmentEdges).toContainEqual({ sourceUrn: focused.focusUrn, targetUrn: 'a' })
+    })
+
+    it('leaves containment between NON-members exactly as it was', () => {
+        const model = base({
+            nodes: [{ urn: 'a' } as never, { urn: 'x' } as never],
+            containmentEdges: [{ sourceUrn: 'parent', targetUrn: 'x' }],
+        })
+        const focused = withSelectionFocus(model, ['a'], 'Selection')
+        expect(focused.containmentEdges).toContainEqual({ sourceUrn: 'parent', targetUrn: 'x' })
+    })
 })

@@ -28,6 +28,9 @@ _WS_READS_MIGRATION_PATH = _VERSIONS_DIR / "20260605_1200_phase18_ws_reads.py"
 # View-sharing rework added workspace:view:publish (gates enterprise
 # visibility). Seeded by its own data migration, same pattern as Phase 18.
 _VIEW_PUBLISH_MIGRATION_PATH = _VERSIONS_DIR / "20260731_1300_view_publish.py"
+# Analytics added system:analytics:read — the dedicated platform privilege for
+# the Analytics section. Same pattern again.
+_ANALYTICS_PERM_MIGRATION_PATH = _VERSIONS_DIR / "20260823_1200_analytics_perm.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -199,3 +202,59 @@ def test_grant_role_enum_is_narrower_than_global_role():
 
     assert grant_repo.VALID_GRANT_ROLES == {"editor", "viewer"}
     assert grant_repo.VALID_GRANT_ROLES <= binding_repo.VALID_ROLE_NAMES_PHASE_1 | {"editor"}
+
+
+def test_analytics_permission_reaches_an_existing_database():
+    """``system:analytics:read`` must be seeded by a migration, not only by
+    ``rbac_seed``.
+
+    ``seed_reference_data`` runs on the VIRGIN-database path only — an existing
+    deployment has always taken its RBAC rows from the migration chain. A
+    permission added to ``rbac_seed`` alone therefore reaches fresh installs and
+    nothing else: the row is absent, the grants are absent, it cannot be given
+    to a custom role, and it never appears in the role-matrix admin UI. The
+    section then runs entirely on the older permissions kept for compatibility,
+    which is the dedicated privilege doing nothing at all.
+    """
+    from backend.app.config import rbac_seed
+
+    perm = "system:analytics:read"
+
+    assert _ANALYTICS_PERM_MIGRATION_PATH.exists(), (
+        f"missing migration: {_ANALYTICS_PERM_MIGRATION_PATH}"
+    )
+    mod = _load_migration(_ANALYTICS_PERM_MIGRATION_PATH, "_analytics_perm_migration")
+
+    # Migration side.
+    assert {p[0] for p in mod._NEW_PERMISSIONS} == {perm}
+    migration_grants = set(mod._NEW_ROLE_PERMISSIONS)
+    assert migration_grants == {
+        ("org_admin", perm), ("org_auditor", perm), ("super_admin", perm),
+    }, f"unexpected grants: {sorted(migration_grants)}"
+
+    # Fresh-install seed side — the two paths must land on the same rows.
+    assert perm in {p["id"] for p in rbac_seed.PERMISSIONS}
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    assert seed_grants == migration_grants, (
+        f"rbac_seed grants {sorted(seed_grants)} but the migration grants "
+        f"{sorted(migration_grants)}"
+    )
+
+
+def test_the_analytics_permission_is_offered_to_the_client():
+    """The server's privileged list and the nav catalogue's must agree.
+
+    ``useAnalyticsAccess`` reads the catalogue entry to decide whether a caller
+    is privileged. While the catalogue omitted the dedicated permission, a
+    holder of it was not merely missing a nav item — the route guard refused
+    them with a panel saying the section was not open on this deployment, which
+    was untrue: the server would have served them the whole document.
+    """
+    from backend.app.services.analytics_scope import PRIVILEGED_PERMISSIONS
+    from backend.app.services.nav_catalogue import get_catalogue
+
+    spec = get_catalogue().sidebar["analytics"].spec
+    assert set(spec.perms) == set(PRIVILEGED_PERMISSIONS), (
+        "nav catalogue and analytics_scope disagree about who is privileged: "
+        f"{sorted(set(spec.perms) ^ set(PRIVILEGED_PERMISSIONS))}"
+    )

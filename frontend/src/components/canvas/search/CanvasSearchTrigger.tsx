@@ -5,8 +5,8 @@
  * ContextViewCanvas uses ContextViewHeader's onOpenAdvancedSearch button
  * instead — this trigger is for canvases without an integrated header.
  *
- * Binds the Cmd+K / Ctrl+K shortcut so search opens consistently across
- * every canvas.
+ * Binds the Cmd+Shift+F / Ctrl+Shift+F shortcut so search opens
+ * consistently across every canvas.
  */
 import { useEffect } from 'react'
 import { Search } from 'lucide-react'
@@ -28,9 +28,9 @@ export function CanvasSearchTrigger({
 }: CanvasSearchTriggerProps) {
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
-            // Cmd+K on macOS, Ctrl+K elsewhere — matches the convention
-            // already documented in the brief.
-            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+            // Cmd+Shift+F on macOS, Ctrl+Shift+F elsewhere — matches the
+            // convention already documented in the brief.
+            if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
                 e.preventDefault()
                 onToggle()
             }
@@ -45,8 +45,8 @@ export function CanvasSearchTrigger({
         <button
             type="button"
             onClick={onToggle}
-            aria-label="Open advanced search (⌘K)"
-            title="Advanced search · ⌘K"
+            aria-label="Open advanced search (⌘⇧F)"
+            title="Advanced search · ⌘⇧F"
             className={cn(
                 'absolute top-4 right-4 z-30',
                 'flex items-center gap-2 px-3 h-9 rounded-full',
@@ -60,7 +60,7 @@ export function CanvasSearchTrigger({
             <Search size={13} />
             <span>Search</span>
             <kbd className="ml-1 px-1.5 py-0.5 rounded text-2xs font-mono bg-surface-base/60 border border-border-subtle text-ink-muted">
-                ⌘K
+                ⌘⇧F
             </kbd>
         </button>
     )

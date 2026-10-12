@@ -2,15 +2,22 @@
  * Import/Export API Service — the bulk CRUD surface for a data source's graph.
  *
  * Backend-driven by design (so the same flow is scriptable/automatable): the browser uploads a
- * file to `POST /api/v1/{wsId}/versioning/graphs/{gid}/imports` (the file IS the request body,
- * options are query params), the server opens/append s a **draft**, resolves + applies the rows
- * onto it, and the changes become reviewable through the existing draft diff/publish endpoints.
- * Export is symmetric — an async job produces a downloadable, re-importable artifact (a backup).
+ * file in parts to `…/graphs/{gid}/imports/uploads` (resumable, up to 10 GB; a script can instead
+ * send the whole file as the body of `POST …/imports`), the server opens/appends a **draft**,
+ * resolves + applies the rows onto it, and the changes become reviewable through the existing
+ * draft diff/publish endpoints.
+ * Export is symmetric: ask what an export would hold (the plan), then download it, a
+ * re-importable artifact (a backup). The server's workers prepare a data source with version
+ * control's export (up to 50 GB), and its download resumes; one without streams as it is read.
  *
  * Talks to the workspace-scoped versioning router, mirroring `versioningApiService`
  * (cookie + CSRF session via `fetchWithTimeout`, camelCase wire types).
  */
 import { authFetch } from './apiClient'
+import { fetchWithTimeout } from './fetchWithTimeout'
+import { httpStatusOf } from './graphRequestFailure'
+import { jobPollDelayMs } from '@/config/polling'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
 
@@ -31,6 +38,9 @@ export interface ExportSummary {
   nodes: number
   edges: number
   bytes: number
+  /** While it runs: the passes over the records so far (a spreadsheet reads them all once for its
+   *  columns, then again to write them); `nodes` and `edges` count the current pass. */
+  passes?: number
 }
 
 export interface Job {
@@ -45,18 +55,72 @@ export interface Job {
   errorMessage?: string | null
   createdAt?: string
   completedAt?: string | null
+  /** Queued for the server's import/export workers: how many jobs are ahead of it; else absent. */
+  queuedAhead?: number | null
+  /** A finished export: whether its file is still kept to download (it is for a day). */
+  kept?: boolean
+  /** The step it is on: `queued` while it waits, then an import's `parse`, `nodes`, `edges` and
+   *  (an import that replaces) `replace`; null between them. */
+  phase?: string | null
+  /** Percent done (an export says how far it has got in its `summary` instead). */
+  progress?: number | null
+  /** An import's rows applied so far, of all it has (while parsing, `total` is the rows read). */
+  processed?: number | null
+  total?: number | null
+  /** Each time a server takes the job up is one attempt: past the first, it resumed where an
+   *  earlier one stopped. */
+  attempt?: number | null
+  /** Running, but its server stopped answering: another one is about to take it over. */
+  stale?: boolean
+}
+
+/** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
+export function queuePosition(job: Job | null | undefined): string | null {
+  const ahead = job?.queuedAhead
+  if (ahead == null) return null
+  if (ahead === 0) return 'It starts next.'
+  return `${ahead} ${ahead === 1 ? 'job is' : 'jobs are'} ahead of it.`
+}
+
+/** "Applying the changes… 4,000 of 10,000 rows" for a running import, and a view package's export
+ *  by its steps (the records written so far come from its `summary`); null when there is nothing
+ *  to tell (not running, between steps, or another export: it tells its progress in its `summary`). */
+export function jobProgressText(job: Job | null | undefined): string | null {
+  if (job?.status !== 'running') return null
+  const processed = (job.processed ?? 0).toLocaleString()
+  const total = job.total ?? 0
+  switch (job.phase) {
+    case 'parse': return `Reading the file… ${total.toLocaleString()} rows so far`
+    case 'nodes':
+    case 'edges': return total ? `Applying the changes… ${processed} of ${total.toLocaleString()} rows` : 'Applying the changes…'
+    case 'replace': return 'Removing what the file no longer holds…'
+    case 'bundle': return 'Packing the views…'
+    case 'data': {
+      const written = job.summary as ExportSummary | null
+      return written?.nodes || written?.edges
+        ? `Writing the data… ${written.nodes.toLocaleString()} entities and ${written.edges.toLocaleString()} relationships so far`
+        : 'Writing the data…'
+    }
+    default: return null
+  }
+}
+
+/** Why a job takes longer than it might: its server stopped answering (it is `stale` until another
+ *  takes it over), or one did and the job resumed where it left off (`attempt` past the first).
+ *  Null for a job on its first run, and for one that ended. */
+export function resumeNote(job: Job | null | undefined): string | null {
+  if (!job || TERMINAL.includes(job.status)) return null
+  if (job.stale) return 'The server running it stopped answering. Another one carries on from where it got to.'
+  const attempt = job.attempt ?? 0
+  // A queued job has not been taken up again yet: any attempt was an earlier run.
+  if (job.status === 'pending') return attempt >= 1 ? 'It resumes where it left off.' : null
+  return attempt > 1 ? `Resumed where it left off (attempt ${attempt}).` : null
 }
 
 export interface CreateImportResult {
   jobId: string
   branchId: string
   sourceUri: string
-  status: JobStatus
-}
-
-export interface CreateExportResult {
-  jobId: string
-  resultUri: string
   status: JobStatus
 }
 
@@ -99,24 +163,228 @@ export function inferFormat(fileName: string): ImportFormat {
   return 'ndjson'
 }
 
-/** Upload a file and start the import job (the file is the raw request body). */
-export async function createImport(
+// ── Resumable upload ─────────────────────────────────────────────────────────
+// A large file goes up in parts, each its own request, several at once; a part that fails is sent
+// again, and an upload interrupted by a dropped connection or a reload resumes where it stopped.
+
+/** The most one import can be: a file read a row at a time (NDJSON, CSV, TSV) up to 10 GiB, a JSON
+ *  array or Excel workbook (read whole) up to 100 MB. The server holds the same limits. */
+export const MAX_IMPORT_BYTES = 10 * 1024 ** 3
+export const MAX_WHOLE_FILE_IMPORT_BYTES = 100 * 1024 ** 2
+
+export function importLimit(format: ImportFormat): number {
+  return format === 'json' || format === 'xlsx' ? MAX_WHOLE_FILE_IMPORT_BYTES : MAX_IMPORT_BYTES
+}
+
+/** A file on its way up in parts, as the server describes it: how it is split, and what it has. */
+export interface PartsUpload {
+  uploadId: string
+  size: number
+  partBytes: number
+  parts: number
+  /** The parts that arrived whole: what a resumed upload doesn't send again. */
+  received: number[]
+  /** Where each part goes straight to the server's object store, when it hands such URLs out;
+   *  otherwise every part goes through the server. */
+  partUrls?: string[]
+}
+
+/** An import's file on its way up in parts. */
+export interface ImportUpload extends PartsUpload {
+  fileName: string
+  format: string
+  jobId?: string | null
+}
+
+const PART_CONCURRENCY = 3
+const PART_ATTEMPTS = 5
+
+const uploadsUrl = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/imports/uploads`
+
+function createImportUpload(wsId: string, graphId: string, file: File, format: ImportFormat): Promise<ImportUpload> {
+  return authFetch<ImportUpload>(uploadsUrl(wsId, graphId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName: file.name, size: file.size, format }),
+  })
+}
+
+/** A part a presigned URL couldn't take: the browser couldn't send it there at all (`status` null —
+ *  this site's Content-Security-Policy or the bucket's CORS block it before it leaves, as a bare
+ *  TypeError every time; or the connection dropped), or the bucket refused it (403: the URL's
+ *  signature expired, with the temporary credentials that made it). */
+class DirectPartError extends Error {
+  constructor(message: string, readonly status: number | null) {
+    super(message)
+  }
+}
+
+/** What a refusal says. An object store answers in XML (`<Error><Code>…</Code><Message>…`). */
+function refusalText(text: string, fallback: string): string {
+  const stored = /<Message>([^<]*)<\/Message>/.exec(text)?.[1]
+  return stored ? `The file store refused part of the file: ${stored}` : extractErrorMessageFromText(text, fallback)
+}
+
+/** Send one part, retrying a dropped connection or a server error with backoff; a refusal (4xx,
+ *  but for a timeout or a busy server) is final. `direct`: the URL is the object store's own
+ *  (presigned), so it gets a bare request: no session cookies or CSRF token leave this site, and
+ *  with no custom header the bucket's CORS needs to allow only the PUT itself. One that can't be
+ *  sent there, or is refused for its signature, is a `DirectPartError`: it goes another way. */
+async function putPart(url: string, blob: Blob, signal?: AbortSignal, direct = false): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    // Cancelled between two parts: a request made now would never hear of it.
+    if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+    let res: Response | null = null
+    try {
+      if (direct) {
+        const timeout = new AbortController()
+        const abort = () => timeout.abort()
+        const timer = setTimeout(abort, 120_000)
+        signal?.addEventListener('abort', abort)
+        try {
+          res = await fetch(url, { method: 'PUT', body: blob, credentials: 'omit', signal: timeout.signal })
+        } finally {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', abort)
+        }
+      } else {
+        res = await fetchWithTimeout(url, { method: 'PUT', body: blob, signal, timeoutMs: 120_000 })
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err
+      if (direct) throw new DirectPartError(err instanceof Error ? err.message : String(err), null)
+      if (attempt >= PART_ATTEMPTS) throw err
+    }
+    if (res?.ok) return
+    if (direct && res?.status === 403) throw new DirectPartError(refusalText(await res.text(), res.statusText), 403)
+    if (res && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      throw new Error(refusalText(await res.text(), res.statusText))
+    }
+    if (attempt >= PART_ATTEMPTS) throw new Error("Part of the file couldn't be sent. Try again: it resumes where it stopped.")
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+  }
+}
+
+/** A value this browser keeps for a later visit (localStorage); null when there is none, or no
+ *  storage to keep it in. */
+export function remembered(key: string): string | null {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+
+/** Keep `value` under `key` for a later visit; null forgets it. */
+export function remember(key: string, value: string | null): void {
+  try {
+    if (value) localStorage.setItem(key, value)
+    else localStorage.removeItem(key)
+  } catch { /* private mode: nothing is picked up again after a reload */ }
+}
+
+/**
+ * Send ``file`` up in parts, several at once, each retried, resuming an upload of it where it
+ * stopped. ``key`` names the file as this browser remembers its upload (by name, size and
+ * modification time, so the same file chosen again after a failure or a reload is found again);
+ * ``find`` reads the remembered upload as the server holds it now (null, or a refusal, when it
+ * can't be resumed: ``create`` starts another). ``partUrl`` says where part n goes through the
+ * server, unless the upload names its own ``partUrls``. ``onProgress`` hears the bytes the server
+ * holds so far. Returns the upload with every part sent; it stays remembered until the caller
+ * forgets it (``remember(key, null)``), once done with it.
+ *
+ * The upload's own ``partUrls`` are used while they work. A URL the bucket refuses (403) was
+ * signed with credentials that have since expired: the upload is read again (``find``) for fresh
+ * ones, and the part sent again, once. A part that can't be sent to its URL at all (this site's
+ * security policy or the bucket's CORS don't allow it) — or still is refused — goes through the
+ * server instead, and so does every part after it: a misconfigured bucket slows an upload down,
+ * never breaks it.
+ */
+export async function sendInParts<U extends PartsUpload>(file: File, opts: {
+  key: string
+  find: (uploadId: string) => Promise<U | null>
+  create: () => Promise<U>
+  partUrl: (uploadId: string, n: number) => string
+  onProgress?: (sent: number, total: number) => void
+  signal?: AbortSignal
+}): Promise<U> {
+  const earlier = remembered(opts.key)
+  const found = earlier ? await opts.find(earlier).catch(() => null) : null
+  const upload = found ?? await opts.create()
+  remember(opts.key, upload.uploadId)
+
+  const bytesOf = (n: number) => Math.min(upload.size, (n + 1) * upload.partBytes) - n * upload.partBytes
+  const arrived = new Set(upload.received)
+  let sent = [...arrived].reduce((sum, n) => sum + bytesOf(n), 0)
+  opts.onProgress?.(sent, upload.size)
+  const todo = Array.from({ length: upload.parts }, (_, n) => n).filter((n) => !arrived.has(n))
+  let urls = upload.partUrls?.length ? upload.partUrls : null
+  let renewing: Promise<void> | null = null
+  /** Freshly signed URLs for the upload, read once however many parts asked (null: none). */
+  const renew = (stale: string[]) => {
+    if (urls !== stale) return Promise.resolve()             // renewed already, by another part
+    renewing ??= opts.find(upload.uploadId)
+      .then((u) => { urls = u?.partUrls?.length ? u.partUrls : null }, () => { urls = null })
+      .finally(() => { renewing = null })
+    return renewing
+  }
+  const sendPart = async (n: number, blob: Blob) => {
+    for (let renewed = false; urls; renewed = true) {
+      const using = urls
+      try {
+        return await putPart(using[n], blob, opts.signal, true)
+      } catch (err) {
+        if (!(err instanceof DirectPartError)) throw err
+        if (err.status !== 403 || renewed) {
+          urls = null
+          break
+        }
+        await renew(using)
+      }
+    }
+    await putPart(opts.partUrl(upload.uploadId, n), blob, opts.signal)
+  }
+  const sender = async () => {
+    for (let n = todo.shift(); n !== undefined; n = todo.shift()) {
+      const start = n * upload.partBytes
+      await sendPart(n, file.slice(start, start + bytesOf(n)))
+      sent += bytesOf(n)
+      opts.onProgress?.(sent, upload.size)
+    }
+  }
+  await Promise.all(Array.from({ length: PART_CONCURRENCY }, sender))
+  return upload
+}
+
+/**
+ * Import ``file`` through a resumable upload (``sendInParts``), then start the import from its
+ * parts. The same file chosen again after a failure or a reload resumes the upload where it
+ * stopped. ``onProgress`` hears the bytes the server holds so far.
+ */
+export async function importInParts(
   wsId: string,
   graphId: string,
-  file: File | Blob,
-  opts: CreateImportOptions = {},
+  file: File,
+  opts: CreateImportOptions & { onProgress?: (sent: number, total: number) => void; signal?: AbortSignal } = {},
 ): Promise<CreateImportResult> {
-  const params = new URLSearchParams()
-  params.set('format', opts.format ?? 'ndjson')
-  params.set('reconcileMode', opts.reconcileMode ?? 'upsert')
+  const format = opts.format ?? 'ndjson'
+  const key = `import-upload:${wsId}:${graphId}:${file.name}:${file.size}:${file.lastModified}:${format}`
+  const upload = await sendInParts(file, {
+    key,
+    // One already imported is done with: this is a new import.
+    find: async (id) => {
+      const found = await authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${id}`)
+      return found.jobId ? null : found
+    },
+    create: () => createImportUpload(wsId, graphId, file, format),
+    partUrl: (id, n) => `${uploadsUrl(wsId, graphId)}/${id}/parts/${n}`,
+    onProgress: opts.onProgress,
+    signal: opts.signal,
+  })
+
+  const params = new URLSearchParams({ reconcileMode: opts.reconcileMode ?? 'upsert' })
   if (opts.branchId) params.set('branchId', opts.branchId)
   if (opts.viewId) params.set('viewId', opts.viewId)
-  if (opts.idempotencyKey) params.set('idempotencyKey', opts.idempotencyKey)
-  // Longer timeout: the upload streams the whole file in the request body.
-  return authFetch<CreateImportResult>(
-    `${base(wsId)}/graphs/${graphId}/imports?${params.toString()}`,
-    { method: 'POST', body: file, timeoutMs: 120_000 } as RequestInit,
-  )
+  const created = await authFetch<CreateImportResult>(
+    `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
+  remember(key, null)
+  return created
 }
 
 export function getImport(wsId: string, graphId: string, jobId: string): Promise<Job> {
@@ -129,25 +397,6 @@ export function getImportPreview(wsId: string, graphId: string, jobId: string): 
 
 export function listImports(wsId: string, graphId: string): Promise<Job[]> {
   return authFetch<Job[]>(`${base(wsId)}/graphs/${graphId}/imports`)
-}
-
-/** Create an export job. A whole-data-source export doubles as a re-importable backup. */
-export function createExport(
-  wsId: string,
-  graphId: string,
-  opts: { format?: ImportFormat; asOfSeq?: number; viewId?: string; branchId?: string; props?: string[]; idempotencyKey?: string } = {},
-): Promise<CreateExportResult> {
-  const params = new URLSearchParams()
-  params.set('format', opts.format ?? 'ndjson')
-  if (opts.asOfSeq != null) params.set('asOfSeq', String(opts.asOfSeq))
-  if (opts.viewId) params.set('viewId', opts.viewId)
-  if (opts.branchId) params.set('branchId', opts.branchId)
-  if (opts.props?.length) params.set('props', opts.props.join(','))
-  if (opts.idempotencyKey) params.set('idempotencyKey', opts.idempotencyKey)
-  return authFetch<CreateExportResult>(
-    `${base(wsId)}/graphs/${graphId}/exports?${params.toString()}`,
-    { method: 'POST' },
-  )
 }
 
 export function getExport(wsId: string, graphId: string, jobId: string): Promise<Job> {
@@ -176,53 +425,211 @@ export function triggerBrowserDownload(url: string, filename: string): void {
   a.remove()
 }
 
-/** Detect a file's format from its CONTENT (universal — never relies on the extension, which may
- *  be missing after a download). Reads the first line and classifies json-lines vs csv vs tsv. */
+/** Detect a file's import format. An unambiguous extension wins; otherwise (none after a download,
+ *  or an unknown one) the CONTENT decides: a "PK" zip signature is a workbook, and the first
+ *  non-whitespace character tells a JSON array (`[`) from json-lines (`{`) — never a JSON.parse of
+ *  the first line, which a single-line array longer than the read truncates. Else tsv when the
+ *  first line has a tab and no comma, otherwise csv. */
 export async function detectFormat(file: File): Promise<ImportFormat> {
-  // xlsx is a binary zip (PK signature) — detect by extension/magic BEFORE any text read.
   const ext = file.name.toLowerCase().split('.').pop() || ''
+  if (ext === 'json') return 'json'
+  if (ext === 'ndjson' || ext === 'jsonl') return 'ndjson'
+  if (ext === 'csv') return 'csv'
+  if (ext === 'tsv' || ext === 'tab') return 'tsv'
   if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx'
   try {
     const sig = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     if (sig[0] === 0x50 && sig[1] === 0x4b) return 'xlsx'   // "PK" → an Excel workbook
-    const head = (await file.slice(0, 8192).text()).replace(/^﻿/, '')
+    const head = (await file.slice(0, 8192).text()).replace(/^\uFEFF/, '')
+    const first = head.trimStart()[0]
+    if (first === '[') return 'json'
+    if (first === '{') return 'ndjson'
     const firstLine = (head.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim()
-    if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
-      try { JSON.parse(firstLine); return 'ndjson' } catch { /* not json-lines */ }
-    }
-    if (firstLine.includes('\t') && !firstLine.includes(',')) return 'tsv'
-    if (firstLine.includes(',')) return 'csv'
-  } catch { /* fall through to extension */ }
+    return firstLine.includes('\t') && !firstLine.includes(',') ? 'tsv' : 'csv'
+  } catch { /* unreadable — fall back to the name */ }
   return inferFormat(file.name)
 }
 
-/** Export the graph and download it (with a correct .{format} filename) when ready. */
-export async function exportAndDownload(
-  wsId: string,
-  graphId: string,
-  opts: { format?: ImportFormat; viewId?: string; branchId?: string; props?: string[]; onStatus?: (s: JobStatus) => void } = {},
-): Promise<void> {
-  const format = opts.format ?? 'csv'
-  const created = await createExport(wsId, graphId, { format, viewId: opts.viewId, branchId: opts.branchId, props: opts.props })
-  const done = await pollJob(() => getExport(wsId, graphId, created.jobId), {
-    onTick: (j) => opts.onStatus?.(j.status),
-  })
-  if (done.status !== 'completed') throw new Error(done.errorMessage || 'Export failed')
-  triggerBrowserDownload(downloadExportUrl(wsId, graphId, created.jobId), `graph-export.${format}`)
+/** What an export would hold, asked before downloading it (`/exports/plan`, `/graph/export/plan`). */
+export interface ExportPlan {
+  format: ImportFormat
+  /** `null` when too many to count quickly. */
+  nodes: number | null
+  edges: number | null
+  /** Counted exactly; otherwise an estimate (or unknown). */
+  exact: boolean
+  /** `true` when there is nothing to export; `null` when that isn't known yet. */
+  empty: boolean | null
+  /** Why this format can't hold the export (an Excel sheet stops at 1,048,575 rows), if it can't. */
+  formatLimit: string | null
+  /** A view-scoped export: how many entities the view places, how many were found, how many it
+   *  holds with their contents. `placements: 0` means the view places none, so the whole data
+   *  source is exported. */
+  view?: { viewId: string; placements: number; found: number; entities: number | null } | null
 }
 
-/** Poll a job until it reaches a terminal state (or the signal aborts). */
-export async function pollJob(
-  fetcher: () => Promise<Job>,
-  opts: { intervalMs?: number; onTick?: (job: Job) => void; signal?: AbortSignal } = {},
-): Promise<Job> {
-  const interval = opts.intervalMs ?? 800
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    const job = await fetcher()
-    opts.onTick?.(job)
-    if (TERMINAL.includes(job.status)) return job
-    await new Promise((r) => setTimeout(r, interval))
+/** Which data an export reads. A version-controlled data source exports from its versioned graph
+ *  (`graphId`): published, a draft (`branchId`), or one view's entities (`viewId`). One without
+ *  version control (`graphId` null) exports its whole live graph, a cold copy. */
+export interface ExportTarget {
+  wsId: string
+  dataSourceId: string
+  graphId: string | null
+  viewId?: string
+  branchId?: string
+}
+
+function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<string, string | undefined> = {}): string {
+  const q = new URLSearchParams({ format })
+  if (!target.graphId) q.set('dataSourceId', target.dataSourceId)
+  if (target.graphId && target.viewId) q.set('viewId', target.viewId)
+  if (target.graphId && target.branchId) q.set('branchId', target.branchId)
+  for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v)
+  return q.toString()
+}
+
+function exportBase(target: ExportTarget): string {
+  return target.graphId
+    ? `${base(target.wsId)}/graphs/${target.graphId}/exports`
+    : `/api/v1/${target.wsId}/graph/export`
+}
+
+export function planExport(target: ExportTarget, format: ImportFormat): Promise<ExportPlan> {
+  return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`)
+}
+
+export interface CreateExportResult {
+  jobId: string
+  resultUri: string
+  status: JobStatus
+}
+
+/** Have the server prepare an export of a data source with version control: its workers write
+ *  the file, then `downloadExportUrl` downloads it, a download the browser can resume. Follow it
+ *  with `getExport`. */
+export function createExport(
+  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+): Promise<CreateExportResult> {
+  return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+  })}`, { method: 'POST' })
+}
+
+/** An export the server is preparing, remembered in this browser until its download starts, so
+ *  the dialog finds it again after being closed. */
+export interface PreparedExport {
+  jobId: string
+  fileName: string
+  format: ImportFormat
+  /** The records the plan counted (nodes and edges), for the progress; null when unknown. */
+  total: number | null
+  exact: boolean
+}
+
+const preparedKey = (wsId: string, graphId: string) => `graph-export:${wsId}:${graphId}`
+
+export function preparedExport(wsId: string, graphId: string): PreparedExport | null {
+  try { return JSON.parse(remembered(preparedKey(wsId, graphId)) ?? 'null') } catch { return null }
+}
+
+export function rememberExport(wsId: string, graphId: string, prepared: PreparedExport | null): void {
+  remember(preparedKey(wsId, graphId), prepared && JSON.stringify(prepared))
+}
+
+/** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie
+ *  authenticates it), so a file of any size never passes through this page's memory. */
+export function exportStreamUrl(
+  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+): string {
+  return `${exportBase(target)}/stream?${exportQuery(target, format, {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+  })}`
+}
+
+/** A failed poll worth asking again: all but a refusal. A dropped connection, a client timeout and
+ *  a web pod restarting (502/503) are asked again, as is an error that carries no status at all.
+ *  Final at once: a session that ended (the fetch layer already tried to renew it) and a refusal
+ *  whose status the error carries (`authFetch`'s and the services' own errors do): a 4xx, but for
+ *  a timeout or a busy server. */
+function isTransientPollError(err: unknown): boolean {
+  if (err instanceof Error && err.message === 'Session expired') return false
+  const status = httpStatusOf(err)
+  return status == null || status >= 500 || status === 408 || status === 429
+}
+
+/** Resolves once the hidden tab is shown, or the signal aborts. */
+function whileHidden(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (document.hidden && !signal?.aborted) return
+      document.removeEventListener('visibilitychange', check)
+      signal?.removeEventListener('abort', check)
+      resolve()
+    }
+    document.addEventListener('visibilitychange', check)
+    signal?.addEventListener('abort', check)
+  })
+}
+
+/** Resolves after `ms`, or as soon as the signal aborts. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done)
+  })
+}
+
+/**
+ * Poll a job until it ends (or the signal aborts, which rejects with an `AbortError`), every
+ * `jobPollDelayMs`: often while it may still be a short job, then less. Read-only and cheap for
+ * the server, but every open dialog does it, so it also stops asking while the tab is hidden and
+ * asks at once when it is shown again.
+ *
+ * A failed poll doesn't stop the job, which runs on the server's workers whatever this sees: a
+ * transient failure (see `isTransientPollError`) is asked again until the job has gone unanswered
+ * for `patienceMs` (counted while the tab is shown), and only then is it this poll's error.
+ *
+ * `until` says when what is followed is done, for one that isn't a job (a package upload being
+ * checked); a job is done once it ended.
+ */
+export async function pollJob<J extends { status: string }>(
+  fetcher: () => Promise<J>,
+  opts: {
+    onTick?: (job: J) => void
+    signal?: AbortSignal
+    patienceMs?: number
+    until?: (job: J) => boolean
+  } = {},
+): Promise<J> {
+  const { signal, patienceMs = 120_000, until = (job: J) => TERMINAL.includes(job.status as JobStatus) } = opts
+  const aborted = () => new DOMException('aborted', 'AbortError')
+  let answeredAt = Date.now()
+  for (let tick = 0; ; tick++) {
+    if (typeof document !== 'undefined' && document.hidden) {
+      await whileHidden(signal)
+      answeredAt = Date.now()          // a hidden tab wasn't asking: its silence isn't the job's
+    }
+    if (signal?.aborted) throw aborted()
+    let job: J | null = null
+    try {
+      job = await fetcher()
+      answeredAt = Date.now()
+    } catch (err) {
+      if (signal?.aborted) throw aborted()
+      if (!isTransientPollError(err) || Date.now() - answeredAt >= patienceMs) throw err
+    }
+    if (signal?.aborted) throw aborted()
+    if (job) {
+      opts.onTick?.(job)
+      if (until(job)) return job
+    }
+    await pause(jobPollDelayMs(tick), signal)
   }
 }

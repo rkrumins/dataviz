@@ -13,6 +13,7 @@ the isolation rule (``auth_service`` cannot import
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Protocol
@@ -34,9 +35,11 @@ class AuthConfigSnapshot:
     email_first_login: bool = False
 
 
-# All-true default used when the loader has never been called or
-# when the loader raises (defensive: a transient DB blip shouldn't
-# lock the whole auth flow).
+# The product's posture when nothing has configured one — a fresh
+# install with no ``app_auth_config`` row, and the value
+# ``StaticAuthConfigProvider`` hands back in tests. Matches the column
+# server-defaults the migration sets, so a deployment behaves the same
+# before and after its first row exists.
 _DEFAULTS = AuthConfigSnapshot(
     sso_enabled=True,
     allow_local_login=True,
@@ -45,6 +48,38 @@ _DEFAULTS = AuthConfigSnapshot(
     updated_at="",
     email_first_login=False,
 )
+
+
+# What to serve when the loader RAISED and there is no cached snapshot
+# to fall back to — i.e. the posture is unknown, not unconfigured. A
+# different question from ``_DEFAULTS``, and it was being answered with
+# the same object.
+#
+# The two sign-in switches stay permissive. Failing them closed during a
+# DB blip locks every user out of an application that is otherwise fine,
+# and "nobody can sign in" is worse than what failing closed would
+# prevent — the reasoning ``/auth/login-context`` already states for the
+# login page.
+#
+# ``allow_jit_provisioning`` is not a sign-in switch. It does not decide
+# whether an existing user gets in; it decides whether an unknown IdP
+# subject gets an ACCOUNT CREATED for them. An operator who turned it
+# off did so to stop exactly that, and a cold-cache loader failure —
+# a DB blip during a rolling restart — silently turned it back on.
+# Failing it closed costs a stranger a sign-in they can retry; failing
+# it open costs an account nobody asked for, provisioned while the
+# system could not read its own policy.
+_FAILSAFE = AuthConfigSnapshot(
+    sso_enabled=True,
+    allow_local_login=True,
+    allow_jit_provisioning=False,
+    version=0,
+    updated_at="",
+    email_first_login=False,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class AuthConfigProvider(Protocol):
@@ -94,7 +129,18 @@ class CachedAuthConfigProvider:
             try:
                 snap = await self._loader()
             except Exception:  # noqa: BLE001 — defensive fallback
-                snap = self._cache or _DEFAULTS
+                # A stale cached snapshot is better than the defaults:
+                # it is what the operator last configured. The defaults
+                # are only reached on a cold cache, which in practice
+                # means "the loader has failed since this worker
+                # started" — see the note on ``_DEFAULTS`` for why they
+                # are not uniformly permissive.
+                logger.warning(
+                    "Auth posture load failed; serving %s",
+                    "the last good snapshot" if self._cache else
+                    "the failsafe posture (JIT provisioning off)",
+                )
+                snap = self._cache or _FAILSAFE
             self._cache = snap
             self._cache_at = self._now()
             return snap

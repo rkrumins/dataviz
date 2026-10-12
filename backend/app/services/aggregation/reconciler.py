@@ -32,12 +32,13 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from backend.app.jobs.metrics import increment as metrics_increment
 
 from .cancel import get_registry as get_cancel_registry
 from .models import AggregationJobORM
+from .reap import NEVER_DISPATCHED, WORKER_LOST, reap_job
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,38 @@ _HEARTBEAT_THRESHOLD_SECS: float = float(
     os.getenv("STUCK_JOB_HEARTBEAT_THRESHOLD_SECS", "300")
 )
 _MAX_AUTO_RESUMES: int = int(os.getenv("STUCK_JOB_MAX_AUTO_RESUMES", "5"))
+# Lifetime of the per-job auto-resume counter. It exists only for a job whose
+# executor has died at least once, and it must outlive the whole job — up to
+# AGGREGATION_PENDING_TIMEOUT_SECS queued plus five long runs (a 1M-node
+# graph runs far longer than the old 1200s window in ONE attempt, which is
+# exactly how a sliding TTL let the cap reset between two executor deaths).
+# Nothing reads it once the job is terminal; a hand Resume deletes it. Seven
+# days is the repo's backstop convention for per-source Redis bookkeeping.
+_REDISPATCH_TTL_SECS: int = 7 * 86400
+
+#: How long a terminal run stays readable, and how many of each source's runs
+#: survive regardless of age. ``aggregation_jobs`` only ever grew: one row per
+#: rebuild, and with hundreds of sources on a schedule — plus drift, the
+#: reconcile sweep and the read path's own backfill — that is 10²-10³ rows a
+#: day, each carrying a ``run_stats`` document of tens of KB. Nothing anywhere
+#: deleted one except an operator pressing Delete on a single row.
+#:
+#: The floor matters as much as the window: a source rebuilt monthly would
+#: otherwise lose its whole history to a 90-day cutoff, and the history is
+#: what Job History's "read this run against the last one" is for. Set the
+#: window to 0 to keep everything.
+_RETENTION_DAYS: int = int(os.getenv("AGGREGATION_JOB_RETENTION_DAYS", "90"))
+_RETENTION_MIN_PER_SOURCE: int = int(
+    os.getenv("AGGREGATION_JOB_RETENTION_MIN_PER_SOURCE", "20")
+)
+#: One sweep an hour is ample for a table that grows by hundreds a day, and
+#: keeps the delete off the 30-second loop's critical path.
+_RETENTION_INTERVAL_SECS: float = float(
+    os.getenv("AGGREGATION_JOB_RETENTION_INTERVAL_SECS", "3600")
+)
+#: Rows per sweep. Bounded so the first sweep on a long-neglected table is a
+#: series of small transactions rather than one that locks it for minutes.
+_RETENTION_BATCH = 5_000
 # Stale-PENDING backstop: a row dispatched onto the job stream in a
 # deployment with no aggregation-worker consumer stays 'pending' forever
 # ("queued and will start shortly" in the UI) and 409-blocks every later
@@ -80,7 +113,44 @@ def _parse_iso(ts: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int:
+async def count_auto_resume(redis_client: Any, job_id: str) -> int:
+    """One more automatic re-dispatch of *job_id*; returns the running total.
+
+    The TTL is set ONCE, when the counter is created, so it cannot slide:
+    refreshing it on every increment let a job that ran longer than the
+    window between two executor deaths be resumed forever.
+    """
+    from .redis_client import redispatch_key
+
+    key = redispatch_key(job_id)
+    attempts = int(await redis_client.incr(key))
+    if attempts == 1:
+        await redis_client.expire(key, _REDISPATCH_TTL_SECS)
+    return attempts
+
+
+async def mark_auto_resume_exhausted(
+    session: Any, job: Any, now_iso: str, events: Any = None,
+) -> None:
+    """Terminal status for a job that died more times than automation may
+    resume it. A hand Resume from the cursor is still possible."""
+    await reap_job(
+        session, job, status="failed", now_iso=now_iso, events=events,
+        error_message=(
+            f"{WORKER_LOST} auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
+            f"without completing; resume from cursor={job.last_cursor} "
+            f"is still possible."
+        ),
+    )
+    metrics_increment(
+        "stuck_jobs_redispatched_total",
+        kind="aggregation", outcome="auto_resume_exhausted",
+    )
+
+
+async def _reconcile_once(
+    session_factory: Any, redis_client: Any = None, events: Any = None,
+) -> int:
     """Single sweep. Returns the count of rows reconciled.
 
     Lock-aware (preferred): the per-job execution lock ``agg:exec:{job_id}``
@@ -152,32 +222,20 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
 
                     # Lock gone → executor died. If cancelled, don't resume.
                     if await redis_client.get(cancel_flag_key(job.id)):
-                        job.status = "cancelled"
-                        job.error_message = "Cancelled; executor stopped."
-                        job.completed_at = now_iso
-                        job.updated_at = now_iso
+                        await reap_job(
+                            session, job, status="cancelled", now_iso=now_iso,
+                            error_message="Cancelled; executor stopped.",
+                            events=events,
+                        )
                         reconciled += 1
                         continue
 
-                    # Auto-resume, capped to avoid a poison job looping forever.
-                    cnt_key = f"agg:redispatch:{job.id}"
-                    attempts = int(await redis_client.incr(cnt_key))
-                    await redis_client.expire(
-                        cnt_key, int(_HEARTBEAT_THRESHOLD_SECS) * 4,
-                    )
+                    # Auto-resume, capped to avoid a poison job looping forever
+                    # (the counter is shared with crash recovery and never
+                    # slides — see count_auto_resume).
+                    attempts = await count_auto_resume(redis_client, job.id)
                     if attempts > _MAX_AUTO_RESUMES:
-                        job.status = "failed"
-                        job.error_message = (
-                            f"Auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
-                            f"without completing; resume from cursor={job.last_cursor} "
-                            f"is still possible."
-                        )
-                        job.completed_at = now_iso
-                        job.updated_at = now_iso
-                        metrics_increment(
-                            "stuck_jobs_redispatched_total",
-                            kind="aggregation", outcome="auto_resume_exhausted",
-                        )
+                        await mark_auto_resume_exhausted(session, job, now_iso, events)
                         reconciled += 1
                         continue
 
@@ -227,14 +285,14 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                 job.id, job.data_source_id, stale_for,
                 job.last_checkpoint_at, job.last_cursor,
             )
-            job.status = "failed"
-            job.error_message = (
-                f"Reconciler: no progress for {int(stale_for)}s "
-                f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
-                f"Worker likely died; resume from last_cursor is possible."
+            await reap_job(
+                session, job, status="failed", now_iso=now_iso, events=events,
+                error_message=(
+                    f"{WORKER_LOST} no progress for {int(stale_for)}s "
+                    f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
+                    f"The worker died; resume from last_cursor is possible."
+                ),
             )
-            job.completed_at = now_iso
-            job.updated_at = now_iso
             metrics_increment(
                 "stuck_jobs_redispatched_total",
                 kind="aggregation",
@@ -242,7 +300,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
             )
             reconciled += 1
 
-        reconciled += await _sweep_stale_pending(session, redis_client)
+        reconciled += await _sweep_stale_pending(session, redis_client, events)
 
         if reconciled:
             await session.commit()
@@ -250,7 +308,9 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
     return reconciled
 
 
-async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
+async def _sweep_stale_pending(
+    session: Any, redis_client: Any, events: Any = None,
+) -> int:
     """Fail pending rows that will never be picked up — see the module
     constants for the two signals. Never raises."""
     now = datetime.now(timezone.utc)
@@ -286,15 +346,15 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
             age = (now - ref).total_seconds()
             if workers_alive is False and age > _PENDING_NO_WORKER_SECS:
                 reason = (
-                    f"Queued for {int(age)}s with no aggregation worker "
-                    "registered on the job bus. Check that the aggregation "
-                    "worker service is deployed and can reach REDIS_URL, "
-                    "then re-trigger."
+                    f"{NEVER_DISPATCHED} queued for {int(age)}s with no "
+                    "aggregation worker registered on the job bus. Check that "
+                    "the aggregation worker service is deployed and can reach "
+                    "REDIS_URL, then re-trigger."
                 )
             elif age > _PENDING_TIMEOUT_SECS:
                 reason = (
-                    f"Queued for {int(age)}s without being picked up "
-                    f"(threshold={int(_PENDING_TIMEOUT_SECS)}s) — the "
+                    f"{NEVER_DISPATCHED} queued for {int(age)}s without being "
+                    f"picked up (threshold={int(_PENDING_TIMEOUT_SECS)}s) — the "
                     "dispatch message was likely lost. Re-trigger to "
                     "re-enqueue."
                 )
@@ -305,10 +365,10 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
                 "reconciler: pending job %s ds=%s abandoned: %s",
                 job.id, job.data_source_id, reason,
             )
-            job.status = "failed"
-            job.error_message = reason
-            job.completed_at = now_iso
-            job.updated_at = now_iso
+            await reap_job(
+                session, job, status="failed", events=events,
+                error_message=reason, now_iso=now_iso,
+            )
             metrics_increment(
                 "stuck_jobs_redispatched_total",
                 kind="aggregation", outcome="pending_abandoned",
@@ -318,6 +378,77 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
     except Exception as exc:
         logger.warning("reconciler: stale-pending sweep failed: %s", exc)
         return 0
+
+
+async def prune_job_history(session_factory: Any) -> int:
+    """Delete terminal runs past the retention window, keeping a floor per
+    source. Returns rows deleted. Best-effort: never raises into the loop.
+
+    Two conditions, both required, because either alone is wrong. Age alone
+    erases a slow source's entire history; a per-source count alone lets a
+    source rebuilt every fifteen minutes keep years of rows. A run is removed
+    only when it is BOTH older than the window and outside its source's most
+    recent ``_RETENTION_MIN_PER_SOURCE``.
+
+    Never touches a ``pending`` or ``running`` row, whatever its age: a row
+    that old is a stuck job, which is this module's other business, and
+    deleting it would hide the thing the reconciler exists to surface.
+    """
+    if _RETENTION_DAYS <= 0:
+        return 0
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=_RETENTION_DAYS)
+    ).isoformat()
+    terminal = ("completed", "failed", "cancelled")
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.created_at.desc(),
+        )
+        .label("rank")
+    )
+    ranked = (
+        select(AggregationJobORM.id.label("id"), rank)
+        .where(AggregationJobORM.status.in_(terminal))
+        .subquery()
+    )
+    doomed = (
+        select(ranked.c.id)
+        .where(ranked.c.rank > _RETENTION_MIN_PER_SOURCE)
+        .limit(_RETENTION_BATCH)
+    )
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                delete(AggregationJobORM).where(
+                    AggregationJobORM.id.in_(doomed),
+                    AggregationJobORM.created_at < cutoff,
+                    AggregationJobORM.status.in_(terminal),
+                )
+            )
+            await session.commit()
+            deleted = int(result.rowcount or 0)
+    except Exception as exc:                      # noqa: BLE001 — housekeeping
+        logger.warning("job-history prune failed (%s); retrying next sweep", exc)
+        metrics_increment("aggregation_job_history_pruned_total", outcome="failed")
+        return 0
+    if deleted:
+        logger.info(
+            "job-history prune removed %d run(s) older than %d days, keeping "
+            "the most recent %d per source",
+            deleted, _RETENTION_DAYS, _RETENTION_MIN_PER_SOURCE,
+        )
+    # Always, deleted or not. A sweep that removes nothing is the normal
+    # state and a sweep that stops running looks exactly the same from a
+    # log — while the table it was bounding grows back under the
+    # reconciler's 30 s scans. A counter that stops advancing is visible;
+    # a log line that stops appearing is not.
+    metrics_increment(
+        "aggregation_job_history_pruned_total",
+        outcome="capped" if deleted >= _RETENTION_BATCH else "swept",
+    )
+    return deleted
 
 
 async def run_reconciler(
@@ -339,9 +470,26 @@ async def run_reconciler(
         int(_RECONCILE_INTERVAL_SECS), int(_HEARTBEAT_THRESHOLD_SECS),
         redis_client is not None,
     )
+    # A reaped run has to reach the same mirrors a worker-ended one does, or
+    # the fleet cockpit shows the source mid-rebuild forever in the split-DB
+    # topology. Built once, off the Redis this loop already holds.
+    events = None
+    if redis_client is not None:
+        try:
+            from .events import AggregationEventPublisher
+
+            events = AggregationEventPublisher(redis_client)
+        except Exception as exc:                  # noqa: BLE001 — never fatal
+            logger.warning(
+                "Stuck-job reconciler: no event publisher (%s); reaped runs "
+                "will rely on the direct mirror write alone", exc,
+            )
+    # Housekeeping runs on its own, much slower clock. Stamped in the past so
+    # the first sweep happens shortly after start-up rather than an hour in.
+    last_prune = 0.0
     while not shutdown.is_set():
         try:
-            count = await _reconcile_once(session_factory, redis_client)
+            count = await _reconcile_once(session_factory, redis_client, events)
             if count:
                 logger.info("reconciler: reconciled %d stuck job(s)", count)
         except asyncio.CancelledError:
@@ -350,6 +498,15 @@ async def run_reconciler(
             # A failed sweep must not kill the loop — log and try
             # again next interval.
             logger.error("reconciler: sweep failed: %s", exc, exc_info=True)
+        now = asyncio.get_running_loop().time()
+        if now - last_prune >= _RETENTION_INTERVAL_SECS:
+            last_prune = now
+            try:
+                await prune_job_history(session_factory)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:              # noqa: BLE001 — housekeeping
+                logger.warning("reconciler: prune failed: %s", exc)
         try:
             await asyncio.wait_for(
                 shutdown.wait(), timeout=_RECONCILE_INTERVAL_SECS,

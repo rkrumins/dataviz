@@ -18,31 +18,41 @@
  *
  *   WizardShell             – shared modal chrome (header, stepper, footer)
  *                             used by both the scope phase and body phase.
+ *
+ * The Import journey (a view from a file exported elsewhere) runs through the same
+ * three layers: its File and Target steps belong to the scope phase, and its Match
+ * step leads the body, whose Basics → Preview steps edit the imported design. The
+ * submit writes it through the import endpoint instead of create/update. A view with
+ * its data (a package) has a Data step before Match: the data goes into a draft of
+ * the target, and the view is checked against that draft and goes into it too. Or the
+ * package's data makes a new data source of its own (the Target step's "Into a new data
+ * source"): its Data step creates it and copies the data in full, then the package's
+ * views come into it live — one through the steps, several through the batch flow.
  */
 
 import React, { useState, useCallback, useMemo, useEffect, useRef, startTransition } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
     X,
-    ArrowRight,
-    ArrowLeft,
-    Check,
     Sparkles,
     Network,
     ListTree,
     LayoutTemplate,
-    Save,
     Eye,
     Loader2,
     ClipboardList,
     AlertCircle,
     Database,
     History,
+    FileUp,
+    ListChecks,
+    DatabaseZap,
+    GitPullRequestDraft,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { WizardShell } from '@/components/wizard/WizardShell'
 import {
     CreationProgressBody,
     CreationSuccessBody,
@@ -60,23 +70,32 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useFeatureList } from '@/store/features'
+import { useFeature, useFeatureList } from '@/store/features'
+import { usePermission } from '@/store/auth'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import {
-    viewToViewConfig, updateViewLayout, requestViewPublication,
+    viewToViewConfig, updateViewLayout, requestViewPublication, getView,
 } from '@/services/viewApiService'
-import { useToast } from '@/components/ui/toast'
+import {
+    importView, newRequestId, ViewTransferError,
+    type ImportViewRequest, type ImportViewResult, type PackageInspectResult, type PackageNewSource,
+} from '@/services/viewTransferApiService'
+import { recordEvent } from '@/services/telemetryService'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
-import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
+import { useViewMetadata, useViewFull, VIEW_QUERY_KEY, type ViewMetadata } from '@/hooks/useViewMetadata'
+import { invalidateViewVersions } from '@/hooks/useViewVersions'
+import { reloadViewLibrary } from '@/store/viewLibraryStore'
 import { useWizardScope } from '@/hooks/useWizardScope'
-import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
-import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
+import { resolveWizardEntityScope } from './effectivePlacement'
+import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, LayerNodeSortAlgo, ScopeEdgeConfig } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
@@ -86,7 +105,31 @@ import { LayoutStep } from './steps/LayoutStep'
 import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
 import { AssignmentStep } from './steps/AssignmentStep'
-import { ScopeStep } from './steps/ScopeStep'
+import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
+import { viewTypeLabel } from '@/lib/domainLabels'
+import {
+    ImportSessionProvider, sameDataTarget, useImportSession, useImportSessionState, type NewDataTarget,
+} from './import/importSession'
+import { BatchImport } from './import/BatchImport'
+import { StageChoice } from './import/StageChoice'
+import { DRAFT_PERMISSION, useDraftStaging } from './import/useDraftStaging'
+import { DataTargetToggle, MadeSourceCard, NewSourceTargetPanel, type NewSourceDraft } from './import/NewSourceTargetPanel'
+import { PackageOntologyPicker } from './import/PackageOntologyPicker'
+import { NewSourceSeedStep } from './import/NewSourceSeedStep'
+import { PublishDraftDialog } from '@/features/versioning/components/PublishDraftDialog'
+import { ImportStep } from './import/ImportStep'
+import { PackageDataStep } from './import/PackageDataStep'
+import { ReconcileStep } from './import/ReconcileStep'
+import { TargetSuggestions } from './import/TargetSuggestions'
+import { ImportMetadataPanel } from './import/ImportMetadataPanel'
+import { ImportResultNote, ImportSummaryCard } from './import/ImportSummaryCard'
+import {
+    activeFiltersToFieldFilters, definitionToForm, fieldFiltersToActiveFilters, formToDefinition,
+    formToMetadata, isBuildable, sameJson, type Definition,
+} from './import/importForm'
+import { WizardEntitySeedContext, fallbackNameFromUrn, type EntityIdentity } from './useWizardEntityIndex'
+import { sameResolutions } from '@/features/view-transfer/reconcile/resolutions'
+import { matchBucket, percent } from '@/features/view-transfer/format'
 
 // ============================================
 // Types
@@ -102,6 +145,15 @@ export interface ViewWizardProps {
     /** Optional pre-selected scope (e.g. from a data source card). */
     initialWorkspaceId?: string
     initialDataSourceId?: string
+    /** 'import' opens the Import journey: a view from a file exported by another environment. */
+    journey?: 'build' | 'import'
+    /** Import journey: a file already chosen (dropped on the Explorer, say). */
+    importFile?: File | null
+    /** Import journey: update this view from the file ("Update from file…"). */
+    importIntoViewId?: string
+    /** Import journey: a view package already uploaded, read from there with no file to choose:
+     *  "Finish importing views" on the data source it was copied into (`initialDataSourceId`). */
+    importUploadId?: string
 }
 
 export interface ScopeContext {
@@ -116,8 +168,8 @@ export interface ScopeContext {
     ontologyName?: string
 }
 
-/** Which scope the create wizard is building for. */
-export type ScopeMode = 'existing' | 'blank'
+/** Which scope the create wizard is building for — or, for 'import', where it comes from. */
+export type ScopeMode = 'existing' | 'blank' | 'import'
 
 export interface ActiveFilter {
     id: string
@@ -142,6 +194,18 @@ export interface WizardFormData {
      *  shape the canvas writes via persistReferenceLayout. Never embedded back
      *  into `layers[].entityAssignments` (legacy, deprecated). */
     assignments: Record<string, LayerAssignmentEntry>
+    /** Explicit view entity scope, PINNED by a gesture that needs it rather than
+     *  left to derivation. `deriveEntityScope` answers 'curated' as soon as ONE
+     *  assignment exists — which would make a rule-driven layout (layers carrying
+     *  `entityTypes`, e.g. "one layer per top-level type") collapse to just the
+     *  entities someone happened to drag, because curated scope ignores rules for
+     *  root nodes and hydration then loads assigned URNs only. Undefined = derive
+     *  exactly as before. */
+    entityScope?: 'all' | 'curated'
+    /** View-wide default node sort ("apply to all columns"). A layer's own
+     *  `nodeSortMode` still wins; absent = 'alpha-asc'. Carried here because
+     *  `referenceLayout` stores it beside layers/assignments, not on a layer. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
@@ -162,7 +226,9 @@ export interface WizardFormData {
     layoutTemplateId?: string
 }
 
-export type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
+export type WizardStep =
+    | 'file' | 'target' | 'data' | 'scope' | 'reconcile'
+    | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
 
 interface StepDef {
     id: WizardStep
@@ -181,6 +247,11 @@ interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId'
     /** Blank mode: provider + ontology to provision against on submit. */
     blankProviderId?: string | null
     blankOntologyId?: string | null
+    /** Import journey: back to the File step. */
+    onBackToFile?: () => void
+    /** Import journey: the view goes live by default, not into a draft (its data was just copied
+     *  into a new data source of its own). */
+    importLive?: boolean
 }
 
 const LAYOUT_TYPES = [
@@ -193,14 +264,14 @@ const LAYOUT_TYPES = [
     },
     {
         id: 'hierarchy' as const,
-        label: 'Hierarchy',
+        label: viewTypeLabel('hierarchy'),
         icon: <ListTree className="w-8 h-8" />,
         description: 'Nested tree view',
         features: ['Clear parent-child structure', 'Expandable/collapsible nodes', 'Best for organizational charts'],
     },
     {
         id: 'reference' as const,
-        label: 'Context View',
+        label: viewTypeLabel('reference'),
         icon: <LayoutTemplate className="w-8 h-8" />,
         description: 'Horizontal layer columns',
         features: ['Layer-based organization', 'Rule-driven entity assignment', 'Best for data pipelines'],
@@ -209,263 +280,48 @@ const LAYOUT_TYPES = [
 ]
 
 // ============================================
-// WizardShell — shared modal chrome
+// Import journey steps
 // ============================================
 
-interface WizardShellProps {
-    mode: 'create' | 'edit'
-    currentStep: WizardStep
-    activeSteps: StepDef[]
-    currentStepIndex: number
-    onStepClick: (stepId: WizardStep) => void
-    onBack: () => void
-    onNext: () => void
-    onClose: () => void
-    canProceed: boolean
-    isLastStep: boolean
-    isSubmitting: boolean
-    onSubmit: () => void
-    /** Create mode only: the wizard is past the form and is creating / has created
-     *  the view. The chrome adapts — every step pill reads complete, a terminal pill
-     *  is appended, and the footer is replaced by `footer`. Creating a view is the
-     *  LAST STEP of the wizard, not a detached dialog. */
-    terminalPhase?: 'creating' | 'success'
-    terminalLabel?: string
-    terminalSubtitle?: string
-    /** Replaces the entire default footer (Back / Cancel / Next). */
-    footer?: React.ReactNode
-    /** Hide the header close button (nothing should abandon a create in flight). */
-    hideClose?: boolean
-    children: React.ReactNode
+/** The Import journey's steps. The target step only exists for a new view (an update's target
+ *  view fixes the scope); the data step only for a view with its data; the design steps only for
+ *  layouts the wizard can build. */
+function importStepDefs(opts: {
+    needsTarget: boolean
+    withData: boolean
+    buildable: boolean
+    withAssignments: boolean
+}): StepDef[] {
+    return [
+        { id: 'file', label: 'File', icon: <FileUp className="w-4 h-4" /> },
+        ...(opts.needsTarget ? [{ id: 'target' as const, label: 'Target', icon: <Database className="w-4 h-4" /> }] : []),
+        ...(opts.withData ? [{ id: 'data' as const, label: 'Data', icon: <DatabaseZap className="w-4 h-4" /> }] : []),
+        { id: 'reconcile', label: 'Match', icon: <ListChecks className="w-4 h-4" /> },
+        { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
+        ...(opts.buildable ? [
+            { id: 'layout' as const, label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
+            ...(opts.withAssignments
+                ? [{ id: 'assignment' as const, label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> }]
+                : []),
+            { id: 'entities' as const, label: 'Entities', icon: <Network className="w-4 h-4" /> },
+        ] : []),
+        { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
+    ]
 }
 
-function WizardShell({
-    mode,
-    currentStep,
-    activeSteps,
-    currentStepIndex,
-    onStepClick,
-    onBack,
-    onNext,
-    onClose,
-    canProceed,
-    isLastStep,
-    isSubmitting,
-    onSubmit,
-    terminalPhase,
-    terminalLabel = 'Create',
-    terminalSubtitle,
-    footer,
-    hideClose,
-    children,
-}: WizardShellProps) {
-    const isTerminal = !!terminalPhase
-    const isWide = !isTerminal && (currentStep === 'scope' || currentStep === 'assignment')
+/** A file of several views, imported together (import/BatchImport): where each source goes, how
+ *  they all match, and a review of each. */
+const BATCH_IMPORT_STEPS: StepDef[] = [
+    { id: 'file', label: 'File', icon: <FileUp className="w-4 h-4" /> },
+    { id: 'target', label: 'Targets', icon: <Database className="w-4 h-4" /> },
+    { id: 'reconcile', label: 'Match', icon: <ListChecks className="w-4 h-4" /> },
+    { id: 'preview', label: 'Review', icon: <Eye className="w-4 h-4" /> },
+]
 
-    return (
-        <>
-            <Backdrop open={true} zClassName="z-50" className="bg-black/60" />
-            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
-            <motion.div
-                initial={{ scale: 0.95, opacity: 0, y: 20 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                transition={{ duration: 0.12 }}
-                className={cn(
-                    'pointer-events-auto relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col',
-                    isWide ? 'max-w-[1180px]' : 'max-w-5xl',
-                )}
-            >
-                {/* Header */}
-                <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
-                    <div className="flex items-center gap-4">
-                        <div className={cn(
-                            'w-12 h-12 rounded-xl flex items-center justify-center text-white shadow-md',
-                            terminalPhase === 'success'
-                                ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
-                                : 'bg-gradient-to-br from-blue-500 to-indigo-600',
-                        )}>
-                            {terminalPhase === 'success'
-                                ? <Check className="w-6 h-6" />
-                                : terminalPhase === 'creating'
-                                    ? <Loader2 className="w-6 h-6 animate-spin" />
-                                    : activeSteps[currentStepIndex]?.icon}
-                        </div>
-                        <div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-                                {mode === 'create' ? 'Create New View' : 'Edit View'}
-                            </h2>
-                            <p className="text-sm text-slate-500">
-                                {isTerminal
-                                    ? terminalSubtitle
-                                    : `Step ${currentStepIndex + 1} of ${activeSteps.length}: ${activeSteps[currentStepIndex]?.label}`}
-                            </p>
-                        </div>
-                    </div>
-                    {!hideClose && (
-                        <button
-                            onClick={onClose}
-                            aria-label="Close"
-                            className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                        >
-                            <X className="w-5 h-5 text-slate-500" />
-                        </button>
-                    )}
-                </div>
-
-                {/* Progress Steps — overflow-proof: connectors flex instead of fixed
-                    widths, pills can shrink with truncating labels, and non-active
-                    labels drop out below lg so all six steps always fit the modal.
-                    In the terminal phase every step reads complete and a final pill
-                    shows the create itself. */}
-                <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-                    <div className="flex items-center min-w-0">
-                        {activeSteps.map((step, index) => {
-                            const isActive = !isTerminal && step.id === currentStep
-                            const isCompleted = isTerminal || currentStepIndex > index
-                            const isClickable = !isTerminal && (isCompleted || isActive)
-                            const showConnector = index < activeSteps.length - 1 || isTerminal
-                            return (
-                                <div key={step.id} className={cn('flex items-center min-w-0', showConnector && 'flex-1')}>
-                                    <button
-                                        onClick={() => isClickable && onStepClick(step.id)}
-                                        disabled={!isClickable}
-                                        title={step.label}
-                                        className={cn(
-                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150 min-w-0 shrink',
-                                            isActive
-                                                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
-                                                : isCompleted
-                                                    ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 hover:bg-emerald-100'
-                                                    : 'text-slate-400 cursor-not-allowed',
-                                        )}
-                                    >
-                                        {isCompleted
-                                            ? <Check className="w-4 h-4" />
-                                            : (
-                                                <span className={cn(
-                                                    'w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold border',
-                                                    isActive ? 'border-transparent bg-white/20' : 'border-slate-300',
-                                                )}>
-                                                    {index + 1}
-                                                </span>
-                                            )}
-                                        <span className={cn('truncate', !isActive && 'hidden lg:inline')}>
-                                            {step.label}
-                                        </span>
-                                    </button>
-                                    {showConnector && (
-                                        <div className={cn(
-                                            'flex-1 min-w-2 h-px mx-2',
-                                            isCompleted ? 'bg-emerald-300 dark:bg-emerald-700' : 'bg-slate-200 dark:bg-slate-700',
-                                        )} />
-                                    )}
-                                </div>
-                            )
-                        })}
-
-                        {isTerminal && (
-                            <button
-                                type="button"
-                                disabled
-                                className={cn(
-                                    'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium min-w-0 shrink',
-                                    terminalPhase === 'success'
-                                        ? 'bg-emerald-500 text-white shadow-md'
-                                        : 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900',
-                                )}
-                            >
-                                {terminalPhase === 'success'
-                                    ? <Check className="w-4 h-4" />
-                                    : <Loader2 className="w-4 h-4 animate-spin" />}
-                                <span className="truncate">{terminalLabel}</span>
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                {/* Step Content */}
-                <div className="flex-1 overflow-y-auto min-h-[520px]">
-                    <AnimatePresence mode="wait">
-                        <motion.div
-                            key={terminalPhase ?? currentStep}
-                            initial={{ opacity: 0, x: 20 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            exit={{ opacity: 0, x: -20 }}
-                            transition={{ duration: 0.06 }}
-                            className="p-8"
-                        >
-                            {children}
-                        </motion.div>
-                    </AnimatePresence>
-                </div>
-
-                {/* Footer */}
-                <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
-                    {footer ?? (
-                        <>
-                            <button
-                                onClick={onBack}
-                                disabled={currentStepIndex === 0}
-                                className={cn(
-                                    'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                                    currentStepIndex > 0
-                                        ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                                        : 'text-slate-400 cursor-not-allowed',
-                                )}
-                            >
-                                <ArrowLeft className="w-4 h-4" />
-                                Back
-                            </button>
-
-                            <div className="flex items-center gap-3">
-                                <button
-                                    onClick={onClose}
-                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
-                                >
-                                    Cancel
-                                </button>
-
-                                {isLastStep ? (
-                                    <button
-                                        onClick={onSubmit}
-                                        disabled={!canProceed || isSubmitting}
-                                        className={cn(
-                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                                            canProceed && !isSubmitting
-                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
-                                        )}
-                                    >
-                                        {isSubmitting ? (
-                                            <><Loader2 className="w-4 h-4 animate-spin" />Saving...</>
-                                        ) : (
-                                            <><Save className="w-4 h-4" />{mode === 'create' ? 'Create View' : 'Save Changes'}</>
-                                        )}
-                                    </button>
-                                ) : (
-                                    <button
-                                        onClick={onNext}
-                                        disabled={!canProceed}
-                                        className={cn(
-                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                                            canProceed
-                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
-                                        )}
-                                    >
-                                        Next
-                                        <ArrowRight className="w-4 h-4" />
-                                    </button>
-                                )}
-                            </div>
-                        </>
-                    )}
-                </div>
-            </motion.div>
-            </div>
-        </>
-    )
+function importTitle(action: string | null): { title: string; submitLabel: string } {
+    return action === 'update' || action === 'overwrite'
+        ? { title: 'Update View', submitLabel: 'Update View' }
+        : { title: 'Import View', submitLabel: 'Import View' }
 }
 
 // ============================================
@@ -628,14 +484,23 @@ function ViewWizardEditResolver(props: ViewWizardProps) {
     )
 }
 
-/** Create mode resolver — two-phase: ScopeStep then SchemaScope + Body. */
+/** The newest data source a package made in `wsId` (`newSources` is oldest first). */
+function newestIn(sources: PackageNewSource[], wsId: string | null): PackageNewSource | null {
+    for (let i = sources.length - 1; i >= 0; i--) if (sources[i].workspaceId === wsId) return sources[i]
+    return null
+}
+
+/** Create mode resolver — two-phase: ScopeStep (or the Import journey's File and Target steps)
+ *  then SchemaScope + Body. */
 function ViewWizardCreateResolver(props: ViewWizardProps & {
     activeWorkspaceId: string | null
     activeDataSourceId: string | null
     workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces']
 }) {
     const { activeWorkspaceId, activeDataSourceId, workspaces, ...wizardProps } = props
+    const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
     const lastScope = useMemo(() => readLastScope(), [])
+    const startMode: ScopeMode = props.journey === 'import' ? 'import' : 'existing'
 
     // Determine initial selections: explicit props > active context > last used
     const initialWs = props.initialWorkspaceId ?? activeWorkspaceId ?? lastScope.wsId ?? null
@@ -646,10 +511,61 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
     const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
-    const [scopeMode, setScopeMode] = useState<ScopeMode>('existing')
+    const [scopeMode, setScopeMode] = useState<ScopeMode>(startMode)
     const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
     const [selectedOntologyId, setSelectedOntologyId] = useState<string | null>(null)
     const [scopeConfirmed, setScopeConfirmed] = useState(false)
+
+    // Import journey: its first steps (the file, then where a new view goes) come before any
+    // schema is loaded, so they live here, above both phases, with the session they build.
+    // "Finish importing views" opens on a package's upload at its Data step, following the copy
+    // already made into the data source it opened from.
+    const attachTo = useMemo(
+        () => (props.importUploadId && props.initialWorkspaceId && props.initialDataSourceId
+            ? { workspaceId: props.initialWorkspaceId, dataSourceId: props.initialDataSourceId }
+            : null),
+        [props.importUploadId, props.initialWorkspaceId, props.initialDataSourceId],
+    )
+    const firstImportStep = attachTo ? 'seed' : 'file'
+    const [importStep, setImportStep] = useState<'file' | 'target' | 'batch' | 'seed'>(firstImportStep)
+    const importSession = useImportSessionState({
+        file: props.importFile, intoViewId: props.importIntoViewId, uploadId: props.importUploadId,
+    })
+    const isImport = scopeMode === 'import'
+    const importAction = importSession.action
+    const importNeedsTarget = importAction === 'create' || importAction === 'copy'
+    const importViewType = importSession.view?.metadata.viewType ?? null
+    // A package's data can go into a brand-new data source of its own instead (an independent full
+    // copy, on a graph connection and under a name the person picks): for a new view, where version
+    // control is on (the copy is a versioned graph from the start).
+    const versioningOn = useFeature('versioningEnabled')
+    const newSourceOffered = isImport && importSession.withData && importNeedsTarget && versioningOn
+    const [dataTargetMode, setDataTargetMode] = useState<'existing' | 'new'>('existing')
+    const toNewSource = newSourceOffered && dataTargetMode === 'new'
+    const [newSource, setNewSource] = useState<NewSourceDraft>({})
+    /** "Make another copy": the copy this package had made in the workspace when it was asked for. */
+    const [anotherAfter, setAnotherAfter] = useState<string | null>(null)
+    const updateNewSource = useCallback(
+        (patch: Partial<NewSourceDraft>) => setNewSource(prev => ({ ...prev, ...patch })), [])
+    const chooseNewSourceOntology = useCallback(
+        (ontologyId: string | null) => updateNewSource({ ontologyId }), [updateNewSource])
+    // While the semantic layers are still being scored, nothing is chosen: going on then would
+    // send "no semantic layer" and skip the recommendation.
+    const [newSourceOntologyPending, setNewSourceOntologyPending] = useState(false)
+    // Creating a data source takes the same right as opening drafts on one.
+    const mayCreateSource = usePermission(DRAFT_PERMISSION, selectedWsId)
+    /** The new data source the package's data was copied into: its views go there next, live. */
+    const [seeded, setSeeded] = useState<{ workspaceId: string; dataSourceId: string } | null>(null)
+    // A view with its data can only go where its data can: a data source under version control, in
+    // a draft the person may open.
+    const packageTarget = useDraftStaging(
+        isImport && importSession.withData ? selectedWsId : null,
+        isImport && importSession.withData ? selectedDsId : null,
+    )
+    const packageTargetReady = !importSession.withData
+        || (!packageTarget.checking && packageTarget.versioned && packageTarget.allowed)
+    // The data source a reconcile was last made against: another one is checked afresh.
+    const reconciledScope = useRef<string | null>(null)
 
     // Fetch stats + probe schema while scope step is visible (existing mode)
     const probeScope = selectedWsId && selectedDsId
@@ -673,10 +589,15 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         if (props.isOpen) {
             setSelectedWsId(initialWs)
             setSelectedDsId(initialDs)
-            setScopeMode('existing')
+            setScopeMode(startMode)
+            setImportStep(firstImportStep)
             setSelectedProviderId(null)
             setSelectedOntologyId(null)
             setScopeConfirmed(false)
+            setDataTargetMode('existing')
+            setNewSource({})
+            setAnotherAfter(null)
+            setSeeded(null)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.isOpen])
@@ -697,19 +618,132 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         setSelectedDsId(dsId)
     }, [])
 
+    /** Both at once: a suggestion names a data source in a workspace. */
+    const selectScope = useCallback((wsId: string, dsId: string) => {
+        setSelectedWsId(wsId)
+        setSelectedDsId(dsId)
+    }, [])
+
+    const handleModeChange = useCallback((mode: ScopeMode) => {
+        setScopeMode(mode)
+        if (mode === 'import') setImportStep('file')
+    }, [])
+
+    // Which file and view the target was last suggested for (see confirmImportFile).
+    const suggestedFor = useRef<string | null>(null)
+
+    const { invalidateReconcile } = importSession
     const handleScopeConfirm = useCallback(() => {
-        if (scopeMode === 'existing') {
+        if (scopeMode === 'existing' || scopeMode === 'import') {
             if (selectedWsId && selectedDsId) {
-                saveLastScope(selectedWsId, selectedDsId)
+                if (scopeMode === 'existing') saveLastScope(selectedWsId, selectedDsId)
+                if (scopeMode === 'import') {
+                    const scope = `${selectedWsId}/${selectedDsId}`
+                    if (reconciledScope.current !== scope) invalidateReconcile()
+                    reconciledScope.current = scope
+                }
                 setScopeConfirmed(true)
             }
         } else if (selectedWsId && selectedProviderId && selectedOntologyId) {
             setScopeConfirmed(true)
         }
-    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId])
+    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId, invalidateReconcile])
+
+    /** Import: past the File step. Every view of a file goes to the batch flow; a new view picks
+     *  its target next; an update's target view already fixes the scope. */
+    const confirmImportFile = useCallback(() => {
+        if (importSession.batch) {
+            setImportStep('batch')
+            return
+        }
+        if (importNeedsTarget) {
+            // A new view starts where the file most likely belongs: the best suggestion, when the
+            // sample found at least half of the view's entities there. Once per file and view, so
+            // a person's own pick is never overridden.
+            const key = `${importSession.fileName}:${importSession.view?.portableId}`
+            const top = importSession.suggestions[0]
+            if (suggestedFor.current !== key) {
+                suggestedFor.current = key
+                if (top && (top.sampleHitRate ?? 0) >= 0.5) selectScope(top.workspaceId, top.dataSourceId)
+            }
+            // This package already made a new data source (the wizard was closed, the page reloaded,
+            // or another browser made it): the Target step shows it, in the workspace the wizard
+            // opened on if it made one there, to follow its copy or make another on purpose.
+            const made = newSourceOffered
+                ? newestIn(importSession.newSources, selectedWsId) ?? importSession.newSources.at(-1)
+                : undefined
+            if (made) {
+                setSelectedWsId(made.workspaceId)
+                setDataTargetMode('new')
+            }
+            setImportStep('target')
+            return
+        }
+        const target = importSession.targetView
+        if (!target) return
+        setSelectedWsId(target.workspaceId)
+        setSelectedDsId(target.dataSourceId ?? null)
+        setScopeConfirmed(true)
+    }, [importSession.batch, importSession.fileName, importSession.newSources, importSession.view, importSession.suggestions,
+        importNeedsTarget, importSession.targetView, selectScope, newSourceOffered, selectedWsId])
+
+    // The new data source as the Target step describes it: the package's own label, and its graph
+    // name marked as its copy (`lineage` → `lineage_copy`); both the person's to change.
+    const packageSource = importSession.view ? importSession.inspect?.bundle.sources[importSession.view.source] ?? null : null
+    const newSourceDefaults = useMemo(() => {
+        const label = packageSource?.dataSource.label || packageSource?.dataSource.graphName
+            || importSession.view?.metadata.name || 'Package data'
+        return { label, graphName: slugifyGraphName(`${packageSource?.dataSource.graphName || label} copy`) }
+    }, [packageSource, importSession.view])
+    const newSourceTarget = useMemo<NewDataTarget | null>(() => {
+        const label = (newSource.label ?? newSourceDefaults.label).trim()
+        const graphName = newSource.graphName ?? newSourceDefaults.graphName
+        if (!selectedWsId || !selectedProviderId || !label || !GRAPH_NAME_RE.test(graphName)) return null
+        return {
+            kind: 'new', workspaceId: selectedWsId, providerId: selectedProviderId, label, graphName,
+            ontologyId: newSource.ontologyId ?? null,
+        }
+    }, [newSource, newSourceDefaults, selectedWsId, selectedProviderId])
+    // The data source this package already made in the chosen workspace, the newest (the server's
+    // word when the package was read, or this session's): followed, rather than another described
+    // whose name would read as taken by it — unless another copy was asked for since it was made.
+    const latestHere = useMemo(
+        () => (newSourceOffered ? newestIn(importSession.newSources, selectedWsId) : null),
+        [newSourceOffered, importSession.newSources, selectedWsId],
+    )
+    const describingAnother = !!latestHere && anotherAfter === latestHere.dataSourceId
+    const madeHere = describingAnother ? null : latestHere
+    // No data source id yet: what's needed is a complete description, a free name, and the right.
+    const newSourceReady = !!madeHere || (!!newSourceTarget && mayCreateSource && newSource.graphNameAvailable !== false
+        && !newSourceOntologyPending)
+
+    /** The package's data is in its new data source: its views follow, live. Several go through the
+     *  batch flow, preset to it; one goes through the steps, as a view without its data does. */
+    const handleSeeded = useCallback(async (into: { workspaceId: string; dataSourceId: string }) => {
+        await loadWorkspaces()          // the new data source joins the store: its scope and schema resolve
+        if (importSession.action !== 'create' && importSession.action !== 'copy') {
+            importSession.choose(importSession.matches.length ? 'copy' : 'create')
+        }
+        importSession.setWithData(false)
+        setSeeded(into)
+        setSelectedWsId(into.workspaceId)
+        setSelectedDsId(into.dataSourceId)
+        if ((importSession.inspect?.views.length ?? 0) > 1 && !props.importIntoViewId) {
+            setImportStep('batch')
+            return
+        }
+        reconciledScope.current = `${into.workspaceId}/${into.dataSourceId}`
+        setScopeConfirmed(true)
+    }, [loadWorkspaces, importSession, props.importIntoViewId])
 
     const handleBackToScope = useCallback(() => {
         setScopeConfirmed(false)
+        if (isImport) setImportStep(importNeedsTarget ? 'target' : 'file')
+    }, [isImport, importNeedsTarget])
+
+    const handleBackToFile = useCallback(() => {
+        setScopeConfirmed(false)
+        setImportStep('file')
     }, [])
 
     const scopeContext = useMemo(
@@ -731,6 +765,15 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     // ── Build step list for create mode (blank skips entities + assignment) ──
     const allSteps: StepDef[] = useMemo(() => {
+        if (scopeMode === 'import') {
+            if (importSession.batch) return BATCH_IMPORT_STEPS
+            return importStepDefs({
+                needsTarget: importNeedsTarget,
+                withData: importSession.withData,
+                buildable: isBuildable(importViewType),
+                withAssignments: importViewType === 'reference',
+            })
+        }
         const steps: StepDef[] = [
             { id: 'scope', label: 'Scope', icon: <Database className="w-4 h-4" /> },
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
@@ -742,7 +785,163 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [scopeMode])
+    }, [scopeMode, importSession.batch, importSession.withData, importNeedsTarget, importViewType])
+
+    // ── Phase A (import): the file, then where a new view goes ──
+    if (isImport && !scopeConfirmed) {
+        const { title, submitLabel } = importSession.batch
+            ? { title: 'Import Views', submitLabel: 'Import Views' }
+            : importTitle(importAction)
+        const fileReady = importSession.batch
+            ? !!importSession.inspect && !importSession.inspecting
+            : !!importSession.view && !importSession.inspecting && !!importAction
+                && (importNeedsTarget || !!importSession.targetView)
+        return (
+            <ImportSessionProvider value={importSession}>
+                {importStep === 'batch' ? (
+                    <BatchImport steps={BATCH_IMPORT_STEPS} onBackToFile={() => setImportStep('file')} onClose={props.onClose}
+                        preset={seeded ? { target: seeded, stage: false } : null} />
+                ) : importStep === 'seed' ? (
+                    <NewSourceSeedStep
+                        steps={allSteps}
+                        target={attachTo ? null : newSourceTarget}
+                        made={madeHere}
+                        another={describingAnother}
+                        providerName={chosenProvider?.name}
+                        attached={attachTo}
+                        onBack={() => setImportStep(attachTo ? 'file' : 'target')}
+                        onClose={props.onClose}
+                        onSeeded={(into) => void handleSeeded(into)}
+                        onChooseFileAgain={() => {
+                            importSession.clearFile()
+                            setImportStep('file')
+                        }}
+                        onUseGraphName={(graphName) => updateNewSource({
+                            graphName, graphNameIsAuto: false, graphNameAvailable: undefined,
+                        })}
+                    />
+                ) : importStep === 'file' ? (
+                    <WizardShell
+                        title={title}
+                        submitLabel={submitLabel}
+                        currentStep="file"
+                        activeSteps={allSteps}
+                        currentStepIndex={0}
+                        onStepClick={() => {}}
+                        onBack={() => {}}
+                        onNext={confirmImportFile}
+                        onClose={props.onClose}
+                        canProceed={fileReady}
+                        isLastStep={false}
+                        isSubmitting={false}
+                        onSubmit={() => {}}
+                        wide
+                        helpSlug="import-export"
+                    >
+                        <ImportStep
+                            modeToggle={props.importIntoViewId
+                                ? undefined
+                                : <ScopeModeToggle mode={scopeMode} onChange={handleModeChange} />}
+                        />
+                    </WizardShell>
+                ) : (
+                    <WizardShell
+                        title={title}
+                        submitLabel={submitLabel}
+                        currentStep="target"
+                        activeSteps={allSteps}
+                        currentStepIndex={1}
+                        onStepClick={(id) => { if (id === 'file') setImportStep('file') }}
+                        onBack={() => setImportStep('file')}
+                        onNext={toNewSource ? () => setImportStep('seed') : handleScopeConfirm}
+                        onClose={props.onClose}
+                        canProceed={toNewSource ? newSourceReady : !!(selectedWsId && selectedDsId) && packageTargetReady}
+                        isLastStep={false}
+                        isSubmitting={false}
+                        onSubmit={() => {}}
+                        wide
+                        helpSlug="import-export"
+                    >
+                        <ScopeStep
+                            scopeMode={toNewSource ? 'blank' : 'existing'}
+                            onScopeModeChange={() => {}}
+                            showModeToggle={false}
+                            title={toNewSource ? 'Where should the new data source live?' : 'Where should this view be imported?'}
+                            subtitle={toNewSource
+                                ? 'Choose its workspace and graph connection, name it, and choose its semantic layer: the package’s data is copied into it in full'
+                                : importSession.withData
+                                ? 'Choose the data source here, under version control, that holds the same graph: its data goes into a draft of it'
+                                : 'Choose the data source here that holds the same graph the view was built on'}
+                            aboveSlot={toNewSource ? (
+                                <>
+                                    <DataTargetToggle mode={dataTargetMode} onChange={setDataTargetMode} />
+                                    {!madeHere && (
+                                        <NewSourceTargetPanel
+                                            value={newSource}
+                                            onChange={updateNewSource}
+                                            workspaceId={selectedWsId}
+                                            providerId={selectedProviderId}
+                                            providerName={chosenProvider?.name}
+                                            defaults={newSourceDefaults}
+                                            allowed={mayCreateSource}
+                                            alongside={describingAnother ? latestHere : null}
+                                            onFollowMade={() => setAnotherAfter(null)}
+                                        />
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    {newSourceOffered && <DataTargetToggle mode={dataTargetMode} onChange={setDataTargetMode} />}
+                                    <TargetSuggestions
+                                        suggestions={importSession.suggestions}
+                                        selectedDataSourceId={selectedDsId}
+                                        onSelect={selectScope}
+                                        requireVersioned={importSession.withData}
+                                    />
+                                    {importSession.withData && selectedDsId && !packageTarget.checking && !packageTargetReady && (
+                                        <p role="status" className="mt-3 flex items-start gap-2 rounded-xl bg-amber-500/[0.07] border border-amber-500/20 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-200">
+                                            <AlertCircle className="w-3.5 h-3.5 mt-px shrink-0" />
+                                            {packageTarget.versioned
+                                                ? 'Bringing data into a draft of this data source needs permission to manage it. Choose another.'
+                                                : 'This data source isn’t under version control, so the package’s data can’t go into it. Choose another, or import just the view from the File step.'}
+                                        </p>
+                                    )}
+                                </>
+                            )}
+                            availableWorkspaces={scopeData.workspaces}
+                            schemaAvailability={scopeData.schemaAvailability}
+                            selectedWorkspaceId={selectedWsId}
+                            selectedDataSourceId={selectedDsId}
+                            onSelectWorkspace={handleSelectWorkspace}
+                            onSelectDataSource={handleSelectDataSource}
+                            providers={blankOptions.providers}
+                            ontologies={blankOptions.ontologies}
+                            blankOptionsLoading={blankOptions.isLoading}
+                            selectedProviderId={selectedProviderId}
+                            selectedOntologyId={selectedOntologyId}
+                            onSelectProvider={setSelectedProviderId}
+                            onSelectOntology={setSelectedOntologyId}
+                            blankBody={toNewSource && madeHere ? (
+                                <MadeSourceCard made={madeHere}
+                                    providerName={blankOptions.providers.find(o => o.provider.id === madeHere.providerId)?.provider.name}
+                                    onAnother={() => setAnotherAfter(madeHere.dataSourceId)} />
+                            ) : undefined}
+                            blankOntologySlot={toNewSource ? (
+                                <PackageOntologyPicker
+                                    match={(importSession.inspect as PackageInspectResult | null)?.ontologyMatch?.[importSession.view?.source ?? ''] ?? null}
+                                    typeStats={importSession.pkg?.info.data?.typeStats ?? null}
+                                    value={newSource.ontologyId}
+                                    onChange={chooseNewSourceOntology}
+                                    draftName={`${(newSource.label ?? newSourceDefaults.label).trim() || 'Package'} Schema`}
+                                    onPending={setNewSourceOntologyPending}
+                                />
+                            ) : undefined}
+                        />
+                    </WizardShell>
+                )}
+            </ImportSessionProvider>
+        )
+    }
 
     // ── Phase A: ScopeStep (no SchemaScope yet) ────────────────
     if (!scopeConfirmed) {
@@ -752,7 +951,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
         return (
             <WizardShell
-                mode="create"
+                title="Create New View"
+                submitLabel="Create View"
                 currentStep="scope"
                 activeSteps={allSteps}
                 currentStepIndex={0}
@@ -764,10 +964,12 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 isLastStep={false}
                 isSubmitting={false}
                 onSubmit={() => {}}
+                wide
+                helpSlug="creating-views"
             >
                 <ScopeStep
                     scopeMode={scopeMode}
-                    onScopeModeChange={setScopeMode}
+                    onScopeModeChange={handleModeChange}
                     availableWorkspaces={scopeData.workspaces}
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
@@ -808,22 +1010,26 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     // ── Phase B: SchemaScope + ViewWizardBody ──────────────────
     return (
-        <SchemaScope
-            workspaceId={selectedWsId!}
-            dataSourceId={selectedDsId}
-            loadingLabel="Loading ontology\u2026"
-            fallback={<WizardLoadingShell label="Loading ontology\u2026" onClose={props.onClose} />}
-        >
-            <ViewWizardBody
-                {...wizardProps}
-                resolvedWorkspaceId={selectedWsId!}
-                resolvedDataSourceId={selectedDsId}
-                viewMetadata={null}
-                scopeContext={scopeContext}
-                onBackToScope={handleBackToScope}
-                scopeMode="existing"
-            />
-        </SchemaScope>
+        <ImportSessionProvider value={isImport ? importSession : null}>
+            <SchemaScope
+                workspaceId={selectedWsId!}
+                dataSourceId={selectedDsId}
+                loadingLabel="Loading ontology\u2026"
+                fallback={<WizardLoadingShell label="Loading ontology\u2026" onClose={props.onClose} />}
+            >
+                <ViewWizardBody
+                    {...wizardProps}
+                    resolvedWorkspaceId={selectedWsId!}
+                    resolvedDataSourceId={selectedDsId}
+                    viewMetadata={null}
+                    scopeContext={scopeContext}
+                    onBackToScope={handleBackToScope}
+                    onBackToFile={handleBackToFile}
+                    scopeMode={isImport ? 'import' : 'existing'}
+                    importLive={isImport && seeded?.dataSourceId === selectedDsId}
+                />
+            </SchemaScope>
+        </ImportSessionProvider>
     )
 }
 
@@ -845,13 +1051,85 @@ function ViewWizardBody({
     scopeMode = 'existing',
     blankProviderId,
     blankOntologyId,
+    onBackToFile,
+    importLive = false,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
+    const queryClient = useQueryClient()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments } = useReferenceModelStore()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const isBlank = scopeMode === 'blank'
+
+    // ── Import journey ──
+    // The session (file, choices, reconcile) is held by the resolver above; this body edits the
+    // design the reconcile produced and writes it through the import endpoint.
+    const importSession = useImportSession()
+    const isImport = scopeMode === 'import' && importSession !== null
+    const importAction = isImport ? importSession.action : null
+    const isImportUpdate = importAction === 'update' || importAction === 'overwrite'
+    const importTargetViewId = isImportUpdate ? importSession?.targetView?.viewId ?? null : null
+    const importViewType = importSession?.view?.metadata.viewType ?? null
+    const importBuildable = isBuildable(importViewType)
+    const reconciled = isImport ? importSession.reconcile : null
+    // A view with its data: the data goes into a draft of the target first (the Data step, which
+    // then leads the body), and the view is checked against that draft and goes into it.
+    const importWithData = isImport && importSession.withData
+    const importFirstStep: WizardStep = importWithData ? 'data' : 'reconcile'
+    const importDataTarget = useMemo(() => ({
+        kind: 'existing' as const,
+        workspaceId: resolvedWorkspaceId,
+        dataSourceId: resolvedDataSourceId ?? '',
+        viewId: importTargetViewId,
+    }), [resolvedWorkspaceId, resolvedDataSourceId, importTargetViewId])
+    const importData = importSession?.data
+    const importDataBranch = importWithData && importData?.preview && sameDataTarget(importData.target, importDataTarget)
+        ? importData.started?.branchId ?? null
+        : null
+    // An update keeps the view's current name and details unless the person picks the file's.
+    const targetViewQuery = useQuery({
+        queryKey: [...VIEW_QUERY_KEY, importTargetViewId],
+        queryFn: () => getView(importTargetViewId!),
+        enabled: !!importTargetViewId,
+    })
+    const currentTargetView = targetViewQuery.data ?? null
+    /** The definition the form was filled from, and the form as filled: what `formToDefinition`
+     *  patches, so only what changed in the wizard is written. */
+    const [importFilled, setImportFilled] = useState<{ base: Definition; initial: WizardFormData } | null>(null)
+    const importHydrated = importFilled !== null
+    const [importResult, setImportResult] = useState<ImportViewResult | null>(null)
+    const [importFailure, setImportFailure] = useState<ViewTransferError | null>(null)
+    /** One request id per distinct import request, reused by its retries (safe to repeat). */
+    const importRequestRef = useRef<{ fingerprint: string; id: string } | null>(null)
+    /** The draft an import was staged in: the view opens there. */
+    const createdBranchRef = useRef<string | null>(null)
+    const importTarget = useMemo(() => ({
+        ...(importTargetViewId
+            ? { viewId: importTargetViewId }
+            : { workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId }),
+        // Checked against the draft the data went into, so what it brought counts as found.
+        ...(importDataBranch ? { branchId: importDataBranch } : {}),
+    }), [importTargetViewId, resolvedWorkspaceId, resolvedDataSourceId, importDataBranch])
+    const importTargetLabel = isImportUpdate
+        ? `“${importSession?.targetView?.name ?? 'the view'}”`
+        : `${scopeContext.workspaceName} · ${scopeContext.dataSourceLabel}`
+    // Entities the reconcile found missing here, as the file named them: the Assignments step
+    // shows them by name, and never spends a lookup confirming what is already known.
+    const importEntitySeed = useMemo(() => {
+        if (!reconciled) return null
+        const seed = new Map<string, EntityIdentity>()
+        for (const row of reconciled.report.entities) {
+            if (row.status !== 'missing') continue
+            seed.set(row.urn, {
+                name: row.exported?.name || fallbackNameFromUrn(row.urn),
+                type: row.exported?.type || 'unknown',
+                childCount: 0,
+                missing: true,
+            })
+        }
+        return seed
+    }, [reconciled])
     // Picking Enterprise without the publish permission means "create it,
     // then ask" — the view has to exist before a request can attach to it.
     const { canPublish: canPublishHere } = usePublishGate(
@@ -912,7 +1190,7 @@ function ViewWizardBody({
     // save-and-close behaviour — there's nothing to navigate to.
     const [phase, setPhase] = useState<'steps' | 'creating' | 'success'>('steps')
     const [stageStates, setStageStates] = useState<Record<CreationStageId, CreationStageState>>({
-        provision: 'pending', create: 'pending', layout: 'pending',
+        provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending',
     })
     const [submitError, setSubmitError] = useState<string | null>(null)
     /** A free graph name the server handed back after a late collision (blank models). */
@@ -931,7 +1209,7 @@ function ViewWizardBody({
     // visible in the wizard here.
     useEffect(() => {
         if (mode === 'edit' && editingView) {
-            const { layers, assignments } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
+            const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -942,18 +1220,10 @@ function ViewWizardBody({
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                 layers,
                 assignments,
+                defaultNodeSortMode,
                 visibleEntityTypes: editingView.content.visibleEntityTypes,
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
-                advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
-                    id: `${f.field}-${Date.now()}-${Math.random()}`,
-                    type: f.field === 'tags' ? 'tag' : f.field === 'name' ? 'name' : 'property',
-                    label: f.field === 'tags'
-                        ? `Tag: ${f.value}`
-                        : f.field === 'name'
-                            ? `Name contains "${f.value}"`
-                            : `${f.field}=${f.value}`,
-                    value: f.value,
-                })),
+                advancedFilters: fieldFiltersToActiveFilters(editingView.filters.fieldFilters),
                 scopeEdges: layers[0]?.scopeEdges,
                 isValid: true,
             })
@@ -972,7 +1242,8 @@ function ViewWizardBody({
     }), [resolvedWorkspaceId, resolvedDataSourceId, blankProviderId, blankOntologyId])
 
     const { pendingDraft, dismissDraft, clearDraft, markDirty, tooLarge } = useWizardDraft({
-        enabled: mode === 'create' && phase === 'steps',
+        // An import's design lives in its file; there is nothing to resume that the file lacks.
+        enabled: mode === 'create' && phase === 'steps' && !isImport,
         scopeKey,
         formData,
         currentStep,
@@ -981,12 +1252,12 @@ function ViewWizardBody({
     // Reset on open / close.
     useEffect(() => {
         if (isOpen) {
-            setCurrentStep('basics')
+            setCurrentStep(isImport ? importFirstStep : 'basics')
             setPreviousSteps([])
             setDriftDismissed(false)
             setPhase('steps')
             setSubmitError(null)
-            setStageStates({ provision: 'pending', create: 'pending', layout: 'pending' })
+            setStageStates({ provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending' })
             clearSelection()
             clearAssignments()
             if (mode === 'create') {
@@ -998,8 +1269,46 @@ function ViewWizardBody({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen])
 
+    // Import: fill the form from the design the reconcile produced. Declared after the reset
+    // above so, on mount with a reconcile already in hand, it is the one that sticks. Only a NEW
+    // reconcile (new choices on the Match step) re-fills it, keeping the basics already typed; a
+    // refetch of anything else must never reset edits made since.
+    const filledFromRef = useRef<object | null>(null)
+    useEffect(() => {
+        const view = importSession?.view
+        if (!isImport || !reconciled || !view || filledFromRef.current === reconciled) return
+        if (importTargetViewId && !currentTargetView) return
+        const fileMeta = view.metadata
+        const meta = currentTargetView ? {
+            ...fileMeta,
+            name: currentTargetView.name,
+            description: currentTargetView.description ?? null,
+            icon: (currentTargetView.config?.icon as string | undefined) ?? fileMeta.icon,
+            tags: currentTargetView.tags ?? [],
+        } : fileMeta
+        const hydrated = definitionToForm(reconciled.effectiveDefinition, meta, {
+            dataSourceId: resolvedDataSourceId ?? undefined,
+        })
+        const hadForm = filledFromRef.current !== null
+        filledFromRef.current = reconciled
+        setFormData(prev => hadForm ? {
+            ...hydrated,
+            name: prev.name, description: prev.description, icon: prev.icon, tags: prev.tags,
+            visibility: prev.visibility, publishNote: prev.publishNote,
+        } : hydrated)
+        setImportFilled({ base: reconciled.effectiveDefinition, initial: hydrated })
+    }, [isImport, reconciled, importSession?.view, importTargetViewId, currentTargetView, resolvedDataSourceId])
+
     // Steps for the body phase (scope step is handled by the resolver)
     const activeSteps: StepDef[] = useMemo(() => {
+        if (isImport) {
+            return importStepDefs({
+                needsTarget: !isImportUpdate,
+                withData: importWithData,
+                buildable: importBuildable,
+                withAssignments: formData.layoutType === 'reference',
+            })
+        }
         const steps: StepDef[] = []
         // In create mode, scope is step 0 (handled externally) — include it for the stepper
         if (mode === 'create') {
@@ -1019,7 +1328,7 @@ function ViewWizardBody({
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode, isBlank])
+    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
@@ -1045,12 +1354,22 @@ function ViewWizardBody({
                 }
                 return formData.layoutType !== undefined
             }
+            // Past the Data step once the data is in the draft.
+            case 'data': return !!importDataBranch
+            case 'reconcile': {
+                // Past the Match step only with a verdict that allows it, and with every choice
+                // made there re-checked, so the design edited next is the one the server scored.
+                if (!isImport || !reconciled || !importHydrated || importSession.reconciling) return false
+                if (!sameResolutions(importSession.resolutions, importSession.draft)) return false
+                return reconciled.report.summary.verdict !== 'blocked'
+            }
             case 'assignment': return true
-            case 'entities': return formData.visibleEntityTypes.length > 0
+            // An imported view's selection is its own; an empty one (a rule-driven view) is valid.
+            case 'entities': return isImport || formData.visibleEntityTypes.length > 0
             case 'preview': return true
             default: return false
         }
-    }, [currentStep, formData])
+    }, [currentStep, formData, isImport, reconciled, importHydrated, importSession, importDataBranch])
 
     const handleNext = useCallback(() => {
         const idx = activeSteps.findIndex(s => s.id === currentStep)
@@ -1066,8 +1385,13 @@ function ViewWizardBody({
     }, [currentStep, activeSteps])
 
     const handleBack = useCallback(() => {
+        // The Match (or Data) step leads an import's body: back is its target (or its file).
+        if (isImport && currentStep === importFirstStep) {
+            onBackToScope?.()
+            return
+        }
         // If we're at the first body step in create mode, go back to scope
-        if (currentStep === 'basics' && mode === 'create' && onBackToScope) {
+        if (!isImport && currentStep === 'basics' && mode === 'create' && onBackToScope) {
             onBackToScope()
             return
         }
@@ -1078,12 +1402,16 @@ function ViewWizardBody({
                 setCurrentStep(prev)
             })
         }
-    }, [previousSteps, currentStep, mode, onBackToScope])
+    }, [previousSteps, currentStep, mode, onBackToScope, isImport, importFirstStep])
 
     const handleStepClick = useCallback((stepId: WizardStep) => {
         // Clicking the scope step in create mode goes back to scope
-        if (stepId === 'scope' && mode === 'create' && onBackToScope) {
+        if ((stepId === 'scope' || stepId === 'target') && mode === 'create' && onBackToScope) {
             onBackToScope()
+            return
+        }
+        if (stepId === 'file' && onBackToFile) {
+            onBackToFile()
             return
         }
         const currentIndex = activeSteps.findIndex(s => s.id === currentStep)
@@ -1093,19 +1421,129 @@ function ViewWizardBody({
                 setCurrentStep(stepId)
             })
         }
-    }, [currentStep, activeSteps, mode, onBackToScope])
+    }, [currentStep, activeSteps, mode, onBackToScope, onBackToFile])
 
-    const buildFieldFilters = useCallback((filters: ActiveFilter[]): FieldFilter[] => {
-        return filters.map(af => ({
-            field: af.type === 'tag' ? 'tags' : af.type === 'name' ? 'name' : String(af.value).split('=')[0],
-            operator: (af.type === 'name' ? 'contains' : 'equals') as FieldFilter['operator'],
-            value: af.type === 'property' && String(af.value).includes('=')
-                ? String(af.value).split('=')[1]
-                : af.value,
-        }))
-    }, [])
+    // ── Import submit ──
+    // An import into a version-controlled data source can wait in a draft, to go live with it:
+    // offered there, and the default.
+    const importStaging = useDraftStaging(isImport ? resolvedWorkspaceId : null, isImport ? resolvedDataSourceId : null)
+    const [stageChoice, setStageChoice] = useState<boolean | null>(importLive ? false : null)
+    // A view with its data always joins its data's draft: they go live together.
+    const importStaged = importWithData
+        || (isImport && importStaging.versioned && importStaging.allowed && (stageChoice ?? true))
+    const importWantsPublication = isImport && !isImportUpdate && !importStaged
+        && formData.visibility === 'enterprise' && !canPublishHere
+
+    const handleImportSubmit = useCallback(async () => {
+        const session = importSession
+        const view = session?.view
+        if (!session || !view || !session.action || !session.reconcile || !importFilled) return
+        setIsSubmitting(true)
+        setPhase('creating')
+        setSubmitError(null)
+        setImportFailure(null)
+        setStageStates(s => ({ ...s, import: createdViewIdRef.current ? 'done' : 'active' }))
+        try {
+            let result = importResult
+            if (!createdViewIdRef.current || !result) {
+                const definition = formToDefinition(importFilled.base, importFilled.initial, formData)
+                const viewType = importBuildable ? formData.layoutType : (importViewType ?? formData.layoutType)
+                const request: ImportViewRequest = {
+                    action: session.action,
+                    strategy: session.strategy,
+                    target: importTarget,
+                    metadata: {
+                        ...formToMetadata(formData, viewType),
+                        // A member who picked Enterprise but can't publish gets the widest tier
+                        // they can set; the request below asks for the rest. A view waiting in a
+                        // draft goes live shared with its workspace at most.
+                        ...(isImportUpdate ? {} : {
+                            visibility: (importWantsPublication || (importStaged && formData.visibility === 'enterprise'))
+                                ? 'workspace' : formData.visibility,
+                        }),
+                    },
+                    definition,
+                    // What is written differs from the file: send the file's design, so the
+                    // next file from the same lineage can still merge from this version.
+                    originDefinition: sameJson(definition, view.definition) ? undefined : view.definition,
+                    origin: {
+                        portableId: view.portableId,
+                        sourceViewId: view.sourceViewId,
+                        version: view.version,
+                        definitionHash: view.definitionHash,
+                        name: view.metadata.name,
+                        environment: session.inspect?.bundle.generator.environment,
+                        exportedAt: session.inspect?.bundle.exportedAt,
+                        exportedBy: session.inspect?.bundle.exportedBy.displayName,
+                        fileName: session.fileName,
+                    },
+                    manifest: view.manifest,
+                    history: view.history,
+                    resolutions: session.resolutions,
+                    expectedTargetHash: session.reconcile.update?.targetWorkingHash ?? null,
+                    ...(importStaged ? { stage: true } : {}),
+                }
+                const fingerprint = JSON.stringify(request)
+                if (importRequestRef.current?.fingerprint !== fingerprint) {
+                    importRequestRef.current = { fingerprint, id: newRequestId() }
+                }
+                result = await importView({ ...request, requestId: importRequestRef.current.id })
+                createdViewIdRef.current = result.viewId
+                createdBranchRef.current = result.staged?.branchId ?? null
+                setImportResult(result)
+                const saved = viewToViewConfig(result.view)
+                useSchemaStore.getState().addOrUpdateView(saved)
+                createdViewRef.current = saved
+                invalidateViewVersions(queryClient, result.viewId)
+                // Its display rules are the file's: a canvas that has it open reads them again.
+                reloadViewLibrary(result.viewId)
+                void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, result.viewId] })
+                void queryClient.invalidateQueries({ queryKey: ['views'] })
+                void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
+                recordEvent('view.import', {
+                    action: session.action,
+                    strategy: session.strategy,
+                    staged: !!result.staged,
+                    match: matchBucket(result.report.summary.matchRate),
+                })
+            }
+            setStageStates(s => ({ ...s, import: 'done', publication: importWantsPublication ? 'active' : 'pending' }))
+            if (importWantsPublication) {
+                // The view exists, so the ask has something to attach to. A failure here doesn't
+                // undo the import; the request can be sent again from Share.
+                try {
+                    await requestViewPublication(result.viewId, formData.publishNote?.trim() || undefined)
+                    notify('success', 'View imported — your publication request was sent to your workspace admins')
+                } catch {
+                    notify('error', "View imported, but the publication request couldn't be sent. You can ask again from Share.")
+                }
+                setStageStates(s => ({ ...s, publication: 'done' }))
+            }
+            setPhase('success')
+        } catch (err) {
+            setStageStates(s => ({ ...s, import: 'failed' }))
+            setImportFailure(err instanceof ViewTransferError ? err : null)
+            setSubmitError(err instanceof Error ? err.message : 'The view could not be imported. Please try again.')
+        } finally {
+            setIsSubmitting(false)
+        }
+    }, [importSession, importFilled, importResult, formData, importBuildable, importViewType, importTarget,
+        isImportUpdate, importWantsPublication, importStaged, queryClient, notify])
+
+    /** The view changed since it was reviewed (409): check it again from the Match step. */
+    const handleCheckAgain = useCallback(() => {
+        importSession?.invalidateReconcile()
+        setSubmitError(null)
+        setImportFailure(null)
+        setPhase('steps')
+        setCurrentStep('reconcile')
+    }, [importSession])
 
     const handleSubmit = useCallback(async () => {
+        if (isImport) {
+            await handleImportSubmit()
+            return
+        }
         setIsSubmitting(true)
         setProvisionError(null)
         // Enterprise was chosen by someone who can't grant it: create at the
@@ -1121,23 +1559,25 @@ function ViewWizardBody({
             const priorDefaultSort = mode === 'edit'
                 ? normalizeReferenceLayout(editingView?.layout?.referenceLayout).defaultNodeSortMode
                 : undefined
+            const effectiveDefaultSort = formData.defaultNodeSortMode ?? priorDefaultSort
             const normalizedLayout = normalizeReferenceLayout({
                 layers: layersWithScope,
                 assignments: formData.assignments,
-                ...(priorDefaultSort ? { defaultNodeSortMode: priorDefaultSort } : {}),
+                ...(effectiveDefaultSort ? { defaultNodeSortMode: effectiveDefaultSort } : {}),
             })
-            const fieldFilters = buildFieldFilters(formData.advancedFilters)
+            const fieldFilters = activeFiltersToFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
                 // Show what's actually happening. Stages mirror the awaited calls
                 // below — one row per call, no invented sub-steps.
                 setPhase('creating')
                 setSubmitError(null)
-                setStageStates({
+                setStageStates(prev => ({
+                    ...prev,
                     provision: isBlank ? 'active' : 'done',
                     create: isBlank ? 'pending' : 'active',
                     layout: 'pending',
-                })
+                }))
 
                 let dataSourceId = resolvedDataSourceId ?? undefined
                 if (isBlank) {
@@ -1222,12 +1662,12 @@ function ViewWizardBody({
                                 createdViewId,
                                 formData.publishNote?.trim() || undefined,
                             )
-                            showToast(
+                            notify(
                                 'success',
                                 'View created — your publication request was sent to your workspace admins',
                             )
                         } catch {
-                            showToast(
+                            notify(
                                 'error',
                                 "View created, but the publication request couldn't be sent. You can ask again from Share.",
                             )
@@ -1238,11 +1678,13 @@ function ViewWizardBody({
 
                 // The layout endpoint is the single writer of referenceLayout — write
                 // the full layers+assignments (a new view has no prior layout to race).
-                const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                const entityScope = resolveWizardEntityScope(formData.entityScope, normalizedLayout, undefined)
                 try {
                     const layoutResult = await updateViewLayout(createdViewId, {
                         referenceLayout: normalizedLayout,
                         entityScope,
+                        // The view as built is its first version.
+                        checkpoint: { source: 'create' },
                     })
                     const savedView = viewToViewConfig(layoutResult)
                     useSchemaStore.getState().addOrUpdateView(savedView)
@@ -1288,32 +1730,47 @@ function ViewWizardBody({
                         await requestViewPublication(
                             viewId, formData.publishNote?.trim() || undefined,
                         )
-                        showToast(
+                        notify(
                             'success',
                             'Saved — your publication request was sent to your workspace admins',
                         )
                     } catch {
-                        showToast(
+                        notify(
                             'error',
                             "Saved, but the publication request couldn't be sent. You can ask again from Share.",
                         )
                     }
                 }
                 if (result.success && result.data) {
-                    // Preserve an explicit editingView.content.entityScope; otherwise derive
-                    // from the submitted assignments — a deliberate wizard save is allowed to
-                    // set scope explicitly, unlike implicit canvas gestures.
-                    const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    // A scope PINNED in this wizard session wins (the user just chose a
+                    // rule-driven layout); else preserve an explicit
+                    // editingView.content.entityScope; else derive from the submitted
+                    // assignments — a deliberate wizard save is allowed to set scope
+                    // explicitly, unlike implicit canvas gestures.
+                    const entityScope = resolveWizardEntityScope(
+                        formData.entityScope, normalizedLayout, editingView?.content,
+                    )
                     // When a draft is open for THIS view, route the layout write to the branch
                     // overlay (null on Published → base write), so wizard layer/scope edits on a
                     // draft don't leak to Published — mirrors the canvas debounced saver.
                     const branchId = useBranchStore.getState().branchIdForScope(
                         resolvedWorkspaceId, resolvedDataSourceId, viewId,
                     ) ?? undefined
+                    // The layout write replaces the reference layout wholesale, and the wizard
+                    // edits only its layers, placements and default sort. Everything else it
+                    // carries (display rules, anything newer) rides along, or a save here
+                    // would silently delete it.
+                    const priorSideFields = Object.fromEntries(
+                        Object.entries((editingView?.layout?.referenceLayout ?? {}) as Record<string, unknown>)
+                            .filter(([key]) => key !== 'layers' && key !== 'assignments' && key !== 'defaultNodeSortMode'),
+                    )
                     try {
                         const layoutResult = await updateViewLayout(viewId, {
-                            referenceLayout: normalizedLayout,
+                            referenceLayout: { ...priorSideFields, ...normalizedLayout },
                             entityScope,
+                            // A deliberate save is a version of the view; on a draft it waits
+                            // for the draft to be published.
+                            ...(branchId ? {} : { checkpoint: { source: 'wizard' as const } }),
                         }, branchId)
                         const savedView = viewToViewConfig(layoutResult)
                         useSchemaStore.getState().addOrUpdateView(savedView)
@@ -1330,7 +1787,7 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft, canPublishHere, showToast])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, fullViewQuery.data, editingView, clearDraft, canPublishHere, notify, isImport, handleImportSubmit])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()
@@ -1345,10 +1802,10 @@ function ViewWizardBody({
     // Only when CREATING. An existing view keeps the layout it was built with: withdrawing a
     // layout stops new work in it, and must not silently rewrite the views already in it.
     useEffect(() => {
-        if (mode === 'edit') return
+        if (mode === 'edit' || isImport) return
         if (availableLayoutTypes.some(t => t.id === formData.layoutType)) return
         updateFormData({ layoutType: availableLayoutTypes[0].id })
-    }, [mode, availableLayoutTypes, formData.layoutType, updateFormData])
+    }, [mode, isImport, availableLayoutTypes, formData.layoutType, updateFormData])
 
     /** Restore an autosaved draft, landing back on the step it was left on. */
     const handleResumeDraft = useCallback(() => {
@@ -1376,7 +1833,9 @@ function ViewWizardBody({
     // user just asked for.
     const handleOpenNow = useCallback(() => {
         const id = createdViewIdRef.current
-        if (id) navigate(`/views/${id}`)
+        // A view waiting in a draft opens on that draft.
+        const branch = createdBranchRef.current
+        if (id) navigate(branch ? `/views/${id}?branch=${branch}` : `/views/${id}`)
         const saved = createdViewRef.current
         if (saved) onComplete?.(saved)
         onClose()
@@ -1390,6 +1849,13 @@ function ViewWizardBody({
 
     const isTerminal = mode === 'create' && (phase === 'creating' || phase === 'success')
 
+    // An import waiting in a draft can be sent for review from here (the draft's owner may).
+    const [reviewing, setReviewing] = useState(false)
+    const stagedBranch = importResult?.staged?.branchId
+    const reviewDraft = stagedBranch && importStaging.graphId && importStaging.allowed
+        ? { workspaceId: importResult.view.workspaceId, graphId: importStaging.graphId, branchId: stagedBranch }
+        : null
+
     // Auto-open: the view is saved and there is nowhere else to go, so open it for
     // the user unless they say otherwise ("Stay here").
     const countdown = useAutoOpenCountdown({
@@ -1402,7 +1868,26 @@ function ViewWizardBody({
     const handleSubmitRef = useRef<(() => void) | null>(null)
     handleSubmitRef.current = handleSubmit
 
-    const creationStages: CreationStage[] = useMemo(() => [
+    const creationStages: CreationStage[] = useMemo(() => isImport ? [
+        {
+            id: 'import' as const,
+            label: importWithData
+                ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} beside its data` : 'Importing the view into the draft with its data')
+                : importStaged
+                    ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} in your draft` : 'Importing the view into its own draft')
+                    : isImportUpdate ? `Updating ${importTargetLabel}` : 'Importing the view',
+            detail: importStaged
+                ? 'Writing its design into the draft and checking every entity once more; it goes live with the draft'
+                : 'Writing its design, checking every entity once more, and saving it as a version',
+            state: stageStates.import,
+        },
+        ...(importWantsPublication ? [{
+            id: 'publication' as const,
+            label: 'Requesting publication',
+            detail: 'Asking your workspace admins to publish it to everyone',
+            state: stageStates.publication,
+        }] : []),
+    ] : [
         ...(isBlank ? [{
             id: 'provision' as const,
             label: 'Provisioning your model',
@@ -1421,11 +1906,21 @@ function ViewWizardBody({
             detail: 'Writing the layout this view opens with',
             state: stageStates.layout,
         },
-    ], [isBlank, stageStates])
+    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged, importWithData])
 
     /** What the user just built — shown on the success step. */
     const successStats: CreationSummaryStat[] = useMemo(() => {
         const stats: CreationSummaryStat[] = []
+        if (isImport && importResult) {
+            const summary = importResult.report.summary
+            stats.push(importResult.version
+                ? { label: 'Version', value: `v${importResult.version.version}` }
+                : { label: 'Goes live', value: 'With its draft' })
+            stats.push({ label: 'Matched', value: percent(summary.matchRate) })
+            stats.push({ label: 'Not found, kept', value: summary.entities.missing })
+            stats.push({ label: 'Integrity', value: importResult.integrity.verified ? 'Verified' : 'Adjusted' })
+            return stats
+        }
         const layoutLabel = LAYOUT_TYPES.find(t => t.id === formData.layoutType)?.label ?? formData.layoutType
         stats.push({ label: 'Layout', value: layoutLabel })
         if (formData.layoutType === 'reference') {
@@ -1436,7 +1931,7 @@ function ViewWizardBody({
         }
         stats.push({ label: 'Visibility', value: formData.visibility })
         return stats
-    }, [formData.layoutType, formData.layers.length, formData.assignments, formData.visibleEntityTypes.length, formData.visibility])
+    }, [formData.layoutType, formData.layers.length, formData.assignments, formData.visibleEntityTypes.length, formData.visibility, isImport, importResult])
 
     /** Late graph-name collision: adopt the free name the server offered, then retry. */
     const handleUseSuggestedName = useCallback(() => {
@@ -1453,7 +1948,7 @@ function ViewWizardBody({
             ? (
                 <CreationErrorFooter
                     onBack={() => setPhase('steps')}
-                    onRetry={handleSubmit}
+                    onRetry={importFailure?.type === 'target_changed' ? handleCheckAgain : handleSubmit}
                     suggestedName={nameConflict}
                     onUseSuggestedName={handleUseSuggestedName}
                 />
@@ -1469,13 +1964,21 @@ function ViewWizardBody({
             )
             : undefined
 
+    const shellTitle = isImport ? importTitle(importAction)
+        : mode === 'create' ? { title: 'Create New View', submitLabel: 'Create View' }
+            : { title: 'Edit View', submitLabel: 'Save Changes' }
+
     return (
+        <WizardEntitySeedContext.Provider value={importEntitySeed}>
         <WizardShell
-            mode={mode}
+            title={shellTitle.title}
+            submitLabel={shellTitle.submitLabel}
+            helpSlug={isImport ? 'import-export' : 'creating-views'}
+            wide={currentStep === 'scope' || currentStep === 'assignment' || currentStep === 'reconcile'}
             currentStep={currentStep}
             activeSteps={activeSteps}
             currentStepIndex={currentStepIndex}
-            onStepClick={handleStepClick}
+            onStepClick={(id) => handleStepClick(id as WizardStep)}
             onBack={handleBack}
             onNext={handleNext}
             onClose={phase === 'success' ? handleStayHere : onClose}
@@ -1484,13 +1987,15 @@ function ViewWizardBody({
             isSubmitting={isSubmitting}
             onSubmit={handleSubmit}
             terminalPhase={isTerminal ? phase : undefined}
-            terminalLabel={phase === 'success' ? 'Created' : 'Create'}
+            terminalLabel={phase === 'success'
+                ? (isImport ? (importResult?.staged ? 'In a draft' : isImportUpdate ? 'Updated' : 'Imported') : 'Created')
+                : (isImport ? (isImportUpdate ? 'Update' : 'Import') : 'Create')}
             terminalSubtitle={
                 phase === 'success'
-                    ? 'All done — opening it next'
+                    ? (importResult?.staged ? 'Waiting in a draft — opening it next' : 'All done — opening it next')
                     : submitError
                         ? 'Something went wrong — nothing was lost'
-                        : 'Saving your view…'
+                        : isImport ? 'Importing your view…' : 'Saving your view…'
             }
             hideClose={phase === 'creating' && !submitError}
             footer={terminalFooter}
@@ -1503,14 +2008,28 @@ function ViewWizardBody({
                         error={submitError}
                     />
                 ) : (
-                    <CreationSuccessBody
-                        icon={formData.icon}
-                        graphName={isBlank ? (provisionRef.current?.graphName ?? formData.graphName) : undefined}
-                        viewName={formData.name}
-                        scopeLabel={scopeContext?.dataSourceLabel}
-                        isBlank={isBlank}
-                        stats={successStats}
-                    />
+                    <>
+                        <CreationSuccessBody
+                            icon={formData.icon}
+                            graphName={isBlank ? (provisionRef.current?.graphName ?? formData.graphName) : undefined}
+                            viewName={importResult?.view.name ?? formData.name}
+                            scopeLabel={scopeContext?.dataSourceLabel}
+                            isBlank={isBlank}
+                            stats={successStats}
+                        />
+                        {isImport && importResult && (
+                            <ImportResultNote result={importResult} withData={importWithData ? importData?.started?.draftName : undefined}
+                                onSubmitForReview={reviewDraft ? () => { countdown.cancel(); setReviewing(true) } : undefined} />
+                        )}
+                        {reviewing && reviewDraft && (
+                            <PublishDraftDialog wsId={reviewDraft.workspaceId} graphId={reviewDraft.graphId} branchId={reviewDraft.branchId}
+                                onClose={() => setReviewing(false)}
+                                // Sent for review, or gone to a view on the draft: the dialog went there, so close.
+                                onLeave={handleStayHere}
+                                // Published: the view is live, so open it there rather than on the draft.
+                                onPublished={() => { createdBranchRef.current = null; handleOpenNow() }} />
+                        )}
+                    </>
                 )
             ) : (
             <>
@@ -1534,7 +2053,7 @@ function ViewWizardBody({
             )}
 
             {/* Resume an autosaved draft for this exact scope. */}
-            {pendingDraft && (
+            {pendingDraft && !isImport && (
                 <div className="mb-6 flex items-center gap-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
                     <History className="w-4 h-4 text-blue-500 shrink-0" />
                     <div className="flex-1 min-w-0">
@@ -1572,17 +2091,51 @@ function ViewWizardBody({
                 </div>
             )}
 
+            {currentStep === 'data' && importWithData && (
+                <PackageDataStep
+                    target={importDataTarget}
+                    targetLabel={importTargetLabel}
+                    onChooseFileAgain={() => {
+                        importSession?.clearFile()
+                        onBackToFile?.()
+                    }}
+                />
+            )}
+            {currentStep === 'reconcile' && isImport && (
+                <ReconcileStep
+                    target={importTarget}
+                    targetLabel={importTargetLabel}
+                    searchScope={{ workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId, branchId: importDataBranch }}
+                    onSkipToReview={() => {
+                        startTransition(() => {
+                            setPreviousSteps(prev => [...prev, 'reconcile'])
+                            setCurrentStep('preview')
+                        })
+                    }}
+                />
+            )}
             {currentStep === 'basics' && (
                 <BasicsStep
                     formData={formData}
                     updateFormData={updateFormData}
-                    mode={mode}
+                    mode={isImportUpdate ? 'edit' : mode}
                     savedVisibility={mode === 'edit' ? editingView?.visibility : undefined}
                     scopeContext={scopeContext}
-                    onChangeScope={mode === 'create' ? onBackToScope : undefined}
+                    onChangeScope={mode === 'create' && !isImportUpdate ? onBackToScope : undefined}
                     blankNaming={isBlank && blankProviderId
                         ? { workspaceId: resolvedWorkspaceId, providerId: blankProviderId }
                         : undefined}
+                    aboveFields={isImport && importSession?.view ? (
+                        <ImportMetadataPanel
+                            formData={formData}
+                            updateFormData={updateFormData}
+                            file={importSession.view.metadata}
+                            environment={importSession.inspect?.bundle.generator.environment}
+                            current={isImportUpdate ? currentTargetView : null}
+                            workspaceId={resolvedWorkspaceId}
+                        />
+                    ) : undefined}
+                    hideVisibility={isImportUpdate}
                 />
             )}
             {currentStep === 'layout' && (
@@ -1592,12 +2145,14 @@ function ViewWizardBody({
                     layoutTypes={availableLayoutTypes}
                     dataSourceId={formData.dataSourceId}
                     blank={isBlank}
+                    imported={isImport}
                 />
             )}
             {currentStep === 'assignment' && (
                 <AssignmentStep
                     formData={formData}
                     updateFormData={updateFormData}
+                    viewEntityScope={editingView?.content?.entityScope}
                 />
             )}
             {currentStep === 'entities' && (
@@ -1605,15 +2160,54 @@ function ViewWizardBody({
                     formData={formData}
                     updateFormData={updateFormData}
                     dataSourceId={formData.dataSourceId}
-                    mode={mode}
+                    // An imported selection is the file's, not a seed of ours to prune.
+                    mode={isImport ? 'edit' : mode}
+                    autoScopeEdges={!isImport}
                 />
             )}
+            {currentStep === 'preview' && isImport && (
+                <>
+                    <ImportSummaryCard
+                        targetLabel={importTargetLabel}
+                        staged={importStaged}
+                        editedSinceCheck={!!importFilled && !sameJson(
+                            formToDefinition(importFilled.base, importFilled.initial, formData),
+                            importFilled.base,
+                        )}
+                    />
+                    {importWithData ? (
+                        <div className="mb-6 flex items-start gap-3 rounded-2xl border border-glass-border p-4">
+                            <GitPullRequestDraft className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                            <div className="min-w-0 text-xs">
+                                <p className="text-sm font-bold text-ink">It joins its data in “{importData?.started?.draftName}”</p>
+                                <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+                                    The view and the data it came with go live together, when the draft is published or its review request merges.
+                                    {!isImportUpdate && formData.visibility === 'enterprise'
+                                        ? ' Publishing to everyone waits until then: it goes live shared with its workspace, and you can ask to publish it from Share.'
+                                        : ''}
+                                </p>
+                            </div>
+                        </div>
+                    ) : importStaging.versioned && (
+                        <div className="mb-6">
+                            <StageChoice staging={importStaging} stage={importStaged} onChange={setStageChoice}
+                                kind={isImportUpdate ? 'update' : 'new'}
+                                wantsEveryone={!isImportUpdate && formData.visibility === 'enterprise'} />
+                        </div>
+                    )}
+                </>
+            )}
             {currentStep === 'preview' && (
-                <PreviewStep formData={formData} scopeContext={scopeContext} />
+                <PreviewStep
+                    formData={formData}
+                    scopeContext={scopeContext}
+                    viewEntityScope={editingView?.content?.entityScope}
+                />
             )}
             </>
             )}
         </WizardShell>
+        </WizardEntitySeedContext.Provider>
     )
 }
 

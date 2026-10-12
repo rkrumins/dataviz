@@ -50,6 +50,28 @@ export function committedCreatedUrns(changeSet: ChangeSet | null): Set<string> {
 }
 
 /**
+ * PURE: nodes the branch created AS A CHILD — the target of a containment link the branch added.
+ * They are reached through their parent (the draft read serves them in its children), so loading
+ * them flat alongside the view's roots made one whose parent was not loaded render as a root: an
+ * orphan. `containmentTypes` is the ontology's containment relationship types.
+ */
+export function committedCreatedChildUrns(
+  changeSet: ChangeSet | null, containmentTypes: readonly string[],
+): Set<string> {
+  const urns = new Set<string>()
+  if (!changeSet || containmentTypes.length === 0) return urns
+  const cset = new Set(containmentTypes.map((t) => t.toUpperCase()))
+  for (const c of changeSet.changes) {
+    if (c.status !== 'added' || c.kind !== 'edge') continue
+    const after = (c.after ?? {}) as Record<string, unknown>
+    const type = String(after.edgeType ?? after.edge_type ?? '').toUpperCase()
+    const target = after.targetEntityId ?? after.target_entity_id
+    if (cset.has(type) && typeof target === 'string') urns.add(target)
+  }
+  return urns
+}
+
+/**
  * Reactive branch-created delta for the active scope: live-staged creates (optimistic)
  * UNION committed-in-branch creates (durable across reload). Both are genuinely
  * "created in THIS branch", so honouring the node `layerAssignment` for them in

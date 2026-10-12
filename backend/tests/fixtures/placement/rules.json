@@ -1,0 +1,543 @@
+{
+  "cases": [
+    {
+      "name": "type-rule-places-by-entity-type",
+      "summary": "COMPILE synthetic rules: each layer.entityTypes entry is a rule _type_<layer>_<type>; an unclaimed type is none.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dashboard" }],
+      "expect": { "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }, "y": { "source": "none" } }
+    },
+    {
+      "name": "type-match-folds-case",
+      "summary": "CRITERIA types: fold_case per character (no final-sigma rule, \u0130 folds to i); synthetic ids keep the type as written, and of two spellings of one type the first listed wins (lower offset j).",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": ["Dataset", "dataset", "\u0391\u03a3", "\u0130ndex"]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "v", "entityType": "DATASET" },
+        { "urn": "y", "entityType": "\u03b1\u03c3" },
+        { "urn": "z", "entityType": "index" },
+        { "urn": "w", "entityType": "\u03b1\u03c2" }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_Dataset" },
+        "v": { "layerId": "a", "source": "rule", "ruleId": "_type_a_Dataset" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_\u0391\u03a3" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "_type_a_\u0130ndex" },
+        "w": { "source": "none" }
+      }
+    },
+    {
+      "name": "duplicate-type-first-layer-by-order",
+      "summary": "Decision 1 / COMPILE sort: when two layers claim a type at equal priority the lower layer order wins, whatever the array position or sequence.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": ["dataset"],
+                "rules": [{ "id": "rb", "priority": 3, "entityTypes": ["table"] }],
+                "sequence": 0
+              },
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": ["dataset"],
+                "rules": [{ "id": "ra", "priority": 3, "entityTypes": ["table"] }],
+                "sequence": 1
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "table" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "ra" }
+      }
+    },
+    {
+      "name": "duplicate-type-equal-order-array-position",
+      "summary": "COMPILE sort: layers with equal order are stable-sorted by array position, so the first listed wins a tie.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "b", "name": "B", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" } }
+    },
+    {
+      "name": "layer-order-sorts-numerically-then-by-position",
+      "summary": "COMPILE num(order): a non-numeric or missing order is 0, negative and fractional orders count, and ties fall to array position.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "c", "name": "C", "order": "0", "entityTypes": ["dataset", "table"] },
+              { "id": "b", "name": "B", "order": -1, "entityTypes": ["dataset"] },
+              { "id": "a", "name": "A", "order": 0.5, "entityTypes": ["dataset", "table", "view"] },
+              { "id": "d", "name": "D", "entityTypes": ["dataset", "table", "view"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "table" },
+        { "urn": "z", "entityType": "view" },
+        { "urn": "w", "entityType": "chart" }
+      ],
+      "expect": {
+        "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
+        "y": { "layerId": "c", "source": "rule", "ruleId": "_type_c_table" },
+        "z": { "layerId": "d", "source": "rule", "ruleId": "_type_d_view" },
+        "w": { "source": "none" }
+      }
+    },
+    {
+      "name": "authored-priority-beats-entity-types",
+      "summary": "Decision 1 / COMPILE key: an authored rule's priority 1 beats a priority-0 synthetic rule in a lower layer.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rb", "priority": 1, "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "rb" } }
+    },
+    {
+      "name": "higher-priority-wins-across-layers",
+      "summary": "COMPILE key (-priority first): the higher authored priority wins even from a later layer.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r1", "priority": 5, "entityTypes": ["dataset"] }]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "r2", "priority": 9, "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "r2" } }
+    },
+    {
+      "name": "equal-priority-lower-layer-wins-whatever-the-criterion",
+      "summary": "Decision 1 / COMPILE key: at equal priority the lower layer order wins, whatever kind of criterion each rule uses.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "rb", "priority": 5, "tags": ["pii"] }]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rc", "priority": 5, "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "tags": ["pii"] }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "rb" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "rc" }
+      }
+    },
+    {
+      "name": "authored-before-entity-types-in-the-same-layer",
+      "summary": "COMPILE synthetic key: synthetic rules take index len(rules)+j, so a layer's authored priority-0 rules come before its entityTypes, which come before later layers.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": ["dataset", "table"],
+                "rules": [
+                  { "id": "r", "priority": 0, "entityTypes": ["dataset"] },
+                  { "id": "rt", "priority": 0, "tags": ["pii"] }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rb", "priority": 0, "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "table", "tags": ["pii"] },
+        { "urn": "z", "entityType": "table" }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "rt" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "_type_a_table" }
+      }
+    },
+    {
+      "name": "rule-index-breaks-ties-within-a-layer",
+      "summary": "COMPILE key: equal priority in the same layer goes to the lower rule index.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "r1", "priority": 2, "tags": ["pii"] },
+                  { "id": "r2", "priority": 2, "entityTypes": ["dataset"] }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "tags": ["pii"] }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "r2" }
+      }
+    },
+    {
+      "name": "missing-priority-is-zero-negative-is-below-default",
+      "summary": "COMPILE priority = num(rule.priority): missing is 0, and a negative priority sorts after every priority-0 synthetic rule but still matches when nothing else does.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "rm", "entityTypes": ["dataset"] },
+                  { "id": "rn", "priority": -1, "entityTypes": ["table", "view"] }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": ["table"],
+                "rules": [{ "id": "rp", "priority": 1, "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "table" },
+        { "urn": "v", "entityType": "view" }
+      ],
+      "expect": {
+        "x": { "layerId": "b", "source": "rule", "ruleId": "rp" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "_type_b_table" },
+        "v": { "layerId": "a", "source": "rule", "ruleId": "rn" }
+      }
+    },
+    {
+      "name": "non-numeric-priority-is-zero",
+      "summary": "COMPILE num(priority): a numeric string and a boolean are 0, a fractional priority counts.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "rs", "priority": "10", "entityTypes": ["dataset"] },
+                  { "id": "rbool", "priority": true, "entityTypes": ["table"] }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "rn", "priority": 5, "entityTypes": ["dataset"] },
+                  { "id": "rf", "priority": 0.5, "entityTypes": ["table"] }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "table" }],
+      "expect": {
+        "x": { "layerId": "b", "source": "rule", "ruleId": "rn" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "rf" }
+      }
+    },
+    {
+      "name": "rule-ids-default-to-layer-and-index",
+      "summary": "COMPILE rule id: a missing or empty id becomes _rule_<layer>_<index>.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "priority": 1, "tags": ["pii"] }, { "id": "", "priority": 1, "tags": ["pci"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "tags": ["pii"] }, { "urn": "y", "tags": ["pci"] }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_rule_a_0" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_rule_a_1" }
+      }
+    },
+    {
+      "name": "criteria-and-lists-any-of",
+      "summary": "Decision 3 / MATCH: a rule is the AND of its criteria; each list (entityTypes, tags) is any-of.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 5, "entityTypes": ["table", "view"], "tags": ["pii", "pci"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "tags": ["pii"] },
+        { "urn": "y", "entityType": "view", "tags": ["pci"] },
+        { "urn": "z", "entityType": "table" },
+        { "urn": "w", "entityType": "TABLE", "tags": ["pii", "other"] }
+      ],
+      "expect": {
+        "x": { "source": "none" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "z": { "source": "none" },
+        "w": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "tags-match-exactly",
+      "summary": "CRITERIA tags: tags compare exactly (no case folding, no trimming).",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 5, "tags": ["PII"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "tags": ["pii"] }, { "urn": "y", "tags": ["PII"] }, { "urn": "z", "tags": [" PII"] }],
+      "expect": {
+        "x": { "source": "none" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "z": { "source": "none" }
+      }
+    },
+    {
+      "name": "empty-rule-matches-nothing",
+      "summary": "CRITERIA inert: a rule with no criteria (urnPattern '', empty or blank entityTypes and tags, nothing at all) never matches, even at high priority.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "r", "priority": 10, "urnPattern": "" },
+                  { "id": "r2", "priority": 10, "entityTypes": [], "tags": [] },
+                  { "id": "r3", "priority": 10, "entityTypes": [""], "tags": [""] },
+                  { "id": "r4", "priority": 10 }
+                ]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "folder" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }, "y": { "source": "none" } },
+      "inert": [["a", "r"], ["a", "r2"], ["a", "r3"], ["a", "r4"]]
+    },
+    {
+      "name": "blank-list-entries-are-dropped",
+      "summary": "CRITERIA: blank entries inside entityTypes and tags are ignored, so the remaining entries still apply.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 5, "entityTypes": ["", "dataset"], "tags": ["", "pii"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "tags": ["pii"] },
+        { "urn": "y", "entityType": "dataset" },
+        { "urn": "z", "entityType": "", "tags": ["pii"] }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "y": { "source": "none" },
+        "z": { "source": "none" }
+      }
+    },
+    {
+      "name": "curated-scope-ignores-rules",
+      "summary": "PLACE tier 4: in curated scope neither authored nor synthetic rules place anything.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": ["dataset"],
+                "rules": [{ "id": "r", "priority": 5, "tags": ["pii"] }]
+              }
+            ],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "tags": ["pii"] }, { "urn": "y", "entityType": "folder" }],
+      "expect": { "x": { "source": "none" }, "y": { "layerId": "a", "source": "explicit" } }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# NOT referenced from base/kustomization.yaml, on purpose. A load generator
+# does not belong in every deploy, and one applied by accident is
+# indistinguishable from an attack. Apply it explicitly:
+#
+#   kubectl apply -k deploy/k8s/loadtest
+#   kubectl delete -k deploy/k8s/loadtest
+#
+# The namespace must already exist — this overlay adds to a running
+# deployment, it does not stand one up.
+namespace: synodic
+
+resources:
+  - master.yaml
+  - service.yaml
+  - worker.yaml

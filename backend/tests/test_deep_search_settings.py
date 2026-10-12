@@ -34,6 +34,7 @@ def test_settings_defaults(monkeypatch):
         "DEEP_SEARCH_CANDIDATE_CAP",
         "DEEP_SEARCH_CANDIDATE_CAP_MAX",
         "DEEP_SEARCH_SOFT_DEADLINE_MS",
+        "DEEP_SEARCH_CHUNK_TIMEOUT_MS",
         "DEEP_SEARCH_DISCOVER_SAMPLES",
         "DEEP_SEARCH_DISCOVER_VALUE_SAMPLES",
         "DEEP_SEARCH_DISCOVER_KEY_CAP",
@@ -56,7 +57,8 @@ def test_settings_defaults(monkeypatch):
     assert s.max_or_branch == 24
     assert s.candidate_cap == 10000
     assert s.candidate_cap_max == 100000
-    assert s.default_soft_deadline_ms == 30000
+    assert s.default_soft_deadline_ms == 60000
+    assert s.chunk_timeout_ms == 45000
     assert s.discover_samples_per_label == 200
     assert s.discover_value_samples_per_key == 20
     assert s.discover_value_keys_per_label == 64

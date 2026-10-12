@@ -142,6 +142,77 @@ async def test_display_name_is_never_idp_owned(test_client: AsyncClient, db_sess
     assert resp.json()["displayName"] == "Ada"
 
 
+async def test_an_idp_owned_avatar_is_refused(
+    test_client: AsyncClient, db_session,
+):
+    """The regression this pins: the refusal used to be computed before
+    ``avatarId`` joined the update set, so a provider-managed avatar was
+    silently writable through the very route that refuses managed
+    names."""
+    await _mark_managed(db_session, ["avatar"])
+
+    resp = await test_client.patch(
+        "/api/v1/users/me", json={"avatarId": "cat"},
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "idp_managed_field"
+    assert detail["fields"] == ["avatar"]
+
+
+async def test_names_locked_leaves_the_avatar_editable(
+    test_client: AsyncClient, db_session,
+):
+    """Per-field, as ever: a connection that asserts names but maps no
+    picture leaves the picker alone."""
+    await _mark_managed(db_session, ["first_name", "last_name"])
+
+    resp = await test_client.patch(
+        "/api/v1/users/me", json={"avatarId": "cat"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["avatarId"] == "cat"
+
+
+def test_an_asserted_avatar_is_claimed_beside_the_names():
+    assert asserted_fields(
+        first_name="Ada", last_name="Lovelace",
+        avatar_url="https://sso.corp.example/a.png",
+    ) == ["first_name", "last_name", "avatar"]
+    # A derived (split) name zeroes only the names — an avatar is never
+    # split out of anything.
+    assert asserted_fields(
+        first_name="Ada", last_name="Lovelace", derived=True,
+        avatar_url="https://sso.corp.example/a.png",
+    ) == ["avatar"]
+
+
+async def test_unlinking_the_managing_provider_clears_the_avatar(
+    test_client: AsyncClient, db_session,
+):
+    """The picture was the provider's assertion; with the link gone
+    nothing will ever refresh it, so the initials fallback beats a
+    stale face."""
+    import base64 as _b64
+
+    await _mark_managed(db_session, ["avatar"], provider_id="idp_okta")
+    await user_repo.set_user_avatar_image(
+        db_session, _ME,
+        image_b64=_b64.b64encode(b"png-bytes").decode("ascii"),
+        content_type="image/png",
+        source_url="https://sso.corp.example/a.png",
+    )
+
+    dropped = await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+    assert dropped is True
+    user = await user_repo.get_user_by_id(db_session, _ME)
+    assert user.avatar_image is None
+    assert user.avatar_source_url is None
+    assert managed_fields(json.loads(user.metadata_ or "{}")) == frozenset()
+
+
 async def test_ownership_is_reported_to_the_client(
     test_client: AsyncClient, db_session,
 ):
@@ -328,6 +399,73 @@ async def test_a_field_the_idp_omits_is_neither_owned_nor_blanked(
     assert owned == frozenset({"first_name"})
 
 
+async def test_a_derived_name_seeds_a_blank_profile(sso_provider, db_session):
+    """The gap this closes: derived names are unowned, so the ownership
+    re-sync skipped them — an account that existed blank-named stayed
+    blank forever while every login re-derived the split and threw it
+    away."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="", last_name=""),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert ((row.first_name or ""), (row.last_name or "")) == ("", "")
+
+    await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="name", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Alice", "Doe")
+    # The IdP's exact string lands in the display override, so
+    # "Doe, Alice" shows as the directory wrote it, not as our
+    # reconstruction "Alice Doe".
+    assert row.display_name == "Doe, Alice"
+    # Seeded, never owned: the fields stay the person's to edit.
+    owned, _ = user_repo.idp_ownership(row)
+    assert "first_name" not in owned and "last_name" not in owned
+
+
+async def test_the_seed_never_overwrites_a_typed_name(
+    sso_provider, db_session,
+):
+    """Seeding fills a vacuum; it must not fight a person's edit."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="", last_name=""),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    await user_repo.update_identity(
+        db_session, user.id, first_name="Chosen", last_name="Name",
+    )
+    await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="name", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Chosen", "Name")
+    assert not (row.display_name or "").strip()
+
+
+async def test_jit_provisioning_keeps_the_directory_string(
+    sso_provider, db_session,
+):
+    """A fresh account from a full-name-only IdP shows the name the
+    directory wrote, with the split halves seeded beside it."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="cn", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Alice", "Doe")
+    assert row.display_name == "Doe, Alice"
+
+
 async def test_display_name_survives_a_directory_rename(
     sso_provider, db_session,
 ):
@@ -380,3 +518,129 @@ async def test_most_recent_provider_wins(db_session):
     assert row.first_name == "FromOkta"
     _owned, provider_id = user_repo.idp_ownership(row)
     assert provider_id == okta.id
+
+
+# ── Unlink releases the lock ─────────────────────────────────────────
+#
+# The snapshot's contract is "re-asserted at every sign-in". Unlinking
+# ends the sign-ins, so a lock that survived the unlink was a field
+# nobody could edit and nothing would ever refresh — the worst of both.
+# Scoped to the managing provider: unlinking B must not release A's lock.
+
+async def test_clearing_is_scoped_to_the_managing_provider(
+    test_client: AsyncClient, db_session,
+):
+    await _mark_managed(db_session, ["first_name"], provider_id="idp_okta")
+
+    assert not await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_entra",
+    )
+    row = await user_repo.get_user_by_id(db_session, _ME)
+    assert managed_fields(json.loads(row.metadata_)) == {"first_name"}
+
+    assert await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+    row = await user_repo.get_user_by_id(db_session, _ME)
+    assert managed_fields(json.loads(row.metadata_)) == frozenset()
+
+
+async def test_clearing_without_a_snapshot_is_a_quiet_no(
+    test_client: AsyncClient, db_session,
+):
+    assert not await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+
+
+async def test_self_service_unlink_hands_the_name_back(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="own-unlink", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=_ME, provider_id=provider.id, external_id="e-9",
+    )
+    await _mark_managed(db_session, ["first_name"], provider_id=provider.id)
+    await db_session.commit()
+
+    locked = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Nope"},
+    )
+    assert locked.status_code == 409
+
+    gone = await test_client.delete(f"/api/v1/me/identities/{ident.id}")
+    assert gone.status_code == 204, gone.text
+
+    freed = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Mine Again"},
+    )
+    assert freed.status_code == 200, freed.text
+
+
+async def test_unlinking_a_bystander_leaves_the_lock_alone(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+
+    owner = await idp_provider_repo.create_provider(
+        db_session, slug="lock-owner", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    bystander = await idp_provider_repo.create_provider(
+        db_session, slug="bystander", display_name="Other", kind="oidc",
+        settings={},
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=_ME, provider_id=bystander.id, external_id="e-8",
+    )
+    await _mark_managed(db_session, ["first_name"], provider_id=owner.id)
+    await db_session.commit()
+
+    gone = await test_client.delete(f"/api/v1/me/identities/{ident.id}")
+    assert gone.status_code == 204, gone.text
+
+    still_locked = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Nope"},
+    )
+    assert still_locked.status_code == 409
+
+
+async def test_admin_unlink_releases_it_too(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+    from backend.auth_service.core.password import disabled_password_hash
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="admin-unlink", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    user = await user_repo.create_sso_user(
+        db_session, email="locked@x.com", first_name="Locked",
+        last_name="Name", password_hash=disabled_password_hash(),
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=user.id, provider_id=provider.id,
+        external_id="e-7",
+    )
+    meta = json.loads(user.metadata_ or "{}")
+    user.metadata_ = json.dumps(merge_into_metadata(
+        meta, build_snapshot(
+            fields=["first_name"], provider_id=provider.id,
+            at="2026-07-28T00:00:00Z",
+        ),
+    ))
+    await db_session.commit()
+
+    gone = await test_client.delete(
+        f"/api/v1/admin/users/{user.id}/identities/{ident.id}",
+    )
+    assert gone.status_code == 204, gone.text
+
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert managed_fields(json.loads(row.metadata_)) == frozenset()

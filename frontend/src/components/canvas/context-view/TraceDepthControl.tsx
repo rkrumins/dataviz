@@ -131,10 +131,10 @@ export function TraceDepthControl({
         <span className="text-ink/85 font-medium">Depth</span>
         <span className="w-px h-3 bg-black/15 dark:bg-white/10" aria-hidden />
         <span className="flex items-center gap-1 tabular-nums">
-          <ArrowUp className="w-3 h-3 text-blue-500 dark:text-blue-400" strokeWidth={2.4} />
-          <span className="text-blue-600 dark:text-blue-400 font-semibold">{upstreamDepth}</span>
-          <ArrowDown className="w-3 h-3 text-green-500 dark:text-green-400 ml-1.5" strokeWidth={2.4} />
-          <span className="text-green-600 dark:text-green-400 font-semibold">{downstreamDepth}</span>
+          <ArrowUp className="w-3 h-3 text-lineage-in" strokeWidth={2.4} />
+          <span className="text-lineage-in font-semibold">{upstreamDepth}</span>
+          <ArrowDown className="w-3 h-3 text-lineage-out ml-1.5" strokeWidth={2.4} />
+          <span className="text-lineage-out font-semibold">{downstreamDepth}</span>
         </span>
         <ChevronDown
           className={cn('w-3 h-3 transition-transform duration-200 text-ink-muted/60', open && 'rotate-180')}
@@ -251,20 +251,20 @@ const VARIANT_CLASSES: Record<Variant, {
   sliderFocus: string
 }> = {
   upstream: {
-    icon: 'text-blue-500 dark:text-blue-400',
-    text: 'text-blue-600 dark:text-blue-400',
-    sub: 'text-blue-500/60 dark:text-blue-400/60',
-    sliderTrack: 'bg-blue-500/15 dark:bg-blue-400/15',
-    sliderThumb: '[&::-webkit-slider-thumb]:bg-blue-500 [&::-moz-range-thumb]:bg-blue-500',
-    sliderFocus: 'focus:bg-blue-500/10',
+    icon: 'text-lineage-in',
+    text: 'text-lineage-in',
+    sub: 'text-lineage-in/60',
+    sliderTrack: 'bg-lineage-in/15',
+    sliderThumb: '[&::-webkit-slider-thumb]:bg-lineage-in [&::-moz-range-thumb]:bg-lineage-in',
+    sliderFocus: 'focus:bg-lineage-in/10',
   },
   downstream: {
-    icon: 'text-green-500 dark:text-green-400',
-    text: 'text-green-600 dark:text-green-400',
-    sub: 'text-green-500/60 dark:text-green-400/60',
-    sliderTrack: 'bg-green-500/15 dark:bg-green-400/15',
-    sliderThumb: '[&::-webkit-slider-thumb]:bg-green-500 [&::-moz-range-thumb]:bg-green-500',
-    sliderFocus: 'focus:bg-green-500/10',
+    icon: 'text-lineage-out',
+    text: 'text-lineage-out',
+    sub: 'text-lineage-out/60',
+    sliderTrack: 'bg-lineage-out/15',
+    sliderThumb: '[&::-webkit-slider-thumb]:bg-lineage-out [&::-moz-range-thumb]:bg-lineage-out',
+    sliderFocus: 'focus:bg-lineage-out/10',
   },
 }
 
@@ -273,8 +273,8 @@ const VARIANT_CLASSES: Record<Variant, {
  * single direction. The slider drives coarse scrubbing; the number
  * input + minus/plus buttons handle precise edits and keyboard input.
  * All three controls share `onChange` so they stay in sync. Direction
- * is color-coded to match EntityDrawer's Root Cause (blue) / Impact
- * (green) treatment.
+ * wears the lineage direction pair (lib/lineageDirectionColors.ts), as
+ * the entity drawer's Root Cause / Impact does.
  */
 function DepthRow({
   label,

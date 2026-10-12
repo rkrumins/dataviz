@@ -10,6 +10,7 @@ so a token of one type can never be presented in place of another:
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -36,6 +37,8 @@ from .config import (
 
 _REFRESH_AUDIENCE = f"{JWT_AUDIENCE}:refresh"
 _INVITE_AUDIENCE = f"{JWT_AUDIENCE}:invite"
+
+logger = logging.getLogger(__name__)
 _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
@@ -148,6 +151,56 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
 
 # ── Access tokens ────────────────────────────────────────────────────
 
+#: Claims a caller may never supply through ``extra``.
+#:
+#: Both mint helpers apply ``payload.update(extra)`` AFTER setting the
+#: security-critical claims, so anything in this set would silently
+#: override them — including ``aud``, which is the only thing keeping a
+#: refresh token from being replayed as an access token. Nothing does
+#: that today (``_resolve_claims`` returns ``sid`` and ``global``), but
+#: that is a property of one caller rather than of the mint, and the
+#: cost of making it a property of the mint is this frozenset.
+_RESERVED_CLAIMS = frozenset({"sub", "aud", "iss", "exp", "iat", "nbf", "jti"})
+
+
+#: How the session was signed in to: with the account's own password, or
+#: through an identity provider. Minted on every access token and kept
+#: through every rotation, because a pending password change concerns the
+#: password, not the account — see ``password_change_pending``.
+SIGNIN_CLAIM = "signin"
+SIGNIN_PASSWORD = "password"
+SIGNIN_SSO = "sso"
+
+
+def password_change_pending(payload: dict, account_must_change: bool) -> bool:
+    """Whether this session has to change the account's password first.
+
+    The requirement is about the account's local password — one somebody
+    else chose — so it holds a session that signed in WITH that password,
+    and never one that signed in through an identity provider: someone who
+    signs in with SSO nearly every day must not be stopped for a password
+    they don't use. ``mcp`` is minted on password sessions only; the
+    account flag holds a password session from the moment it is set. A
+    token from before ``signin`` existed is held by ``mcp`` alone.
+    """
+    if payload.get("mcp"):
+        return True
+    return account_must_change and payload.get(SIGNIN_CLAIM) == SIGNIN_PASSWORD
+
+
+def _safe_extra(extra: dict | None) -> dict:
+    """``extra`` with reserved claims dropped and the drop logged."""
+    if not extra:
+        return {}
+    clean = {k: v for k, v in extra.items() if k not in _RESERVED_CLAIMS}
+    if len(clean) != len(extra):
+        logger.error(
+            "Refusing to let extra claims override %s at mint",
+            sorted(set(extra) & _RESERVED_CLAIMS),
+        )
+    return clean
+
+
 def create_access_token(
     user_id: str,
     email: str,
@@ -165,8 +218,7 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(minutes=JWT_EXPIRY_MINUTES),
     }
-    if extra:
-        payload.update(extra)
+    payload.update(_safe_extra(extra))
     return _encode(payload)
 
 
@@ -193,6 +245,13 @@ class RefreshClaims:
     # local password sessions (which keep their 7-day refresh TTL and
     # are not subject to the SSO ceiling).
     auth_time: int | None = None
+    # When the UPSTREAM credential behind this session expires (epoch
+    # seconds) — set only by the browser-exchange back-channel shape,
+    # where the corporate token's own ``exp`` is the one expiry signal
+    # the server will ever hold. Signed into the token and propagated
+    # unchanged through rotation, so rotating cannot extend it; the
+    # refresh route ends the session past it. NULL everywhere else.
+    idp_exp: int | None = None
     # When this token was minted, in epoch MILLISECONDS. Compared
     # against the user's ``sessions_valid_from`` cutoff on /refresh so a
     # revocation cannot be walked around by rotating.
@@ -216,6 +275,7 @@ def create_refresh_token(
     extra: dict | None = None,
     *,
     auth_time: int | None = None,
+    idp_exp: int | None = None,
     jti: str | None = None,
     expires_at_epoch: int | None = None,
     mint_ms: int | None = None,
@@ -263,8 +323,15 @@ def create_refresh_token(
     }
     if auth_time is not None:
         payload["auth_time"] = int(auth_time)
-    if extra:
-        payload.update(extra)
+    if idp_exp is not None:
+        payload["idp_exp"] = int(idp_exp)
+    # ``fam`` and ``mat`` are as load-bearing here as ``aud`` is: the
+    # family id drives reuse detection and the mint instant drives both
+    # the revocation cutoff and the idle ceiling.
+    payload.update({
+        k: v for k, v in _safe_extra(extra).items()
+        if k not in ("fam", "mat")
+    })
     token = _encode(payload)
     claims = RefreshClaims(
         sub=user_id,
@@ -272,6 +339,7 @@ def create_refresh_token(
         family_id=fam,
         exp=int(expires_at.timestamp()),
         auth_time=int(auth_time) if auth_time is not None else None,
+        idp_exp=int(idp_exp) if idp_exp is not None else None,
         mint_ms=minted_ms,
     )
     return token, claims
@@ -308,6 +376,15 @@ def decode_refresh_token(
             auth_time = int(auth_time_raw)
         except (TypeError, ValueError):
             raise jwt.InvalidTokenError("Refresh token auth_time is malformed")
+    idp_exp_raw = payload.get("idp_exp")
+    idp_exp: int | None
+    if idp_exp_raw is None:
+        idp_exp = None
+    else:
+        try:
+            idp_exp = int(idp_exp_raw)
+        except (TypeError, ValueError):
+            raise jwt.InvalidTokenError("Refresh token idp_exp is malformed")
     # Prefer the millisecond claim. Tokens minted before it existed fall
     # back to the standard second-granular ``iat``, which is enough to
     # place them safely on one side of a cutoff stamped later. A token
@@ -323,7 +400,7 @@ def decode_refresh_token(
             mint_ms = 0
     return RefreshClaims(
         sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
-        mint_ms=mint_ms,
+        idp_exp=idp_exp, mint_ms=mint_ms,
     )
 
 
@@ -426,9 +503,28 @@ def create_oidc_state_token(
     nonce: str,
     code_verifier: str,
     next_path: str,
+    provider_id: str | None = None,
+    force_reauth: bool = False,
     expires_in_minutes: int = 10,
 ) -> str:
-    """Sign the in-flight OIDC handshake parameters into a JWT."""
+    """Sign the in-flight OIDC handshake parameters into a JWT.
+
+    ``provider_id`` binds the flow to the provider that started it.
+    There is one ``nx_oidc`` cookie name for every slug, so without it a
+    handshake begun at provider B satisfied provider A's state check —
+    the class RFC 9207 exists to close. Token validation still pins
+    ``iss``/``aud`` to A's configuration, so this is defence in depth
+    rather than a live bypass, but the cheap half of that pair was
+    missing. Optional so a flow cookie minted before this deploy still
+    decodes; the callback treats an absent id as "cannot check".
+
+    ``force_reauth`` records that this flow already asked the IdP for a
+    fresh authentication (``prompt=login``). The callback needs to know:
+    a stale ``auth_time`` on an ordinary flow is worth one forced round
+    trip, while a stale one on a FORCED flow means the IdP ignored the
+    request, and asking again would loop. Written only when set, so a
+    cookie minted before this deploy reads as not forced.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "oidc_state",
@@ -441,6 +537,10 @@ def create_oidc_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
+    if force_reauth:
+        payload["force"] = True
     return _encode(payload)
 
 
@@ -466,8 +566,29 @@ def create_saml_state_token(
     *,
     relay_state: str,
     next_path: str,
+    provider_id: str | None = None,
+    request_id: str | None = None,
+    force_reauth: bool = False,
     expires_in_minutes: int = 10,
 ) -> str:
+    """Sign the in-flight SAML handshake state into a JWT.
+
+    ``request_id`` is the ``ID`` of the AuthnRequest we just sent.
+    python3-saml only compares an assertion's ``InResponseTo`` when it
+    is handed that id, and it was never captured — so nothing bound a
+    response to the request that asked for it, and unsolicited
+    IdP-initiated responses were accepted as ordinary logins.
+
+    ``provider_id`` does for SAML what it does for OIDC: one ``nx_saml``
+    cookie name serves every slug, so a flow begun at provider B
+    satisfied provider A's RelayState check.
+
+    Both optional so a cookie minted before this deploy still decodes.
+
+    ``force_reauth`` records that the AuthnRequest carried
+    ``ForceAuthn`` — see ``create_oidc_state_token``, where it does the
+    same job.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "saml_state",
@@ -478,6 +599,12 @@ def create_saml_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
+    if request_id is not None:
+        payload["rid"] = request_id
+    if force_reauth:
+        payload["force"] = True
     return _encode(payload)
 
 

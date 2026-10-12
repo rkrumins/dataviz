@@ -13,6 +13,7 @@ vi.mock('@/services/adminUserService', () => ({
 
 import { AdminInvites } from '../AdminInvites'
 import { adminUserService, type InviteSummary } from '@/services/adminUserService'
+import { useNotificationStore } from '@/components/ui/notifications'
 
 const HOUR = 1000 * 60 * 60
 
@@ -47,8 +48,12 @@ async function openRowMenu() {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     vi.mocked(adminUserService.listInvites).mockResolvedValue([invite()])
 })
+
+/** What the app's ONE notification stack is currently holding. */
+const raised = () => useNotificationStore.getState().notifications
 
 describe('AdminInvites — reading a row', () => {
     it('never truncates what the link grants or who it is for', async () => {
@@ -350,6 +355,25 @@ describe('AdminInvites — failure and disclosure', () => {
         render(<AdminInvites />)
 
         expect(await screen.findByText('Backend unavailable')).toBeInTheDocument()
+    })
+
+    it('reports a failed revoke once, not twice', async () => {
+        // The failure used to be written into `error` — the in-flow banner that
+        // exists to explain a list that would not LOAD — as well as raised on
+        // the notification stack, so one revoke said the same thing twice on
+        // one screen, in two different shapes, one of which never left.
+        vi.mocked(adminUserService.revokeInvite).mockRejectedValue(
+            new Error('That link is already revoked'),
+        )
+        render(<AdminInvites />)
+        await openRowMenu()
+        fireEvent.click(await screen.findByRole('button', { name: 'Revoke this link' }))
+        fireEvent.click(await screen.findByRole('button', { name: /revoke link/i }))
+
+        await waitFor(() =>
+            expect(raised().map(n => n.message)).toEqual(['That link is already revoked']),
+        )
+        expect(screen.queryAllByText('That link is already revoked')).toHaveLength(0)
     })
 
     it('never renders a token, even if one somehow arrives', async () => {

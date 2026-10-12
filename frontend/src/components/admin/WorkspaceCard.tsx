@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { WorkspaceUsage } from '@/services/contentInsightsService'
+import { WorkspaceUsageLine } from './workspace/WorkspaceUsageLine'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { type WorkspaceResponse } from '@/services/workspaceService'
@@ -47,6 +49,10 @@ interface WorkspaceCardProps {
     healthStatus?: WorkspaceHealth
     dsProviders: WsDataSourceProviderInfo[]
     schemaSummary: WorkspaceSchemaSummary
+    /** Opens, distinct people and the view people come here for. Undefined
+     *  while it loads or when the call failed — a rollup is decoration, and
+     *  decoration must never gate a workspace list. */
+    usage?: WorkspaceUsage
     onOpen: () => void
     onDelete: () => void
     onSetDefault: () => void
@@ -108,6 +114,7 @@ export function WorkspaceCard({
     healthStatus,
     dsProviders,
     schemaSummary,
+    usage,
     onOpen,
     onDelete,
     onSetDefault,
@@ -236,6 +243,15 @@ export function WorkspaceCard({
                     </div>
                 ))}
             </div>
+
+            {/* Under the counts, because those say what the workspace CONTAINS
+                and this says whether anybody has been here — which is the half
+                that decides whether it is worth opening. */}
+            {usage && (
+                <div className="px-5 pt-2.5">
+                    <WorkspaceUsageLine usage={usage} />
+                </div>
+            )}
 
             {/* An empty workspace is a workspace waiting for a data source, not a
                 broken one. Say that, and give it the next step. */}

@@ -61,7 +61,11 @@ describe.each(VENDOR_PRESETS.map(p => [p.name, p] as const))(
     })
 
     it('declares a kind the backend accepts', () => {
-        expect(['oidc', 'saml2', 'custom_profile', 'custom'])
+        // Mirrors ``VALID_KINDS`` in ``idp_provider_repo`` and the
+        // ``ck_idp_providers_kind`` CHECK. A preset naming a kind the
+        // backend does not have fails at INSERT, after the operator has
+        // filled in the whole wizard.
+        expect(['oidc', 'saml2', 'custom_profile', 'custom', 'backchannel'])
             .toContain(preset.kind)
     })
 

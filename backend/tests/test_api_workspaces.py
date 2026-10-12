@@ -166,6 +166,58 @@ async def test_bulk_cached_stats_cold_cache_and_workspace_filter(test_client: As
     assert all(k.startswith(f"{ws2}/") for k in scoped)
 
 
+# ── PUT /admin/workspaces/{id}/data-sources/{ds_id} ───────────────────
+
+async def test_ontology_reassignment_invalidates_cached_hierarchy_reads(
+    test_client: AsyncClient, monkeypatch,
+):
+    """Cached top-level / children / node reads were answered under the old
+    ontology (its entity types, its name mapping) — a reassignment drops them.
+    A rename changes nothing they depend on and keeps them, also when the edit
+    form re-sends the ontology the source already has."""
+    calls: list = []
+
+    async def _record(ws_id, ds_id):
+        calls.append((ws_id, ds_id))
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.invalidate_hierarchy_reads", _record,
+    )
+    ws = await test_client.post(
+        "/api/v1/admin/workspaces",
+        json={"name": "Reassign WS", "dataSources": [{"providerId": "prov_re", "graphName": "g"}]},
+    )
+    assert ws.status_code == 201
+    ws_id = ws.json()["id"]
+    ds_id = ws.json()["dataSources"][0]["id"]
+    ont = await test_client.post(
+        "/api/v1/admin/ontologies",
+        json={"name": "Reassigned", "version": 1, "entityTypeDefinitions": {"Layer": {"label": "Layer"}}},
+    )
+    assert ont.status_code == 201
+
+    r = await test_client.put(
+        f"/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}",
+        json={"label": "renamed"},
+    )
+    assert r.status_code == 200
+    assert calls == []
+
+    r = await test_client.put(
+        f"/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}",
+        json={"ontologyId": ont.json()["id"]},
+    )
+    assert r.status_code == 200
+    assert calls == [(ws_id, ds_id)]
+
+    r = await test_client.put(
+        f"/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}",
+        json={"label": "renamed again", "ontologyId": ont.json()["id"]},
+    )
+    assert r.status_code == 200
+    assert calls == [(ws_id, ds_id)]
+
+
 # ── Lifecycle round-trip ──────────────────────────────────────────────
 
 async def test_workspace_crud_roundtrip(test_client: AsyncClient):

@@ -116,6 +116,12 @@ describe('predicateSentence — plain-English summary', () => {
         expect(text).toContain('contacts')
     })
 
+    it('reads a condition matching every entity as that, not as unknown', () => {
+        const text = rendered({ kind: 'all' } as Predicate)
+        expect(text).toContain('every entity')
+        expect(text).not.toContain('unknown')
+    })
+
     it('renders entityType leaf naturally', () => {
         const draft: Predicate = {
             kind: 'entityType', op: 'in',
@@ -135,5 +141,60 @@ describe('predicateSentence — plain-English summary', () => {
         const text = rendered(draft)
         expect(text).toContain('tagged')
         expect(text).toContain('PII')
+    })
+})
+
+
+describe('predicateSentence — property values read as what they are', () => {
+    const prop = (op: string, value: unknown): Predicate =>
+        ({ kind: 'property', key: 'gvHash', op, value } as Predicate)
+
+    it('quotes text and leaves numbers bare', () => {
+        expect(rendered(prop('eq', 'gold'))).toContain('"gvHash" is "gold"')
+        expect(rendered(prop('eq', 15))).toContain('"gvHash" equals 15')
+        expect(rendered(prop('gt', 15))).toContain('"gvHash" is greater than 15')
+        expect(rendered(prop('eq', true))).toContain('"gvHash" is true')
+    })
+
+    it('reads a 64-bit integer as the number it is, though it travels as text', () => {
+        const typed = (op: string, value: unknown, valueType: string): Predicate =>
+            ({ kind: 'property', key: 'gvHash', op, value, valueType } as Predicate)
+        expect(rendered(typed('eq', '-3746471915534727923', 'number')))
+            .toContain('"gvHash" equals -3746471915534727923')
+        expect(rendered(typed('between', ['1', '9007199254740993'], 'number')))
+            .toContain('is between 1 and 9007199254740993')
+        expect(rendered(typed('eq', 'true', 'boolean'))).toContain('"gvHash" is true')
+        // A text operator on a number reads its digits: still quoted.
+        expect(rendered(typed('contains', '74', 'number'))).toContain('"gvHash" contains "74"')
+    })
+
+    it('says each operator the way its type reads', () => {
+        const typed = (op: string, value: unknown, valueType: string, extra = {}): Predicate =>
+            ({ kind: 'property', key: 'updated', op, value, valueType, ...extra } as Predicate)
+        expect(rendered(typed('gte', '2024-05-01', 'date'))).toContain('"updated" is on or after "2024-05-01"')
+        expect(rendered(typed('withinLast', 'P30D', 'date'))).toContain('"updated" is within the last 30 days')
+        expect(rendered(typed('isNotSet', undefined, 'string'))).toMatch(/"updated" is not set\.$/)
+        expect(rendered(typed('neq', 'x', 'string', { includeMissing: true })))
+            .toContain('"updated" is not "x" (or not set)')
+        expect(rendered(typed('contains', 'Ab', 'string', { caseSensitive: true })))
+            .toContain('contains "Ab" (match case)')
+    })
+
+    it('reads a search by property name', () => {
+        expect(rendered({ kind: 'hasProperty', key: 'owner', keyMatch: 'contains' } as Predicate))
+            .toContain('has a property whose name contains "owner"')
+        expect(rendered({ kind: 'hasProperty', key: 'pii', keyMatch: 'prefix', negate: true } as Predicate))
+            .toContain('does not have a property whose name starts with "pii"')
+    })
+
+    it('shows a range as both ends and a list as its items', () => {
+        expect(rendered(prop('between', [10, 20]))).toContain('is between 10 and 20')
+        expect(rendered(prop('in', ['a', 'b']))).toContain('is one of "a", "b"')
+    })
+
+    it('shows a missing value as a gap, not as the empty string', () => {
+        const text = rendered(prop('contains', ''))
+        expect(text).toContain('"gvHash" contains …')
+        expect(text).not.toContain('""')
     })
 })

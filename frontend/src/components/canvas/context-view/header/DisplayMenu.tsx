@@ -17,9 +17,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ChevronDown, RotateCcw, Settings2, Sliders, SlidersHorizontal } from 'lucide-react'
+import { ChevronDown, RotateCcw, Settings2, Sliders, SlidersHorizontal, Unlink, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { usePreferencesStore, type CanvasDensity, type LineageRenderMode } from '@/store/preferences'
 import { DisplaySettingsSections, isDefaultState } from '../DisplaySettingsPopover'
 import { LineageDisplaySections } from '../LineageDisplayPopover'
 
@@ -46,6 +47,9 @@ export interface DisplayMenuProps {
   /** When false, the Lineage appearance section renders muted + inert with
    *  a one-line hint, instead of being hidden outright. */
   lineageEnabled: boolean
+
+  /** Opens the orphaned-entities panel. Absent = no Advanced section. */
+  onOpenOrphans?: () => void
 }
 
 const POPOVER_WIDTH = 320
@@ -66,6 +70,7 @@ export function DisplayMenu({
   showEdgeDirection,
   onToggleEdgeDirection,
   lineageEnabled,
+  onOpenOrphans,
 }: DisplayMenuProps) {
   // Defense-in-depth defaults — see DisplaySettingsPopover for rationale.
   const canvasZoom = canvasZoomRaw ?? 1
@@ -116,10 +121,19 @@ export function DisplayMenu({
     }
   }, [open])
 
-  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines })
+  const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
+  const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
+  const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
+  const setLineagePortSides = usePreferencesStore((s) => s.setLineagePortSides)
+  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage })
 
   return (
     <>
+      <HoverTip
+        className="inline-flex"
+        label="Change how the canvas is drawn — zoom, density, badges and lineage"
+        detail="Affects what you see, never the view itself"
+      >
       <button
         ref={triggerRef}
         data-tour="canvas-display"
@@ -127,7 +141,6 @@ export function DisplayMenu({
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title="Display settings — canvas zoom, density, and lineage appearance"
         className={cn(
           'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300',
           open
@@ -139,6 +152,7 @@ export function DisplayMenu({
         <span>Display</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform duration-200', open && 'rotate-180')} />
       </button>
+      </HoverTip>
 
       {/* Portal escapes the header's stacking context (it has backdrop-filter,
           which creates one) so the popover is layered above the canvas body
@@ -153,7 +167,7 @@ export function DisplayMenu({
               ref={popoverRef}
               initial={{ opacity: 0, y: -6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.15, ease: 'easeOut' }}
+              transition={{ duration: 0.1, ease: 'easeOut' }}
               role="dialog"
               aria-label="Display"
               style={{
@@ -178,15 +192,19 @@ export function DisplayMenu({
                 </div>
                 <div className="text-[12px] font-semibold text-ink tracking-tight">Canvas</div>
                 {isCustom && (
-                  <button
-                    type="button"
-                    onClick={onReset}
-                    className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
-                    title="Reset all display settings"
+                  <HoverTip
+                    className="ml-auto inline-flex"
+                    label="Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults"
                   >
-                    <RotateCcw className="w-3 h-3" />
-                    Reset
-                  </button>
+                    <button
+                      type="button"
+                      onClick={onReset}
+                      className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Reset
+                    </button>
+                  </HoverTip>
                 )}
               </div>
 
@@ -223,8 +241,42 @@ export function DisplayMenu({
                 onSetLineageRenderMode={onSetLineageRenderMode}
                 showEdgeDirection={showEdgeDirection}
                 onToggleEdgeDirection={onToggleEdgeDirection}
+                lineagePortSides={lineagePortSides}
+                onSetLineagePortSides={setLineagePortSides}
                 disabled={!lineageEnabled}
               />
+
+              {onOpenOrphans && (
+                <>
+                  <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+                  {/* Section: Advanced — power-user tools, kept last so the
+                      everyday settings stay first. */}
+                  <div className="px-3 pt-3 pb-1 flex items-center gap-2 border-b border-black/[0.06] dark:border-white/[0.04]">
+                    <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-accent-lineage/25 to-purple-500/15 flex items-center justify-center">
+                      <Wrench className="w-3.5 h-3.5 text-accent-lineage" strokeWidth={2.2} />
+                    </div>
+                    <div className="text-[12px] font-semibold text-ink tracking-tight">Advanced</div>
+                  </div>
+
+                  <div className="p-2">
+                    <HoverTip
+                      className="flex"
+                      label="List entities with no parent in the data whose type normally sits inside another"
+                      detail="Opens a side panel — the canvas stays as it is"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => { setOpen(false); onOpenOrphans() }}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                      >
+                        <Unlink className="w-3.5 h-3.5" />
+                        Orphaned entities…
+                      </button>
+                    </HoverTip>
+                  </div>
+                </>
+              )}
               </div>
             </motion.div>
           )}

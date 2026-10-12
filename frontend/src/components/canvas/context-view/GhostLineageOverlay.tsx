@@ -1,4 +1,5 @@
 import React, { useState, useLayoutEffect, useRef, useCallback } from 'react'
+import { sameRows } from './rowEquality'
 import type { ViewLayerConfig } from '@/types/schema'
 import {
   EXTREMITY_EDGE_GUTTER_PX,
@@ -47,10 +48,13 @@ export const GhostLineageOverlay = React.memo(function GhostLineageOverlay({
     if (!container) return
 
     const containerRect = container.getBoundingClientRect()
-    setSize({
-      w: container.scrollWidth,
-      h: container.scrollHeight,
-    })
+    // Guarded: `recompute` runs from a ResizeObserver watching this container AND
+    // every layer column, plus scroll and window resize. An unguarded write minted
+    // a fresh {w,h} on every one of those, re-rendering the overlay — whose <svg>
+    // takes its width/height from this very state, inside the observed subtree.
+    const w = container.scrollWidth
+    const h = container.scrollHeight
+    setSize(prev => (prev.w === w && prev.h === h ? prev : { w, h }))
 
     // Group ghost-card rects by their owning layer column.
     // GhostFlatTreeItem sets [data-canvas-ghost="true"]; the LayerColumn root
@@ -69,7 +73,7 @@ export const GhostLineageOverlay = React.memo(function GhostLineageOverlay({
     })
 
     if (byLayer.size < 2) {
-      setPaths([])
+      setPaths(prev => (prev.length === 0 ? prev : []))
       return
     }
 
@@ -117,7 +121,7 @@ export const GhostLineageOverlay = React.memo(function GhostLineageOverlay({
       }
     }
 
-    setPaths(nextPaths)
+    setPaths(prev => (sameRows(prev, nextPaths) ? prev : nextPaths))
   }, [containerRef, layers])
 
   const scheduleRecompute = useCallback(() => {

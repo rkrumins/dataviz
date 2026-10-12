@@ -84,7 +84,6 @@ function buildViewConfig(
             visibleRelationshipTypes: request.visibleRelationshipTypes ?? [],
             defaultDepth: 5,
             maxDepth: 10,
-            rootEntityTypes: ['domain'],
             ...(baseEntityScope !== undefined ? { entityScope: baseEntityScope } : {}),
         },
         layout: {

@@ -10,11 +10,15 @@
  *  - Arrow keys + Enter to pick; Escape closes.
  *  - When ``multiple={true}``, picked values appear as removable chips
  *    inside the input; backspace removes the last chip.
- *  - When the typed value doesn't match any option, the user can still
- *    pick "Use <text>" to emit it as a free-text value. This is
- *    important because discovery samples won't surface every possible
- *    value (especially right after a new property is added to the
- *    graph).
+ *  - Whatever the user types is a value in its own right: while text is
+ *    typed, the first row is "Use <text>" and it is highlighted, so Enter
+ *    commits exactly what was typed; Arrow keys move on to the suggestions.
+ *    Tab or a click away commits the typed text too, and Escape drops it.
+ *    Suggestions are samples of what exists — the typed "74" must never be
+ *    silently swapped for a sample that merely contains it, nor left on
+ *    screen while the value underneath is still empty.
+ *  - In multi-select mode a pasted list (newline, comma or tab separated)
+ *    becomes one chip per value.
  *  - Optional value counts surfaced on each option for "how common is
  *    this value" hinting (matches discovery's tagValues map).
  *
@@ -26,6 +30,7 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { Check, ChevronDown, Search, Sparkles, X } from 'lucide-react'
 import {
+    type ClipboardEvent,
     type CSSProperties,
     type KeyboardEvent,
     type ReactNode,
@@ -63,6 +68,8 @@ export interface PickerOption {
     icon?: ReactNode
     /** When true, the option appears greyed out and is unselectable. */
     disabled?: boolean
+    /** Internal: the synthetic "Use <typed text>" row. */
+    freeText?: boolean
 }
 
 
@@ -100,6 +107,9 @@ interface BaseProps {
      *  inline dropdown gets clipped against panel edges. Defaults
      *  off for backward compatibility with the existing builder. */
     portal?: boolean
+    /** Called with the text being typed — for a caller that fetches
+     *  suggestions for it (the options are still filtered locally). */
+    onQueryChange?: (query: string) => void
 }
 
 interface SingleProps extends BaseProps {
@@ -148,6 +158,8 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
 
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
+    const { onQueryChange } = props
+    useEffect(() => { onQueryChange?.(query) }, [query, onQueryChange])
     const [highlightIndex, setHighlightIndex] = useState(0)
     const inputRef = useRef<HTMLInputElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -209,31 +221,26 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
         })
     }, [normalisedOptions, query])
 
+    // The typed text leads the list whenever it is not already an option,
+    // so the default Enter is "what I typed" and never the first sample
+    // that happens to contain it.
+    const typed = query.trim()
+    const rows = useMemo<PickerOption[]>(() => {
+        if (!allowFreeText || !typed) return filteredOptions
+        if (normalisedOptions.some((o) => o.value === typed)) return filteredOptions
+        return [{ value: typed, freeText: true }, ...filteredOptions]
+    }, [allowFreeText, filteredOptions, normalisedOptions, typed])
+
     // Single-select mode shows the current value (or placeholder) in
     // the field; multiple shows chips + an empty input for typing.
     const singleSelectDisplay = !isMultiple ? (props as SingleProps).value : ''
 
-    // ---------------------------------------------------------------
-    // Outside-click → close (includes the portal dropdown when active)
-    // ---------------------------------------------------------------
+    // Clamp highlight when the list shrinks below it.
     useEffect(() => {
-        if (!open) return
-        const handler = (e: MouseEvent) => {
-            const t = e.target as Node
-            if (containerRef.current?.contains(t)) return
-            if (portalRef.current?.contains(t)) return
-            setOpen(false)
+        if (highlightIndex >= rows.length) {
+            setHighlightIndex(Math.max(0, rows.length - 1))
         }
-        document.addEventListener('mousedown', handler)
-        return () => document.removeEventListener('mousedown', handler)
-    }, [open])
-
-    // Clamp highlight when filtered list shrinks below it.
-    useEffect(() => {
-        if (highlightIndex >= filteredOptions.length) {
-            setHighlightIndex(Math.max(0, filteredOptions.length - 1))
-        }
-    }, [filteredOptions.length, highlightIndex])
+    }, [rows.length, highlightIndex])
 
     // ---------------------------------------------------------------
     // Commit / remove helpers
@@ -268,6 +275,56 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
         onChange(current.filter((v) => v !== value))
     }, [isMultiple, props])
 
+    /** Leaving the field with text typed keeps it: the typed text is the
+     *  value the user meant, not a draft to be thrown away. A value that is
+     *  already chosen is left alone (multi-select would toggle it off). */
+    const commitTyped = useCallback(() => {
+        if (!allowFreeText || !typed || disabled) return
+        if (selectedSet.has(typed)) { setQuery(''); return }
+        if (isMultiple) {
+            if (atMax) return
+            const { value: current, onChange } = props as MultiProps
+            onChange([...current, typed])
+            setQuery('')
+        } else {
+            ;(props as SingleProps).onChange(typed)
+            setQuery('')
+        }
+    }, [allowFreeText, atMax, disabled, isMultiple, props, selectedSet, typed])
+
+    // ---------------------------------------------------------------
+    // Outside-click → keep the typed text, close (portal dropdown included)
+    // ---------------------------------------------------------------
+    useEffect(() => {
+        if (!open) return
+        const handler = (e: MouseEvent) => {
+            const t = e.target as Node
+            if (containerRef.current?.contains(t)) return
+            if (portalRef.current?.contains(t)) return
+            commitTyped()
+            setOpen(false)
+        }
+        document.addEventListener('mousedown', handler)
+        return () => document.removeEventListener('mousedown', handler)
+    }, [open, commitTyped])
+
+    const onPaste = useCallback((e: ClipboardEvent<HTMLInputElement>) => {
+        if (!isMultiple || !allowFreeText || disabled) return
+        const text = e.clipboardData.getData('text')
+        if (!/[\n\r\t,]/.test(text)) return
+        e.preventDefault()
+        const { value: current, onChange, maxValues } = props as MultiProps
+        const next = [...current]
+        for (const part of text.split(/[\n\r\t,]+/)) {
+            const v = part.trim()
+            if (!v || next.includes(v)) continue
+            if (typeof maxValues === 'number' && next.length >= maxValues) break
+            next.push(v)
+        }
+        onChange(next)
+        setQuery('')
+    }, [allowFreeText, disabled, isMultiple, props])
+
     // ---------------------------------------------------------------
     // Keyboard navigation
     // ---------------------------------------------------------------
@@ -276,20 +333,25 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
         if (e.key === 'ArrowDown') {
             e.preventDefault()
             if (!open) setOpen(true)
-            setHighlightIndex((i) => Math.min(filteredOptions.length - 1, i + 1))
+            setHighlightIndex((i) => Math.min(rows.length - 1, i + 1))
         } else if (e.key === 'ArrowUp') {
             e.preventDefault()
             setHighlightIndex((i) => Math.max(0, i - 1))
         } else if (e.key === 'Enter') {
             e.preventDefault()
-            const pick = filteredOptions[highlightIndex]
+            const pick = rows[highlightIndex]
             if (pick && !pick.disabled) {
                 commit(pick.value)
-            } else if (allowFreeText && query.trim()) {
-                commit(query.trim())
+            } else if (allowFreeText && typed) {
+                commit(typed)
             }
+        } else if (e.key === 'Tab') {
+            // Moving on keeps what was typed (focus still moves).
+            commitTyped()
+            setOpen(false)
         } else if (e.key === 'Escape') {
             e.preventDefault()
+            setQuery('')
             setOpen(false)
         } else if (e.key === 'Backspace' && isMultiple && query === '') {
             const current = (props as MultiProps).value
@@ -298,8 +360,8 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
             }
         }
     }, [
-        allowFreeText, commit, disabled, filteredOptions, highlightIndex,
-        isMultiple, open, props, query,
+        allowFreeText, commit, commitTyped, disabled, highlightIndex,
+        isMultiple, open, props, query, rows, typed,
     ])
 
     // ---------------------------------------------------------------
@@ -375,6 +437,7 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
                         }}
                         onFocus={() => setOpen(true)}
                         onKeyDown={onKeyDown}
+                        onPaste={onPaste}
                         placeholder={
                             isMultiple && (props as MultiProps).value.length > 0
                                 ? ''
@@ -425,7 +488,7 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
                 portalCoords={portalCoords}
                 portalRef={portalRef}
                 listboxId={listboxId}
-                filteredOptions={filteredOptions}
+                filteredOptions={rows}
                 highlightIndex={highlightIndex}
                 selectedSet={selectedSet}
                 atMax={atMax ?? false}
@@ -611,7 +674,9 @@ function OptionRow({
                 isDisabled && "opacity-50 cursor-not-allowed",
             )}
         >
-            {option.icon ? (
+            {option.freeText ? (
+                <Sparkles className="w-3.5 h-3.5 shrink-0 text-accent-lineage mt-0.5" strokeWidth={2.5} />
+            ) : option.icon ? (
                 <span className="shrink-0 text-accent-lineage mt-0.5">{option.icon}</span>
             ) : null}
             <span className="flex-1 min-w-0">
@@ -623,7 +688,9 @@ function OptionRow({
                             isPicked && "text-accent-lineage font-medium",
                         )}
                     >
-                        {option.label ?? option.value}
+                        {option.freeText ? (
+                            <>Use <span className="font-mono">“{option.value}”</span></>
+                        ) : (option.label ?? option.value)}
                     </span>
                     {typeof option.count === 'number' && (
                         <span className="shrink-0 text-[10px] tabular-nums text-ink-muted">

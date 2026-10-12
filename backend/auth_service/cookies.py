@@ -28,7 +28,8 @@ clusters entirely. With the id unset the names are unchanged.
 ``nx_access_exp`` is scoped too, despite carrying no signature: it decides
 when the client renews, so a sibling deployment writing the same name into
 the same jar leaves each tab scheduling against the other's token. The
-client resolves the suffix from ``environment_id`` on ``GET /auth/me``.
+client resolves the suffix from ``environment_id``, which every response
+that establishes, rotates or heals a session carries.
 
 ``nx_csrf`` is scoped for a different reason again. Sharing its VALUE is
 harmless — the double-submit check only compares it against the header on
@@ -100,10 +101,17 @@ REFRESH_COOKIE_NAME = _scoped(_BASE_REFRESH_COOKIE_NAME)
 # The original objection — JavaScript reads this by name, so a scoped
 # name has to be discovered at runtime, and getting it wrong 403s every
 # POST — is answered the same way ``nx_access_exp`` answers it: the SPA
-# learns the suffix from ``environment_id`` on ``GET /auth/me``, and
-# falls back to the unscoped name until it does. Writes only happen after
-# bootstrap, so the window in which the fallback is load-bearing does not
-# overlap with any write.
+# learns the suffix from ``environment_id``, and falls back to the
+# unscoped name until it does.
+#
+# That answer used to be ``GET /auth/me`` alone, on the premise that
+# writes only happen after bootstrap. They do not: an SSO sign-in that
+# completes on the page (the Enterprise Gateway, a browser-storage
+# portal, an invited signup) never makes that call, and its tab read
+# ``nx_csrf``, found nothing, and sent every write without its token —
+# graph reads included, which are POSTs. So every response that
+# establishes, rotates or heals a session now names the environment —
+# the CSRF heal included, so a repair can always read what it minted.
 CSRF_COOKIE_NAME = _scoped(_BASE_CSRF_COOKIE_NAME)
 # When ``nx_access`` expires, as a unix epoch. Readable by JavaScript,
 # because the browser cannot read the HttpOnly access cookie and so has
@@ -139,9 +147,9 @@ CSRF_COOKIE_NAME = _scoped(_BASE_CSRF_COOKIE_NAME)
 # the whole keepalive exists to prevent.
 #
 # The original objection is real but small: JavaScript reads this by
-# name, so the suffix has to be discovered. ``GET /auth/me`` — the
-# bootstrap call, made before the keepalive can start — returns
-# ``environment_id`` for that. Discovery failing is survivable by
+# name, so the suffix has to be discovered. Every response that
+# establishes or rotates a session returns ``environment_id`` for that
+# (see ``nx_csrf`` above). Discovery failing is survivable by
 # construction: the reader falls back to the unscoped name, and the
 # scheduler already treats "no published expiry" as "probe again in 60s"
 # rather than an error.
@@ -290,6 +298,34 @@ def _warn_if_oversized(token: str) -> None:
     )
 
 
+def set_csrf_cookie(
+    response: Response, csrf_token: str, *, max_age_seconds: int,
+) -> None:
+    """Set only ``nx_csrf`` (environment-scoped), with the exact
+    attributes ``set_session_cookies`` gives it.
+
+    CSRF lifetime follows the REFRESH cookie, not the access cookie: if
+    the two matched, a user whose access cookie just expired would lose
+    the CSRF cookie at the same moment — the next write would 403 on
+    CSRF before the 401-triggered silent refresh could run, forcing a
+    re-login every ``JWT_EXPIRY_MINUTES``. Callers pass the refresh
+    max-age for that reason.
+
+    Exists on its own so ``GET /auth/me`` can heal a session that has
+    lost this one cookie (a sibling deployment's sign-out evicts it
+    across the shared parent domain) without re-minting the whole
+    session.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        max_age=max_age_seconds,
+        httponly=False,
+        path="/",
+        **_common_kwargs(),
+    )
+
+
 def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
     """Attach the four session cookies to *response*. Called by /login and /refresh."""
     common = _common_kwargs()
@@ -310,20 +346,10 @@ def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
         path=REFRESH_COOKIE_PATH,
         **common,
     )
-    # CSRF lifetime follows the refresh cookie, NOT the access cookie.
-    # If the two matched, a user whose access cookie just expired would
-    # lose the CSRF cookie at the same moment — the next write would
-    # 403 on CSRF before the 401-triggered silent refresh could run,
-    # forcing a re-login every ``JWT_EXPIRY_MINUTES``. While refresh is
-    # still valid we want every state-changing request to be able to
-    # mint the double-submit header.
-    response.set_cookie(
-        key=CSRF_COOKIE_NAME,
-        value=tokens.csrf_token,
-        max_age=tokens.refresh_max_age_seconds,
-        httponly=False,
-        path="/",
-        **common,
+    # Why the refresh lifetime: see ``set_csrf_cookie``.
+    set_csrf_cookie(
+        response, tokens.csrf_token,
+        max_age_seconds=tokens.refresh_max_age_seconds,
     )
     # Same reasoning as the CSRF cookie above, for a different reason:
     # this one has to OUTLIVE the access cookie it describes. A tab that

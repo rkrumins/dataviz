@@ -173,7 +173,7 @@ export function ViewActivityTimeline({ viewId }: { viewId: string }) {
                 <div className="py-10 text-center text-sm text-ink-muted">No {channel !== 'all' ? channel : ''} activity{actorId !== 'all' ? ' for this person' : ''}.</div>
             ) : groups.map(group => (
                 <div key={group.day} className="mb-1">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-ink-muted px-1 py-2 sticky top-0 bg-canvas-elevated/95 backdrop-blur-sm z-10">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-ink-muted px-1 py-2 sticky top-0 bg-canvas-elevated z-10">
                         {group.day}
                     </div>
                     <ol className="relative">

@@ -198,7 +198,7 @@ class TestResolveAssignmentNodeLayer:
     def setup_method(self):
         self.engine = AssignmentEngine()
         # Two plain layers, NO rules / entityTypes, so nothing but the node
-        # property (or the layers[0] default) can place a Layer-typed node.
+        # property can place a Layer-typed node.
         self.layers = [
             ViewLayerConfig(id="source", name="Source", color="#111", order=0),
             ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
@@ -230,17 +230,16 @@ class TestResolveAssignmentNodeLayer:
         result = self._resolve(node)
         assert result.layer_id == "transform"
 
-    def test_without_node_layer_falls_back_to_default(self):
-        """No property, no rule -> layers[0] default (unchanged behaviour)."""
+    def test_without_node_layer_or_rule_is_unassigned(self):
+        """No property, no rule -> unassigned (there is no layers[0] default)."""
         node = self._node("urn:plain", "Layer")
-        result = self._resolve(node)
-        assert result.layer_id == "source"
+        assert self._resolve(node) is None
 
-    def test_stale_layer_id_ignored_falls_back_to_default(self):
+    def test_stale_layer_id_is_ignored(self):
         """A property naming a layer that no longer exists must not win."""
         node = self._node("urn:y", "Layer", layer_assignment="deleted-layer")
         result = self._resolve(node)
-        assert result.layer_id == "source"
+        assert result is None
 
     def test_view_config_assignment_outranks_node_property(self):
         """An explicit view-config move (instance) beats a stale node stamp."""
@@ -361,8 +360,8 @@ class TestRequestAssignmentsAndEntityScope:
 
     def test_inherits_children_false_falls_through(self):
         """A parent's explicit assignment with inheritsChildren=False does NOT
-        cascade to its children — they fall through to tiers 3-5 (here, the
-        layers[0] default) instead of inheriting the parent's layer."""
+        cascade to its children — they fall through to tiers 3-4 (here nothing
+        matches, so it is unassigned) instead of inheriting the parent's layer."""
         layers = [
             ViewLayerConfig(id="other", name="Other", color="#222", order=0),
             ViewLayerConfig(id="source", name="Source", color="#111", order=1),
@@ -382,8 +381,7 @@ class TestRequestAssignmentsAndEntityScope:
         result = self.engine._resolve_assignment(
             child, "urn:parent", parent_assignment, index, layers, lsm,
         )
-        assert result.layer_id == "other"  # layers[0] default, NOT inherited "source"
-        assert result.is_inherited is False
+        assert result is None  # NOT inherited "source"
 
     def test_node_hint_ignored_in_curated_scope(self):
         """The node's own persisted layerAssignment hint is only honoured in
@@ -420,9 +418,10 @@ class TestRequestAssignmentsAndEntityScope:
         assert result is None
 
     @pytest.mark.parametrize("scope", [None, "all"])
-    def test_open_scope_default_layer(self, scope):
-        """Existing default behaviour (layers[0] fallback) is unchanged for
-        open scope ('all' or the None/absent default)."""
+    def test_open_scope_unmatched_is_unassigned(self, scope):
+        """Open scope ('all' or the None/absent default) places only by
+        explicit, inherited, node hint or rule; an entity matching none is
+        unassigned — no layers[0] default."""
         layers = [ViewLayerConfig(id="source", name="Source", color="#111", order=0)]
         index = self.engine._build_rule_index(layers)
         lsm = {l.id: i for i, l in enumerate(layers)}
@@ -430,5 +429,4 @@ class TestRequestAssignmentsAndEntityScope:
         result = self.engine._resolve_assignment(
             node, None, None, index, layers, lsm, entity_scope=scope,
         )
-        assert result.layer_id == "source"
-        assert result.confidence == 0.5
+        assert result is None

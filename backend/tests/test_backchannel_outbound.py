@@ -1,0 +1,497 @@
+"""The guarded outbound helper, and the one exception it permits.
+
+``assert_fetchable`` refuses every private address, which is correct for
+IdP *metadata* — that is published on the public internet. It is fatal
+for a back-channel identity gateway, which is on RFC1918 by definition:
+"internal SSO endpoint" is the whole point of the pattern.
+
+So the guard grows an allowlist. The risk that creates is the reason
+most of this file exists: an allowlist that could be talked into
+reaching ``169.254.169.254`` would convert an admin form into
+instance-credential theft. These tests pin the floor that no entry can
+lower, and pin that the relaxation is otherwise exact — one host, one
+port, one address class.
+"""
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from backend.auth_service.providers import outbound
+from backend.auth_service.providers.outbound import (
+    BlockedOutboundRequest,
+    OutboundStatusError,
+    assert_fetchable,
+    host_port_key,
+    request_json,
+)
+
+
+# ── the allowlist key ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://gw.corp.internal/x",      "gw.corp.internal:443"),
+    ("https://GW.Corp.Internal/x",      "gw.corp.internal:443"),
+    ("https://gw.corp.internal./x",     "gw.corp.internal:443"),
+    ("https://gw.corp.internal:443/x",  "gw.corp.internal:443"),
+    ("https://gw.corp.internal:8443/x", "gw.corp.internal:8443"),
+    ("http://gw.corp.internal/x",       "gw.corp.internal:80"),
+])
+def test_the_key_is_normalised_and_the_port_is_always_explicit(url, expected):
+    """Case, a trailing root dot, and an implicit port are all the same
+    entry — an operator should not have to guess which spelling the
+    form wants."""
+    assert host_port_key(url) == expected
+
+
+# ── what the allowlist unlocks ───────────────────────────────────────
+
+PRIVATE = "https://10.0.0.5/authenticate"
+
+
+def test_a_private_address_is_still_refused_by_default():
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable(PRIVATE)
+
+
+def test_the_allowlist_permits_exactly_that_host_and_port():
+    assert_fetchable(PRIVATE, allow_hosts={"10.0.0.5:443"})  # no raise
+
+
+def test_a_different_port_on_an_allowed_host_is_refused():
+    """The entry names a service, not a machine. Allowing the gateway
+    on 443 must not also allow Redis on 6379 on the same box."""
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable("https://10.0.0.5:6379/x", allow_hosts={"10.0.0.5:443"})
+
+
+def test_an_entry_for_a_different_host_does_not_carry_over():
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable(PRIVATE, allow_hosts={"10.0.0.6:443"})
+
+
+def test_entries_are_matched_case_insensitively():
+    assert_fetchable(
+        "https://10.0.0.5/x", allow_hosts={"  10.0.0.5:443  "},
+    )  # no raise
+
+
+# ── the floor no entry can lower ─────────────────────────────────────
+
+NEVER = [
+    # The one that matters: cloud metadata. Reaching this is not
+    # information disclosure, it is instance credentials.
+    "https://169.254.169.254/latest/meta-data/",
+    # The IPv4-mapped IPv6 spelling of the same destination.
+    "https://[::ffff:169.254.169.254]/latest/meta-data/",
+    # Our own process: Redis, debug ports, internal endpoints.
+    "https://127.0.0.1/x",
+    "https://[::1]/x",
+    # Not a destination at all.
+    "https://0.0.0.0/x",
+    "https://[ff02::1]/x",
+]
+
+
+@pytest.mark.parametrize("url", NEVER)
+def test_these_are_refused_even_when_explicitly_allowlisted(url):
+    """The whole security argument for a UI-editable allowlist rests on
+    this test. An operator can permit their internal gateway; they
+    cannot permit the metadata service, whatever they type in the form.
+    """
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable(url, allow_hosts={host_port_key(url)})
+
+
+def test_plain_http_in_production_is_refused_even_when_allowlisted(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable("http://10.0.0.5/x", allow_hosts={"10.0.0.5:80"})
+
+
+def test_a_non_http_scheme_is_refused_even_when_allowlisted():
+    with pytest.raises(BlockedOutboundRequest):
+        assert_fetchable("file:///etc/passwd", allow_hosts={":443"})
+
+
+# ── request_json ─────────────────────────────────────────────────────
+
+URL = "https://sso.example.com/gateway"
+
+
+#: Captured before any monkeypatching. ``outbound.httpx`` IS the global
+#: ``httpx`` module, so patching ``AsyncClient`` through it also rebinds
+#: the name this helper would otherwise call — and the factory would
+#: recurse into itself instead of building a client.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _mock_client(handler):
+    """Swap the helper's client for one wired to a MockTransport,
+    preserving the kwargs the helper passes (timeout, redirects off)."""
+    def _make(**kwargs):
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_a_json_body_comes_back_parsed(monkeypatch):
+    def handler(request):
+        assert request.method == "POST"
+        assert request.headers["x-app-id"] == "app-1"
+        return httpx.Response(200, json={"token": "abc"})
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _mock_client(handler))
+    got = await request_json(
+        URL, json_body={"session": "xyz"},
+        headers={"x-app-id": "app-1"}, timeout=2.0,
+    )
+    assert got == {"token": "abc"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_a_redirect_is_an_error_not_a_hop(monkeypatch, status):
+    """Following one would defeat the pre-flight address check
+    entirely: the check ran against the first URL, the request lands on
+    the second."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(
+            status, headers={"location": "http://169.254.169.254/"},
+        )),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="redirect"):
+        await request_json(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502, 503])
+async def test_a_failure_status_fails_closed(monkeypatch, status):
+    """And carries the code, which the liveness check reads to tell
+    "the IdP revoked this session" from "the IdP is having an
+    outage"."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(status, json={"error": "nope"})),
+    )
+    with pytest.raises(OutboundStatusError) as err:
+        await request_json(URL, timeout=2.0)
+    assert err.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_response_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=b"x" * 5000)),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="cap"):
+        await request_json(URL, timeout=2.0, max_bytes=1024)
+
+
+@pytest.mark.asyncio
+async def test_a_non_json_response_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=b"<html>hi</html>")),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="valid JSON"):
+        await request_json(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_the_response_body_never_reaches_the_error_message(monkeypatch):
+    """These errors surface to an administrator. A helper that echoed
+    what an internal address replied would hand back exactly the
+    capability the address check exists to withhold.
+    """
+    secret = "SUPER-SECRET-INTERNAL-DETAIL"
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(500, content=secret.encode())),
+    )
+    with pytest.raises(OutboundStatusError) as err:
+        await request_json(URL, timeout=2.0)
+    assert secret not in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_the_destination_is_checked_before_the_request_is_made(monkeypatch):
+    """The pre-flight check is the point: an SSRF's value is often the
+    side effect, not the response, so a request that gets sent and then
+    judged has already done the damage."""
+    sent = []
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: sent.append(r) or httpx.Response(200, json={})),
+    )
+    with pytest.raises(BlockedOutboundRequest):
+        await request_json("https://169.254.169.254/x", timeout=2.0)
+    assert sent == []
+
+
+# ── accept_jwt: the one widened refusal ──────────────────────────────
+
+_JWS = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJlbXAtMSJ9.c2ln"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_jwt_body_passes_when_the_caller_expects_one(monkeypatch):
+    """A token-translation endpoint that answers with the token as the
+    whole body — text/plain, not JSON. The caller says it expects that
+    shape; nothing else about the transport rules changes."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(
+            200, content=_JWS.encode(),
+            headers={"content-type": "application/jwt"},
+        )),
+    )
+    got = await request_json(URL, timeout=2.0, accept_jwt=True)
+    assert got == _JWS
+
+
+@pytest.mark.asyncio
+async def test_a_bare_jwt_body_is_still_refused_without_the_flag(monkeypatch):
+    """The default stays strict: a caller that expects JSON gets the
+    same refusal it always did, whatever the body looks like."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=_JWS.encode())),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="valid JSON"):
+        await request_json(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_accept_jwt_does_not_admit_arbitrary_text(monkeypatch):
+    """The flag widens the refusal for exactly one shape. HTML — an SSO
+    portal's login page, say — is still an error, not a token."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=b"<html>hi</html>")),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="valid JSON"):
+        await request_json(URL, timeout=2.0, accept_jwt=True)
+
+
+@pytest.mark.asyncio
+async def test_a_json_wrapped_jwt_needs_no_flag(monkeypatch):
+    """`{"access_token": "<jws>"}` is just JSON with a string in it; the
+    caller resolves a path to it. The flag exists only for the bare-body
+    shape."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, json={"access_token": _JWS})),
+    )
+    got = await request_json(URL, timeout=2.0)
+    assert got == {"access_token": _JWS}
+
+
+# ── fetch_jwks: the key set, guarded like everything else ────────────
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_returns_the_document(monkeypatch):
+    def handler(request):
+        assert request.method == "GET"
+        return httpx.Response(200, json={"keys": [{"kid": "a", "kty": "RSA"}]})
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _mock_client(handler))
+    doc = await outbound.fetch_jwks(URL, timeout=2.0)
+    assert doc["keys"][0]["kid"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_refuses_a_non_jwks_answer(monkeypatch):
+    """An object without a `keys` array is not a key set, whatever else
+    it is. Refusing here beats handing PyJWT a shape it half-tolerates."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, json={"nope": True})),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="JWKS"):
+        await outbound.fetch_jwks(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_goes_through_the_destination_guard(monkeypatch):
+    """The key set decides which signatures verify. This is the fetch
+    PyJWKClient would have made unguarded — the reason fetch_jwks
+    exists is that it must not be."""
+    sent = []
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: sent.append(r) or httpx.Response(200, json={"keys": []})),
+    )
+    with pytest.raises(BlockedOutboundRequest):
+        await outbound.fetch_jwks("https://169.254.169.254/jwks", timeout=2.0)
+    assert sent == []
+
+
+# ── outbound TLS trust ───────────────────────────────────────────────
+#
+# ``resolve_outbound_verify`` decides what ``verify=`` every outbound
+# client gets: an explicit per-call override, else the deployment CA
+# bundle named by SSO_OUTBOUND_TLS_CA_CERTS, else full verification
+# against the system store. A bundle that cannot be loaded FAILS
+# CLOSED to True — the strictest posture — with an ERROR naming the
+# fix; never to False.
+
+import ssl as _ssl
+
+import certifi
+
+from backend.auth_service.providers.outbound import resolve_outbound_verify
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_bundle(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+
+
+def test_verify_defaults_to_full_verification():
+    assert resolve_outbound_verify() is True
+
+
+def test_the_env_bundle_becomes_an_ssl_context(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert isinstance(resolve_outbound_verify(), _ssl.SSLContext)
+
+
+def test_a_file_uri_is_tolerated(monkeypatch):
+    # GCP tooling hands paths around as file: URIs; this bit the Redis
+    # TLS family once already, and the same normaliser is reused here.
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", "file://" + certifi.where())
+    assert isinstance(resolve_outbound_verify(), _ssl.SSLContext)
+
+
+def test_a_missing_bundle_fails_closed_to_true(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", str(tmp_path / "nope.pem"))
+    with caplog.at_level("ERROR"):
+        assert resolve_outbound_verify() is True
+    assert "SSO_OUTBOUND_TLS_CA_CERTS" in caplog.text
+    assert "nope.pem" in caplog.text
+
+
+def test_an_unparseable_bundle_fails_closed_to_true(monkeypatch, tmp_path, caplog):
+    bad = tmp_path / "bad.pem"
+    bad.write_bytes(b"not a pem")
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", str(bad))
+    with caplog.at_level("ERROR"):
+        assert resolve_outbound_verify() is True
+
+
+def test_an_explicit_override_wins_over_the_env(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert resolve_outbound_verify(False) is False
+    assert resolve_outbound_verify(True) is True
+
+
+def test_the_context_is_cached_per_path(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert resolve_outbound_verify() is resolve_outbound_verify()
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_constructed_with_the_resolved_verify(monkeypatch):
+    captured: dict = {}
+
+    def handler(request):
+        return httpx.Response(200, json={"ok": True})
+
+    def _make(**kwargs):
+        captured.update(kwargs)
+        kwargs.pop("verify", None)
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    await request_json(URL, method="GET", timeout=2.0)
+    assert isinstance(captured["verify"], _ssl.SSLContext)
+
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS")
+    await request_json(URL, method="GET", timeout=2.0)
+    assert captured["verify"] is True
+
+
+# ── naming a TLS trust failure ───────────────────────────────────────
+
+from backend.auth_service.providers.outbound import is_tls_verification_failure
+
+
+def test_a_wrapped_ssl_verification_error_is_recognised():
+    inner = _ssl.SSLCertVerificationError(1, "certificate verify failed")
+    try:
+        try:
+            raise inner
+        except _ssl.SSLCertVerificationError as caught:
+            raise httpx.ConnectError("boom") from caught
+    except httpx.ConnectError as wrapped:
+        assert is_tls_verification_failure(wrapped) is True
+
+
+def test_a_message_only_form_is_recognised():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+                           "verify failed: unable to get local issuer "
+                           "certificate"),
+    ) is True
+
+
+def test_an_unrelated_error_is_not():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("connection refused"),
+    ) is False
+
+
+# ── a slow resolver never stalls the worker ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_slow_dns_lookup_does_not_freeze_the_event_loop(monkeypatch):
+    """The address check resolves the gateway's name before every call —
+    the liveness check included, once per active session per access
+    lifetime. ``socket.getaddrinfo`` blocks, and it ran on the event loop:
+    a slow corporate resolver froze every request on that worker, which
+    users see as every page "taking longer than usual". It runs off the
+    loop now, so everything else keeps being served while it waits."""
+    import asyncio
+    import socket
+    import time as _time
+
+    real = socket.getaddrinfo
+
+    def _slow(host, *args, **kwargs):
+        _time.sleep(0.3)
+        return real("127.0.0.1", *args, **kwargs) if host != "gw.example" else [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ]
+
+    monkeypatch.setattr(outbound.socket, "getaddrinfo", _slow)
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda request: httpx.Response(200, json={"ok": True})),
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    beat = asyncio.create_task(_heartbeat())
+    try:
+        await request_json("https://gw.example/userinfo", timeout=2.0)
+    finally:
+        beat.cancel()
+
+    # 0.3s of lookup at a 20ms heartbeat: a frozen loop manages ~0.
+    assert ticks >= 5, ticks

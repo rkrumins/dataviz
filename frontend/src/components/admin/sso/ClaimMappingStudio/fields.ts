@@ -61,11 +61,15 @@ export const FIELDS: MappingField[] = [
     },
     {
         key: 'groups', label: 'Groups',
-        hint: 'Feeds the IdP-group → role / internal-group mappings. Accepts a list, or a comma-separated string.',
+        hint: 'Feeds the IdP-group → role / internal-group mappings on the Access mapping tab. Accepts a list, or a comma-separated string. Nested keys use dots — entitlements.groups is already a default.',
     },
     {
         key: 'auth_time', label: 'Auth time',
         hint: 'Epoch seconds. Drives the 24h SSO re-authentication ceiling.',
+    },
+    {
+        key: 'avatar_url', label: 'Avatar', managed: true,
+        hint: 'A profile-picture URL. Fetched by the server at sign-in and re-served from here — participates only while the connection’s "Map their avatar" toggle is on.',
     },
 ]
 

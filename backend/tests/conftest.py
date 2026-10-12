@@ -190,6 +190,24 @@ def _feature_flags_at_their_defaults():
 
 
 @pytest.fixture(autouse=True)
+def _reset_replica_penalty_box():
+    """Clear the process-global replica penalty box between tests.
+
+    The box is keyed by endpoint and shared across every provider in the
+    process (see ``_penalise_replica``), which is what makes one bad node
+    cost the fleet one read rather than one read per data source. The same
+    sharing means a test that benches a replica benches it for every test
+    that follows in the same worker — the file that pins the penalty
+    deliberately benches BOTH replicas of its shard, so without this every
+    later test in it sees a shard with no usable replica."""
+    from backend.app.providers.falkordb_provider import _REPLICA_PENALTY_BOX
+
+    _REPLICA_PENALTY_BOX.clear()
+    yield
+    _REPLICA_PENALTY_BOX.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_revocation_backend():
     """Clear the process-global in-memory revocation set between tests.
 
@@ -217,6 +235,18 @@ def signup_enabled():
     in the cache — the same path a gate reads in production (see
     ``_feature_flags_at_their_defaults`` above and ``test_feature_gates._prime``)."""
     feature_flags._cache = {**(feature_flags._cache or {}), "signupEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    yield
+
+
+@pytest.fixture()
+def view_portability_enabled():
+    """Turn the view versions, import and export preview ON for a test.
+
+    It is an experimental flag, so it ships OFF, and every ``/views/transfer`` and
+    ``/views/{id}/versions`` route answers to it before anything else. Primed in the cache,
+    like ``signup_enabled`` above."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "viewPortabilityEnabled": True}
     feature_flags._cache_ts = time.monotonic()
     yield
 

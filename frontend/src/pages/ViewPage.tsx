@@ -57,8 +57,8 @@ export function ViewPage() {
   // ─── Error state ────────────────────────────────────────────────────
   if (status === 'error') {
     return (
-      <div className="absolute inset-0 flex items-center justify-center bg-canvas/80 backdrop-blur-sm">
-        <div className="flex flex-col items-center gap-4 max-w-md text-center px-6">
+      <div className="absolute inset-0 flex overflow-y-auto py-6 bg-canvas/80 backdrop-blur-sm">
+        <div className="m-auto flex flex-col items-center gap-4 max-w-md text-center px-6">
           <div className="w-14 h-14 rounded-2xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center">
             <AlertTriangle className="w-7 h-7 text-red-500" />
           </div>
@@ -91,8 +91,8 @@ export function ViewPage() {
 
       {/* Health warning overlay for broken views */}
       {status === 'ready' && healthWarning && (
-        <div className="absolute inset-0 flex items-center justify-center bg-canvas/80 backdrop-blur-sm z-30">
-          <div className="flex flex-col items-center gap-4 max-w-md text-center px-6">
+        <div className="absolute inset-0 flex overflow-y-auto py-6 bg-canvas/80 backdrop-blur-sm z-30">
+          <div className="m-auto flex flex-col items-center gap-4 max-w-md text-center px-6">
             <div className="w-14 h-14 rounded-2xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 flex items-center justify-center">
               <AlertTriangle className="w-7 h-7 text-red-500" />
             </div>

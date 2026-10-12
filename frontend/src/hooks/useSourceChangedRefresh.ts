@@ -1,6 +1,15 @@
 import { useEffect } from 'react'
+import { withJitter } from '@/config/polling'
 import { aggregationService } from '@/services/aggregationService'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+
+/**
+ * After three consecutive failures the poll drops to this floor rather than
+ * stopping for the life of the canvas. It used to stop dead, which left the
+ * blue "lineage is being recomputed" banner asserting a rebuild that had
+ * very likely finished — with nothing left running to clear it.
+ */
+const AFTER_ERRORS_MS = 5 * 60_000
 
 /**
  * Self-refresh the canvas after a source-changed rebuild completes.
@@ -31,15 +40,14 @@ export function useSourceChangedRefresh(
     let cancelled = false
     let prevReady: boolean | undefined
     let consecutiveErrors = 0
-    let poll: ReturnType<typeof setInterval> | undefined
-    const stop = () => {
-      if (poll) {
-        clearInterval(poll)
-        poll = undefined
-      }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const arm = (baseMs: number) => {
+      if (cancelled) return
+      timer = setTimeout(check, withJitter(baseMs))
     }
 
     const check = async () => {
+      if (cancelled) return
       try {
         const res = await aggregationService.getReadiness(dataSourceId)
         consecutiveErrors = 0
@@ -50,19 +58,27 @@ export function useSourceChangedRefresh(
         prevReady = res.isReady
         // A failed rebuild is terminal until the reconciler/user acts — the
         // banner honestly stays; stop the poll rather than spin on it.
-        if (res.aggregationStatus === 'failed') stop()
+        if (res.aggregationStatus === 'failed') return
+        arm(pollMs)
       } catch {
-        // Backend unreachable — stop after a few misses so we don't hammer;
-        // a later stale response re-arms this effect (deps change).
-        if (++consecutiveErrors >= 3) stop()
+        // Backend unreachable. Back off hard after a few misses rather than
+        // hammer — but keep a slow, jittered ask alive: this loop is the only
+        // thing that takes the "recomputing" banner down, and stopping for
+        // good left it asserting a rebuild that had already finished.
+        if (cancelled) return
+        if (++consecutiveErrors >= 3) {
+          consecutiveErrors = 0
+          arm(AFTER_ERRORS_MS)
+          return
+        }
+        arm(pollMs)
       }
     }
 
     void check()
-    poll = setInterval(check, pollMs)
     return () => {
       cancelled = true
-      stop()
+      if (timer) clearTimeout(timer)
     }
   }, [dataSourceId, staleReason, pollMs])
 }

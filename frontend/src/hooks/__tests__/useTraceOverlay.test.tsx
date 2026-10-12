@@ -14,8 +14,8 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTraceOverlay, FOCUS_AUTO_OPEN_MAX, type UseTraceOverlayArgs } from '../useTraceOverlay'
 import type { TraceView } from '../lib/traceViewModel'
-import { cfoEstate, rootsNodeEstate, tableEstate } from '@/test/fixtures/traceEstates'
-import { emptyWalkModel, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
+import { cfoEstate, rootsNodeEstate, tableEstate, twoSeedEstate } from '@/test/fixtures/traceEstates'
+import { emptyWalkModel, unionWalkModels, type LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import { countTest, expectTestsRan } from '@/test/canary'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -61,7 +61,7 @@ const grownModel = (): LensWalkModel => {
 }
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(32))
+afterAll(() => expectTestsRan(35))
 
 describe('useTraceOverlay — the seed', () => {
   it('opens the focus chain and leaves the direct partners visible and CLOSED', () => {
@@ -571,5 +571,63 @@ describe('useTraceOverlay — restoreExpansion', () => {
 
     rerender(args())
     expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
+  })
+})
+
+/**
+ * A COMBINED TRACE (a multi-selection): every seed gets the seed a one-seed
+ * trace of it would get, and the overlay is live the moment ANY seed's walk
+ * holds it. The state stays keyed by the PRIMARY seed, so narrowing the trace
+ * to fewer seeds is not a new trace — the reader's expansion survives it.
+ */
+describe('useTraceOverlay — several seeds', () => {
+  const two = twoSeedEstate()
+  const multi = (over: Partial<UseTraceOverlayArgs> = {}) => args({
+    model: two.model, focusUrn: 'orders', focusUrns: ['orders', 'sales'], layers: two.layers, assignments: two.assignments, ...over,
+  })
+
+  it('opens every seed’s chain and the hosts above every seed’s partners', () => {
+    const { result } = renderHook(() => useTraceOverlay(multi()))
+    expect(result.current.active).toBe(true)
+    expect([...result.current.traceExpansion].sort()).toEqual(['BI', 'CRM', 'FIN', 'MART', 'RAW', 'orders', 'sales'])
+    for (const id of ['orders.amt', 'sales.amt', 'ledger', 'dash', 'crm']) expect(result.current.view!.visible.has(id)).toBe(true)
+    expect(cardOf(result.current.view, 'sales')!.role).toBe('focus')
+    // The partners stay closed, as with one seed.
+    expect(cardOf(result.current.view, 'dash')!.expanded).toBe(false)
+
+    // The first seed alone opens only its own way in.
+    const single = renderHook(() => useTraceOverlay(multi({ focusUrns: undefined })))
+    expect([...single.result.current.traceExpansion].sort()).toEqual(['FIN', 'RAW', 'orders'])
+  })
+
+  it('goes live when only the SECOND seed has landed, and opens the first when it lands', () => {
+    // What the walk hook's union looks like while seed 1 is still loading.
+    const onlySecond = unionWalkModels([emptyWalkModel('orders'), two.modelB])!
+    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: multi({ model: onlySecond }) })
+    expect(result.current.active).toBe(true)
+    expect(cardOf(result.current.view, 'sales')!.role).toBe('focus')
+    expect([...result.current.traceExpansion].sort()).toEqual(['BI', 'CRM', 'MART', 'orders', 'sales'])
+
+    rerender(multi())
+    expect([...result.current.traceExpansion].sort()).toEqual(['BI', 'CRM', 'FIN', 'MART', 'RAW', 'orders', 'sales'])
+
+    // Keyed on the first seed alone, the same frame drew nothing at all.
+    const single = renderHook(() => useTraceOverlay(multi({ model: onlySecond, focusUrns: undefined })))
+    expect(single.result.current.active).toBe(false)
+  })
+
+  it('removing a seed other than the primary keeps the reader’s expansion', () => {
+    const { result, rerender } = renderHook((a: UseTraceOverlayArgs) => useTraceOverlay(a), { initialProps: multi() })
+    act(() => result.current.toggle('ledger'))   // opened by the reader
+    act(() => result.current.toggle('RAW'))      // shut by the reader
+    const before = [...result.current.traceExpansion].sort()
+
+    // What the walk hook hands back once seed 2 is dropped: seed 1's own model.
+    rerender(multi({ model: two.modelA, focusUrns: ['orders'] }))
+    expect([...result.current.traceExpansion].sort()).toEqual(before)
+    expect(result.current.traceExpansion.has('ledger')).toBe(true)
+    expect(result.current.traceExpansion.has('RAW')).toBe(false)
+    expect(cardOf(result.current.view, 'sales')).toBeUndefined()
+    expect(result.current.view!.visible.has('ledger.amt')).toBe(true)
   })
 })

@@ -33,9 +33,42 @@
  *   rowCount > 1000                → property rowCount gt 1000
  *   rowCount=42  / rowCount:42     → property rowCount eq 42
  *   rowCount != 0                  → property rowCount neq 0
+ *   owner CONTAINS "fin"           → property owner contains "fin"
+ *   owner STARTS WITH fin          → property owner startsWith "fin"
+ *   owner ENDS WITH team           → property owner endsWith "team"
+ *   tier IN (gold, silver)         → property tier in [gold, silver]
+ *   tier NOT IN (bronze)           → property tier notIn [bronze]
+ *   rows BETWEEN (10, 20)          → property rows between [10, 20]
+ *   rows BETWEEN 10 AND 20         → the same
+ *   "Asset Owner" = Bob            → a key with spaces is quoted
+ *   owner NOT CONTAINS "test"      → property owner notContains "test"
+ *   labels CONTAINS ALL (pii, gold) → property labels containsAll [pii, gold]
+ *   owner IS SET / IS NOT SET      → property owner isSet / isNotSet
+ *   notes IS EMPTY / IS NOT EMPTY  → property notes isEmpty / isNotEmpty
+ *   updated WITHIN LAST 30 DAYS    → property updated withinLast "P30D"
+ *   updated WITHIN LAST PT12H      → any ISO 8601 duration
+ *   has:owner* / has:*owner*       → hasProperty by name: starts with / contains
+ *
+ * A comparison may end with suffixes that keep a row's meaning exactly:
+ *   … AS NUMBER | TEXT | BOOLEAN | DATE → the type it compares as
+ *                                        (written only when the value alone
+ *                                        would read as another type)
+ *   … MATCH CASE                        → case-sensitive text
+ *   … INCLUDING MISSING                 → ≠ / NOT IN / NOT CONTAINS also
+ *                                        match entities without the key
+ *
+ * A value that must stay TEXT but reads like a number, boolean or null
+ * ("15", "007", "true") is written quoted, and a quoted value is always
+ * text — so Code mode round-trips a property's type, not just its digits.
+ * An unquoted integer too long for a double stays its exact digits.
  *   noUpstream / noUpstreamLineage → isRoot edgeClass=lineage
  *   noDownstream                   → isLeaf edgeClass=lineage
  *   noLineage                      → isOrphan edgeClass=lineage
+ *
+ * A condition the words above can't spell exactly — within N hops, a path, a
+ * depth-bounded descendantOf, a case-sensitive or exact text match… — is
+ * written as its own JSON, `{"kind": "withinHops", …}`, and read back as it
+ * is: Code mode never changes a condition it shows.
  *
  * Examples:
  *
@@ -58,8 +91,14 @@ import type {
     GroupPredicate,
     TextTarget,
     PropertyOp,
+    PropertyPredicate,
     EdgeClass,
 } from '@/types/search'
+import { OPERATOR_TABLE } from '@/types/generated/searchOperators'
+
+import { arityOf, autoTypeOf, isNegative, predicateType } from '../typed/operators'
+import { type DurationUnit, parseDuration, toDuration } from '../typed/valueCodec'
+import type { ValueType } from '../typed/valueTypes'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
@@ -153,26 +192,97 @@ function formatExpr(p: Predicate, isTopLevel: boolean): string {
 }
 
 
+/** One condition as DSL: the first spelling that reads back as this very
+ *  condition, or — when none does — the condition itself as JSON, which
+ *  always does. A `[withinHops]` once came back as a name search. */
 function formatAtom(c: Predicate): string {
+    for (const spelling of spellings(c)) {
+        const back = parsePredicate(spelling)
+        if (!back.error && back.predicate && meaning(back.predicate) === meaning(c)) return spelling
+    }
+    return JSON.stringify(c)
+}
+
+
+const TEXT_FIELD: Partial<Record<TextTarget, string>> = {
+    name: 'name', qualifiedName: 'qname', description: 'description', tags: 'tags',
+}
+const TEXT_VERB: Record<string, string> = {
+    substring: 'CONTAINS', prefix: 'STARTS WITH', suffix: 'ENDS WITH',
+}
+
+
+/** The ways the words can write ``c``, plainest first. */
+function spellings(c: Predicate): string[] {
     switch (c.kind) {
         case 'text': {
             const target: TextTarget = (c.target ?? 'name') as TextTarget
-            // Bareword shortcut: substring/name/case-insensitive → raw word
-            if (target === 'name'
-                && (c.match ?? 'substring') === 'substring'
-                && !c.caseSensitive
-            ) {
-                if (!needsQuotes(c.value)) return c.value
-                return `"${c.value}"`
-            }
-            const value = needsQuotes(c.value) ? `"${c.value}"` : c.value
-            if (target === 'name') return `name CONTAINS ${value}`
-            if (target === 'qualifiedName') return `qname:${value}`
-            if (target === 'description') return `description:${value}`
-            if (target === 'tags') return `tag:${value}`
-            if (target === 'any') return value
-            return `${target}:${value}`
+            const match = c.match ?? 'substring'
+            const out: string[] = []
+            // A bare or quoted word is a case-insensitive name search.
+            if (target === 'name' && match === 'substring') out.push(c.value, `"${c.value}"`)
+            if (target === 'qualifiedName' && match === 'substring') out.push(`qname:${c.value}`)
+            if (target === 'description' && match === 'substring') out.push(`description:${c.value}`)
+            const field = TEXT_FIELD[target]
+            const verb = TEXT_VERB[match]
+            if (field && verb) out.push(`${field} ${verb} ${c.value}`, `${field} ${verb} "${c.value}"`)
+            return out
         }
+        default: {
+            const one = spelling(c)
+            return one === null ? [] : [one]
+        }
+    }
+}
+
+
+/** A condition's meaning: every default spelled out, a comparison as the
+ *  server compares it — two ways of writing one condition compare equal. */
+function meaning(p: Predicate): string {
+    switch (p.kind) {
+        case 'text':
+            return stable(['text', p.value, p.target ?? 'name', p.match ?? 'substring',
+                !!p.caseSensitive, p.boost ?? 1, p.propertyKey ?? null])
+        case 'tag':
+            return stable(['tag', p.op ?? 'hasAny', p.values])
+        case 'entityType':
+            return stable(['entityType', p.op ?? 'in', p.values])
+        case 'hasProperty':
+            return stable(['hasProperty', p.key, p.keyMatch ?? 'exact', !!p.negate])
+        case 'isRoot': case 'isLeaf': case 'isOrphan': case 'hasIncoming': case 'hasOutgoing':
+            return stable([p.kind, p.edgeClass ?? DEFAULT_EDGE_CLASS, p.edgeTypes ?? null])
+        case 'property': {
+            const op = p.op ?? 'eq'
+            const arity = arityOf(op)
+            return stable(['property', p.key, op,
+                arity === 'none' ? null : arity === 'duration' ? String(p.value).toUpperCase() : p.value,
+                arity === 'none' || OPERATOR_TABLE[op].types.length === 1 ? null : predicateType(p),
+                arity !== 'none' && !!p.caseSensitive, isNegative(op) && !!p.includeMissing])
+        }
+        case 'group': {
+            // `not has:x` reads back as NOT around the name test.
+            const only = p.children.length === 1 ? p.children[0] : null
+            if (p.op === 'not' && only?.kind === 'hasProperty') {
+                return meaning({ ...only, negate: !only.negate })
+            }
+            return stable(p)
+        }
+        default:
+            return stable(p)
+    }
+}
+
+
+/** JSON with keys in order and undefined fields dropped. */
+function stable(v: unknown): string {
+    return JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x)
+        ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x))
+}
+
+
+/** The one way the words write a condition that isn't text, or null. */
+function spelling(c: Predicate): string | null {
+    switch (c.kind) {
         case 'entityType': {
             const verb = c.op === 'notIn' ? 'type NOT IN' : 'type:'
             if (verb.endsWith(':')) return `type:${c.values.join(',')}`
@@ -188,13 +298,14 @@ function formatAtom(c: Predicate): string {
             return needsQuotes(c.layerAssignment)
                 ? `layer="${c.layerAssignment}"`
                 : `layer:${c.layerAssignment}`
-        case 'hasProperty':
-            return c.negate ? `not has:${c.key}` : `hasProperty:${c.key}`
+        case 'hasProperty': {
+            const name = c.keyMatch === 'prefix' ? `${c.key}*`
+                : c.keyMatch === 'contains' ? `*${c.key}*` : c.key
+            return c.negate ? `not has:${name}` : `hasProperty:${name}`
+        }
         case 'property': {
-            const op = c.op ?? 'eq'
-            const opStr = PROP_OP_STR[op]
-            const val = formatScalar(c.value)
-            return `${c.key} ${opStr} ${val}`
+            const key = needsQuotes(c.key) ? `"${c.key}"` : c.key
+            return `${key} ${formatComparison(c)}${formatSuffixes(c)}`
         }
         case 'isRoot':       return 'noUpstream'
         case 'isLeaf':       return 'noDownstream'
@@ -204,13 +315,13 @@ function formatAtom(c: Predicate): string {
         case 'descendantOf': {
             // URNs always contain `:`, so quote unconditionally — the
             // prefix lexer would otherwise misread `urn:foo:bar` as a
-            // `urn:` prefixed token. maxDepth (rare; UI never sets it)
-            // is lossy in DSL — preserve via JSON view if needed.
+            // `urn:` prefixed token. One with a maxDepth doesn't read back
+            // from this, so it is written as JSON (``formatAtom``).
             const quoted = c.urns.map((u) => `"${u}"`).join(', ')
             return `descendantOf IN (${quoted})`
         }
         default:
-            return `[${(c as { kind?: string }).kind ?? 'unknown'}]`
+            return null
     }
 }
 
@@ -229,6 +340,7 @@ const enum TokenKind {
     AndKw = 'and',
     OrKw = 'or',
     NotKw = 'not',
+    Json = 'json',           // {…}: a condition written as its own JSON
 }
 
 interface Token {
@@ -257,6 +369,14 @@ function lex(input: string): Token[] {
                 raw: input.slice(i, close + 1),
             })
             i = close + 1
+            continue
+        }
+        if (ch === '{') {
+            // A condition as JSON: to its matching brace, strings and all.
+            const end = jsonEnd(input, i)
+            const text = input.slice(i, end)
+            out.push({ kind: TokenKind.Json, text, raw: text })
+            i = end
             continue
         }
         if (ch === '(' || ch === ')' || ch === ',') {
@@ -320,6 +440,29 @@ function lex(input: string): Token[] {
         }
     }
     return out
+}
+
+
+/** Just past the ``}`` closing the JSON object that opens at ``start`` —
+ *  or the input's end, when nothing closes it (the parser then refuses it). */
+function jsonEnd(input: string, start: number): number {
+    let depth = 0
+    let inString = false
+    for (let i = start; i < input.length; i += 1) {
+        const c = input[i]
+        if (inString) {
+            if (c === '\\') i += 1
+            else if (c === '"') inString = false
+        } else if (c === '"') {
+            inString = true
+        } else if (c === '{' || c === '[') {
+            depth += 1
+        } else if (c === '}' || c === ']') {
+            depth -= 1
+            if (depth === 0) return i + 1
+        }
+    }
+    return input.length
 }
 
 
@@ -436,6 +579,23 @@ class Parser {
     parsePredicateToken(): Predicate {
         const t = this.consume()
 
+        // 0) A condition written as its own JSON — read back as it is, or
+        //    refused: never searched for as a name.
+        if (t.kind === TokenKind.Json) {
+            let value: unknown
+            try {
+                value = JSON.parse(t.text)
+            } catch {
+                value = null
+            }
+            const kind = (value as { kind?: unknown } | null)?.kind
+            if (!value || typeof value !== 'object' || Array.isArray(value) || typeof kind !== 'string') {
+                throw new Error(`Not a condition: ${t.raw}`)
+            }
+            this.recognized.push(kind)
+            return value as Predicate
+        }
+
         // 1) boolean-shaped bareword (noUpstream, etc.)
         if (t.kind === TokenKind.Word) {
             const bool = matchBooleanToken(t.text)
@@ -445,34 +605,55 @@ class Parser {
             }
         }
 
-        // 2) `lhs CONTAINS rhs` — three tokens
-        if (t.kind === TokenKind.Word) {
-            const containsT = this.peek()
-            if (containsT?.kind === TokenKind.Word && containsT.text.toUpperCase() === 'CONTAINS') {
-                const target = lhsToTextTarget(t.text)
-                if (target) {
-                    this.consume()  // CONTAINS
-                    const rhs = this.consume()
-                    const value = (rhs.kind === TokenKind.Quoted ? rhs.text : rhs.text).trim()
-                    if (value) {
-                        this.recognized.push(`${t.text} CONTAINS ${rhs.raw}`)
-                        return makeTextPredicate(target, value)
-                    }
-                }
-            }
+        // 2a) `key IS [NOT] SET|EMPTY`, `key WITHIN LAST …`,
+        //     `key CONTAINS ALL (…)`, `key NOT CONTAINS x`
+        if (t.kind === TokenKind.Word || t.kind === TokenKind.Quoted) {
+            const tail = this.tryConsumePropertyTail(t)
+            if (tail) return tail
         }
 
-        // 3) `type [NOT] IN ( a, b, c )`
-        if (t.kind === TokenKind.Word) {
-            const inResult = this.tryConsumeInExpression(t.text)
+        // 2) `lhs CONTAINS | STARTS WITH | ENDS WITH rhs` — on a text field
+        //    (name, qname, description, tags) a text predicate, on anything
+        //    else a property predicate. A quoted lhs is always a property key.
+        if (t.kind === TokenKind.Word || t.kind === TokenKind.Quoted) {
+            const checkpoint = this.pos
+            const textOp = this.tryConsumeTextOperator()
+            const rhs = textOp ? this.peek() : null
+            // Without a value this is ordinary words ("sales contains") —
+            // the lenient fallback below reads them as text.
+            if (textOp && rhs && (rhs.kind === TokenKind.Word || rhs.kind === TokenKind.Quoted)
+                && !(t.kind === TokenKind.Word && lhsToTextTarget(t.text) && !rhs.text.trim())) {
+                this.consume()
+                const target = t.kind === TokenKind.Word ? lhsToTextTarget(t.text) : null
+                this.recognized.push(`${t.raw} ${textOp.raw} ${rhs.raw}`)
+                if (target) {
+                    const value = rhs.text.trim()
+                    return {
+                        ...makeTextPredicate(target, value),
+                        match: textOp.op === 'contains' ? 'substring'
+                            : textOp.op === 'startsWith' ? 'prefix' : 'suffix',
+                    } as Predicate
+                }
+                return this.consumeSuffixes({ kind: 'property', key: t.text, op: textOp.op, value: rhs.text })
+            }
+            this.pos = checkpoint
+        }
+
+        // 3) `type [NOT] IN ( a, b, c )` — and `key [NOT] IN (…)` for a property
+        if (t.kind === TokenKind.Word || t.kind === TokenKind.Quoted) {
+            const inResult = this.tryConsumeInExpression(t.text, t.kind === TokenKind.Quoted)
             if (inResult) {
                 this.recognized.push(inResult.label)
-                return inResult.predicate
+                return inResult.predicate.kind === 'property'
+                    ? this.consumeSuffixes(inResult.predicate)
+                    : inResult.predicate
             }
+            const between = this.tryConsumeBetween(t)
+            if (between) return between
         }
 
         // 4) `key OP value` (eq / neq / lt / lte / gt / gte)
-        if (t.kind === TokenKind.Word) {
+        if (t.kind === TokenKind.Word || t.kind === TokenKind.Quoted) {
             const opT = this.peek()
             if (opT?.kind === TokenKind.Op) {
                 const propOp = OP_MAP[opT.text]
@@ -482,15 +663,15 @@ class Parser {
                     const rawValue = valT.kind === TokenKind.Quoted ? valT.text : valT.text
                     this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
                     // `layer = "X"` is a layer predicate
-                    if (t.text.toLowerCase() === 'layer' && propOp === 'eq') {
+                    if (t.kind === TokenKind.Word && t.text.toLowerCase() === 'layer' && propOp === 'eq') {
                         return { kind: 'layer', layerAssignment: rawValue }
                     }
-                    return {
+                    return this.consumeSuffixes({
                         kind: 'property',
                         key: t.text,
                         op: propOp,
                         value: coerceScalar(rawValue, valT.kind === TokenKind.Quoted),
-                    }
+                    })
                 }
             }
         }
@@ -514,7 +695,159 @@ class Parser {
         return makeTextPredicate('name', value)
     }
 
-    tryConsumeInExpression(lhs: string): {
+    /** `CONTAINS`, `STARTS WITH` or `ENDS WITH` at the cursor — consumed
+     *  when present, nothing consumed when not. */
+    tryConsumeTextOperator(): { op: 'contains' | 'startsWith' | 'endsWith'; raw: string } | null {
+        const a = this.peek()
+        if (a?.kind !== TokenKind.Word) return null
+        const up = a.text.toUpperCase()
+        if (up === 'CONTAINS') {
+            this.consume()
+            return { op: 'contains', raw: a.raw }
+        }
+        const b = this.tokens[this.pos + 1]
+        if ((up === 'STARTS' || up === 'ENDS') && b?.kind === TokenKind.Word && b.text.toUpperCase() === 'WITH') {
+            this.pos += 2
+            return { op: up === 'STARTS' ? 'startsWith' : 'endsWith', raw: `${a.raw} ${b.raw}` }
+        }
+        return null
+    }
+
+    /** `key BETWEEN (lo, hi)` (what the writer emits) or `key BETWEEN lo AND hi`. */
+    tryConsumeBetween(lhs: Token): Predicate | null {
+        const kw = this.peek()
+        if (kw?.kind !== TokenKind.Word || kw.text.toUpperCase() !== 'BETWEEN') return null
+        const isValue = (x?: Token) => x?.kind === TokenKind.Word || x?.kind === TokenKind.Quoted
+        const at = (i: number) => this.tokens[this.pos + i]
+        let lo: Token, hi: Token, width: number
+        if (at(1)?.kind === TokenKind.LParen && isValue(at(2)) && at(3)?.kind === TokenKind.Comma
+            && isValue(at(4)) && at(5)?.kind === TokenKind.RParen) {
+            lo = at(2); hi = at(4); width = 6
+        } else if (isValue(at(1)) && at(2)?.kind === TokenKind.AndKw && isValue(at(3))) {
+            lo = at(1); hi = at(3); width = 4
+        } else {
+            return null  // "values between" is just words
+        }
+        const label = [lhs.raw, ...this.tokens.slice(this.pos, this.pos + width).map((x) => x.raw)].join(' ')
+        this.pos += width
+        this.recognized.push(label)
+        return this.consumeSuffixes({
+            kind: 'property',
+            key: lhs.text,
+            op: 'between',
+            value: [
+                coerceScalar(lo.text, lo.kind === TokenKind.Quoted),
+                coerceScalar(hi.text, hi.kind === TokenKind.Quoted),
+            ],
+        })
+    }
+
+    /** The comparisons spelled with keywords after a property key:
+     *  `IS [NOT] SET|EMPTY`, `WITHIN LAST 30 DAYS` / `WITHIN LAST P30D`,
+     *  `CONTAINS ALL (a, b)` and `NOT CONTAINS x` (on name, qname,
+     *  description or tags: NOT of the text match). Nothing is consumed
+     *  when none is there. */
+    tryConsumePropertyTail(lhs: Token): Predicate | null {
+        const at = (i: number): Token | undefined => this.tokens[this.pos + i]
+        const word = (i: number, w: string) => {
+            const x = at(i)
+            return x?.kind === TokenKind.Word && x.text.toUpperCase() === w
+        }
+        const isValue = (x?: Token) => x?.kind === TokenKind.Word || x?.kind === TokenKind.Quoted
+        const start = this.pos
+        const key = lhs.text
+        let pred: Predicate | null = null
+        if (word(0, 'IS')) {
+            const negated = at(1)?.kind === TokenKind.NotKw
+            const i = negated ? 2 : 1
+            if (word(i, 'SET') || word(i, 'EMPTY')) {
+                const op: PropertyOp = word(i, 'SET')
+                    ? (negated ? 'isNotSet' : 'isSet')
+                    : (negated ? 'isNotEmpty' : 'isEmpty')
+                this.pos += i + 1
+                pred = { kind: 'property', key, op }
+            }
+        } else if (word(0, 'WITHIN') && word(1, 'LAST')) {
+            const amount = at(2)
+            const unit = at(3)?.kind === TokenKind.Word ? UNIT_WORDS[at(3)!.text.toLowerCase()] : undefined
+            if (amount?.kind === TokenKind.Word && /^\d+$/.test(amount.text) && unit) {
+                this.pos += 4
+                pred = { kind: 'property', key, op: 'withinLast', value: toDuration(Number(amount.text), unit) }
+            } else if (isValue(amount) && /^P/i.test(amount!.text)) {
+                this.pos += 3
+                pred = { kind: 'property', key, op: 'withinLast', value: amount!.text.toUpperCase() }
+            }
+        } else if (word(0, 'CONTAINS') && word(1, 'ALL') && at(2)?.kind === TokenKind.LParen) {
+            const list = this.readParenList(this.pos + 2)
+            if (list) {
+                this.pos = list.end
+                pred = {
+                    kind: 'property', key, op: 'containsAll',
+                    value: list.values.map((v, i) => coerceScalar(v, list.quoted[i])),
+                }
+            }
+        } else if (at(0)?.kind === TokenKind.NotKw && word(1, 'CONTAINS') && isValue(at(2))) {
+            const value = at(2)!.text
+            this.pos += 3
+            const target = lhs.kind === TokenKind.Word ? lhsToTextTarget(key) : null
+            pred = target
+                ? { kind: 'group', op: 'not', children: [makeTextPredicate(target, value.trim())] }
+                : { kind: 'property', key, op: 'notContains', value }
+        }
+        if (!pred) {
+            this.pos = start
+            return null
+        }
+        this.recognized.push([lhs.raw, ...this.tokens.slice(start, this.pos).map((x) => x.raw)].join(' '))
+        return pred.kind === 'property' ? this.consumeSuffixes(pred) : pred
+    }
+
+    /** `AS NUMBER`, `MATCH CASE`, `INCLUDING MISSING` after a comparison. */
+    consumeSuffixes(p: PropertyPredicate): PropertyPredicate {
+        const at = (i: number): Token | undefined => this.tokens[this.pos + i]
+        const word = (i: number, w: string) => {
+            const x = at(i)
+            return x?.kind === TokenKind.Word && x.text.toUpperCase() === w
+        }
+        let out = p
+        for (;;) {
+            const typeWord = word(0, 'AS') && at(1)?.kind === TokenKind.Word
+                ? TYPE_WORDS[at(1)!.text.toUpperCase()] : undefined
+            if (typeWord) {
+                out = { ...out, valueType: typeWord }
+                this.pos += 2
+            } else if (word(0, 'MATCH') && word(1, 'CASE')) {
+                out = { ...out, caseSensitive: true }
+                this.pos += 2
+            } else if (word(0, 'INCLUDING') && word(1, 'MISSING')) {
+                out = { ...out, includeMissing: true }
+                this.pos += 2
+            } else {
+                return out
+            }
+        }
+    }
+
+    /** `( a, "b", c )` starting at `cursor` (the '('): its values, which
+     *  were quoted, and the index after ')'. */
+    readParenList(cursor: number): { values: string[]; quoted: boolean[]; end: number } | null {
+        if (this.tokens[cursor]?.kind !== TokenKind.LParen) return null
+        cursor += 1
+        const values: string[] = []
+        const quoted: boolean[] = []
+        while (cursor < this.tokens.length && this.tokens[cursor].kind !== TokenKind.RParen) {
+            const inner = this.tokens[cursor]
+            if (inner.kind === TokenKind.Comma) { cursor += 1; continue }
+            if (inner.kind !== TokenKind.Word && inner.kind !== TokenKind.Quoted) return null
+            values.push(inner.text)
+            quoted.push(inner.kind === TokenKind.Quoted)
+            cursor += 1
+        }
+        if (this.tokens[cursor]?.kind !== TokenKind.RParen) return null
+        return { values, quoted, end: cursor + 1 }
+    }
+
+    tryConsumeInExpression(lhs: string, lhsQuoted = false): {
         predicate: Predicate; label: string
     } | null {
         const checkpoint = this.pos
@@ -530,16 +863,18 @@ class Parser {
         if (this.tokens[cursor]?.kind !== TokenKind.LParen) return null
         cursor += 1
         const values: string[] = []
+        const quoted: boolean[] = []
         while (cursor < this.tokens.length && this.tokens[cursor].kind !== TokenKind.RParen) {
             const inner = this.tokens[cursor]
             if (inner.kind === TokenKind.Comma) { cursor += 1; continue }
             if (inner.kind !== TokenKind.Word && inner.kind !== TokenKind.Quoted) return null
             values.push(inner.text)
+            quoted.push(inner.kind === TokenKind.Quoted)
             cursor += 1
         }
         if (this.tokens[cursor]?.kind !== TokenKind.RParen) return null
         cursor += 1
-        const fieldName = lhs.toLowerCase()
+        const fieldName = lhsQuoted ? '' : lhs.toLowerCase()
         let predicate: Predicate | null = null
         if (fieldName === 'type' || fieldName === 'entitytype') {
             predicate = { kind: 'entityType', op: negated ? 'notIn' : 'in', values }
@@ -552,7 +887,12 @@ class Parser {
             if (negated) return null
             predicate = { kind: 'descendantOf', urns: values }
         } else {
-            return null
+            predicate = {
+                kind: 'property',
+                key: lhs,
+                op: negated ? 'notIn' : 'in',
+                value: values.map((v, i) => coerceScalar(v, quoted[i])),
+            }
         }
         const consumed = this.tokens.slice(checkpoint, cursor).map((t) => t.raw).join(' ')
         this.pos = cursor
@@ -606,8 +946,16 @@ function matchPrefixedToken(token: string): Predicate | null {
         case 'layer':
             return { kind: 'layer', layerAssignment: value }
         case 'hasproperty':
-        case 'has':
-            return { kind: 'hasProperty', key: value, negate: false }
+        case 'has': {
+            // `owner*` — a name that starts with; `*owner*` — one that contains.
+            const contains = value.length > 2 && value.startsWith('*') && value.endsWith('*')
+            const prefix = !contains && value.length > 1 && value.endsWith('*')
+            const key = contains ? value.slice(1, -1) : prefix ? value.slice(0, -1) : value
+            return {
+                kind: 'hasProperty', key, negate: false,
+                ...(contains ? { keyMatch: 'contains' as const } : prefix ? { keyMatch: 'prefix' as const } : {}),
+            }
+        }
         case 'name':
             return makeTextPredicate('name', value)
         case 'qname':
@@ -665,7 +1013,13 @@ function splitCsv(s: string): string[] {
 
 
 function needsQuotes(s: string): boolean {
-    return /\s|[",()!]/.test(s)
+    return /\s|[",()!=<>]/.test(s) || s === ''
+}
+
+
+/** A string the parser would read back as something else unquoted. */
+function readsAsNonText(s: string): boolean {
+    return /^-?\d+(\.\d+)?$/.test(s) || s === 'true' || s === 'false' || s === 'null'
 }
 
 
@@ -676,9 +1030,11 @@ function coerceScalar(value: string, wasQuoted: boolean): unknown {
     if (trimmed === 'true') return true
     if (trimmed === 'false') return false
     if (trimmed === 'null') return null
-    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    // A number with a leading zero ("007") is an identifier, and an integer
+    // past 2^53 has no exact double — both stay their text.
+    if (/^-?(0|[1-9]\d*)(\.\d+)?$/.test(trimmed)) {
         const n = Number(trimmed)
-        if (!Number.isNaN(n)) return n
+        if (Number.isFinite(n) && (trimmed.includes('.') || Number.isSafeInteger(n))) return n
     }
     return trimmed
 }
@@ -686,7 +1042,7 @@ function coerceScalar(value: string, wasQuoted: boolean): unknown {
 
 function formatScalar(v: unknown): string {
     if (v === null || v === undefined) return 'null'
-    if (typeof v === 'string') return needsQuotes(v) ? `"${v}"` : v
+    if (typeof v === 'string') return needsQuotes(v) || readsAsNonText(v) ? `"${v}"` : v
     if (typeof v === 'boolean' || typeof v === 'number') return String(v)
     if (Array.isArray(v)) return `(${v.map(formatScalar).join(', ')})`
     return JSON.stringify(v)
@@ -699,9 +1055,62 @@ const PROP_OP_STR: Record<PropertyOp, string> = {
     gt: '>', gte: '>=',
     in: 'IN', notIn: 'NOT IN',
     contains: 'CONTAINS',
+    notContains: 'NOT CONTAINS',
+    containsAll: 'CONTAINS ALL',
     startsWith: 'STARTS WITH',
     endsWith: 'ENDS WITH',
     between: 'BETWEEN',
+    withinLast: 'WITHIN LAST',
+    isSet: 'IS SET', isNotSet: 'IS NOT SET',
+    isEmpty: 'IS EMPTY', isNotEmpty: 'IS NOT EMPTY',
+}
+
+
+const UNIT_WORDS: Record<string, DurationUnit> = {
+    h: 'hours', hour: 'hours', hours: 'hours',
+    d: 'days', day: 'days', days: 'days',
+    w: 'weeks', week: 'weeks', weeks: 'weeks',
+    month: 'months', months: 'months',
+    y: 'years', year: 'years', years: 'years',
+}
+
+
+const TYPE_WORDS: Record<string, ValueType> = {
+    TEXT: 'string', STRING: 'string', NUMBER: 'number', BOOLEAN: 'boolean', DATE: 'date',
+}
+
+const TYPE_WORD: Record<ValueType, string> = {
+    string: 'TEXT', number: 'NUMBER', boolean: 'BOOLEAN', date: 'DATE',
+}
+
+
+/** The operator and value of a property comparison, as DSL. */
+function formatComparison(c: PropertyPredicate): string {
+    const op = c.op ?? 'eq'
+    const arity = arityOf(op)
+    if (arity === 'none') return PROP_OP_STR[op]
+    if (arity === 'duration') {
+        const d = parseDuration(c.value)
+        return d ? `WITHIN LAST ${d.amount} ${d.unit}` : `WITHIN LAST ${formatScalar(c.value)}`
+    }
+    return `${PROP_OP_STR[op]} ${formatScalar(c.value)}`
+}
+
+
+/** The suffixes that keep a comparison's meaning through a round trip. The
+ *  type is written only when the value alone would read as another one —
+ *  `created = "2024-05-01"` is text equality unless it says `AS DATE`. */
+function formatSuffixes(c: PropertyPredicate): string {
+    const op = c.op ?? 'eq'
+    const parts: string[] = []
+    const type = c.valueType
+    if (type && type !== 'auto' && OPERATOR_TABLE[op].types.length > 1
+        && type !== autoTypeOf(op, c.value)) {
+        parts.push(`AS ${TYPE_WORD[type]}`)
+    }
+    if (c.caseSensitive && arityOf(op) !== 'none') parts.push('MATCH CASE')
+    if (c.includeMissing && isNegative(op)) parts.push('INCLUDING MISSING')
+    return parts.length ? ` ${parts.join(' ')}` : ''
 }
 
 

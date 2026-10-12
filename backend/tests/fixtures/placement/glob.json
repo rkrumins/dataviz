@@ -1,0 +1,354 @@
+{
+  "cases": [
+    {
+      "name": "glob-star-matches-any-run",
+      "summary": "CRITERIA glob: * matches any run, including the empty one and DataHub-style URNs with parentheses and commas.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:li:dataset:*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "urn:li:dataset:(urn:li:dataPlatform:hive,db.t,PROD)" },
+        { "urn": "urn:li:dataset:" },
+        { "urn": "urn:li:datasetx" }
+      ],
+      "expect": {
+        "urn:li:dataset:(urn:li:dataPlatform:hive,db.t,PROD)": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:dataset:": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:datasetx": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-is-anchored",
+      "summary": "CRITERIA glob: the pattern must match the whole URN, at both ends.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "dataset*" }]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "g2", "priority": 1, "urnPattern": "urn:*:x" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "urn:li:dataset:y" },
+        { "urn": "dataset:y" },
+        { "urn": "urn:a:x" },
+        { "urn": "urn:a:xy" },
+        { "urn": "my:urn:a:x" }
+      ],
+      "expect": {
+        "urn:li:dataset:y": { "source": "none" },
+        "dataset:y": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:a:x": { "layerId": "b", "source": "rule", "ruleId": "g2" },
+        "urn:a:xy": { "source": "none" },
+        "my:urn:a:x": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-question-is-one-code-point",
+      "summary": "CRITERIA glob: ? matches exactly one code point, an astral character included, never zero or two.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:a?c" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:abc" }, { "urn": "urn:ac" }, { "urn": "urn:a\ud83d\ude00c" }, { "urn": "urn:abbc" }],
+      "expect": {
+        "urn:abc": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:ac": { "source": "none" },
+        "urn:a\ud83d\ude00c": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:abbc": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-regex-characters-are-literal",
+      "summary": "CRITERIA glob: every character other than * and ? is literal, regex metacharacters . + ( ) [ ] | $ ^ included.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:a.b+(c)[d]|e$^*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "urn:a.b+(c)[d]|e$^tail" },
+        { "urn": "urn:a.b+(c)[d]|e$^" },
+        { "urn": "urn:aXb+(c)[d]|e$^" },
+        { "urn": "urn:a.bb+(c)[d]|e$^" }
+      ],
+      "expect": {
+        "urn:a.b+(c)[d]|e$^tail": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:a.b+(c)[d]|e$^": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:aXb+(c)[d]|e$^": { "source": "none" },
+        "urn:a.bb+(c)[d]|e$^": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-unbalanced-parenthesis-is-a-valid-pattern",
+      "summary": "CRITERIA glob: every string is a valid pattern, so an unbalanced '(' in a DataHub URN prefix still matches.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:li:dataset:(urn:li:dataPlatform:hive,*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "urn:li:dataset:(urn:li:dataPlatform:hive,db.t,PROD)" },
+        { "urn": "urn:li:dataset:(urn:li:dataPlatform:kafka,t,PROD)" }
+      ],
+      "expect": {
+        "urn:li:dataset:(urn:li:dataPlatform:hive,db.t,PROD)": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:dataset:(urn:li:dataPlatform:kafka,t,PROD)": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-is-case-sensitive",
+      "summary": "CRITERIA glob: matching is case-sensitive.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "URN:LI:*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:li:x" }, { "urn": "URN:LI:y" }],
+      "expect": { "urn:li:x": { "source": "none" }, "URN:LI:y": { "layerId": "a", "source": "rule", "ruleId": "g" } }
+    },
+    {
+      "name": "glob-star-matches-newlines",
+      "summary": "CRITERIA glob: * matches newlines too (DOTALL), while anchoring still rejects a trailing newline after the literal end.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:x:*:end" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:x:a\nb:end" }, { "urn": "urn:x:a:end\n" }, { "urn": "urn:x::end" }],
+      "expect": {
+        "urn:x:a\nb:end": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:x:a:end\n": { "source": "none" },
+        "urn:x::end": { "layerId": "a", "source": "rule", "ruleId": "g" }
+      }
+    },
+    {
+      "name": "glob-backslash-and-braces-are-literal",
+      "summary": "CRITERIA glob: a backslash and braces are literal characters, not escapes or quantifiers.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:a\\b{2}*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:a\\b{2}x" }, { "urn": "urn:abb" }, { "urn": "urn:a\\bb" }],
+      "expect": {
+        "urn:a\\b{2}x": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:abb": { "source": "none" },
+        "urn:a\\bb": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-and-type-criteria-combine",
+      "summary": "MATCH: a glob is ANDed with the rule's other criteria.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:li:dataset:*", "entityTypes": ["dataset"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "urn:li:dataset:a", "entityType": "dataset" },
+        { "urn": "urn:li:dataset:b", "entityType": "table" },
+        { "urn": "urn:li:chart:c", "entityType": "dataset" }
+      ],
+      "expect": {
+        "urn:li:dataset:a": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:dataset:b": { "source": "none" },
+        "urn:li:chart:c": { "source": "none" }
+      }
+    },
+    {
+      "name": "glob-star-alone-matches-every-urn",
+      "summary": "CRITERIA glob: a lone * is a criterion that matches every URN.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "*" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x" }, { "urn": "urn:li:y" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:y": { "layerId": "a", "source": "rule", "ruleId": "g" }
+      }
+    },
+    {
+      "name": "glob-with-only-question-mark-stays-a-rule",
+      "summary": "COMPILE normalization: a pattern containing ? is a glob, not an exact URN, so it is not promoted and the derived scope stays open.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "g", "priority": 1, "urnPattern": "urn:li:x?" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:li:x1" }, { "urn": "urn:li:x" }, { "urn": "urn:li:x12" }],
+      "expect": {
+        "urn:li:x1": { "layerId": "a", "source": "rule", "ruleId": "g" },
+        "urn:li:x": { "source": "none" },
+        "urn:li:x12": { "source": "none" }
+      }
+    },
+    {
+      "name": "exact-urn-rule-is-promoted-not-a-prefix",
+      "summary": "COMPILE normalization + glob: a pattern without * or ? is an explicit entry for exactly that URN; it does not match longer URNs.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 1, "urnPattern": "urn:li:dataset:foo" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:li:dataset:foo" }, { "urn": "urn:li:dataset:foo_v2" }],
+      "expect": {
+        "urn:li:dataset:foo": { "layerId": "a", "source": "explicit" },
+        "urn:li:dataset:foo_v2": { "source": "none" }
+      }
+    }
+  ]
+}

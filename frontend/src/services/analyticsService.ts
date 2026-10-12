@@ -1,0 +1,464 @@
+/**
+ * Platform analytics service — business insights across the whole application.
+ *
+ * Backs the Analytics section. Server-gated on `system:audit:read` OR
+ * `system:org-admin`; the sidebar hides the section for anyone holding neither,
+ * so a 403 here means the two have drifted apart.
+ *
+ * These types ARE the contract. The endpoint returns a wide analytics document
+ * rather than a domain entity, so the backend types it loosely on purpose and
+ * this file is where its shape is written down.
+ */
+import { authFetch } from './apiClient'
+
+const ANALYTICS_API = '/api/v1/admin/analytics'
+
+/** A count with its period-over-period movement. */
+export interface Metric {
+    /** All-time total. */
+    total: number
+    /** Count inside the selected window. */
+    current?: number
+    /** The same measure over the immediately preceding window of equal length. */
+    previous?: number
+    /** Percent change, or `null` when the previous window had no base. */
+    changePct?: number | null
+}
+
+export interface AnalyticsRange {
+    from: string
+    to: string
+    previousFrom: string
+    previousTo: string
+}
+
+export interface PlatformTotals {
+    users: Metric
+    activeUsers: Metric
+    workspaces: Metric
+    views: Metric
+    viewOpens: Metric
+    dataSources: Metric
+    activity: Metric
+    ontologies: Metric
+    contextModels: Metric
+    catalogItems: Metric
+    groups: Metric
+}
+
+/** Every series shares `buckets` as its x-axis, so charts can never disagree. */
+export interface PlatformSeries {
+    buckets: string[]
+    signups: number[]
+    cumulativeUsers: number[]
+    activeUsers: number[]
+    signIns: number[]
+    viewsCreated: number[]
+    cumulativeViews: number[]
+    workspacesCreated: number[]
+    cumulativeWorkspaces: number[]
+    viewOpens: number[]
+    activityEvents: number[]
+    dataSourcesOnboarded: number[]
+    /**
+     * The same measures over the PREVIOUS period, padded to the current
+     * window's length, with `buckets` carrying the dates they happened on.
+     *
+     * The KPI delta says a number moved; this says what shape the move was —
+     * steady growth, one spike, or a late collapse all produce the same
+     * percentage. Two layouts read it: the bar charts put it in chronological
+     * position on one shared axis, and the line charts overlay it by bucket
+     * index, which is the alignment a SHAPE comparison wants.
+     */
+    previous: {
+        /** The dates these values happened on, one per value, ending the day
+         *  before `buckets` opens. Without them the only possible layout is by
+         *  bucket INDEX against an axis labelled with THIS period's dates —
+         *  which puts a bar for the 4th of July on the 3rd of August. */
+        buckets: string[]
+        signups: number[]
+        viewsCreated: number[]
+        viewOpens: number[]
+        activeUsers: number[]
+    }
+}
+
+export interface FunnelStageDto {
+    stage: string
+    count: number
+    rate: number | null
+}
+
+export interface CohortDto {
+    cohort: string
+    size: number
+    weeks: { week: number; active: number; rate: number | null }[]
+}
+
+export interface Engagement {
+    dau: number
+    wau: number
+    mau: number
+    /** DAU ÷ MAU — habit, not traffic. `null` when there is no MAU. */
+    stickiness: number | null
+    /** Share of the window's cohort that reached the VALUE moment — traced
+     *  lineage. Authoring a view is a later, heavier commitment and is scored
+     *  separately as `creationRate`. */
+    activationRate: number | null
+    creationRate: number | null
+    medianDaysToFirstView: number | null
+    funnel: FunnelStageDto[]
+    growthAccounting: {
+        new: number
+        returning: number
+        resurrected: number
+        dormant: number
+    }
+    cohorts: CohortDto[]
+}
+
+export interface ClassCount {
+    key: string
+    count: number
+}
+
+export interface Breakdowns {
+    usersByStatus: ClassCount[]
+    usersBySignupSource: ClassCount[]
+    viewsByVisibility: ClassCount[]
+    viewsByType: ClassCount[]
+    activityByAction: ClassCount[]
+    collaborationRate: number | null
+    contentConcentration: number | null
+    /** Live views with no opens in the window, and what share of the
+     *  catalogue that is. The other half of concentration: knowing the top ten
+     *  take most of the attention says nothing about how much is getting none. */
+    viewsNotOpened: number
+    viewsNotOpenedShare: number | null
+}
+
+export interface TopUser {
+    userId: string
+    name: string
+    email: string | null
+    events: number
+    viewsOpened: number
+    viewsCreated: number
+}
+
+export interface TopView {
+    viewId: string
+    name: string
+    /** True when the viewer may not know this view's name. Counts stay real. */
+    redacted?: boolean
+    /**
+     * Whether a LINK into this view should be rendered — a stricter question
+     * than whether it is named. Reporting on something is not a door into it,
+     * so a link appears only where the app would actually open it.
+     */
+    canOpen?: boolean
+    workspaceId: string
+    visibility: string
+    viewType: string
+    opens: number
+    uniqueViewers: number
+    favourites: number
+    /** Who built it, and a way to reach them — present only where the reader
+     *  may see the view AND the operator turned contact on. Absent, not null,
+     *  when either is false. */
+    createdByName?: string | null
+    createdByEmail?: string | null
+}
+
+export interface Leaderboards {
+    topUsers: TopUser[]
+    topViews: TopView[]
+    topWorkspaces: {
+        workspaceId: string; name: string; activity: number; opens: number
+        redacted?: boolean
+        canOpen?: boolean
+    }[]
+    topCreators: { userId: string; name: string; viewsCreated: number }[]
+}
+
+export interface GraphScale {
+    nodes: number
+    edges: number
+    entityTypes: number
+    sourcesWithStats: number
+}
+
+/** One row of the feature-adoption matrix. */
+export interface AdoptionRow {
+    key: string
+    label: string
+    events: number
+    users: number
+    previousEvents: number
+    changePct: number | null
+    /** Share of ACTIVE users who touched this feature — not of all users. */
+    reach: number | null
+    /** When this feature's instrumentation first produced data. `null` means
+     *  never measured, which is different from "nobody used it". */
+    since: string | null
+}
+
+/**
+ * Did the product answer the question it was asked?
+ *
+ * A trace that returns no lineage and a search that finds no match are FAILED
+ * value moments — the user asked and got nothing back. Rates are `null` rather
+ * than `0` when there is no basis, because "no traces ran" is not "0% success".
+ */
+export interface ValueMoments {
+    traces: number
+    tracesEmpty: number
+    traceSuccessRate: number | null
+    tracedBy: number
+    searches: number
+    searchMisses: number
+    searchHitRate: number | null
+}
+
+export interface Reliability {
+    refreshes: number
+    failures: number
+    successRate: number | null
+    sourcesRefreshed: number
+    sourcesUntouched: number
+    byOutcome: ClassCount[]
+}
+
+export interface AccessFriction {
+    requests: number
+    pending: number
+    medianHoursToApprove: number | null
+    oldestPendingDays: number | null
+    invitesSent: number
+    invitesRedeemed: number
+    acceptanceRate: number | null
+}
+
+export interface SemanticAdoption {
+    sourcesWithOntology: number
+    sourcesTotal: number
+    coverage: number | null
+    sourcesDrifting: number
+}
+
+/**
+ * `reliability` and `access` are an OPERATOR's view — they name where the data
+ * is unreliable and who is waiting to get in — so the server omits them for a
+ * non-privileged viewer. Optional here rather than nullable: the field is
+ * absent, not empty.
+ */
+export interface PlatformHealth {
+    reliability?: Reliability
+    access?: AccessFriction
+    semanticLayer: SemanticAdoption
+}
+
+/** An announcement, anchored to a bucket on the shared x-axis. */
+export interface Annotation {
+    bucket: string
+    date: string
+    title: string
+    kind: string
+}
+
+/** One computed observation for the "What changed" strip. */
+export interface Insight {
+    key: string
+    tone: 'good' | 'watch' | 'bad' | 'neutral'
+    headline: string
+    detail: string
+    /** Which tab answers this in more depth, if any. */
+    tab: string | null
+    /**
+     * The series the headline is a claim ABOUT, drawn beside it.
+     *
+     * "Up 35%" is a summary of a shape, and steady growth, one spike and a
+     * late collapse all produce the same percentage. `null` for rules that
+     * quote a rate or a share: they have no series of their own, and a
+     * sparkline invented for them would be a picture of a different number.
+     */
+    spark: number[] | null
+}
+
+export interface AnalyticsSummary {
+    windowDays: number
+    generatedAt: string
+    range: AnalyticsRange
+    bucket: 'day' | 'week'
+    totals: PlatformTotals
+    series: PlatformSeries
+    engagement: Engagement
+    breakdowns: Breakdowns
+    leaderboards: Leaderboards
+    graph: GraphScale
+    adoption: AdoptionRow[]
+    valueMoments: ValueMoments
+    health: PlatformHealth
+    annotations: Annotation[]
+    /** Ranked, most significant first. Empty on a young install — the strip
+     *  says nothing rather than manufacturing observations. */
+    insights: Insight[]
+    /**
+     * Present only when the document was redacted for this viewer. Absent for
+     * administrators and auditors, who see everything.
+     */
+    redaction?: {
+        applied: true
+        /** The operator's chosen level. Governs people and operations only. */
+        mode: 'strict' | 'internal' | 'full'
+        showsPeople: boolean
+        showsOperations: boolean
+        /** An operator has opened workspace REPORTING to everyone, so a
+         *  workspace can be named without being openable. */
+        reportsAllWorkspaces: boolean
+        /** `null` when the viewer can see every workspace anyway. */
+        visibleWorkspaces: number | null
+        /** False when the viewer's workspace access could not be resolved, so
+         *  something locked may be locked wrongly. Say so rather than showing a
+         *  confident redaction we cannot stand behind. */
+        accessResolved: boolean
+        hidden: string[]
+    }
+    coverage: {
+        /** When view-open tracking began. `null` means no opens recorded yet —
+         *  the charts say so rather than implying nobody opened anything. */
+        viewOpenTrackingSince: string | null
+        /** Per feature, because each signal starts the day its instrumentation
+         *  shipped. Lets the UI say "not measured yet" instead of plotting a
+         *  zero that reads as "unused". */
+        trackingSince: Record<string, string | null>
+    }
+}
+
+export interface WorkspaceAnalyticsRow {
+    workspaceId: string
+    name: string
+    createdAt: string
+    isActive: boolean
+    /**
+     * True when the viewer is not a member. The row still EXISTS — it is
+     * counted in the totals above the table — but every specific below is
+     * `null` rather than `0`, because zero is a claim and null is a refusal.
+     */
+    redacted?: boolean
+    /** Whether a link into the workspace should be rendered. See `TopView`. */
+    canOpen?: boolean
+    members: number | null
+    views: number | null
+    newViews: number | null
+    dataSources: number | null
+    activity: number | null
+    opens: number | null
+    activeUsers: number | null
+    nodes: number | null
+    edges: number | null
+    lastActivityAt: string | null
+    dormant: boolean
+}
+
+export interface WorkspaceAnalyticsDetail {
+    workspaceId: string
+    name: string
+    description: string | null
+    createdAt: string
+    isActive: boolean
+    windowDays: number
+    generatedAt: string
+    range: AnalyticsRange
+    bucket: 'day' | 'week'
+    totals: {
+        views: Metric
+        viewOpens: Metric
+        activeUsers: Metric
+        activity: Metric
+        members: Metric
+        dataSources: Metric
+        contextModels: Metric
+    }
+    series: {
+        buckets: string[]
+        viewsCreated: number[]
+        cumulativeViews: number[]
+        activityEvents: number[]
+        activeUsers: number[]
+        viewOpens: number[]
+    }
+    breakdowns: {
+        viewsByVisibility: ClassCount[]
+        viewsByType: ClassCount[]
+        activityByAction: ClassCount[]
+    }
+    topViews: TopView[]
+    /** `email` is dropped by the server's allow-list for anyone who may not see
+     *  people, so it is optional here rather than `string | null`. */
+    topContributors: { userId: string; name: string; email?: string | null; events: number }[]
+    graph: GraphScale
+    /**
+     * Present when the server filtered this document. `member` says whether the
+     * reader is actually in the workspace — reporting on a workspace never
+     * makes it one, so the roster is gated on this rather than on reachability.
+     */
+    redaction?: {
+        applied: boolean
+        showsPeople: boolean
+        member: boolean
+    }
+}
+
+/**
+ * The slice every number is measured over. Two ways to say it, and the server
+ * resolves both to the same shape:
+ *
+ *   * `{ days }`        — a trailing window. What the presets send.
+ *   * `{ from, to }`    — explicit `YYYY-MM-DD` bounds, both inclusive.
+ *
+ * Modelled as a union rather than three optional fields so "a preset AND a
+ * custom range at once" cannot be expressed.
+ */
+export type AnalyticsRangeSelection =
+    | { kind: 'preset'; days: number }
+    | { kind: 'custom'; from: string; to: string }
+
+/** Query string for one selection. Shared by all three endpoints so they can
+ *  never disagree about which window they are showing. */
+export function rangeQuery(range: AnalyticsRangeSelection): string {
+    return range.kind === 'custom'
+        ? `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+        : `days=${range.days}`
+}
+
+/** Stable cache-key fragment for a selection. */
+export function rangeKey(range: AnalyticsRangeSelection): string {
+    return range.kind === 'custom' ? `${range.from}..${range.to}` : `d${range.days}`
+}
+
+export const analyticsService = {
+    /** Platform-wide insights over one window. */
+    getSummary(range: AnalyticsRangeSelection): Promise<AnalyticsSummary> {
+        return authFetch<AnalyticsSummary>(
+            `${ANALYTICS_API}/summary?${rangeQuery(range)}`,
+        )
+    },
+
+    /** One aggregate row per live workspace. */
+    listWorkspaces(range: AnalyticsRangeSelection): Promise<WorkspaceAnalyticsRow[]> {
+        return authFetch<WorkspaceAnalyticsRow[]>(
+            `${ANALYTICS_API}/workspaces?${rangeQuery(range)}`,
+        )
+    },
+
+    /** Full insights for a single workspace. */
+    getWorkspace(
+        workspaceId: string, range: AnalyticsRangeSelection,
+    ): Promise<WorkspaceAnalyticsDetail> {
+        return authFetch<WorkspaceAnalyticsDetail>(
+            `${ANALYTICS_API}/workspaces/${encodeURIComponent(workspaceId)}`
+            + `?${rangeQuery(range)}`,
+        )
+    },
+}

@@ -1,18 +1,14 @@
 /**
- * PasswordChangeRequired — the wall in front of an account that is
- * still holding a shipped default password.
+ * PasswordChangeRequired — the wall in front of an account holding a
+ * password somebody else chose: the built-in administrator's starting
+ * password, or one an administrator set for this account.
  *
- * Deliberately outside AppLayout and deliberately without an exit: the
- * API refuses everything except this form, so offering navigation would
- * only lead to a wall of 403s.
- *
- * The credential this catches — `admin123` / `changeme` — is printed in
- * the README, the quickstart compose file, and every setup doc, so an
- * unrotated bootstrap admin is a publicly known password on a
- * super_admin account.
+ * Deliberately outside AppLayout and without a way into the app: the API
+ * refuses everything except this form, so offering navigation would only
+ * lead to a wall of 403s. Signing out is the one other way off it.
  */
 import { useState } from 'react'
-import { AlertCircle, KeyRound, ShieldAlert } from 'lucide-react'
+import { AlertCircle, KeyRound, LogOut, ShieldAlert } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 
 import {
@@ -41,6 +37,11 @@ export function PasswordChangeRequired() {
         && newPassword === confirmPassword
         && !saving
 
+    const handleSignOut = async () => {
+        await logout()
+        navigate('/login', { replace: true })
+    }
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
         if (!canSubmit) return
@@ -58,7 +59,7 @@ export function PasswordChangeRequired() {
     }
 
     return (
-        <div className="min-h-screen w-full flex items-center justify-center bg-canvas px-4 py-10">
+        <div className="min-h-full w-full flex items-center justify-center bg-canvas px-4 py-10">
             <div className="w-full max-w-md">
                 <div className="flex items-start gap-3 mb-6">
                     <div className="w-11 h-11 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
@@ -69,10 +70,10 @@ export function PasswordChangeRequired() {
                             Choose a new password
                         </h1>
                         <p className="text-sm text-ink-secondary mt-1">
-                            This account is still using the password it shipped with.
-                            That password is published in this project's setup
-                            documentation, so anyone who can reach this deployment
-                            already knows it.
+                            This account's password was chosen by someone else —
+                            when the platform was installed, or by an
+                            administrator. Choose one only you know before you
+                            continue.
                         </p>
                     </div>
                 </div>
@@ -160,6 +161,15 @@ export function PasswordChangeRequired() {
                         new password.
                     </p>
                 </form>
+
+                <button
+                    type="button"
+                    onClick={handleSignOut}
+                    className="mt-4 mx-auto flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors"
+                >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Sign out instead
+                </button>
             </div>
         </div>
     )

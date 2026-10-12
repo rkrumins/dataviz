@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versioning-transfer
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: versioning-transfer
+    app.kubernetes.io/component: worker
+spec:
+  # The transfer lane of the versioning worker: the import, export and publish
+  # jobs the API queues, GRAPHVER_TRANSFER_SLOTS (2) at a time plus one
+  # package-inspect slot per pod, and the reaper for jobs nothing will run.
+  # Claims are FOR UPDATE SKIP LOCKED, so any number of pods share the queue;
+  # hpa.yaml scales it on CPU.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versioning-transfer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versioning-transfer
+        app.kubernetes.io/component: worker
+        synodic.io/lane: transfer
+    spec:
+      serviceAccountName: synodic-backend
+      # A stopping pod gives running jobs GRAPHVER_DRAIN_SECS (40) to hand
+      # themselves back at a window boundary, then cancels and releases the
+      # rest; all of it has to fit before the SIGKILL.
+      terminationGracePeriodSeconds: 60
+      # No init gates, as in deployment.yaml: the worker retries both stores.
+      containers:
+        - name: versioning-transfer
+          image: REGISTRY/aggregation-worker:latest
+          # The worker image bundles the whole backend; run the versioning
+          # worker instead of the aggregation one (Dockerfile CMD).
+          command: ["python", "-m", "backend.app.services.versioning"]
+          envFrom:
+            - configMapRef:
+                name: common-config
+            - configMapRef:
+                name: worker-config
+          env:
+            - name: MANAGEMENT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MANAGEMENT_DB_URL
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: CREDENTIAL_ENCRYPTION_KEY
+            - name: REDIS_STREAMS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_STREAMS_PASSWORD
+                  optional: true
+            - name: REDIS_CACHE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_CACHE_PASSWORD
+                  optional: true
+            - name: GRAPHVER_WORKER_LANES
+              value: "transfer"
+            # The WEB pool only serves management-database lookups here; its
+            # default (20) is sized for request handlers.
+            - name: DB_WEB_POOL_SIZE
+              value: "4"
+            # Only the "event_loop_lag CRITICAL" ERROR line keys on this. No
+            # request waits on a worker's loop, so keep the page for
+            # multi-second stalls; GRAPHVER_JOB_WEDGE_SECS exits on a dead one.
+            - name: EVENT_LOOP_CRITICAL_THRESHOLD_S
+              value: "5"
+            # Spool files (an upload being inspected, an export being
+            # packaged). A pod that outgrows the emptyDir is evicted and its
+            # jobs are taken over by another pod.
+            - name: TMPDIR
+              value: /spool
+          volumeMounts:
+            - name: spool
+              mountPath: /spool
+            - name: redis-streams-certs
+              mountPath: /certs/streams
+              readOnly: true
+            - name: redis-cache-certs
+              mountPath: /certs/cache
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          # No HTTP health server on this worker yet, so no httpGet probes
+          # (they would flap and restart-loop). A crash exits the process and
+          # the Deployment restarts it; its jobs' leases lapse and another pod
+          # takes them over.
+      volumes:
+        - name: spool
+          emptyDir:
+            sizeLimit: 12Gi
+        - name: redis-streams-certs
+          secret:
+            secretName: redis-streams-certs
+            optional: true
+        - name: redis-cache-certs
+          secret:
+            secretName: redis-cache-certs
+            optional: true

@@ -42,7 +42,10 @@ _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
 _RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
 _Q1_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:[\w|]+\]->\(t\) WHERE x\.urn IN \$xs")
 _Q2_RE = re.compile(r"MATCH \(s\)-\[r:[\w|]+\]->\(y(?::\w+)?\) WHERE y\.urn IN \$ys")
-_RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.urn IN \$sourceUrns")
+_RAW_RE = re.compile(
+    r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t(?::\w+)?\) "
+    r"WHERE (?:s\.urn IN \$sourceUrns|t\.urn IN \$targetUrns)"
+)
 
 
 def _pattern_types(cypher):
@@ -142,6 +145,15 @@ class _FakeGraph:
                 [t, s, w, list(ty)] for s, t, w, ty, sd, td in self.agg
                 if t in params["ys"] and sd <= td
             ])
+        if "max(r.sourceDepth)" in cypher or "max(r.targetDepth)" in cypher:
+            # Depth-stamp probe: urn → the deepest stamp on its own cells.
+            out_side = "max(r.sourceDepth)" in cypher
+            best = {}
+            for s, t, w, ty, sd, td in self.agg:
+                u, d = (s, sd) if out_side else (t, td)
+                if u in params["urns"]:
+                    best[u] = max(best.get(u, -1), d)
+            return _Result([[u, d] for u, d in best.items()])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
     async def ro_query(self, cypher, params=None, timeout=None, **kw):
@@ -154,14 +166,14 @@ class _FakeGraph:
             raise AssertionError(
                 f"containment walk issued on the read path: {cypher}"
             )
-        if "count(ch)" in cypher and "OPTIONAL MATCH" in cypher:
-            # Leafness probe: urn → child count. Single hop, no depth —
-            # depth now comes from the stamped incident cells. (Checked
-            # BEFORE the classify regex, whose label-anchored prefix the
-            # probe shares.)
+        if re.search(r"AND \(n\)-\[:[\w|]+\]->\(\)", cypher):
+            # Leafness probe: the urns that have a child at all. Single
+            # hop, no depth — depth comes from the stamped incident cells.
+            # (Checked BEFORE the classify regex, whose label-anchored
+            # prefix the probe shares.)
             return _Result([
-                [u, len(self.children.get(u, ()))]
-                for u in params["urns"] if u in self.labels
+                [u] for u in params["urns"]
+                if u in self.labels and self.children.get(u)
             ])
         m = _CLASSIFY_RE.search(cypher)
         if m:
@@ -181,12 +193,13 @@ class _FakeGraph:
             for par, kids in self.children.items():
                 for k in kids:
                     parent[k] = par
+            bound = int(re.search(r"\*1\.\.(\d+)", cypher).group(1))  # FalkorDB climbs no further
             rows = []
             for u in params["urns"]:
                 if self.labels.get(u) != lbl:
                     continue
                 chain, cur = [], parent.get(u)
-                while cur is not None:
+                while cur is not None and len(chain) < bound:
                     chain.append(cur)
                     cur = parent.get(cur)
                 rows.append([u, chain])
@@ -200,9 +213,9 @@ class _FakeGraph:
             # Exact-endpoint raw mirror (cube/unknown regime, no containment).
             lt = params.get("ltypes") or _pattern_types(cypher)
             cells = {}
-            tgts = params.get("targetUrns")
+            srcs, tgts = params.get("sourceUrns"), params.get("targetUrns")
             for eid, s, t, et in self.lineage:
-                if s not in params["sourceUrns"] or et not in lt:
+                if (srcs is not None and s not in srcs) or et not in lt:
                     continue
                 if s == t or (tgts is not None and t not in tgts):
                     continue
@@ -228,18 +241,25 @@ class _FakeGraph:
                         types.append(et)
             return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
         if _Q2_RE.search(cypher):
-            # Leaf targets: EXACT typed raw fan-in.
+            # Leaf targets: EXACT typed raw fan-in. Q2 returns y first; the
+            # target-only mode returns rows in the read's (sUrn, tUrn) order.
             lt = _pattern_types(cypher)
+            source_first = "RETURN s.urn AS sUrn" in cypher
             cells = {}
             for y in params["ys"]:
                 for eid, s, t, et in self.lineage:
                     if t != y or et not in lt:
                         continue
+                    if "s.urn <> y.urn" in cypher and s == y:
+                        continue
                     eids, types = cells.setdefault((y, s), (set(), []))
                     eids.add(eid)
                     if et not in types:
                         types.append(et)
-            return _Result([[y, s, len(e), ty] for (y, s), (e, ty) in cells.items()])
+            return _Result([
+                [s, y, len(e), ty] if source_first else [y, s, len(e), ty]
+                for (y, s), (e, ty) in cells.items()
+            ])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
@@ -259,7 +279,7 @@ def _make_provider(fake, levels):
             by.setdefault(fake.labels.get(u) or "", []).append(u)
         return sorted(by.items())
 
-    async def _ancestors_read_through(urns):
+    async def _ancestors_read_through(urns, **kw):
         # Read-THROUGH ancestor resolution, exactly as the reader now calls
         # it: a cache hit is free, a miss COMPUTES (and caches) the chain —
         # it never returns a miss, so chain_cache_down (a cold cache) does
@@ -277,7 +297,7 @@ def _make_provider(fake, levels):
             out[u] = chain
         return out
 
-    async def _stamp_depths(urns):
+    async def _stamp_depths(urns, **kw):
         want = set(urns)
         out = {}
         for s_, t_, w, ty, sd, td in fake.agg:
@@ -460,7 +480,7 @@ def test_no_containment_types_falls_back_to_raw_synthesis():
     sentinel = [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
     seen = {}
 
-    async def fake_raw(source_urns, target_urns, lineage_edges, *, timeout=None):
+    async def fake_raw(source_urns, target_urns, lineage_edges, *, timeout=None, **kw):
         seen["args"] = (source_urns, target_urns, lineage_edges)
         return sentinel
 
@@ -524,7 +544,8 @@ def test_bulk_ancestor_chains_are_label_driven():
     ))
     assert chains["urn:a3"] == ["urn:a2", "urn:a1", "urn:a0"]
     assert chains["urn:b2"] == ["urn:b1", "urn:b0"]
-    assert chains["urn:nonexistent"] == []
+    # No row came back for it: unknown, never a root.
+    assert "urn:nonexistent" not in chains
 
     # The per-URN path delegates to the same label-driven query.
     assert _run(p._compute_ancestor_chain("urn:b3")) == [
@@ -1133,7 +1154,7 @@ def test_entry_result_carries_freshness_fields():
     assert result2.regime == "boundary" and result2.stamp_version == 2
 
 
-def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
+def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows(monkeypatch):
     """A timed-out :AGGREGATED batch used to be silently swallowed by
     `_run_batch`'s ``except Exception: return []`` — the merged result
     presented (and got cached upstream) as complete even though a whole
@@ -1141,6 +1162,13 @@ def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
     stale/degraded/truncated, exactly like an on-demand sub-query
     failure, WITHOUT dropping the rows the other batch did return."""
     from backend.app.providers.falkordb_provider import AggRunMeta
+
+    async def no_sleep(_s):
+        return None
+
+    # A timeout is per-query pressure now: the read narrows the page twice,
+    # retries the narrowest once (briefly), then reports the loss by name.
+    monkeypatch.setattr(_fp.asyncio, "sleep", no_sleep)
 
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
@@ -1173,7 +1201,9 @@ def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
     ))
 
     assert result.stale is True
-    assert result.stale_reason == "degraded"
+    assert result.stale_reason == "timeout"
+    assert result.degraded_detail["kind"] == "timeout"
+    assert result.degraded_detail["narrowedPages"] == 2 and result.degraded_detail["floorRetries"] == 1
     assert result.truncated is True
     got = {
         (e.source_urn, e.target_urn): e.edge_count
@@ -1399,3 +1429,540 @@ def test_materialized_read_keeps_prefix_and_flags_when_a_page_fails(monkeypatch)
     assert result.stale is True
     assert result.stale_reason == "degraded"
     assert result.truncated is True
+
+
+# ── the read-side ladder ────────────────────────────────────────────
+#
+# The canvas reads rollups in pages and URN batches, bounded by the same
+# two per-query limits as a rebuild's scans. A refused page is halved and
+# re-read from the same keyset position, a refused batch split by URN; only
+# what is still refused at the narrowest page or batch is lost, and then the
+# result says which limit — and the node — so the canvas can say what to do.
+
+from backend.app.config import resilience as _resilience
+from backend.app.providers import falkordb_provider as _fp
+
+_LIMIT_RE = re.compile(r"LIMIT (\d+)")
+
+
+def _refusal(kind):
+    return (Exception("Query's mem consumption exceeded capacity") if kind == "memory"
+            else Exception("Query timed out"))
+
+
+def _cells(n, source="urn:a1"):
+    """n materialized cells from one source, weights distinct and descending."""
+    return [[source, f"urn:t{i}", 100 - i, ["FLOWS"]] for i in range(n)]
+
+
+def _ladder_provider(fake, levels, cells, *, refuse_above=None, refuse_resumed_at=None,
+                     kind="memory", boom=None):
+    """The materialized-cell read as a paging fake: honours the LIMIT in the
+    cypher and the keyset resume, refuses pages wider than ``refuse_above``
+    and, when ``refuse_resumed_at`` is set, every RESUMED page at or under
+    that width — the shape of a floor that still fails."""
+    p = _make_provider(fake, levels)
+    limits = []
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            if boom is not None:
+                raise boom
+            limit = int(_LIMIT_RE.search(cypher).group(1))
+            limits.append(limit)
+            resumed = "lastWeight" in params
+            if refuse_above is not None and limit > refuse_above:
+                raise _refusal(kind)
+            if refuse_resumed_at is not None and resumed and limit <= refuse_resumed_at:
+                raise _refusal(kind)
+            start = 0
+            if resumed:
+                start = next((i for i, r in enumerate(cells) if r[2] < params["lastWeight"]), len(cells))
+            return _Result([list(r) for r in cells[start:start + limit]])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    return p, limits
+
+
+def _read(p, sources=("urn:a1",), targets=None, lineage=()):
+    return _run(p.get_aggregated_edges_between(
+        list(sources), list(targets) if targets else None, granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=list(lineage),
+    ))
+
+
+def test_a_refused_page_is_halved_at_the_same_position_and_the_read_completes(monkeypatch):
+    """The store refusing a page at its per-query ceiling is a fact about
+    the page's size: the read halves it, re-reads from the same keyset
+    position, and finishes with every row — a complete answer, no mark."""
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 1)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2)
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == [f"urn:t{i}" for i in range(5)]
+    assert limits == [8, 4, 2, 2, 2]
+    assert result.stale is False and result.stale_reason is None
+    assert result.truncated is False and result.degraded_detail is None
+
+
+def test_a_memory_refusal_at_the_floor_keeps_the_prefix_and_names_the_ceiling(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2)
+    p.note_server_limits("10.0.0.1:6379", query_mem_capacity=512 * 2 ** 20)
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == ["urn:t0", "urn:t1"]
+    assert limits == [8, 4, 2, 2]
+    assert result.stale and result.stale_reason == "query_memory" and result.truncated
+    assert result.degraded_detail == {
+        "kind": "query_memory", "narrowedPages": 2, "narrowedBatches": 0, "degradedBatches": 1,
+        "floorRetries": 0, "endpoint": "10.0.0.1:6379", "queryMemCapacity": 512 * 2 ** 20,
+    }
+
+
+def test_a_timeout_at_the_floor_is_retried_once_briefly_then_reported(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(_fp.asyncio, "sleep", fake_sleep)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2, kind="timeout")
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == ["urn:t0", "urn:t1"]
+    assert limits == [8, 4, 2, 2, 2]                      # the floor page, retried once
+    assert sleeps == [_fp._READ_FLOOR_RETRY_S]
+    assert result.stale_reason == "timeout" and result.degraded_detail["floorRetries"] == 1
+    assert result.degraded_detail["endpoint"] == "x:6379"  # no node read yet: the configured one
+
+
+def _pressure_wrapped(fake, levels, *, refuse_multi_only, materialized):
+    """A provider whose source-graph reads refuse URN batches — every
+    multi-URN batch, or every batch — with the memory refusal."""
+    p = _make_provider(fake, levels)
+    real_ro = p._ro_query
+    refused = []
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        key = next((k for k in ("urns", "xs", "ys", "sourceUrns")
+                    if isinstance((params or {}).get(k), list)), None)
+        if key and (len(params[key]) > 1 or not refuse_multi_only):
+            refused.append(len(params[key]))
+            raise _refusal("memory")
+        return await real_ro(cypher, params=params, timeout=timeout, **kw)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            return _Result([list(r) for r in materialized if r[0] in params["sourceUrns"]])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._ro_query = ro_query
+    p._proj_ro_query = proj_ro_query
+    return p, refused
+
+
+def test_urn_batches_split_under_pressure_and_the_answer_is_whole():
+    """Two same-label leaves share one profile batch and one raw batch;
+    refusing every multi-URN query splits them down to single URNs and the
+    answer is exactly what an unrefused read gives — with no mark."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    control, _ = _pressure_wrapped(fake, levels, refuse_multi_only=True, materialized=[])
+    control._ro_query = fake.ro_query                     # no refusals at all
+    expected = {(e.source_urn, e.target_urn): e.edge_count for e in _read(
+        control, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",),
+    ).aggregated_edges}
+    assert expected == {("urn:a2", "urn:b2"): 2, ("urn:a2", "urn:b0"): 2}
+
+    p, refused = _pressure_wrapped(fake, levels, refuse_multi_only=True, materialized=[])
+    result = _read(p, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == expected
+    assert refused and all(n > 1 for n in refused)
+    assert result.stale is False and result.degraded_detail is None and result.truncated is False
+
+
+def test_a_batch_refused_at_a_single_urn_is_reported_as_query_memory():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, refused = _pressure_wrapped(
+        fake, levels, refuse_multi_only=False,
+        materialized=[["urn:a2", "urn:b2", 9, ["FLOWS"]]],
+    )
+    result = _read(p, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == {("urn:a2", "urn:b2"): 9}               # the materialized rows are kept
+    assert result.stale_reason == "query_memory" and result.truncated
+    assert result.degraded_detail["kind"] == "query_memory"
+    assert result.degraded_detail["narrowedBatches"] >= 1 and result.degraded_detail["degradedBatches"] >= 2
+    assert 1 in refused
+
+
+def test_a_structural_reason_wins_but_the_pressure_detail_rides_along(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.meta = None                                      # regime unknown → "unmaterialized"
+    p, _ = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2)
+    result = _read(p, lineage=("FLOWS",))
+    assert result.stale_reason == "unmaterialized"
+    assert result.truncated and result.degraded_detail["kind"] == "query_memory"
+
+
+def test_a_failure_that_is_not_pressure_stays_degraded_without_detail():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, _ = _ladder_provider(fake, levels, _cells(5), boom=RuntimeError("boom"))
+    result = _read(p)
+    assert result.stale_reason == "degraded" and result.truncated
+    assert result.degraded_detail is None
+
+
+def test_the_runaway_guard_still_bounds_a_pathological_read(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 2)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 1)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_RESULT_CAP", 3)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5))
+    result = _read(p)
+    assert len(result.aggregated_edges) == 4 and limits == [2, 2]
+    assert result.truncated and result.stale is False and result.degraded_detail is None
+
+
+def test_pressure_kind_is_one_classifier_for_both_ladders():
+    from backend.app.providers import falkordb_materialize as mat
+    for exc, kind in (
+        (Exception("Query's mem consumption exceeded capacity"), "memory"),
+        (Exception("Query timed out"), "timeout"),
+        (asyncio.TimeoutError(), "timeout"),
+        (TimeoutError("client deadline"), "timeout"),
+        (RuntimeError("boom"), None),
+    ):
+        assert _fp._pressure_kind(exc) == kind
+        assert mat._pressure_kind(exc) == kind
+
+
+# ── the read's wall clock covers the on-demand phase ────────────────
+#
+# Only the stored-cell pager consulted the read's deadline. The on-demand
+# phase after it (leafness, depth stamps, Q1/Q2/Q3, the chain read-through)
+# ran one query after another at up to 30s each, so one request could outlive
+# the 45s tier and come back a 504 the client retried.
+
+import pytest
+
+
+def _clocked_provider(fake, levels, *, depth_fails=False, chains_fail=False):
+    """A provider whose chain read-through and depth-stamp probes are the
+    real ones, recording every query after the regime read as (cypher,
+    timeout). Stored cells: none."""
+    p = _make_provider(fake, levels)
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p._compute_and_store_ancestors_bulk = FalkorDBProvider._compute_and_store_ancestors_bulk.__get__(p)
+    p._frontier_depths_from_stamps = FalkorDBProvider._frontier_depths_from_stamps.__get__(p)
+    asked = []
+
+    async def noop_connect():
+        return None
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        asked.append((cypher, timeout))
+        if chains_fail and _CHAIN_RE.search(cypher):
+            raise RuntimeError("chain bucket failed")
+        return await fake.ro_query(cypher, params=params, timeout=timeout)
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "_AggMeta" in cypher:
+            return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+        asked.append((cypher, timeout))
+        if params and "sourceUrns" in params:
+            return _Result([])
+        if depth_fails and "max(r." in cypher:
+            raise RuntimeError("depth stamps unreadable")
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._ro_query = ro_query
+    p._proj_ro_query = proj_ro_query
+    return p, asked
+
+
+def _seed_mixed(fake):
+    """a1 (container) and a2 (leaf) → b0 (container) and b2 (leaf), with a
+    stored a1→b1 cell: every on-demand query shape runs."""
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
+    return levels
+
+
+def _clocked_read(p, *, timeout=None):
+    return _run(p.get_aggregated_edges_between(
+        ["urn:a2", "urn:a1"], ["urn:b0", "urn:b2"], granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"], timeout=timeout,
+    ))
+
+
+@pytest.mark.parametrize("regime", ["boundary", "cube"])
+def test_a_spent_read_clock_starts_no_on_demand_query(monkeypatch, regime):
+    monkeypatch.setattr(_resilience, "FALKORDB_AGGREGATED_READ_BUDGET_SECS", 1.0)  # under the 2s attempt floor
+    fake = _FakeGraph()
+    fake.set_meta(regime, 2)
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    result = _clocked_read(p, timeout=30.0)
+    assert asked == []
+    assert result.truncated and result.truncation_reason == "timeout"
+    assert result.stale_reason == "timeout"
+
+
+def test_on_demand_queries_are_capped_by_what_is_left_of_the_read_clock(monkeypatch):
+    monkeypatch.setattr(_resilience, "FALKORDB_AGGREGATED_READ_BUDGET_SECS", 5.0)
+    fake = _FakeGraph()
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    result = _clocked_read(p, timeout=30.0)
+    got = {(e.source_urn, e.target_urn) for e in result.aggregated_edges}
+    assert got == {("urn:a2", "urn:b2"), ("urn:a2", "urn:b0"), ("urn:a1", "urn:b2"), ("urn:a1", "urn:b0")}
+    assert result.truncated is False
+    shapes = " ".join(c for c, _ in asked)
+    assert "child.urn IN $urns" in shapes and "max(r.sourceDepth)" in shapes and "(t2)" in shapes
+    assert all(t is not None and t <= 5.0 for _, t in asked), [t for _, t in asked]
+
+
+def test_a_depth_stamp_read_that_failed_marks_the_answer_short():
+    """Without its depth a container reads as depth 0, and its mixed-depth
+    pairs are dropped. That answer is short, and must say so rather than be
+    cached as complete."""
+    fake = _FakeGraph()
+    p, _ = _clocked_provider(fake, _seed_mixed(fake), depth_fails=True)
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
+def test_a_chain_walk_that_failed_marks_the_answer_short():
+    """The roll-ups those chains would have resolved are missing, and an
+    answer cached as complete would keep them missing for the full TTL."""
+    fake = _FakeGraph()
+    p, _ = _clocked_provider(fake, _seed_mixed(fake), chains_fail=True)
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
+def test_a_raw_mirror_batch_that_failed_marks_the_answer_short():
+    """In cube regime the raw mirror is the only source of leaf pairs. A
+    batch it lost used to be logged and dropped, and the answer read as
+    complete: kept for the full TTL and mirrored as last-known-good."""
+    fake = _FakeGraph()
+    fake.set_meta("cube", 2)
+    p, _ = _clocked_provider(fake, _seed_mixed(fake))
+    ro_query = p._ro_query
+
+    async def raw_fails(cypher, params=None, timeout=None, **kw):
+        if "type(r) IN $ltypes" in cypher:
+            raise RuntimeError("raw mirror batch failed")
+        return await ro_query(cypher, params=params, timeout=timeout, **kw)
+
+    p._ro_query = raw_fails
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
+def test_leafness_is_an_existence_probe_not_a_child_count():
+    """count(ch) walks every child of every target, an anchored column's
+    whole contents, on every chunk. Whether a node has a child at all stops
+    at the first one: FalkorDB 4.18 runs the pattern predicate as a Semi
+    Apply (5 ms against 320 ms for a container of a million children)."""
+    fake = _FakeGraph()
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    _clocked_read(p)
+    shapes = [c for c, _ in asked]
+    assert not [c for c in shapes if "count(ch)" in c]
+    assert [c for c in shapes if "AND (n)-[:CONTAINS]->() RETURN n.urn" in c]
+
+
+def test_a_row_fifty_levels_down_still_rolls_up_to_a_shallow_container():
+    """Folders nested in folders: one level in the level map, so the chain
+    query climbs at most 16 hops. The partner's chain used to stop 16 levels
+    above it, and every container higher up lost the roll-up."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=50)
+    p, _ = _clocked_provider(fake, {"lvl0": 0})
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a49"], ["urn:b1", "urn:b40"], granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"],
+    ))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == {("urn:a49", "urn:b1"): 2, ("urn:a49", "urn:b40"): 2}
+    assert result.truncated is False
+
+
+# ── a read naming far fewer targets seeks from the targets ──────────────
+#
+# A ledger's in-leg names every covered row as a source and only the rows
+# just added as targets. Seeking from the sources expanded every covered
+# row's cells (and, in cube regime, every covered row's raw edges) on every
+# page or expand.
+
+def _in_leg(fake, *, regime):
+    """20 sources (a2, a1 and 18 rows with no lineage) against 2 targets."""
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    fake.set_meta(regime, 2)
+    for i in range(18):
+        fake.add_node(f"urn:x{i}", "lvl2")
+    return levels, ["urn:a2", "urn:a1", *[f"urn:x{i}" for i in range(18)]], ["urn:b2", "urn:b1"]
+
+
+def _recording_provider(fake, levels, stored, raw):
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "ORDER BY weight DESC" in cypher:
+            stored.append((cypher, params))
+            srcs, tgts = params.get("sourceUrns"), params.get("targetUrns")
+            return _Result([
+                [s_, t_, w, list(ty)] for s_, t_, w, ty, sd, td in fake.agg
+                if (srcs is None or s_ in srcs) and (tgts is None or t_ in tgts)
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        if _RAW_RE.search(cypher):
+            raw.append((cypher, params))
+        return await fake.ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    p._ro_query = ro_query
+    return p
+
+
+def _pairs(p, sources, targets):
+    result = _run(p.get_aggregated_edges_between(
+        sources, targets, granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"],
+    ))
+    return {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+
+
+def test_an_in_leg_reads_its_stored_cells_from_the_targets(monkeypatch):
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="boundary")
+    stored, raw = [], []
+    got = _pairs(_recording_provider(fake, levels, stored, raw), sources, targets)
+
+    assert stored and all(
+        "-[r:AGGREGATED]->(t:lvl" in c and "t.urn IN $targetUrns" in c
+        and "s.urn IN $sourceUrns" in c and set(prm["targetUrns"]) <= set(targets)
+        and prm["sourceUrns"] == sources
+        for c, prm in stored
+    ), stored
+    # The same answer the sources' side gives.
+    import backend.app.providers.falkordb_provider as fp
+    monkeypatch.setattr(fp, "_TARGET_ANCHOR_RATIO", 1000)
+    by_source = []
+    assert got == _pairs(_recording_provider(fake, levels, by_source, []), sources, targets)
+    assert by_source and all("(s:lvl" in c for c, _ in by_source)
+    assert got == {
+        ("urn:a1", "urn:b1"): 5, ("urn:a2", "urn:b2"): 2,
+        ("urn:a2", "urn:b1"): 2, ("urn:a1", "urn:b2"): 2,
+    }
+
+
+def test_an_in_leg_in_cube_regime_reads_its_raw_pairs_from_the_targets(monkeypatch):
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="cube")
+    stored, raw = [], []
+    got = _pairs(_recording_provider(fake, levels, stored, raw), sources, targets)
+
+    assert raw and all(
+        "->(t:lvl" in c and "t.urn IN $targetUrns" in c and prm["sourceUrns"] == sources
+        for c, prm in raw
+    ), raw
+    import backend.app.providers.falkordb_provider as fp
+    monkeypatch.setattr(fp, "_TARGET_ANCHOR_RATIO", 1000)
+    assert got == _pairs(_recording_provider(fake, levels, [], []), sources, targets)
+    assert got == {("urn:a1", "urn:b1"): 5, ("urn:a2", "urn:b2"): 2}
+
+
+def test_a_read_with_comparable_sides_still_seeks_from_the_sources():
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="boundary")
+    stored = []
+    _pairs(_recording_provider(fake, levels, stored, []), sources[:19], targets)
+    assert stored and all("(s:lvl" in c and "(t:" not in c for c, _ in stored)
+
+
+# ── no sources named: every cell INTO the targets ───────────────────────
+#
+# Selecting a collapsed container draws its lines. Out is sources=[it] with
+# no targets; in had no way to be asked without naming every possible
+# source. With no sources the read seeks from the targets and answers
+# everything that ends on them, the mirror image of the source-only mode.
+
+def _into(fake, levels, targets, stored=None, raw=None):
+    p = _recording_provider(fake, levels, stored if stored is not None else [], raw if raw is not None else [])
+    return _pairs(p, [], targets)
+
+
+def test_no_sources_reads_every_stored_cell_into_a_container():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.add_node("urn:x0", "lvl0")
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    fake.aggregated("urn:x0", "urn:b1", 3)
+    fake.aggregated("urn:a1", "urn:b0", 4)              # into another target
+    stored = []
+    assert _into(fake, levels, ["urn:b1"], stored) == {("urn:a1", "urn:b1"): 5, ("urn:x0", "urn:b1"): 3}
+    assert stored and all(
+        "-[r:AGGREGATED]->(t:lvl1)" in c and "sourceUrns" not in c and "sourceUrns" not in prm
+        for c, prm in stored
+    ), stored
+
+
+def test_no_sources_on_a_leaf_target_is_its_raw_fan_in():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    assert _into(fake, levels, ["urn:b2"]) == {("urn:a2", "urn:b2"): 2}
+
+
+def test_no_sources_in_cube_regime_mirrors_the_raw_fan_in():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.set_meta("cube", 2)
+    fake.aggregated("urn:a1", "urn:b2", 2)
+    raw = []
+    assert _into(fake, levels, ["urn:b2"], raw=raw) == {("urn:a2", "urn:b2"): 2, ("urn:a1", "urn:b2"): 2}
+    assert raw and all("->(t:lvl2)" in c and "sourceUrns" not in c for c, _ in raw), raw
+
+
+def test_no_sources_and_no_targets_is_still_nothing():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    stored = []
+    p = _recording_provider(fake, levels, stored, [])
+    assert _pairs(p, [], None) == {} and stored == []

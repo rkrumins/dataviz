@@ -297,3 +297,157 @@ export function mergeClosures(
         seedCursor,
     }
 }
+
+
+/**
+ * Union several walk models into one — the canvas's bulk trace.
+ *
+ * Each selected seed is walked independently (so one seed's truncation or
+ * failure is never attributed to another); this is where the separate
+ * pictures become the single overlay the canvas draws.
+ *
+ * Nodes and edges dedupe by id, because two seeds that reach the same table
+ * have found ONE table, not two. `upstreamUrns` / `downstreamUrns` union for
+ * the same reason — with one deliberate exception: a urn that is itself one
+ * of the seeds is dropped from both. A seed is hop 0 of its own walk, and
+ * counting it as another seed's upstream would let a selection report
+ * lineage it does not have.
+ *
+ * `truncated` and `seedTruncated` are ORed: if any seed's picture is
+ * incomplete, the union is incomplete, and the overlay has to say so.
+ * `focusUrn` is the first seed — the union has no single focal, and callers
+ * that need the whole set read it from the selection instead.
+ */
+export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel | null {
+    if (models.length === 0) return null
+    if (models.length === 1) return models[0]!
+
+    const seeds = new Set(models.map((m) => m.focusUrn))
+    const nodes = new Map<string, LensWalkNode>()
+    const lineageEdges = new Map<string, LensEdgeLike>()
+    const containmentEdges = new Map<string, LensContainmentEdgeLike>()
+    const upstreamUrns = new Set<string>()
+    const downstreamUrns = new Set<string>()
+    const coarseUp = new Set<string>()
+    const coarseDown = new Set<string>()
+    const frontierUp = new Map<string, LensFrontierEntry>()
+    const frontierDown = new Map<string, LensFrontierEntry>()
+    let truncated = false
+    let seedTruncated = false
+    let truncationReason: string | null = null
+
+    for (const m of models) {
+        for (const n of m.nodes) nodes.set(n.urn, n)
+        // `id` is optional on a lineage hop and absent on a containment
+        // edge, so both dedupe by the pair they connect (and, for lineage,
+        // the relationship) — the same identity `mergeClosures` treats as one
+        // edge. Two seeds reaching the same pair found ONE hop.
+        for (const e of m.lineageEdges) {
+            lineageEdges.set(e.id ?? `${e.sourceUrn}\u0000${e.targetUrn}\u0000${e.edgeType ?? ''}`, e)
+        }
+        for (const e of m.containmentEdges) {
+            containmentEdges.set(`${e.sourceUrn}\u0000${e.targetUrn}`, e)
+        }
+        for (const u of m.upstreamUrns) if (!seeds.has(u)) upstreamUrns.add(u)
+        for (const u of m.downstreamUrns) if (!seeds.has(u)) downstreamUrns.add(u)
+        for (const u of m.coarseUpstreamUrns ?? []) if (!seeds.has(u)) coarseUp.add(u)
+        for (const u of m.coarseDownstreamUrns ?? []) if (!seeds.has(u)) coarseDown.add(u)
+        // A node still owed by ANY seed is still owed by the union.
+        for (const f of m.frontierUp) frontierUp.set(f.urn, f)
+        for (const f of m.frontierDown) frontierDown.set(f.urn, f)
+        truncated = truncated || m.truncated
+        seedTruncated = seedTruncated || m.seedTruncated
+        truncationReason = truncationReason ?? m.truncationReason
+    }
+
+    return {
+        focusUrn: models[0]!.focusUrn,
+        nodes: [...nodes.values()],
+        lineageEdges: [...lineageEdges.values()],
+        containmentEdges: [...containmentEdges.values()],
+        upstreamUrns,
+        downstreamUrns,
+        ...(coarseUp.size > 0 ? { coarseUpstreamUrns: coarseUp } : {}),
+        ...(coarseDown.size > 0 ? { coarseDownstreamUrns: coarseDown } : {}),
+        frontierUp: [...frontierUp.values()],
+        frontierDown: [...frontierDown.values()],
+        truncated,
+        truncationReason,
+        seedTruncated,
+        // The union has no single focus whose contents could be resumed; each
+        // seed's own cursor is drained by the driver on its own model.
+        seedCursor: null,
+    }
+}
+
+
+/** URN prefix marking a focal that stands for a SELECTION rather than a
+ *  real entity. Nothing in the graph can collide with it. */
+export const SELECTION_FOCUS_PREFIX = 'selection:'
+
+/** The urn for a lens focused on `memberUrns`. Sorted, so the same selection
+ *  is the same focal however it was built — which is what lets the walk cache
+ *  and the lens history recognise it. */
+export function selectionFocusUrn(memberUrns: readonly string[]): string {
+    return SELECTION_FOCUS_PREFIX + [...memberUrns].sort().join('\u0000')
+}
+
+/** The members a selection focal stands for, or null when it is a real urn. */
+export function selectionMembers(urn: string | null): string[] | null {
+    if (!urn || !urn.startsWith(SELECTION_FOCUS_PREFIX)) return null
+    const members = urn.slice(SELECTION_FOCUS_PREFIX.length).split('\u0000').filter(Boolean)
+    return members.length > 0 ? members : null
+}
+
+/**
+ * Give a union model a SYNTHETIC focus that contains the selection.
+ *
+ * The Lens is built around one focal, and everything it computes — hop
+ * numbering, the frontier pills, the orientation sentence — is measured from
+ * the "focus side", which `buildLensSubgraph` derives as the focus plus
+ * everything CONTAINED in it. So a selection becomes a lens focus by being
+ * exactly that: one synthetic node with a containment edge to each selected
+ * entity. Hop 1 is then "anything the selection reaches", by the same rule
+ * that makes a table's columns hop 0 of the table's own lens.
+ *
+ * Nothing downstream needs to know. The synthetic node is a normal
+ * `LensWalkNode`; it simply has no edges of its own, which is true of every
+ * container the lens already draws.
+ */
+export function withSelectionFocus(
+    model: LensWalkModel,
+    memberUrns: readonly string[],
+    label: string,
+): LensWalkModel {
+    const focusUrn = selectionFocusUrn(memberUrns)
+    const present = new Set(model.nodes.map((n) => n.urn))
+    const synthetic: LensWalkNode = {
+        id: focusUrn,
+        position: { x: 0, y: 0 },
+        data: { label, urn: focusUrn, type: 'selection' },
+        urn: focusUrn,
+        displayName: label,
+        entityType: 'selection',
+    } as LensWalkNode
+
+    const members = new Set(memberUrns)
+    return {
+        ...model,
+        focusUrn,
+        nodes: [synthetic, ...model.nodes],
+        containmentEdges: [
+            // Only for members the walk actually returned: an edge to a node
+            // the subgraph does not hold would nest nothing and count as a
+            // child that is not there.
+            ...memberUrns
+                .filter((urn) => present.has(urn))
+                .map((urn) => ({ sourceUrn: focusUrn, targetUrn: urn })),
+            // A member belongs to the SELECTION now, and to nothing else.
+            // `buildLensSubgraph` takes the first parent it sees but lets
+            // every claimant keep the child in its own `childrenOf` list, so
+            // leaving the real container's edge in place drew that container
+            // as a second card insisting it still held them.
+            ...model.containmentEdges.filter((e) => !members.has(e.targetUrn)),
+        ],
+    }
+}

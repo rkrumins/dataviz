@@ -1,0 +1,82 @@
+/**
+ * What a lineage port says on hover.
+ *
+ * A card whose lineage could not be counted says exactly that, and that the
+ * canvas is asking again — never that data is "not loaded". A card with
+ * lineage no line shows yet says it has some, and how to draw it.
+ */
+import { fireEvent, render, screen } from '@testing-library/react'
+import { useRef } from 'react'
+import { describe, expect, it } from 'vitest'
+
+import { PortHoverTip } from '../PortHoverTip'
+
+function Scroller({ port }: { port: Record<string, string> }) {
+  const ref = useRef<HTMLDivElement>(null)
+  return (
+    <div ref={ref}>
+      <span data-testid="port" {...port} />
+      <PortHoverTip scrollerRef={ref} />
+    </div>
+  )
+}
+
+describe('PortHoverTip', () => {
+  it('a port whose count failed says it could not be counted and is being retried', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'unknown', 'data-dir': 'both' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip')
+    expect(tip.textContent).toContain('Lineage for this entity could not be counted — retrying')
+    expect(tip.textContent).not.toMatch(/load/i)
+  })
+
+  it('a hollow port says its lineage leads outside this view — never that anything is not loaded', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'beyond', 'data-dir': 'out', 'data-out': '4' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('4 underlying flows lead to entities outside this view')
+    expect(tip).not.toMatch(/load|canvas|render/i)
+  })
+
+  it('a hollow incoming port says where its lineage arrives from', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'beyond', 'data-dir': 'in', 'data-in': '1' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('1 underlying flow arrives from entities outside this view')
+    expect(tip).not.toMatch(/load|canvas|render/i)
+  })
+
+  it('a solid port with no line yet says the card has lineage that way, and what selecting it does', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'lineage', 'data-dir': 'in' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('Has incoming lineage')
+    // Its partners may be inside it, or of a hidden type: no promise of lines.
+    expect(tip).toContain('Selecting it draws the lines this view can show.')
+    expect(tip).not.toMatch(/draw its lines|outside|load|\d/i)
+  })
+
+  it('says which way on the outgoing side', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'lineage', 'data-dir': 'out' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    expect(screen.getByRole('tooltip').textContent).toContain('Has outgoing lineage')
+    expect(screen.getByRole('tooltip').textContent).toContain('Downstream — data flows out of this entity.')
+  })
+
+  it('a solid port still counts its lines', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'here', 'data-dir': 'out', 'data-out': '3' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    expect(screen.getByRole('tooltip').textContent).toContain('3 outgoing lines')
+  })
+
+  // With incoming left and outgoing right, a line to the left or within the
+  // column leaves by the edge across from its marker: the tip names the
+  // direction, never the edge.
+  it('says which way its lines run, not that they meet this edge', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'here', 'data-dir': 'in', 'data-in': '1' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('1 incoming line')
+    expect(tip).not.toMatch(/lines|here/)
+  })
+})

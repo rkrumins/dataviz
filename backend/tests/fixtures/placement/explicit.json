@@ -1,0 +1,165 @@
+{
+  "cases": [
+    {
+      "name": "explicit-entry-places-in-curated-scope",
+      "summary": "PLACE tier 1: a valid explicit entry places its node; in curated scope a node with no entry and no hand-placed parent stops at tier 4 (none).",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "x": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "b", "source": "explicit" }, "y": { "source": "none" } }
+    },
+    {
+      "name": "explicit-beats-own-rule",
+      "summary": "PLACE tier 1 before tier 6: an explicit entry wins over the layer type rule that would otherwise claim the node.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "x": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "b", "source": "explicit" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }
+      }
+    },
+    {
+      "name": "stale-explicit-falls-through-to-rule",
+      "summary": "PLACE stale: an entry naming an unknown layer (including the __UNASSIGNED__ sentinel) is skipped, the node falls through to its rule, and staleExplicit is set.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {
+              "x": { "layerId": "gone", "inheritsChildren": true },
+              "y": { "layerId": "__UNASSIGNED__", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset", "staleExplicit": true },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset", "staleExplicit": true }
+      }
+    },
+    {
+      "name": "stale-explicit-in-curated-scope",
+      "summary": "PLACE stale: in curated scope a stale node with no hand parent is none+stale; a stale child of a hand-placed parent still inherits (tier 2) and keeps staleExplicit.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {
+              "x": { "layerId": "gone", "inheritsChildren": true },
+              "p": { "layerId": "a", "inheritsChildren": true },
+              "c": { "layerId": "gone", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "c", "entityType": "dataset" }
+      ],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "x": { "source": "none", "staleExplicit": true },
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p", "staleExplicit": true }
+      }
+    },
+    {
+      "name": "empty-or-non-string-layer-id-is-absent-not-stale",
+      "summary": "COMPILE explicit: an entry whose layerId is '', null, a number or missing is absent (never stale), so the node falls to its rule without staleExplicit.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {
+              "x": { "layerId": "", "inheritsChildren": true },
+              "y": { "layerId": null, "inheritsChildren": true },
+              "z": { "layerId": 5, "inheritsChildren": true },
+              "w": { "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "dataset" },
+        { "urn": "z", "entityType": "dataset" },
+        { "urn": "w", "entityType": "dataset" }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "w": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }
+      }
+    },
+    {
+      "name": "explicit-layer-id-must-be-an-exact-layer-id",
+      "summary": "PLACE stale: an entry is valid only when its layerId equals a layer id exactly; a layer's name or a differently cased id is stale.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "Gold", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "Silver", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "x": { "layerId": "Silver", "inheritsChildren": true },
+              "y": { "layerId": "B", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset", "staleExplicit": true },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset", "staleExplicit": true }
+      }
+    },
+    {
+      "name": "explicit-entry-without-inherits-children-still-places-itself",
+      "summary": "PLACE tier 1: inheritsChildren false gates only the children; the node itself is explicit, and in open scope it beats its own type rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": { "x": { "layerId": "a", "inheritsChildren": false } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "a", "source": "explicit" } }
+    }
+  ]
+}

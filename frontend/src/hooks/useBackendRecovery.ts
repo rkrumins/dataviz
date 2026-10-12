@@ -8,8 +8,9 @@
  *   - Views list reload (populates sidebar & view gallery)
  *   - Graph schema invalidation (next canvas route mount will re-fetch fresh)
  *   - Insights query invalidation: every query whose key starts with
- *     ``insights-`` (asset stats, asset list, job status, ...) is
- *     invalidated so stuck "Computing" StatusChips refresh once
+ *     ``insights-`` (asset stats, job status, ...), plus the provider
+ *     asset list and catalog keys, is invalidated so stuck "Computing"
+ *     StatusChips and a stuck "no data sources" list both recover once
  *     Redis is back online.
  *
  * This eliminates the need for a full page refresh after a backend restart.
@@ -22,6 +23,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { GRAPH_SCHEMA_QUERY_KEY } from '@/hooks/useGraphSchema'
+import { PROVIDER_ASSETS_QUERY_KEY, PROVIDER_CATALOG_QUERY_KEY } from '@/hooks/useProviderAssets'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 
 export function useBackendRecovery() {
@@ -61,13 +63,22 @@ export function useBackendRecovery() {
       queryClient.invalidateQueries({ queryKey: [...GRAPH_SCHEMA_QUERY_KEY] })
 
       // Invalidate every insights envelope/query so stuck "Computing"
-      // chips refresh once Redis is back. Tuple-key predicate form:
-      // any query whose first key is a string starting with
-      // ``insights-`` (asset stats/list, job status, etc.).
+      // chips refresh once Redis is back.
+      //
+      // The asset LIST is not under an ``insights-`` key — it is
+      // ``provider-assets`` (useProviderAssets.ts), so the startsWith
+      // predicate never matched it and the docstring above was wrong. That
+      // mattered: an outage-era envelope with data:null classifies as
+      // 'unavailable', which stops the poll, so the list stayed stuck on
+      // "no data sources" after the backend came back while the per-row
+      // chips un-stuck around it. Name both provider keys explicitly.
       queryClient.invalidateQueries({
         predicate: (q) => {
           const head = q.queryKey[0]
-          return typeof head === 'string' && head.startsWith('insights-')
+          if (typeof head !== 'string') return false
+          return head.startsWith('insights-')
+            || head === PROVIDER_ASSETS_QUERY_KEY
+            || head === PROVIDER_CATALOG_QUERY_KEY
         },
       })
     })

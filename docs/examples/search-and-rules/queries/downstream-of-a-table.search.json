@@ -1,0 +1,18 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      {
+        "kind": "withinHops",
+        "urns": ["urn:li:dataset:REPLACE_WITH_A_URN"],
+        "hops": 3,
+        "direction": "out",
+        "edgeClass": "lineage"
+      },
+      { "kind": "entityType", "op": "in", "values": ["dataset", "dashboard"] }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 200, "includeAncestorPath": true }
+}

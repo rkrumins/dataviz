@@ -31,13 +31,14 @@ import {
 
 import { AccountCard, AccountShell, EmptyState, useAccountIdentity } from '@/components/account/AccountShell'
 import { pageGeometry } from '@/components/layout/PageContainer'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     STRENGTH_COLORS, STRENGTH_LABELS, MIN_STRENGTH_SCORE, usePasswordStrength,
 } from '@/lib/passwordStrength'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { accountService, type AccountActivityItem } from '@/services/accountService'
+import { authService } from '@/services/authService'
 import { useAuthStore } from '@/store/auth'
 
 /** What each activity event is called, in words the account owner uses. */
@@ -76,7 +77,7 @@ export function AccountSettingsPage() {
  */
 function AccountSettingsContent() {
     const navigate = useNavigate()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const user = useAuthStore((s) => s.user)
     const applyProfile = useAuthStore((s) => s.applyProfile)
     const logout = useAuthStore((s) => s.logout)
@@ -100,6 +101,25 @@ function AccountSettingsContent() {
 
     const [revoking, setRevoking] = useState(false)
     const [activity, setActivity] = useState<AccountActivityItem[]>([])
+
+    // The SSO-only card's "Request a password" affordance. The request
+    // is the forgot-password flow, which never mints a token — it flags
+    // the account so an administrator can grant one deliberately.
+    const [requestingPassword, setRequestingPassword] = useState(false)
+    const [passwordRequested, setPasswordRequested] = useState(false)
+
+    async function handleRequestPassword() {
+        if (!user?.email) return
+        setRequestingPassword(true)
+        try {
+            await authService.forgotPassword(user.email)
+            setPasswordRequested(true)
+        } catch {
+            notify('error', 'Could not send the request. Try again.')
+        } finally {
+            setRequestingPassword(false)
+        }
+    }
 
     useEffect(() => {
         let cancelled = false
@@ -144,7 +164,12 @@ function AccountSettingsContent() {
         || displayName.trim() !== ''
     ), [firstName, lastName, displayName, user])
 
-    const canSaveProfile = !!firstName.trim() && !!lastName.trim()
+    // A first name is required; a surname is not — "Prince" and
+    // undivided scripts ("山田太郎") land whole in the first name, and
+    // demanding a second field made Save permanently dead for them
+    // (taking the display-name escape hatch down with it, since it
+    // rides in the same patch).
+    const canSaveProfile = !!firstName.trim()
         && profileDirty && !savingProfile
 
     const resetProfile = () => {
@@ -169,9 +194,9 @@ function AccountSettingsContent() {
                 lastName: updated.lastName,
                 displayName: updated.displayName,
             })
-            showToast('success', 'Profile updated')
+            notify('success', 'Profile updated')
         } catch (err) {
-            showToast('error', (err as Error).message)
+            notify('error', (err as Error).message)
         } finally {
             setSavingProfile(false)
         }
@@ -190,12 +215,12 @@ function AccountSettingsContent() {
         setPasswordError(null)
         try {
             await accountService.changePassword(currentPassword, newPassword)
-            showToast('success', 'Password changed. Sign in again.')
+            notify('success', 'Password changed. Sign in again.')
             // Same teardown as the sign-out-everywhere button above, and
             // for the same reason: changing your password revokes every
             // session, this one included, so a tab that keeps believing
             // it is signed in lands on "You're already signed in as …"
-            // instead of the login form the toast just promised.
+            // instead of the login form the notification just promised.
             // ``PasswordChangeRequired`` always did this; this caller
             // did not.
             await logout()
@@ -212,7 +237,7 @@ function AccountSettingsContent() {
         try {
             await accountService.revokeAllSessions()
         } catch (err) {
-            showToast('error', (err as Error).message)
+            notify('error', (err as Error).message)
             setRevoking(false)
             return
         }
@@ -296,8 +321,27 @@ function AccountSettingsContent() {
                         </p>
                         <p className="text-ink-muted text-[13px]">
                             If you need one — to sign in when the provider is
-                            unavailable, say — an administrator can set it for you.
+                            unavailable, or is being retired — ask here. An
+                            administrator approves it and sends you a link.
                         </p>
+                        {passwordRequested ? (
+                            <p
+                                role="status"
+                                className="text-[13px] text-emerald-600 dark:text-emerald-400"
+                            >
+                                Requested. An administrator will see it and get
+                                a reset link to you.
+                            </p>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => void handleRequestPassword()}
+                                disabled={requestingPassword}
+                                className="px-3 py-1.5 rounded-lg border border-glass-border bg-canvas text-xs font-medium text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
+                            >
+                                Request a password
+                            </button>
+                        )}
                     </div>
                 ) : !passwordOpen ? (
                     <button

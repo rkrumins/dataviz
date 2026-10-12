@@ -4,9 +4,12 @@ This is the logic the commit/checkpoint/publish/PR services build on, factored
 out so it is unit-testable without a database:
 
 * :func:`materialize` — fold an ordered list of working-change ops onto a base
-  state to get a branch's head state.  A working-change ``payload`` is the *full*
-  entity payload at that edit (the client stages the whole optimistic state, plan
-  decision #10), so create/update both replace and delete tombstones.
+  state to get a branch's head state.  A ``create`` payload is the full entity; an
+  ``update`` payload is a PATCH (see ``backend.common.property_patch``): top-level
+  fields replace, ``properties`` merges, a removal marker removes; ``delete``
+  tombstones.
+* :func:`fold_batch_ops` — the same composition for ONE batch of ops before it is
+  applied (several ops on one entity become one), shared with ``apply_ops``.
 * :func:`net_delta` — the **squash**: per-entity create/update/delete between a
   base state and a head state, content-hash-deduped so a no-op edit produces no
   delta (a 1M-edit draft that nets to 300 changes squashes to 300 rows).
@@ -17,16 +20,23 @@ A "state" is ``{entity_id: payload | None}`` where ``None`` is a tombstone.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 try:
     from .merkle import content_hash
+    from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 except ImportError:  # script mode
+    import pathlib
+    import sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
     from merkle import content_hash  # type: ignore
+    from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 
 __all__ = [
     "Delta",
+    "BatchFold",
+    "fold_batch_ops",
     "materialize",
     "net_delta",
     "field_diff",
@@ -52,12 +62,11 @@ def materialize(base_state: Mapping[str, Optional[dict]], ops: List[Mapping]) ->
 
     Each op is ``{"entity_id", "op", "payload"}``.  ``delete`` sets a tombstone
     (``None``).  A ``create`` replaces the entity wholesale; an ``update`` is a
-    field-level PATCH — its payload is merged onto the entity's current value so
-    fields it doesn't mention (urn, displayName, qualifiedName, …) are preserved.
-    (The canvas sends partial update payloads — only the edited fields — so a
-    wholesale replace here would silently strip the rest and surface as blank
-    names + lost properties once a publish/merge projects the truncated entity.
-    Full-payload callers are unaffected: every field is present in the merge.)
+    PATCH applied onto the entity's current value: fields it doesn't mention
+    (urn, displayName, qualifiedName, …) are preserved, ``properties`` merges key
+    by key — a partial properties patch keeps the properties it doesn't name —
+    and a property marked for removal is removed. Full-payload callers are
+    unaffected: every field is present in the merge.
     """
     state: State = dict(base_state)
     for op in ops:
@@ -66,10 +75,65 @@ def materialize(base_state: Mapping[str, Optional[dict]], ops: List[Mapping]) ->
         if op["op"] == "delete" or payload is None:
             state[eid] = None
         elif op["op"] == "update" and isinstance(state.get(eid), dict):
-            state[eid] = {**state[eid], **dict(payload)}     # PATCH: merge onto current
+            state[eid] = apply_patch(state[eid], payload)
         else:                                                # create → full replace
-            state[eid] = dict(payload)
+            state[eid] = strip_deletes(dict(payload))
     return state
+
+
+@dataclass
+class BatchFold:
+    """One batch of ops folded to at most one pending value per entity."""
+
+    #: entity → pending value: a full payload (create / update-after-create), a
+    #: PATCH (``update_ids``), or ``None`` (delete).
+    new_vals: Dict[str, Optional[dict]] = field(default_factory=dict)
+    kind_by_entity: Dict[str, str] = field(default_factory=dict)
+    #: entities whose pending value is a PATCH still to be applied onto the current value.
+    update_ids: Set[str] = field(default_factory=set)
+    #: entity → the client's optimistic-concurrency token (the first update's).
+    base_versions: Dict[str, str] = field(default_factory=dict)
+
+
+def fold_batch_ops(
+    ops: List[Mapping],
+    *,
+    is_edge_payload: Callable[[Mapping], bool],
+    sanitize_node: Callable[[dict], dict],
+) -> BatchFold:
+    """Compose a batch's ops per entity, in order.
+
+    An update after a create patches the create's payload (a node renamed before
+    its first save); two updates compose into one patch that keeps both
+    removals; a create or delete restarts the entity. A create never carries a
+    removal marker.
+    """
+    out = BatchFold()
+    for op in ops:
+        eid = op["entity_id"]
+        payload = op.get("payload") or {}
+        out.kind_by_entity[eid] = (op.get("entity_kind")
+                                   or ("edge" if is_edge_payload(payload) else "node"))
+        earlier = out.new_vals.get(eid)
+        if op["op"] == "update" and earlier is not None:
+            out.new_vals[eid] = (compose_patches(earlier, payload) if eid in out.update_ids
+                                 else apply_patch(earlier, payload))
+        else:
+            if op["op"] == "delete":
+                out.new_vals[eid] = None
+            elif op["op"] == "update":
+                out.new_vals[eid] = dict(payload)
+            else:
+                out.new_vals[eid] = strip_deletes(dict(payload))
+            if op["op"] == "update":
+                out.update_ids.add(eid)
+                if op.get("base_version"):
+                    out.base_versions[eid] = op["base_version"]
+            else:
+                out.update_ids.discard(eid)          # a create / delete restarts the entity
+        if out.new_vals[eid] is not None and out.kind_by_entity[eid] == "node":
+            out.new_vals[eid] = sanitize_node(out.new_vals[eid])
+    return out
 
 
 def net_delta(base_state: Mapping[str, Optional[dict]], head_state: Mapping[str, Optional[dict]]) -> List[Delta]:

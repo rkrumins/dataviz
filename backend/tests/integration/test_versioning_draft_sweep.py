@@ -20,7 +20,7 @@ from backend.app.services.versioning.worker import ProjectionWorker
 
 def _n(eid):
     return {"op": "create", "entity_kind": "node", "entity_id": eid,
-            "payload": {"displayName": eid}}
+            "payload": {"entityType": "Dataset", "displayName": eid}}
 
 
 async def _backdate(bid: str, days: int) -> None:

@@ -23,16 +23,20 @@ vi.mock('@/store/auth', async () => {
     return { ...actual, usePermission: () => perms.value }
 })
 
-const { listProviders, listGroupMappings, auditList } = vi.hoisted(() => ({
+const { listProviders, listGroupMappings, auditList, failureDigest, activity } = vi.hoisted(() => ({
     listProviders: vi.fn(),
     listGroupMappings: vi.fn(),
     auditList: vi.fn(),
+    failureDigest: vi.fn(),
+    activity: vi.fn(),
 }))
 
 vi.mock('@/services/ssoAdminService', () => ({
     ssoAdminService: {
         listProviders,
         listGroupMappings,
+        failureDigest,
+        activity,
         providerStatus: vi.fn().mockResolvedValue({ providers: [] }),
     },
 }))
@@ -50,7 +54,23 @@ beforeEach(() => {
     listProviders.mockResolvedValue([])
     listGroupMappings.mockResolvedValue([])
     auditList.mockResolvedValue({ events: [], nextCursor: null })
+    failureDigest.mockResolvedValue(digest())
+    activity.mockResolvedValue({
+        rows: [], nextCursor: null,
+        counts: {
+            signed_in: 0, failed: 0, session_ended: 0, signed_out: 0,
+            account: 0, trust: 0, config: 0,
+        },
+    })
 })
+
+function digest(attempts = 0) {
+    return {
+        window: { from: '', scanned: attempts, truncated: false },
+        totals: { attempts, people: 0, stillFailing: 0, unidentified: 0 },
+        reasons: [], providers: [], people: [],
+    }
+}
 
 function provider(over: Record<string, unknown> = {}) {
     return {
@@ -63,12 +83,30 @@ function provider(over: Record<string, unknown> = {}) {
 }
 
 describe('tab shell', () => {
-    it('offers four tabs and no longer a Find user tab', () => {
+    it('offers five tabs and no longer a Find user tab', () => {
         render(<MemoryRouter><AdminSso /></MemoryRouter>)
-        for (const name of [/^Providers$/, /Access mapping/, /Diagnostics/, /^Settings$/]) {
+        for (const name of [/^Providers$/, /Access mapping/, /Diagnostics/, /^Activity$/, /^Settings$/]) {
             expect(screen.getByRole('button', { name })).toBeInTheDocument()
         }
         expect(screen.queryByRole('button', { name: /find user/i })).not.toBeInTheDocument()
+    })
+
+    it('has no Activity tab without audit access', () => {
+        perms.value = false
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        expect(screen.queryByRole('button', { name: /^Activity$/ })).not.toBeInTheDocument()
+    })
+
+    it('opens Activity with a quoted reference searched', async () => {
+        const user = userEvent.setup()
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+        await user.click(screen.getByRole('button', { name: /^Diagnostics$/ }))
+        await user.type(screen.getByLabelText('Reference'), 'ab12cd34')
+        await user.click(screen.getByRole('button', { name: /look up/i }))
+
+        expect(screen.getByRole('button', { name: /^Activity$/ }))
+            .toHaveAttribute('aria-current', 'page')
+        expect(activity).toHaveBeenCalledWith(expect.objectContaining({ q: 'ab12cd34' }))
     })
 
     it('carries the page actions every other Admin section has', () => {
@@ -108,6 +146,16 @@ describe('stat tiles', () => {
 
         const fails = await screen.findByText(/failed sign-ins/i)
         expect(within(fails.closest('div')!.parentElement!).getByText('—'))
+            .toBeInTheDocument()
+        expect(failureDigest).not.toHaveBeenCalled()
+    })
+
+    it('counts failed sign-in attempts, not every warning in the log', async () => {
+        failureDigest.mockResolvedValue(digest(7))
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+
+        const fails = await screen.findByText(/failed sign-ins/i)
+        expect(await within(fails.closest('div')!.parentElement!).findByText('7'))
             .toBeInTheDocument()
         expect(auditList).not.toHaveBeenCalled()
     })
@@ -194,6 +242,14 @@ describe('diagnostics', () => {
         // The lookup half survives — only the audit-backed half goes away.
         expect(screen.getByText(/find a person/i)).toBeInTheDocument()
         expect(screen.queryByText(/system:audit:read/i)).not.toBeInTheDocument()
+        expect(screen.queryByText(/sign-in problems/i)).not.toBeInTheDocument()
+        expect(failureDigest).not.toHaveBeenCalled()
+    })
+
+    it('leads with who is failing when the operator can read the log', async () => {
+        render(<DiagnosticsTab />)
+        expect(await screen.findByText('Sign-in problems')).toBeInTheDocument()
+        expect(failureDigest).toHaveBeenCalled()
     })
 
     it('drops the reference prompt along with the log it points at', () => {

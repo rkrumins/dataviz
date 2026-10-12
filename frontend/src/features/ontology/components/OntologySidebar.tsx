@@ -604,7 +604,7 @@ export function OntologySidebar({
   return (
     <div
       data-tour="schema-sidebar"
-      className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative"
+      className="flex-shrink-0 flex flex-col border-r border-glass-border bg-canvas-elevated/40 h-full relative overflow-x-hidden overflow-y-auto"
       style={{ width }}
     >
       {/* Header */}
@@ -773,8 +773,9 @@ export function OntologySidebar({
         )}
       </div>
 
-      {/* Scrollable list */}
-      <div ref={listScrollRef} className="flex-1 overflow-y-auto px-3 pb-3">
+      {/* Scrollable list — floored, so a short window scrolls the sidebar
+          instead of squeezing the list to nothing */}
+      <div ref={listScrollRef} className="flex-1 min-h-40 overflow-y-auto px-3 pb-3">
         {effectiveLoading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="w-5 h-5 animate-spin text-ink-muted/40" />

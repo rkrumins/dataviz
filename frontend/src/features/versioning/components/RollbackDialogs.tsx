@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { MergeConflictError } from '@/services/versioningApiService'
 import { useRestoreCommit, useRestorePreview, useRevertCommit } from '../hooks/useVersioning'
 import { kindMeta } from '../model/commitKind'
@@ -101,7 +101,7 @@ export function RevertDialog({
   /** actor id → display name (the commit log wrapper's map). */
   userNames?: Record<string, string>
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const revert = useRevertCommit(wsId, graphId)
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
 
@@ -119,7 +119,7 @@ export function RevertDialog({
       {
         onSuccess: (r) => {
           onClose()
-          showToast(
+          notify(
             'success',
             r.commitId
               ? 'Change undone — a new revision was added to history.'
@@ -131,7 +131,7 @@ export function RevertDialog({
             setConflicts(err.conflicts)
             return
           }
-          showToast('error', err instanceof Error ? err.message : 'Could not undo this change.')
+          notify('error', err instanceof Error ? err.message : 'Could not undo this change.')
         },
       },
     )
@@ -232,7 +232,7 @@ export function RestoreDialog({
   /** actor id → display name (the commit log wrapper's map). */
   userNames?: Record<string, string>
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const restore = useRestoreCommit(wsId, graphId)
   const commitId = (commit?.commit_id as string) ?? null
   const preview = useRestorePreview(wsId, graphId, commitId, open)
@@ -245,7 +245,7 @@ export function RestoreDialog({
       {
         onSuccess: (r) => {
           onClose()
-          showToast(
+          notify(
             'success',
             r.commitId
               ? 'Graph restored — a new revision was added to history.'
@@ -253,7 +253,7 @@ export function RestoreDialog({
           )
         },
         onError: (err) =>
-          showToast('error', err instanceof Error ? err.message : 'Could not restore the graph.'),
+          notify('error', err instanceof Error ? err.message : 'Could not restore the graph.'),
       },
     )
   }

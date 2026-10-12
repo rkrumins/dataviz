@@ -17,6 +17,9 @@ import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
 import type { Predicate } from '@/types/search'
 
+import { arityOf } from '../typed/operators'
+import { describeDuration } from '../typed/valueCodec'
+
 
 export interface QueryChipsProps {
     predicate: Predicate
@@ -92,18 +95,25 @@ function describePredicate(p: Predicate): Chip {
         }
 
         case 'property': {
-            const op = (p.op && PROP_OP_LABEL[p.op]) || p.op || '='
+            const op = p.op ?? 'eq'
+            const arity = arityOf(op)
+            const value = arity === 'none' ? ''
+                : arity === 'duration' ? ` ${describeDuration(p.value) ?? '…'}`
+                    : ` ${valueLabel(p.value)}`
             return {
                 icon: 'SlidersHorizontal',
-                label: `${p.key} ${op} ${valueLabel(p.value)}`,
+                label: `${p.key} ${PROP_OP_LABEL[op] ?? op}${value}`,
             }
         }
 
-        case 'hasProperty':
+        case 'hasProperty': {
+            const name = p.keyMatch === 'contains' ? `*${p.key}*`
+                : p.keyMatch === 'prefix' ? `${p.key}*` : p.key
             return {
                 icon: 'KeyRound',
-                label: p.negate ? `no ${p.key}` : `has ${p.key}`,
+                label: p.negate ? `no ${name}` : `has ${name}`,
             }
+        }
 
         case 'tag': {
             const verb = (p.op && TAG_OP_LABEL[p.op]) || 'tagged'
@@ -205,9 +215,16 @@ const PROP_OP_LABEL: Record<string, string> = {
     in: 'in',
     notIn: 'not in',
     contains: 'contains',
+    notContains: 'does not contain',
+    containsAll: 'has all of',
     startsWith: 'starts with',
     endsWith: 'ends with',
     between: 'between',
+    withinLast: 'within the last',
+    isSet: 'is set',
+    isNotSet: 'is not set',
+    isEmpty: 'is empty',
+    isNotEmpty: 'is not empty',
 }
 
 const TAG_OP_LABEL: Record<string, string> = {

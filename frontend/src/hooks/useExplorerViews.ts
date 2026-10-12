@@ -61,6 +61,11 @@ export type SortOption =
   // Settings-edit time.
   | 'updated'
   | 'popular'
+  // Ranked by OPENS rather than favourites. Not server-sorted, and cannot be:
+  // opens live in the event log and views in the catalogue, and this repo bans
+  // cross-domain JOINs. Ordered on the client from the usage already fetched
+  // for the cards, exactly as `likes-asc` / `type-az` / `owner-az` are.
+  | 'most-opened'
   | 'az'
   | 'za'
   // Column-sorts (list view header clicks)

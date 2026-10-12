@@ -81,6 +81,15 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "graphExportEnabled":
         "Exporting graph data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "viewPortabilityEnabled":
+        "View versions, import and export are a preview that is turned off for this deployment. "
+        "An administrator can turn them on under Admin → Features.",
+    "viewExportEnabled":
+        "Exporting views to a file is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "viewImportEnabled":
+        "Importing views from a file is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "blankModelsEnabled":
         "Building a lineage model from scratch is turned off for this deployment — lineage must "
         "come from a connected data source. An administrator can enable it under Admin → Features.",
@@ -134,7 +143,7 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
     _category("display", "Display & UI", "Palette", "blue", 6, preview=True),
     _category("security", "Security", "Shield", "rose", 7, preview=True),
     _category("integrations", "Integrations", "Plug", "sky", 8, preview=True),
-    _category("analytics", "Analytics", "BarChart3", "teal", 9, preview=True),
+    _category("analytics", "Analytics", "BarChart3", "teal", 9),
     _category("experimental", "Experimental", "FlaskConical", "fuchsia", 10, preview=True),
     _category("performance", "Performance", "Zap", "orange", 11, preview=True),
     _category("other", "Other", "LayoutTemplate", "slate", 99, preview=True),
@@ -142,13 +151,142 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
 
 
 SEED_DEFINITIONS: list[dict[str, Any]] = [
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    {
+        "key": "analyticsWorkspaceVisibility",
+        "name": "Show every workspace in Analytics",
+        "description": (
+            "Let everyone see each workspace's name and figures in Analytics, including "
+            "workspaces they are not a member of. Reporting only — it does not grant "
+            "access to the workspace itself, and links into a workspace still appear "
+            "only for people who can actually open it."
+        ),
+        "impact_when_off": (
+            "Workspaces someone is not a member of appear as locked rows: counted in "
+            "the platform totals, with their name and figures hidden. This matches how "
+            "the rest of the product already scopes workspaces."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default: on, Analytics reports on workspaces the rest of the
+        # product hides from that person. That is a reasonable choice for a
+        # single-company deployment and a poor one anywhere else, so it is a
+        # decision an operator makes rather than a default they inherit.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this on for a single-company deployment where workspace names are "
+            "team names rather than secrets. It widens what Analytics REPORTS beyond "
+            "what workspace permissions allow, so the change is recorded in the "
+            "feature-change log. The alternative, if you want people to see everything "
+            "everywhere, is to grant them the 'system:org-viewer' permission — that "
+            "widens the whole product consistently instead of just this page."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "analyticsPrivacyMode",
+        "name": "What everyone can see",
+        "description": (
+            "How much detail Analytics shows to people who are not administrators or "
+            "auditors. Workspace access is never affected by this setting — that always "
+            "follows the same permissions as the rest of the product."
+        ),
+        "impact_when_off": (
+            "Not applicable — this is a choice between levels rather than a switch. If "
+            "the value cannot be read, Analytics falls back to aggregate-only."
+        ),
+        "category_id": "analytics",
+        "type": "string",
+        # Internal-first: this platform is mostly deployed inside a single company,
+        # where colleague names are already in the workspace member lists and hiding
+        # them is friction that protects nobody. Operational health is the step
+        # beyond, and is held back because "which sources are failing" is a map of
+        # where the gaps are.
+        "default_value": json.dumps("internal"),
+        "options": json.dumps([
+            {"id": "strict", "label": "Aggregate only"},
+            {"id": "internal", "label": "Show colleagues"},
+            {"id": "full", "label": "Show colleagues and operations"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Aggregate only — counts and trends, nobody is ever named. Show colleagues "
+            "— adds leaderboards and who built what; right for an internal deployment, "
+            "though publishing per-person activity to all staff is a works-council "
+            "question in parts of the EU. Show colleagues and operations — also adds "
+            "access-request backlogs, invite acceptance and refresh failures. None of "
+            "these reveal a workspace someone cannot already open."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "analyticsShowEmailAddresses",
+        "name": "Let people contact each other from Analytics",
+        "description": (
+            "Show a colleague's email address beside their name in Analytics, so someone "
+            "who finds the person behind a view or a busy workspace can reach out without "
+            "hunting for them. Only where the person is attached to something the reader "
+            "can already open \u2014 never on the platform-wide activity ranking."
+        ),
+        "impact_when_off": (
+            "Names still appear (subject to the privacy level); addresses do not. The "
+            "reader can still reach a view's author the way they always could \u2014 by "
+            "opening the view, where the address has always been shown."
+        ),
+        "category_id": "analytics",
+        "sort_order": 3,
+        "type": "boolean",
+        # OFF by default. Addresses are already reachable one page over, so this
+        # is not the thing protecting them \u2014 but a ranked page that lists several
+        # at once is a different artefact from a detail panel showing one, and an
+        # operator should turn that on knowing their deployment, not inherit it.
+        "default_value": json.dumps(False),
+        "options": None,
+    },
+    {
+        "key": "analyticsPublicEnabled",
+        "name": "Analytics for everyone",
+        "description": (
+            "Open the Analytics section to every signed-in person, not just administrators "
+            "and auditors. Everyone sees platform-wide growth and usage; workspaces they "
+            "are not a member of stay locked, and no individual's activity is ever shown."
+        ),
+        "impact_when_off": (
+            "Analytics disappears from the sidebar for everyone except administrators, "
+            "auditors and organisation admins, and the server refuses their requests. "
+            "Privileged users keep the full section either way — this switch only decides "
+            "whether everyone else gets the redacted view."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default, and deliberately: this widens who can see how many people
+        # use the platform and how many workspaces exist. That is a disclosure
+        # decision an operator should make on purpose, not inherit from a default.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turning this on is a disclosure decision. Non-privileged people see aggregate "
+            "growth and usage for the whole platform, plus full detail for workspaces they "
+            "belong to. Names of other workspaces, their data sources, and every per-person "
+            "leaderboard stay hidden no matter who is looking."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+
     # ── Editing ────────────────────────────────────────────────────────────────
     {
         "key": "editModeEnabled",
         "name": "Edit mode",
         "description": (
-            "Let people change the data itself — editing node properties from a view and saving "
-            "those changes back to the source."
+            "Let people change the data itself — editing entities and their properties in a draft "
+            "of a view, then publishing the draft. A data source without version control stays "
+            "read-only."
         ),
         "impact_when_off": (
             "Views become read-only. The edit controls disappear from the entity drawer and the "
@@ -302,8 +440,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "file they can take away."
         ),
         "impact_when_off": (
-            "The export controls disappear and the server refuses both the export job and the "
-            "download. Everything inside the product is unaffected: people can still read, filter "
+            "The export controls disappear and the server refuses every export: streamed, as a job, "
+            "and its download. Everything inside the product is unaffected: people can still read, filter "
             "and trace every graph they have access to. Files already downloaded are not recalled — "
             "this stops new ones leaving."
         ),
@@ -378,6 +516,81 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "the estate nobody downstream can tell which is which."
         ),
         "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "viewPortabilityEnabled",
+        "name": "View versions, import and export",
+        "description": (
+            "Keep a history of each view's design that people can compare and restore, and let "
+            "them move views between environments as files, with or without their graph data. "
+            "Export views and Import views decide which directions are allowed."
+        ),
+        "impact_when_off": (
+            "Versions, Export and Import disappear from every view, the Explorer and the View "
+            "wizard, and the server refuses those requests. Views keep working exactly as they "
+            "are, and versions keep being recorded, so turning this on later shows each view's "
+            "whole history. Imports already waiting in a draft go live, or are discarded, with "
+            "their draft."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. Turn it on to try moving views from one environment to another, for "
+            "example from development to production, and to give people a view's history."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "viewExportEnabled",
+        "name": "Export views",
+        "description": (
+            "Let people download a view — its layers, assignments and settings — as a file, to "
+            "bring it into another environment or keep a copy of its design."
+        ),
+        "impact_when_off": (
+            "The Export actions disappear and the server refuses to build the file. Views keep "
+            "working and their version history is unaffected. Files already downloaded are not "
+            "recalled — this stops new ones leaving."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A view file holds the view's design and the names and types of the entities it "
+            "places, not the graph data itself; exporting the data is 'Export graph data'. "
+            "Turn both off if nothing about your lineage should leave the product."
+        ),
+        "sort_order": 3,
+        "deprecated": False,
+    },
+    {
+        "key": "viewImportEnabled",
+        "name": "Import views",
+        "description": (
+            "Let people bring a view in from a file exported by another environment, check it "
+            "against a data source here, and create or update a view from it."
+        ),
+        "impact_when_off": (
+            "The Import journey disappears from the View wizard and the server refuses uploads. "
+            "Views can still be built in the wizard, and exporting still works."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this off to make every view in this environment be built here, in the wizard, "
+            "rather than arrive as a file from somewhere else."
+        ),
+        "sort_order": 4,
         "deprecated": False,
     },
     # ── Display & UI ──────────────────────────────────────────────────────────
@@ -608,6 +821,85 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "canvasLayerFoldEnabled",
+        "name": "Fold distant layers",
+        "description": (
+            "Offer a Fold button on the Context View: layers outside the part of the canvas being "
+            "read fold into slim spines, so a wide view fits on screen and a line into a folded "
+            "layer lands on its spine instead of scrolling away."
+        ),
+        "impact_when_off": (
+            "The Fold button disappears and every layer stays at full width; a wide view scrolls "
+            "sideways, and lines to layers out of sight show as ghosts at the canvas edge. Folding "
+            "one layer by hand from its header keeps working. This is a preview; it ships off "
+            "until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Worth turning on for views with many layers. Each person still chooses whether to fold "
+            "— this only offers the button. Client-side only and safe to toggle at any time."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "canvasLineageRollupEnabled",
+        "name": "Roll up lineage to unloaded entities",
+        "description": (
+            "Retired: this switch no longer does anything. A line whose far end is an entity the "
+            "canvas has not loaded — inside a collapsed container, say — always rolls up to the "
+            "nearest container on screen, because where that entity sits is how the canvas tells "
+            "lineage inside the view from lineage that leaves it."
+        ),
+        "impact_when_off": (
+            "None. The switch is retired and nothing reads it; roll-ups are always on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Nothing to decide: the switch is retired and will be removed in a later release."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "placementContractEnabled",
+        "name": "One placement rule for every view surface",
+        "description": (
+            "Decide which layer each entity sits in with one shared rule everywhere: the canvas, "
+            "Layer Studio, the trace overlay, search badges, Build Mode and view imports, so they "
+            "can no longer disagree."
+        ),
+        "impact_when_off": (
+            "Every surface keeps today's placement, including its known disagreements: an entity "
+            "type two layers claim can land in either column depending on load order, and Layer "
+            "Studio can show a different column from the canvas. Saved views are not changed "
+            "either way. While it is on, an entity created in an open view is pinned to a layer "
+            "only where the rule would put it elsewhere, so after turning it off such entities "
+            "follow today's rules. This is a preview; it ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Run the placement dry run first (python -m backend.scripts.placement_dry_run) and "
+            "review the views it lists. While this is on, creating a view or saving its layers "
+            "refuses a new or changed layer rule that can never match. Safe to switch back off "
+            "at any time."
+        ),
+        "sort_order": 3,
+        "deprecated": False,
+    },
+    {
         "key": "realtimeChangeFeedEnabled",
         "name": "Live updates",
         "description": (
@@ -630,7 +922,11 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "the periodic check remains underneath as a safety net either way, so switching this "
             "off never loses an update — it only makes it arrive later."
         ),
-        "sort_order": 0,
+        # 4, not 0: 0 was already toursEnabled's, which this shipped on top
+        # of, and main has since taken 1-3. Two rows claiming one position
+        # order arbitrarily, so the admin list silently reshuffles between
+        # deployments.
+        "sort_order": 4,
         "deprecated": False,
     },
 ]

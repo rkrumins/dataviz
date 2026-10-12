@@ -20,6 +20,7 @@ import { groupLedgerBySweep, type LedgerGroup } from './reconcileHealth'
 const SKIP_LABEL: Record<string, string> = {
     deleted: 'Deleted',
     platform_mastered: DRIFT_SPEC.managed.label,
+    projection_stalled: DRIFT_SPEC.projectionStalled.label,
     no_ontology: 'No ontology assigned',
     no_stats: 'No counts to check yet',
     stats_stale: 'Counts too old to check',
@@ -28,6 +29,8 @@ const SKIP_LABEL: Record<string, string> = {
     already_marked: 'Already queued for rebuild',
     cooldown: 'Within the minimum time between rebuilds',
     paused: 'Rebuilds paused by an operator',
+    provider_held: 'Rebuilds paused or stopped for the whole provider',
+    fleet_held: 'Rebuilds paused or stopped fleet-wide',
     failed_backoff: 'Backing off after a failed rebuild',
     opted_out: 'Automation off for this source',
     disabled: 'Automation off',

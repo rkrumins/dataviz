@@ -31,6 +31,20 @@ PERMISSIONS: tuple[dict[str, str | None], ...] = (
         "examples": "[\"Manage every workspace's settings\", \"Change any user's role from User to Admin\", \"Create and delete workspaces\", \"Override every other permission check\"]",
     },
     {
+        "id": "system:analytics:read",
+        "category": "system",
+        "description": "Read platform analytics — growth, engagement and adoption.",
+        "long_description": "Lets you open the Analytics section and see platform-wide growth, engagement and adoption, including per-person activity and operational health. Deliberately SEPARATE from system:audit:read: business metrics are not the audit log, and someone who should see how the platform is growing does not automatically need every login and RBAC mutation. Workspace-level detail still follows the normal workspace permissions — this grants no access to a workspace you are not otherwise entitled to.",
+        "examples": "[\"See how many people signed up this quarter and how many are still active.\", \"Find which views the organisation actually opens.\"]",
+    },
+    {
+        "id": "system:sso:hosts:manage",
+        "category": "system",
+        "description": "Manage which internal hosts SSO may call back to.",
+        "long_description": "Lets you add and remove entries in the back-channel host allowlist — the internal addresses a back-channel SSO provider is permitted to call during a login. Deliberately SEPARATE from system:admin, because an entry lets this service make requests to an address on your internal network: the list is the only thing standing between an SSO configuration form and a request-forgery tool, so who may edit it is a decision worth making on its own. It grants no access to provider settings or to anyone's identity, and no entry can ever unlock loopback or the cloud metadata service.",
+        "examples": "[\"Allow sso-gateway.corp.internal:443 so a new back-channel provider can reach it.\", \"Remove a gateway that has been decommissioned.\"]",
+    },
+    {
         "id": "system:audit:read",
         "category": "system",
         "description": "Read the platform audit log (logins, RBAC mutations, sessions).",
@@ -229,15 +243,22 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     ("org_admin", "workspace:view:edit"),
     ("org_admin", "workspace:view:publish"),
     ("org_admin", "workspace:view:read"),
+    ("org_admin", "system:analytics:read"),
+    ("org_auditor", "system:analytics:read"),
     ("org_auditor", "system:audit:read"),
     ("org_auditor", "system:bindings:read"),
     ("org_auditor", "system:org-viewer"),
     ("super_admin", "system:admin"),
+    ("super_admin", "system:analytics:read"),
     ("super_admin", "system:audit:read"),
     ("super_admin", "system:bindings:read"),
     ("super_admin", "system:groups:manage"),
     ("super_admin", "system:org-admin"),
     ("super_admin", "system:org-viewer"),
+    # super_admin only, deliberately. org_admin runs the platform; this
+    # one decides where the platform may send requests, which is a
+    # network decision rather than an administrative one.
+    ("super_admin", "system:sso:hosts:manage"),
     ("super_admin", "system:users:manage"),
     ("super_admin", "system:workspaces:create"),
     ("super_admin", "workspace:admin"),

@@ -74,6 +74,15 @@ class OntologyRules:
     # contract), which loses the declared casing; this restores it so canonicalization
     # rewrites to what the ontology (and the FalkorDB projection) actually use.
     edge_type_canonical: Mapping[str, str] = field(default_factory=dict)
+    # Entity types allowed at the TOP level (with no containment parent). Empty = unconstrained;
+    # otherwise any other type must sit inside a parent (see GraphVersioningService._enforce_written).
+    root_entity_types: FrozenSet[str] = frozenset()
+
+    def is_root_type(self, name: Optional[str]) -> bool:
+        """Whether an entity of this type may be at the top level (case-insensitive)."""
+        if not self.root_entity_types:
+            return True
+        return bool(name) and str(name).upper() in {t.upper() for t in self.root_entity_types}
 
     def canonical_entity_type(self, name: Optional[str]) -> Optional[str]:
         """Exact match, else case-insensitive; ``None`` if the type is unknown."""

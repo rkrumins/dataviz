@@ -18,7 +18,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+
+# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
+# committed-main entities: the projector's rollup watermark, the aggregation
+# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
+# projector's and the aggregation worker's own output, so every comparison of a
+# cache graph against committed main must exclude them. ONE definition, shared
+# — see the module docstring there for the two separate outages a second copy
+# of this list caused.
+from backend.common.derived_artifacts import (  # noqa: F401  (re-export)
+    DERIVED_LABELS,
+    not_derived_clause,
+)
 
 # --------------------------------------------------------------------------- #
 # Store / decoupling (RUNTIME-TUNABLE)                                         #
@@ -136,6 +149,11 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
+# Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
+# lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
+# climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
+# past this the aggregation batch job — which also writes only the difference — takes over.
+PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
@@ -167,19 +185,12 @@ FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{
 DEFAULT_FALKOR_PROVIDER: str = "default"
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
-# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
-# committed-main entities: the projector's rollup watermark, the aggregation
-# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
-# projector's and the aggregation worker's own output, so every comparison of a
-# cache graph against committed main must exclude them.
-#
-# ONE definition on purpose. Two copies of this list is exactly how
-# ``reconcile.falkor_counts`` came to omit ``_AggMeta``: in ``in_source`` mode —
-# which is the versioned mode — the aggregation pipeline stamps ``_AggMeta``
-# into the same graph the projector verifies, so any aggregation job left the
-# node count one high, the verify reported "extra entities vs committed main",
-# and the watermark was pinned until a human rebuilt.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection")
+# DERIVED_LABELS / not_derived_clause are imported at the top of this module and
+# re-exported here for this package's callers. The definition moved OUT to
+# ``backend/common/derived_artifacts`` because the provider and profiling read
+# paths need the same list and cannot import from the versioning package
+# (deliberately decoupled) — so they went without one and re-broke this a second
+# way. That module's docstring records both incidents.
 
 
 def falkor_eviction_configured() -> bool:
@@ -200,6 +211,20 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 # (uq_commits_branch_seq) — concurrent write-through writes to main.
 COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
 DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
+
+# A draft changing more entities than this has its Changes panel counted, not laid out as a
+# containment tree: the tree is built from every changed payload and their ancestors, in the
+# web process, per request.
+DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20000"))
+# A draft changing more entities than this publishes (or has its review merged) as a job on the
+# versioning worker, not inside the request: the squash holds every changed payload and hashes
+# them all, which a web pod's memory and event loop can't spare at that size.
+SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES", "20000"))
+# Kill switch for the narrow squash: an up-to-date draft of a non-fork graph, published with no
+# conflict resolutions, is planned from content hashes and its rows copied inside Postgres instead
+# of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
+# merge. Temporary: removed one release after the narrow squash ships.
+NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")
@@ -226,22 +251,52 @@ TRACE_LEASE_TTL_SECS: int = int(os.getenv("GRAPHVER_TRACE_LEASE_TTL_SECS", "120"
 # Import / Export (bulk CRUD) — object store + pipeline tunables               #
 # --------------------------------------------------------------------------- #
 def object_store_backend() -> str:
-    """Which ObjectStore backend serves import/export artifacts: local | s3 | gcs.
+    """Which ObjectStore backend serves import/export artifacts: database | local | s3 | gcs.
 
-    LocalFS in v1 (a mounted volume); S3/GCS are drop-in behind the same Protocol."""
-    return os.getenv("OBJECT_STORE_BACKEND", "local").lower()
+    The management database by default, which every API pod shares: an artifact one pod stored
+    is there whichever pod serves the next request. ``local`` keeps them as files under
+    ``IMPORT_STORE_ROOT``: a directory every API and versioning-worker pod mounts (a shared volume,
+    or an S3/GCS bucket through its FUSE driver), or one pod's own disk for a single-pod stack.
+    S3/GCS are drop-in behind the same Protocol."""
+    return os.getenv("OBJECT_STORE_BACKEND", "database").lower()
 
 
 def import_store_root() -> str:
-    """Filesystem root for the LocalFs object store (a mounted volume in prod).
+    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``): where the
+    files land, typically a mount every pod shares.
 
     Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
     is attributable to its workspace/data source/graph/job at a glance."""
     return os.getenv("IMPORT_STORE_ROOT", "/tmp/synodic-import-store")
 
 
-# Accepted deltas per windowed ``checkpoint`` commit the import worker writes onto the draft.
-IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "50000"))
+def object_store_s3() -> dict:
+    """The S3-compatible object store (``OBJECT_STORE_BACKEND=s3``; optional, it needs
+    ``requirements-s3.txt``): Amazon S3, MinIO, or GCS through its XML API. Credentials come from
+    boto3's own chain: ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` (for GCS, an HMAC key), or a
+    role.
+
+    ``PREFIX`` is what every key goes under: the daily sweep deletes whatever under it is old, so by
+    default it never reaches anything else the bucket holds. ``ENDPOINT_URL`` for anything but Amazon
+    S3 (``https://storage.googleapis.com`` for GCS); ``ADDRESSING`` ``auto`` | ``path`` (MinIO) |
+    ``virtual``. ``PRESIGN=1`` hands browsers presigned URLs, so package parts go up to the bucket
+    and exports come down from it without passing through the API: the endpoint must be one browsers
+    reach, and the bucket's CORS must allow this site's PUTs."""
+    return {
+        "bucket": os.getenv("OBJECT_STORE_S3_BUCKET", ""),
+        # Never the bucket's root, even when set empty: the sweep would delete everything old in it.
+        "prefix": os.getenv("OBJECT_STORE_S3_PREFIX", "").strip("/") or "synodic-import-store",
+        "endpoint_url": os.getenv("OBJECT_STORE_S3_ENDPOINT_URL") or None,
+        "region": os.getenv("OBJECT_STORE_S3_REGION") or None,
+        "addressing": os.getenv("OBJECT_STORE_S3_ADDRESSING", "auto").lower(),
+        "presign": os.getenv("OBJECT_STORE_S3_PRESIGN", "").lower() in ("1", "true", "yes"),
+    }
+
+
+# Staged rows per import window: one commit onto the draft, together with the job's checkpoint. A
+# window is also what a resumed import redoes at most, and what the job's lease waits out before a
+# stopping worker hands the job back — so a few seconds of work, not minutes.
+IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
@@ -251,6 +306,23 @@ INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
 IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 # Retain import/export artifacts + staging rows this many days after a terminal job.
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
+# The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
+# written more than this many hours ago.
+OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
+# Import, export and publish jobs run ONLY on the versioning worker's transfer lane: the API queues
+# them. Running them in the web process (the old default) shared its CPU, memory and event loop
+# with interactive requests, and a restart or gunicorn's 120 s worker timeout lost the job.
+if os.getenv("GRAPHVER_TRANSFER_INPROCESS"):
+    logging.getLogger(__name__).warning(
+        "GRAPHVER_TRANSFER_INPROCESS is set but no longer read: import, export and publish jobs "
+        "always run on the versioning worker's transfer lane (GRAPHVER_WORKER_LANES). Remove it.")
+# Jobs one versioning-worker process runs at once. An export job also takes one of its pod's export
+# turns (GRAPH_EXPORT_CONCURRENCY, 2), so raise the two together.
+TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
+# How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
+TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
+# A queued job no worker has started in this long reads as failed: none may be running.
+TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 
 
 # --------------------------------------------------------------------------- #
@@ -272,10 +344,21 @@ BOOTSTRAP_EDGE_TARGET: int = int(os.getenv("GRAPHVER_BOOTSTRAP_EDGE_TARGET", "50
 BOOTSTRAP_WINDOW: int = int(os.getenv("GRAPHVER_BOOTSTRAP_WINDOW", "50000"))
 # Entities re-read from the SOURCE and content-hash-compared during validation.
 BOOTSTRAP_SAMPLE_K: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SAMPLE_K", "64"))
+# The backfill WRITES to the customer's live graph (anchor keys, and re-pointing a duplicate
+# collapse's edges), and a FalkorDB write holds the graph's write lock for its whole run, queueing
+# every canvas read behind it. So each write is fitted to at most this many changes, and the job
+# pauses this long between writes to let the readers through.
+BOOTSTRAP_BACKFILL_MAX_WRITES: int = int(os.getenv("GRAPHVER_BOOTSTRAP_BACKFILL_MAX_WRITES", "20000"))
+BOOTSTRAP_BACKFILL_PAUSE_MS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_BACKFILL_PAUSE_MS", "200"))
 # The import commit's Merkle tree is built inline up to this many entities; above it
 # the root is left NULL (the column is expressly "async-filled for bulk") and the
 # report says so, rather than OOM-ing on a 10M-entity in-memory tree.
 BOOTSTRAP_MERKLE_INLINE_MAX: int = int(os.getenv("GRAPHVER_BOOTSTRAP_MERKLE_MAX", "1000000"))
+# A new data source seeded from a view package (``package_seed``): data lines parsed, converted and
+# written per window — one worker-thread hop and one fenced transaction each — and version rows
+# projected into the new FalkorDB key per window. Peak memory is O(window), whatever the package.
+PACKAGE_SEED_WINDOW: int = int(os.getenv("GRAPHVER_PACKAGE_SEED_WINDOW", "20000"))
+PACKAGE_PROJECT_WINDOW: int = int(os.getenv("GRAPHVER_PACKAGE_PROJECT_WINDOW", "20000"))
 # Worker pickup cadence + the heartbeat age after which a `running` job is presumed
 # dead and taken over by another worker (JobORM is the durable queue; no stream).
 INGEST_POLL_SECS: int = int(os.getenv("GRAPHVER_INGEST_POLL_SECS", "5"))
@@ -331,6 +414,67 @@ PURGE_GRACE_DAYS: int = int(os.getenv("GRAPHVER_PURGE_GRACE_DAYS", "30"))
 # and gets reaped at 09:15 has cost nobody anything — and a slow scan keeps the trash query off
 # the hot path. It is deliberately NOT the 5s job poll.
 REAP_POLL_SECS: int = int(os.getenv("GRAPHVER_REAP_POLL_SECS", "900"))
+
+
+# --------------------------------------------------------------------------- #
+# Worker lanes and the job lease (job_lease.py)                                #
+# --------------------------------------------------------------------------- #
+# A versioning-worker process runs one or more LANES, so production can scale and isolate them as
+# separate pods while compose and dev run all three in one process:
+#   projection  the FalkorDB projection (poll, stream, idle-draft sweep, cache eviction);
+#   transfer    import / export / publish jobs, plus one dedicated package_inspect slot;
+#   bootstrap   "enable version control" and package seeds, purges, and the undo-window reaper.
+LANES = ("projection", "transfer", "bootstrap")
+
+
+def worker_lanes() -> frozenset:
+    """The lanes this process runs (``GRAPHVER_WORKER_LANES``, comma-separated; all by default).
+
+    An unknown name fails start-up rather than being skipped: a pod whose lane is misspelt would
+    otherwise run nothing, healthily, while its jobs queue forever."""
+    raw = os.getenv("GRAPHVER_WORKER_LANES", ",".join(LANES))
+    lanes = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+    unknown = lanes - set(LANES)
+    if unknown or not lanes:
+        raise ValueError(f"GRAPHVER_WORKER_LANES={raw!r}: expected a comma-separated subset of "
+                         f"{', '.join(LANES)}")
+    return lanes
+
+
+# Bootstrap and package-seed jobs one process runs at once, and at most this many at once per
+# (FalkorDB provider, origin) across ALL workers: a bootstrap scans the customer's FalkorDB, and
+# several scans of one instance at once slow every reader of it.
+BOOTSTRAP_SLOTS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SLOTS", "2"))
+BOOTSTRAP_PER_PROVIDER: int = int(os.getenv("GRAPHVER_BOOTSTRAP_PER_PROVIDER", "2"))
+# A SOFT per-workspace share of a lane's running jobs: a claim prefers the job of a workspace
+# running fewer than this, so one tenant queueing 50 imports doesn't hold every slot while
+# another's single job waits. Soft (work-conserving): with nobody else waiting it still runs.
+JOBS_PER_WORKSPACE: int = int(os.getenv("GRAPHVER_JOBS_PER_WORKSPACE", "2"))
+# How long a stopping worker gives its running jobs to hand themselves back at a window boundary
+# (release: pending again, cursor kept) before cancelling them. Inside the deployment's 60 s
+# termination grace, with time left to release the cancelled ones.
+DRAIN_SECS: float = float(os.getenv("GRAPHVER_DRAIN_SECS", "40"))
+# A standalone worker whose event loop has not ticked for this long is WEDGED (a synchronous call
+# that never returns): its jobs would never finish while the heartbeat thread kept them leased,
+# so it dumps every thread's stack and exits for the orchestrator to restart it.
+JOB_WEDGE_SECS: float = float(os.getenv("GRAPHVER_JOB_WEDGE_SECS", "900"))
+
+
+def lane_pool_size(lanes) -> int:
+    """graphver connections a worker running ``lanes`` needs, when ``GRAPHVER_POOL_SIZE`` is unset.
+
+    Sized from what each lane holds at once — projection: one per concurrent graph plus the poll,
+    stream and sweep; transfer: two per slot (the job's window and a nested read) plus the inspect
+    slot; bootstrap: three per slot (window, phase driver, a validation read) plus purge and reaper —
+    so a busy lane waits on its own work, never on a pool sized for a web process."""
+    size = 2
+    if "projection" in lanes:
+        size += PROJECTION_CONCURRENCY + 3
+    if "transfer" in lanes:
+        size += 2 * (TRANSFER_SLOTS + 1)
+    if "bootstrap" in lanes:
+        size += 3 * BOOTSTRAP_SLOTS + 2
+    return size
 
 
 def _selftest() -> None:

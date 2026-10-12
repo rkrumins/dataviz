@@ -8,7 +8,7 @@
  * store (assignEntityToLayer) is isolated and separately tested here. A Context View node's id IS its
  * urn, so the assignment keys are the same ids the canvas renders from.
  */
-import type { AssignmentConflict, LayerAssignmentEntry } from '@/types/schema'
+import type { LayerAssignmentEntry } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { generateNKeysBetween } from '@/utils/orderKeys'
 
@@ -104,9 +104,10 @@ export function lastOrderKeyInLayer(
  * appended after the largest key already in THIS set — so key order matches
  * what the user sees. A sibling that lacks an assignment entry (children
  * normally inherit their layer and have none) gets a bare orderKey-carrier
- * entry; this is layer-safe because a containment child always inherits its
- * parent's layer and never consults its own entry for placement. Returns the
- * same layout when every sibling is already keyed.
+ * entry; this is layer-safe because the carrier names the SAME layer the
+ * sibling set renders in, so it resolves to the layer the child would inherit
+ * anyway and the child stays nested. Returns the same layout when every
+ * sibling is already keyed.
  */
 export function ensureSiblingOrderKeys(
   layout: NormalizedReferenceLayout,
@@ -241,35 +242,43 @@ export function remapAssignmentUrn(
 }
 
 /**
- * Containment hard rule: a child cannot be placed in a different layer than its parent subtree —
- * children ALWAYS inherit. Walks up `parentMap` to the nearest ancestor with an explicit assignment
- * (the subtree's effective layer); if that layer differs from the target, the move is blocked. Returns
- * null when there is no such ancestor or it already sits in the target layer. Ported verbatim from the
- * store's `assignEntityToLayer` block — no new conflict UX is introduced.
+ * Release every member of `groupIds` (a deleted group and the groups inside it): the entries keep
+ * their layer — the entity stays in that column, ungrouped (and, placed in its parent's own layer,
+ * back under its parent) — and lose only the group. Same layout when nothing names those groups.
  */
-export function checkAssignmentConflict(
-  parentMap: Map<string, string>,
-  assignments: Record<string, LayerAssignmentEntry>,
-  urn: string,
-  layerId: string,
-): AssignmentConflict | null {
-  const seen = new Set<string>([urn])
-  let ancestor = parentMap.get(urn)
-  while (ancestor && !seen.has(ancestor)) {
-    seen.add(ancestor)
-    const entry = assignments[ancestor]
-    if (entry?.layerId) {
-      if (entry.layerId === layerId) return null
-      return {
-        entityId: urn,
-        conflictingEntityId: ancestor,
-        type: 'containment_locked',
-        message:
-          "Cannot assign child to a different layer than its parent. Children always inherit their parent's layer assignment.",
-        conflictingLayerId: entry.layerId,
-      }
+export function releaseGroupMembers(
+  layout: NormalizedReferenceLayout,
+  groupIds: string[],
+): NormalizedReferenceLayout {
+  const ids = new Set(groupIds)
+  let changed = false
+  const assignments = { ...layout.assignments }
+  for (const [urn, entry] of Object.entries(layout.assignments)) {
+    if (entry.logicalNodeId && ids.has(entry.logicalNodeId)) {
+      const { logicalNodeId: _drop, ...rest } = entry
+      assignments[urn] = rest as LayerAssignmentEntry
+      changed = true
     }
-    ancestor = parentMap.get(ancestor)
   }
-  return null
+  return changed ? { ...layout, assignments } : layout
+}
+
+/** Re-home the entities placed in `fromIds` into group `toId`, or out of any group (`null` — they
+ *  stay in their column). Same layout when nothing names those groups. */
+export function reassignGroupMembers(
+  layout: NormalizedReferenceLayout,
+  fromIds: string[],
+  toId: string | null,
+): NormalizedReferenceLayout {
+  if (toId === null) return releaseGroupMembers(layout, fromIds)
+  const ids = new Set(fromIds)
+  let changed = false
+  const assignments = { ...layout.assignments }
+  for (const [urn, entry] of Object.entries(layout.assignments)) {
+    if (entry.logicalNodeId && ids.has(entry.logicalNodeId) && entry.logicalNodeId !== toId) {
+      assignments[urn] = { ...entry, logicalNodeId: toId }
+      changed = true
+    }
+  }
+  return changed ? { ...layout, assignments } : layout
 }

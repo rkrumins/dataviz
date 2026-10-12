@@ -1,29 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { BookOpen, Search, HelpCircle, ChevronDown } from 'lucide-react'
+import { BookOpen, HelpCircle, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { docSections, docEntries, getEntriesForSection } from './docsConfig'
 import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
 import { useCollapsedSections } from './reading/useCollapsedSections'
+import { SidebarFilterInput, SidebarFilterResults } from './reading/SidebarFilter'
+import { useSidebarFilter } from './reading/useSidebarFilter'
+import { ReadMark, SidebarPathCard } from './reading/ReadingPath'
 
-export function DocsSidebar({ onOpenSearch }: { onOpenSearch?: () => void }) {
+export function DocsSidebar() {
   const brand = useBrand()
-  const [search, setSearch] = useState('')
+  const filter = useSidebarFilter('docs', docEntries)
   const { collapsed, toggle } = useCollapsedSections('docs-sidebar-collapsed')
 
-  const filteredEntries = search
-    ? docEntries.filter(
-        (e) =>
-          e.title.toLowerCase().includes(search.toLowerCase()) ||
-          e.description?.toLowerCase().includes(search.toLowerCase()),
-      )
-    : null
-
-  const filteredSections = filteredEntries ? null : docSections.filter((s) => s.id !== 'faq')
+  const sections = docSections.filter((s) => s.id !== 'faq')
 
   return (
-    <aside className="w-72 shrink-0 border-r border-glass-border bg-canvas-elevated flex flex-col h-full">
+    <aside className="w-72 max-w-full shrink-0 border-r border-glass-border bg-canvas-elevated flex flex-col h-full">
       {/* Header */}
       <div className="px-6 pt-6 pb-4">
         <div className="flex items-center gap-3 mb-4">
@@ -37,44 +32,16 @@ export function DocsSidebar({ onOpenSearch }: { onOpenSearch?: () => void }) {
         </div>
 
         {/* Filter + full-text search */}
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
-          <input
-            type="text"
-            placeholder="Filter pages..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && onOpenSearch) onOpenSearch()
-            }}
-            className="input pl-9 h-9 text-sm"
-          />
-        </div>
-        {onOpenSearch && (
-          <button
-            onClick={onOpenSearch}
-            className="mt-2 w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs text-ink-muted hover:text-ink bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border hover:border-accent-lineage/30 transition-colors"
-          >
-            <span className="flex items-center gap-2"><Search className="w-3.5 h-3.5" /> Search all pages</span>
-            <kbd className="inline-flex items-center rounded border border-glass-border bg-canvas px-1.5 text-[10px]">⌘K</kbd>
-          </button>
-        )}
+        <SidebarFilterInput filter={filter} />
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 pb-4 space-y-4">
-        {filteredEntries && (
-          <div className="space-y-0.5">
-            {filteredEntries.length === 0 && (
-              <p className="px-3 py-4 text-xs text-ink-muted text-center">No pages match "{search}"</p>
-            )}
-            {filteredEntries.map((entry) => (
-              <SidebarLink key={entry.slug} slug={entry.slug} title={entry.title} description={entry.description} />
-            ))}
-          </div>
-        )}
+      {!filter.filtering && <SidebarPathCard area="docs" />}
 
-        {filteredSections?.map((section) => {
+      {/* Navigation */}
+      <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 pb-4 space-y-4" aria-label="Documentation pages">
+        {filter.filtering && <SidebarFilterResults filter={filter} />}
+
+        {!filter.filtering && sections.map((section) => {
           const entries = getEntriesForSection(section.id)
           if (entries.length === 0) return null
           const SectionIcon = section.icon
@@ -156,6 +123,7 @@ function SidebarLink({ slug, title, description }: { slug: string; title: string
           <span className="text-[10px] text-ink-muted truncate mt-0.5">{interpolateBrand(description, brand)}</span>
         )}
       </div>
+      <ReadMark area="docs" slug={slug} />
     </NavLink>
   )
 }

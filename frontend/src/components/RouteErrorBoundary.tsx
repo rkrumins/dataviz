@@ -61,8 +61,8 @@ export class RouteErrorBoundary extends Component<Props, State> {
 
         const chunk = isChunkLoadError(error)
         return (
-            <div className="absolute inset-0 flex items-center justify-center bg-canvas p-6">
-                <div className="max-w-md text-center space-y-3">
+            <div className="absolute inset-0 flex overflow-y-auto bg-canvas p-6">
+                <div className="m-auto max-w-md text-center space-y-3">
                     <h1 className="text-lg font-medium text-primary">
                         {chunk ? 'This page could not be loaded' : 'Something went wrong'}
                     </h1>

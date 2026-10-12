@@ -29,10 +29,44 @@ def hash_password(plain: str) -> str:
     return _hasher.hash(plain)
 
 
+#: A real Argon2id hash of a value nothing uses, verified against when
+#: there is no genuine hash to verify against. Its only job is to make
+#: the failure path cost the same as the success path.
+_TIMING_DUMMY_HASH: str | None = None
+
+
+def _dummy_hash() -> str:
+    """The timing dummy, computed once on first use.
+
+    Lazily rather than at import: hashing at Argon2id's default cost on
+    every import would tax processes that never verify a password.
+    """
+    global _TIMING_DUMMY_HASH
+    if _TIMING_DUMMY_HASH is None:
+        _TIMING_DUMMY_HASH = _hasher.hash("__sentinel_timing_dummy__")
+    return _TIMING_DUMMY_HASH
+
+
 def verify_password(plain: str, hashed: str) -> bool:
-    """Return True if *plain* matches *hashed*, False otherwise."""
+    """Return True if *plain* matches *hashed*, False otherwise.
+
+    The sentinel branch runs a real Argon2id verify before returning.
+    Returning immediately was correct and constant-time *for the
+    comparison*, but it made the whole call finish in microseconds where
+    a genuine account takes tens of milliseconds — so an attacker could
+    tell "this account is SSO-only" from "this account has a password
+    and I guessed wrong" by timing alone. That is a small leak, and
+    ``/auth/resolve`` discloses adjacent information by design, but it
+    costs three lines to close and the caller cannot close it: only this
+    function knows which branch it took.
+    """
     if hashed == _DISABLED_SENTINEL:
+        _hasher_verify_quietly(plain, _dummy_hash())
         return False
+    return _hasher_verify_quietly(plain, hashed)
+
+
+def _hasher_verify_quietly(plain: str, hashed: str) -> bool:
     try:
         return _hasher.verify(hashed, plain)
     except (VerifyMismatchError, VerificationError, InvalidHashError):

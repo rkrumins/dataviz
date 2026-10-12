@@ -32,10 +32,11 @@ import {
   isClosedToNesting,
   type AllowedEdgeOption,
 } from '@/services/ontologyPreflightService'
-import { useStageEntityCreation } from './useStageEntityCreation'
+import { useStageEntityCreation, type StageEntityInput } from './useStageEntityCreation'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import type { ParsedOutlineRow } from './outlineParser'
 import type { EntityTypeSchema } from '@/types/schema'
+import { splitNodeFields } from '@/lib/nodeFields'
 
 export interface OutlineRow {
   changeId: string
@@ -299,16 +300,16 @@ export function useHierarchyOutline(opts: {
   const commitSibling = useCallback((): string | null => {
     if (!canCommit || !active.typeId) return null
     const tags = active.details.tags.split(',').map((t) => t.trim()).filter(Boolean)
-    const properties: Record<string, unknown> = {
-      ...active.details.fieldValues,
-      ...(active.details.description.trim() ? { description: active.details.description.trim() } : {}),
-    }
+    // Schema fields named like node fields (qualifiedName, …) are node fields, not properties.
+    const { topLevel, properties } = splitNodeFields(active.details.fieldValues)
     const tempUrn = stageEntity({
       entityType: active.typeId,
       displayName: active.name.trim(),
       parentUrn: active.parentUrn,
       containmentEdgeType: active.edgeType ?? undefined,
       tags,
+      ...(topLevel as Pick<StageEntityInput, 'qualifiedName' | 'sourceSystem'>),
+      description: active.details.description.trim() || undefined,
       properties,
     })
     registerBatchUrn(tempUrn)
@@ -358,14 +359,14 @@ export function useHierarchyOutline(opts: {
 
   const updateRowDetails = useCallback(
     (tempUrn: string, details: { description?: string; tags?: string[]; properties?: Record<string, unknown> }) => {
-      const patch: { tags?: string[]; properties?: Record<string, unknown> } = {}
+      const patch: Parameters<typeof updateStagedEntity>[1] = {}
       if (details.tags !== undefined) patch.tags = details.tags
-      if (details.description !== undefined || details.properties !== undefined) {
-        patch.properties = {
-          ...(details.properties ?? {}),
-          ...(details.description !== undefined ? { description: details.description } : {}),
-        }
+      if (details.properties !== undefined) {
+        const split = splitNodeFields(details.properties)
+        Object.assign(patch, split.topLevel)
+        patch.properties = split.properties
       }
+      if (details.description !== undefined) patch.description = details.description
       updateStagedEntity(tempUrn, patch)
     },
     [updateStagedEntity],

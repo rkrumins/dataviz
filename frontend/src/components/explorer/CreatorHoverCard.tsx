@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 
 interface CreatorHoverCardProps {
   /** The raw user id recorded on the view — shown only as secondary/mono detail, never as the primary label. */
@@ -167,15 +168,22 @@ export function CreatorHoverCard({
                   const palette = avatarPaletteFor(userId ?? name)
                   const avatarClass = accentClassName ?? cn(palette.bg, palette.text)
                   return (
-                    <div
-                      className={cn(
-                        'w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold shrink-0',
-                        avatarClass,
+                    <UserAvatar
+                      userId={userId}
+                      name={name}
+                      className="w-10 h-10 text-xs font-bold"
+                      fallback={(
+                        <span
+                          className={cn(
+                            'flex h-full w-full items-center justify-center rounded-full',
+                            avatarClass,
+                          )}
+                          aria-hidden
+                        >
+                          {initialsOf(name)}
+                        </span>
                       )}
-                      aria-hidden
-                    >
-                      {initialsOf(name)}
-                    </div>
+                    />
                   )
                 })()}
                 <div className="flex-1 min-w-0">

@@ -15,11 +15,16 @@ ordinary branch path (reused from :class:`VersionedBranchProvider`).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypeVar
+import asyncio
+import copy
+import logging
+from collections import ChainMap, OrderedDict
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, TypeVar
 
+from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
-    GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
+    GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
 
@@ -28,16 +33,28 @@ from .versioned_branch_provider import VersionedBranchProvider
 #: ``frontierUp``/``frontierDown``/``seedTruncated`` to every static reader.
 _TraceT = TypeVar("_TraceT", bound=TraceResult)
 
+logger = logging.getLogger(__name__)
+
 
 class _OverlayDelta:
-    """Indexed, reader-shaped view of a draft's patch set vs its main base."""
+    """Indexed, reader-shaped view of a draft's patch set vs its main base.
+
+    What the draft created or changed comes as skeletons — ``lazy`` entries, what the version row
+    says (a node's urn, type and names; an edge's type and ends) — never payloads, so building this
+    costs a draft's size in small objects, not its payloads. The index lists, matches and searches
+    by those fields alone; a read loads the values of just the nodes (:meth:`load`) and edges
+    (:meth:`edges`) it serves."""
 
     def __init__(self, raw: Dict[str, Any], containment_types: List[str]):
         cset = {t.upper() for t in (containment_types or [])}
-        self.node_upsert: Dict[str, GraphNode] = {}
+        self.node_upsert: Dict[str, GraphNode] = {}         # values to serve, by urn
+        # Every node the patch set gives a value or a skeleton for, by urn: what listings, matches
+        # and searches read. A skeleton is served once loaded.
+        self.node_index: Dict[str, GraphNode] = {}
         self.node_new: set = set(raw.get("nodesNew", []))   # urns CREATED in the draft (vs modified)
         self.node_remove: set = set()
         self.edge_upsert: Dict[str, GraphEdge] = {}
+        self.edge_lazy: set = set()                         # ids of the skeletons among edge_upsert
         self.edge_remove: Dict[str, GraphEdge] = {}
         self.lineage_added: List[GraphEdge] = []
         self.lineage_removed: List[GraphEdge] = []
@@ -46,13 +63,31 @@ class _OverlayDelta:
         self.cont_added: List[GraphEdge] = []
         self.cont_removed: List[GraphEdge] = []
 
+        # Nodes the draft modified or created, by urn → entity id: a read loads the ones it serves
+        # (load()).
+        self.node_modified: Dict[str, str] = {m["urn"]: m["entityId"] for m in raw.get("nodesModified", [])}
+        # A skeleton's default_factory fields are given, not left to model_construct: it resolves
+        # each through ``inspect.signature`` per instance, and on a 100k+100k draft that was 35 s of
+        # CPU — and garbage enough to set off full collections that stalled the event loop.
         for d in raw.get("nodesUpsert", []):
-            n = GraphNode(**d)
-            self.node_upsert[n.urn] = n
+            if d.get("lazy"):                               # fields straight from version columns
+                n = GraphNode.model_construct(**d, properties={}, tags=[])
+                self.node_modified[n.urn] = d["entityId"]
+            else:
+                n = GraphNode(**d)
+                self.node_upsert[n.urn] = n
+            self.node_index[n.urn] = n
+        self._loader: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None
+        self._edge_loader: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None
+        self._edges_loaded: Dict[str, GraphEdge] = {}
         for d in raw.get("nodesRemove", []):
             self.node_remove.add(d["urn"])
         for d in raw.get("edgesUpsert", []):
-            e = GraphEdge(**d)
+            if d.get("lazy"):
+                e = GraphEdge.model_construct(**d, properties={})
+                self.edge_lazy.add(e.id)
+            else:
+                e = GraphEdge(**d)
             self.edge_upsert[e.id] = e
             if (e.edge_type or "").upper() in cset:
                 self.cont_added.append(e)
@@ -70,7 +105,47 @@ class _OverlayDelta:
 
     @property
     def empty(self) -> bool:
-        return not (self.node_upsert or self.node_remove or self.edge_upsert or self.edge_remove)
+        return not (self.node_upsert or self.node_modified or self.node_remove
+                    or self.edge_upsert or self.edge_remove)
+
+    def for_request(self, loader: Callable[[List[str]], Awaitable[List[dict]]],
+                    edge_loader: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None,
+                    ) -> "_OverlayDelta":
+        """This delta for one request: every index shared, plus the nodes and edges this request
+        loads — kept apart, so a delta reused across requests never accumulates their payloads."""
+        view = copy.copy(self)
+        view.node_upsert = ChainMap({}, self.node_upsert)
+        view._loader = loader
+        view._edge_loader = edge_loader
+        view._edges_loaded = {}
+        return view
+
+    async def load(self, urns: Iterable[str]) -> None:
+        """Bring the draft's value of each node among ``urns`` it modified or created into this
+        request's view. Every read that serves draft nodes calls it first, with those nodes."""
+        want = [u for u in dict.fromkeys(urns) if u in self.node_modified and u not in self.node_upsert]
+        if not want or self._loader is None:
+            return
+        for d in await self._loader([self.node_modified[u] for u in want]):
+            n = GraphNode(**d)
+            self.node_upsert[n.urn] = n
+
+    async def served(self, urns: Iterable[str]) -> List[GraphNode]:
+        """The draft's value of each of ``urns`` (nodes the index matched), loaded where it is a
+        skeleton — in their order. A node whose value is gone by now is left out."""
+        urns = list(urns)
+        await self.load(urns)
+        return [self.node_upsert[u] for u in urns if u in self.node_upsert]
+
+    async def edges(self, edges: List[GraphEdge]) -> List[GraphEdge]:
+        """``edges`` as served: each the draft added or changed carries its value, loaded for this
+        response (only those among ``edges``); the rest as they are."""
+        want = [e.id for e in edges if e.id in self.edge_lazy and e.id not in self._edges_loaded]
+        if want and self._edge_loader is not None:
+            for d in await self._edge_loader(list(dict.fromkeys(want))):
+                e = GraphEdge(**d)
+                self._edges_loaded[e.id] = e
+        return [self._edges_loaded.get(e.id, e) for e in edges]
 
     @property
     def lineage_changed(self) -> bool:
@@ -83,6 +158,37 @@ class _OverlayDelta:
             return node
         return node.model_copy(update={"child_count": max(0, (node.child_count or 0) + adj)})
 
+    def compose_page(
+        self, base_items: List[GraphNode], added: List[GraphNode], *, first_page: bool,
+        base_total: Optional[int], removed: int,
+    ) -> "tuple[List[GraphNode], Optional[int]]":
+        """ONE rule for every listing the draft patches (a container's children, the
+        top-level set): main's page with each item overlaid or dropped, the draft's NEW
+        items on the first page only, and the listing's size as main's plus what the
+        draft added minus what it removed from it.
+
+        Positions — where the next page starts, whether there is one — stay MAIN's
+        (the caller passes the base page's through): that is what lets a client that
+        holds the draft's new items plus main's first pages ask for the next page and
+        get exactly the rows it has not seen. Serving the new items on every page
+        repeated them; counting them into the position skipped a row of main per item
+        (a new child pushed an existing sibling out of view, and "Load N more" asked
+        past the end forever); reporting the page length as the total invented or hid
+        a remainder."""
+        items: List[GraphNode] = []
+        for n in base_items:
+            merged = self.overlay_existing(n)
+            if merged is not None:
+                items.append(merged)
+        if first_page:
+            present = {n.urn for n in items}
+            for n in added:
+                if n.urn not in present:
+                    items.append(n)
+                    present.add(n.urn)
+        total = None if base_total is None else max(0, base_total + len(added) - removed)
+        return items, total
+
     def overlay_existing(self, base_node: GraphNode) -> Optional[GraphNode]:
         """The visible form of a node that EXISTS in base (main): removed → None; modified → the
         draft's changed fields but KEEPING the base node's containment context (childCount, and its
@@ -93,10 +199,49 @@ class _OverlayDelta:
             return None
         up = self.node_upsert.get(base_node.urn)
         if up is None:
+            if base_node.urn in self.node_modified:          # a read that forgot to load() it
+                logger.warning("draft overlay: served main's value of modified node %s", base_node.urn)
             return self.with_child_count(base_node)
         if base_node.child_count is not None:               # a MODIFIED existing node keeps main's count
             up = up.model_copy(update={"child_count": base_node.child_count})
         return self.with_child_count(up)
+
+
+class _DeltaCache:
+    """This process's recent draft deltas, keyed by what a delta depends on
+    (``GraphVersioningService.overlay_version``): a draft's reads share one delta until the draft or
+    main moves, instead of each read rebuilding it — at 100k changed entities a rebuild costs a read
+    seconds. Built once per key, however many reads ask at the same time."""
+
+    def __init__(self, size: int = 2):
+        self._size = size
+        self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
+        self._building: Dict[tuple, asyncio.Task] = {}
+
+    async def get(self, key: tuple, build: Callable[[], Awaitable[_OverlayDelta]]) -> _OverlayDelta:
+        hit = self._items.get(key)
+        if hit is not None:
+            self._items.move_to_end(key)
+            return hit
+        task = self._building.get(key)
+        if task is None or task.get_loop() is not asyncio.get_running_loop():
+            task = asyncio.ensure_future(build())
+            self._building[key] = task
+            task.add_done_callback(lambda t, k=key: self._settle(k, t))
+        return await asyncio.shield(task)          # one reader giving up doesn't cancel the build
+
+    def _settle(self, key: tuple, task: asyncio.Task) -> None:
+        if self._building.get(key) is task:
+            del self._building[key]
+        if task.cancelled() or task.exception() is not None:
+            return
+        self._items[key] = task.result()
+        self._items.move_to_end(key)
+        while len(self._items) > self._size:
+            self._items.popitem(last=False)
+
+
+_DELTAS = _DeltaCache()
 
 
 class DraftOverlayProvider:
@@ -154,9 +299,25 @@ class DraftOverlayProvider:
 
     async def _delta_(self) -> _OverlayDelta:
         if self._delta is None:
-            raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
-            self._delta = _OverlayDelta(raw, self._containment_types)
+            version = await self._svc.overlay_version(graph_id=self._gid, branch_id=self._branch)
+            cset = list(self._containment_types)
+
+            async def build() -> _OverlayDelta:
+                raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
+                # Indexing a large draft's patch set is pure CPU: off the event loop.
+                return await asyncio.to_thread(_OverlayDelta, raw, cset)
+
+            shared = await _DELTAS.get((self._gid, self._branch, version, tuple(cset)), build)
+            self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
+
+    async def _load_modified(self, entity_ids: List[str]) -> List[dict]:
+        return await self._svc.overlay_payloads(
+            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids)
+
+    async def _load_edges(self, entity_ids: List[str]) -> List[dict]:
+        return await self._svc.overlay_payloads(
+            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge")
 
     @staticmethod
     def _matches(node: GraphNode, query: NodeQuery) -> bool:
@@ -174,16 +335,39 @@ class DraftOverlayProvider:
         if urn in d.node_remove:
             return None
         base = await self._base.get_node(urn)
+        await d.load([urn])
         if base is not None:                                 # exists in main → merge changes, keep childCount
             return d.overlay_existing(base)
         up = d.node_upsert.get(urn)                          # draft-NEW node (no base)
         return d.with_child_count(up) if up else None
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on the draft, and as what: main's answer (through its own, faster
+        lookup where it has one), with what the draft created, changed or removed on top. The
+        same three states as ``GraphDataProvider.resolve_identities``."""
+        base_lookup = getattr(self._base, "resolve_identities", None)
+        found = (await base_lookup(urns) if callable(base_lookup)
+                 else await resolve_identities_by_query(self._base, urns))
+        d = await self._delta_()
+        if d.empty:
+            return found
+        await d.load(urns)
+        out = dict(found)
+        for urn in urns:
+            if urn in d.node_remove:
+                out[urn] = None
+            elif urn in d.node_upsert:
+                node = d.node_upsert[urn]
+                out[urn] = {"type": node.entity_type, "name": node.display_name,
+                            "qualifiedName": node.qualified_name}
+        return out
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         base = await self._base.get_nodes(query)
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base)
         seen: set = set()
         out: List[GraphNode] = []
         for n in base:
@@ -193,18 +377,41 @@ class DraftOverlayProvider:
             if merged is not None:
                 out.append(merged)
             seen.add(n.urn)
-        for urn, n in d.node_upsert.items():                 # draft-NEW nodes matching the query
-            if urn in seen or urn not in d.node_new:
-                continue
-            if self._matches(n, query):
-                out.append(d.with_child_count(n))
+        added = [urn for urn, n in d.node_index.items()      # draft-NEW nodes matching the query
+                 if urn not in seen and urn in d.node_new and self._matches(n, query)]
+        out += [d.with_child_count(n) for n in await d.served(added)]
         return out
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """A page in MAIN's order: `has_more` and `next_offset` are the base's, so a
+        draft that deletes rows can't end paging early and the draft's new nodes —
+        on the first page only — can't push the next page past rows of main."""
+        base = await self._base.get_nodes_page(query)
+        d = await self._delta_()
+        if d.empty:
+            return base
+        await d.load(n.urn for n in base.nodes)
+        seen: set = set()
+        out: List[GraphNode] = []
+        for n in base.nodes:
+            if n.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(n)
+            if merged is not None:
+                out.append(merged)
+            seen.add(n.urn)
+        if not (query.offset or 0):
+            added = [urn for urn, n in d.node_index.items()
+                     if urn not in seen and urn in d.node_new and self._matches(n, query)]
+            out += [d.with_child_count(n) for n in await d.served(added)]
+        return NodePage(nodes=out, hasMore=base.has_more, nextOffset=base.next_offset)
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         base = await self._base.search_nodes(query, limit=limit, offset=offset)
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base)
         q = (query or "").lower()
         out: List[GraphNode] = []
         for n in base:
@@ -214,9 +421,9 @@ class DraftOverlayProvider:
             if merged is not None:
                 out.append(merged)
         seen = {n.urn for n in out}
-        for urn, n in d.node_upsert.items():                 # draft-NEW matches only
-            if urn not in seen and urn in d.node_new and q in (n.display_name or "").lower():
-                out.append(n)
+        out += await d.served([urn for urn, n in d.node_index.items()     # draft-NEW matches only
+                               if urn not in seen and urn in d.node_new
+                               and q in (n.display_name or "").lower()])
         return out
 
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
@@ -230,6 +437,7 @@ class DraftOverlayProvider:
         tgt = set(query.target_urns or [])
         anyu = set(query.any_urns or [])
         ets = set(query.edge_types or [])
+        added = 0
         for eid, e in d.edge_upsert.items():
             if eid in seen:
                 continue
@@ -241,41 +449,61 @@ class DraftOverlayProvider:
                 continue
             if ets and e.edge_type not in ets:
                 continue
+            # At most the query's limit of the draft's own edges: each one served is loaded for
+            # this response, and a broad query on a draft that added 100k edges must not load
+            # them all, every time.
+            if query.limit and added >= query.limit:
+                break
             out.append(e)
-        return out
+            added += 1
+        return await d.edges(out)
 
     async def get_children_with_edges(
         self, parent_urn: str, edge_types: Optional[List[str]] = None,
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
-        sort_direction: str = "asc",
+        sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
         base = await self._base.get_children_with_edges(
             parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, offset=offset, limit=limit,
             include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor,
-            sort_direction=sort_direction)
+            sort_direction=sort_direction, **scope_kw)
         d = await self._delta_()
         if d.empty:
             return base
-        # children: drop removed, overlay modified (keeping each child's base childCount so a renamed
-        # child isn't orphaned), add the draft's new containment children of THIS parent.
-        children = []
-        for c in base.children:
-            if c.urn in d.node_remove:
-                continue
-            merged = d.overlay_existing(c)
-            if merged is not None:
-                children.append(merged)
+        first_page = offset == 0 and not cursor
+        targets = [e.target_urn for e in d.cont_added if e.source_urn == parent_urn]
+        # The draft's new children are served on the first page only (compose_page); past it they
+        # are only counted, which a created child's skeleton is enough for.
+        await d.load([c.urn for c in base.children]
+                     + [u for u in targets if first_page or u not in d.node_index])
+        # children: main's page overlaid (a renamed child keeps its base childCount so it
+        # isn't orphaned), the draft's new children of THIS parent — see compose_page.
+        added = [d.with_child_count(d.node_upsert[u] if u in d.node_upsert else d.node_index[u])
+                 for u in targets
+                 if (u in d.node_upsert or u in d.node_index) and u not in d.node_remove]
+        # A main node the draft moved here has only its edge in the draft, so read it from
+        # main. Else a fixed orphan, dropped from the top-level page, showed nowhere.
+        moved = list(dict.fromkeys(u for u in targets if u not in d.node_upsert
+                                   and u not in d.node_index and u not in d.node_remove))
+        if moved:
+            added += [d.with_child_count(n) for n in await self._base.get_nodes(
+                NodeQuery(urns=moved, limit=len(moved)))]
+        if search_query:
+            q = search_query.lower()
+            added = [n for n in added
+                     if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
+        removed = sum(1 for e in d.cont_removed if e.source_urn == parent_urn)
+        children, total_children = d.compose_page(
+            base.children, added, first_page=first_page,
+            base_total=base.total_children, removed=removed)
         present = {c.urn for c in children}
-        for e in d.cont_added:
-            if e.source_urn == parent_urn and e.target_urn in d.node_upsert and e.target_urn not in present:
-                children.append(d.with_child_count(d.node_upsert[e.target_urn]))
-                present.add(e.target_urn)
         # containment edges under this parent
         cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
-        cont += [e for e in d.cont_added if e.source_urn == parent_urn]
+        cont = await d.edges(cont + [e for e in d.cont_added if e.source_urn == parent_urn])
         # lineage edges among the (now overlaid) visible child scope
         lineage = base.lineage_edges
         if include_lineage_edges:
@@ -283,11 +511,28 @@ class DraftOverlayProvider:
             seen = {e.id for e in lineage}
             scope = present | {parent_urn}
             for e in d.lineage_added:
-                if e.id not in seen and e.source_urn in scope and e.target_urn in scope:
+                if e.id in seen:
+                    continue
+                if lineage_scope == "siblings":
+                    # The far end may sit on a page not loaded yet; the delta is
+                    # small, so hand over every draft edge touching this page and
+                    # let the client keep it once both ends are loaded.
+                    if e.source_urn in present or e.target_urn in present:
+                        lineage.append(e)
+                elif e.source_urn in scope and e.target_urn in scope:
                     lineage.append(e)
+            lineage = await d.edges(lineage)
+        # Where the next page starts and whether there is one are facts about MAIN's
+        # order, which only the base knows — a draft that drops a page's rows must
+        # neither end paging nor move the next page.
         return ChildrenWithEdgesResult(
             children=children, containmentEdges=cont, lineageEdges=lineage,
-            totalChildren=len(children), hasMore=base.has_more, nextCursor=base.next_cursor)
+            totalChildren=total_children if total_children is not None else len(children),
+            hasMore=base.has_more, nextCursor=base.next_cursor,
+            nextOffset=base.next_offset if base.next_offset is not None else offset + len(base.children),
+            # A base page whose lineage could not be read stays marked as such:
+            # the draft's answer is cached too, and must not pass for complete.
+            degradedDetail=base.degraded_detail)
 
     async def get_children(
         self, parent_urn: str, entity_types: Optional[List[str]] = None,
@@ -314,28 +559,33 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base.nodes)
         # Overlay main's top-level set: drop removed, merge modified (keeping base childCount). A
         # draft-CREATED node becomes a new root only when no draft containment targets it. Crucially a
         # MODIFIED existing node (e.g. a rename) is NOT hoisted to top-level — its parent edge lives on
         # main (outside the draft delta), so it keeps its real position; hoisting it was what made a
         # single rename "break the containment tree" (the node jumped to the root with childCount 0).
         has_parent = {e.target_urn for e in d.cont_added}
-        nodes = []
-        for n in base.nodes:
-            if n.urn in d.node_remove:
-                continue
-            merged = d.overlay_existing(n)
-            if merged is not None:
-                nodes.append(merged)
-        present = {n.urn for n in nodes}
         et = set(entity_types or [])
-        for urn, n in d.node_upsert.items():
-            if urn in present or urn in has_parent or urn not in d.node_new:
-                continue
-            if et and n.entity_type not in et:
-                continue
-            nodes.append(d.with_child_count(n))
-        return base.model_copy(update={"nodes": nodes, "total_count": len(nodes)})
+        q = (search_query or "").lower()
+        roots = [urn for urn, n in d.node_index.items()
+                 if urn in d.node_new and urn not in has_parent and urn not in d.node_remove
+                 and (not et or n.entity_type in et)
+                 and (not q or q in (n.display_name or "").lower() or q in urn.lower())]
+        # Served on the first page only (compose_page); past it only counted, by their skeletons.
+        added = [d.with_child_count(n) for n in (
+            await d.served(roots) if not cursor else [d.node_index[u] for u in roots])]
+        # A removed node was a root of main unless the draft also removed a parent link to it.
+        had_parent = {e.target_urn for e in d.cont_removed}
+        removed = sum(1 for urn in d.node_remove if urn not in had_parent and urn not in d.node_new)
+        # A main top-level node the draft gives a parent is no longer top-level (an
+        # orphan being fixed). The total keeps it: only this page shows which
+        # targets were top-level in main.
+        base_nodes = [n for n in base.nodes if n.urn not in has_parent]
+        nodes, total = d.compose_page(
+            base_nodes, added, first_page=not cursor,
+            base_total=base.total_count, removed=removed)
+        return base.model_copy(update={"nodes": nodes, "total_count": total})
 
     async def get_aggregated_edges_between(
         self, source_urns: List[str], target_urns: Optional[List[str]],
@@ -371,9 +621,75 @@ class DraftOverlayProvider:
                         "edge_count": new_count,
                         "edge_types": sorted(set(cur.edge_types) | {t for t in types if t})})
         edges = sorted(by_pair.values(), key=lambda e: e.edge_count, reverse=True)
-        return AggregatedEdgeResult(
-            aggregatedEdges=edges, totalSourceEdges=sum(e.edge_count for e in edges),
-            truncated=base.truncated, lastMaterializedAt=base.last_materialized_at)
+        # Everything else is the base's to say — stale, degraded detail, truncation
+        # reason: a partial base must not be cached as complete once overlaid.
+        return base.model_copy(update={
+            "aggregated_edges": edges, "total_source_edges": sum(e.edge_count for e in edges)})
+
+    async def get_node_degrees(
+        self, urns: List[str], edge_types: Optional[List[str]] = None,
+        *, include_rollups: bool = False,
+    ) -> Dict[str, Dict[str, int]]:
+        """Main's lineage counts, moved by the draft's own flows. A urn main
+        could not count stays absent (unknown), and a base that cannot count at
+        all (a stale projection is served by VersionedBranchProvider) says so,
+        as the draft's other unsupported reads do: a 501 at the route. The
+        delta does not tell an added flow from an edited one, so an edited
+        flow counts once more, as in the roll-ups above: too high keeps a
+        marker solid.
+
+        Roll-up presence: a flow the draft added gives its source and every
+        container above it a cell out, and its target and theirs a cell in, as
+        the materialiser rolls it up. A flow it removed leaves main's flag as
+        it is: other flows may hold that cell, and a flag left set keeps a
+        marker solid, never falsely hollow. When the walk that places the
+        added flows fails, the counts stand and the flags are left out, as
+        when main's own probe fails: the canvas asks for them again.
+
+        An entity the draft created is not in main, and asking main about it
+        cost a full-scan query that on a large graph passed its deadline and
+        left it unknown. All of its lineage is the draft's own, so the draft
+        counts it from its own flows alone and main is never asked."""
+        fn = getattr(self._base, "get_node_degrees", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"{getattr(self._base, 'name', type(self._base).__name__)} does not count node degrees")
+        d = await self._delta_()
+        mains = [u for u in urns if u not in d.node_new]
+        base: Dict[str, Dict[str, int]] = {}
+        if mains:
+            base = await (fn(mains, edge_types, include_rollups=True) if include_rollups
+                          else fn(mains, edge_types))
+        nothing = {"in": 0, "out": 0, **({"rollupIn": 0, "rollupOut": 0} if include_rollups else {})}
+        out = {**{u: dict(v) for u, v in base.items()},
+               **{u: dict(nothing) for u in urns if u in d.node_new}}
+        if not d.lineage_changed:
+            return out
+        types = {t.upper() for t in (edge_types or []) if t}
+        added = [e for e in d.lineage_added if not types or (e.edge_type or "").upper() in types]
+        removed = [e for e in d.lineage_removed if not types or (e.edge_type or "").upper() in types]
+        for sign, edges in ((1, added), (-1, removed)):
+            for e in edges:
+                for urn, way in ((e.source_urn, "out"), (e.target_urn, "in")):
+                    if urn in out:
+                        out[urn][way] += sign
+        for v in out.values():
+            v["in"], v["out"] = max(0, v["in"]), max(0, v["out"])
+        if include_rollups and added:
+            try:
+                chains = await self.get_ancestor_chains(
+                    sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+            except Exception:
+                for v in out.values():
+                    v.pop("rollupIn", None)
+                    v.pop("rollupOut", None)
+                return out
+            for e in added:
+                for end, flag in ((e.source_urn, "rollupOut"), (e.target_urn, "rollupIn")):
+                    for urn in (end, *chains.get(end, [])):
+                        if urn in out:
+                            out[urn][flag] = 1
+        return out
 
     async def trace_at_level(
         self, urn: str, level: int, upstream_depth: int, downstream_depth: int,
@@ -443,12 +759,115 @@ class DraftOverlayProvider:
                  if e.id not in d.edge_remove
                  and e.source_urn not in d.node_remove and e.target_urn not in d.node_remove]
         seen = {e.id for e in edges}
-        for e in d.lineage_added:
-            if e.id not in seen and e.source_urn in scope and e.target_urn in scope:
-                edges.append(e)
+        edges += await d.edges([e for e in d.lineage_added
+                                if e.id not in seen and e.source_urn in scope and e.target_urn in scope])
         return base.model_copy(update={"nodes": nodes, "edges": edges})
 
+    # ---- deep search: the base answers, the draft's delta does not ------ #
+    #: Read by ``AdvancedSearchService._build_scope_diagnostics`` to note
+    #: that the results are the base's, not the draft's. A marker rather
+    #: than an ``isinstance`` keeps the provider classes out of the
+    #: service layer.
+    is_overlay = True
+
+    # The ontology's edge classification, as the base reads it (the scope
+    # diagnostics report it).
+    def _get_containment_edge_types(self):
+        return self._base._get_containment_edge_types()
+
+    def _get_lineage_edge_types(self):
+        return self._base._get_lineage_edge_types()
+
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Search the base graph — the draft's own edits are NOT included.
+
+        The overlay patches reads it composes itself; the deep-search
+        predicate tree compiles to Cypher inside the base provider, and
+        there is no seam to overlay a sparse Postgres patch set onto a
+        result page without re-implementing the whole compiler over it.
+        So a draft searches what it is a draft OF, and the response says
+        so — ``is_overlay`` drives the scope-diagnostics note, so the gap
+        is disclosed rather than silently narrowing someone's results.
+
+        Pure delegation also means the provider's match-set cache entry
+        may legitimately be SHARED with a main-graph search: identical
+        query against identical data is identical work.
+        """
+        return await self._base.deep_search(query, deadline_ms=deadline_ms)
+
+    @property
+    def supports_search_sessions(self) -> bool:
+        return bool(getattr(self._base, "supports_search_sessions", False))
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine, on the base — the draft's edits are not
+        searched, for the reason :meth:`deep_search` gives."""
+        return await self._base.deep_search_session(query, context=context)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's total — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_count(query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_membership(scope, items, urns, context=context)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """The property catalog — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
+                                                    session_id=session_id, refresh=refresh)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """An export of every match — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_export(query, context=context, fmt=fmt,
+                                                   columns=columns, wait_ms=wait_ms,
+                                                   session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export, to stream — the base's."""
+        return await self._base.deep_search_export_open(session_id, context=context)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """Container counts from a search session — the base's, like
+        :meth:`deep_search_session`."""
+        return await self._base.deep_search_ancestor_counts(session_id, urns, context=context)
+
+    async def deep_search_explain(self, query):
+        """Compile-only path. Delegated for the same reason as
+        :meth:`deep_search` — the Cypher explained is the one that would
+        actually run, i.e. the base's."""
+        return await self._base.deep_search_explain(query)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery. Delegated like :meth:`deep_search`: what is
+        queryable is a property of the base graph's storage."""
+        return await self._base.deep_search_discover(
+            sample_per_label=sample_per_label,
+        )
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — the base's values, like :meth:`deep_search`."""
+        return await self._base.deep_search_values(
+            key=key, entity_types=entity_types, q=q, limit=limit,
+        )
+
     # ---- writes: commit to the draft (reused from the branch provider) -- #
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """Containment chains on the DRAFT (its moves included) — the branch reader's walk over the
+        draft's composed state. ``{urn: [parent, …, root]}``; absent = unknown, ``[]`` = a root."""
+        return await self._writer.get_ancestor_chains(urns)
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors in the draft, parent first, root last (as the main reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         self._delta = None
         return await self._writer.create_node(node, containment_edge)

@@ -109,16 +109,85 @@ describe('assurance', () => {
 })
 
 describe('actions', () => {
-    it('labels every icon button for screen readers', () => {
+    it('labels every control for screen readers', () => {
         render(<IdpProviderCard provider={provider()} {...noop} />)
-        for (const name of [/rehearse sign-in/i, /turn off/i, /edit/i, /delete/i]) {
+        for (const name of [/rehearse sign-in/i, /edit/i, /delete/i]) {
             expect(screen.getByRole('button', { name })).toBeInTheDocument()
         }
+        // The enabled toggle is a real switch now, not a glyph whose two
+        // states rendered identically.
+        expect(screen.getByRole('switch', { name: /turn off/i }))
+            .toBeInTheDocument()
     })
 
     it('shows where an email domain routes', () => {
         render(<IdpProviderCard {...noop}
             provider={provider({ emailDomains: ['corp.example', 'sub.corp.example'] })} />)
         expect(screen.getByText(/corp\.example, sub\.corp\.example/)).toBeInTheDocument()
+    })
+})
+
+describe('the enabled state, said in words', () => {
+    it('a switched-off connection says so instead of claiming Live', () => {
+        // The old card showed a green "Live" chip at 60% opacity for a
+        // connection the stat tiles excluded — the two surfaces
+        // contradicted each other.
+        render(<IdpProviderCard {...noop}
+            provider={provider({ enabled: false })} />)
+        expect(screen.getByText(/off — sign-ins refused/i)).toBeInTheDocument()
+        expect(screen.queryByText(/^live$/i)).not.toBeInTheDocument()
+        expect(screen.getByRole('switch', { name: /turn on/i }))
+            .toHaveAttribute('aria-checked', 'false')
+    })
+
+    it('an enabled live connection reads Live with the switch on', () => {
+        render(<IdpProviderCard provider={provider()} {...noop} />)
+        expect(screen.getByText('Live')).toBeInTheDocument()
+        expect(screen.getByRole('switch', { name: /turn off/i }))
+            .toHaveAttribute('aria-checked', 'true')
+    })
+
+    it('the switch toggles when asked', async () => {
+        const onToggleEnabled = vi.fn()
+        const user = userEvent.setup()
+        render(<IdpProviderCard provider={provider()} {...noop}
+                                onToggleEnabled={onToggleEnabled} />)
+        await user.click(screen.getByRole('switch', { name: /turn off/i }))
+        expect(onToggleEnabled).toHaveBeenCalled()
+    })
+})
+
+describe('readiness and history', () => {
+    it('a rehearsed draft says so', () => {
+        render(<IdpProviderCard {...noop}
+            provider={provider({
+                lifecycle: 'draft',
+                lastAssertionAt: new Date().toISOString(),
+            })} />)
+        expect(screen.getByText(/rehearsed ✓/i)).toBeInTheDocument()
+    })
+
+    it('an unrehearsed draft shows no tick', () => {
+        render(<IdpProviderCard {...noop}
+            provider={provider({ lifecycle: 'draft' })} />)
+        expect(screen.queryByText(/rehearsed ✓/i)).not.toBeInTheDocument()
+    })
+
+    it('a live connection shows its last sign-in', () => {
+        render(<IdpProviderCard {...noop}
+            provider={provider({
+                lastAssertionAt: new Date().toISOString(),
+            })} />)
+        expect(screen.getByText(/last sign-in/i)).toBeInTheDocument()
+    })
+})
+
+describe('health fetch failure', () => {
+    it('is distinguished from "never probed"', () => {
+        render(<IdpProviderCard provider={provider()} {...noop}
+                                healthUnavailable />)
+        expect(screen.getByText(/health unavailable right now/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/not checked yet/i)).not.toBeInTheDocument()
     })
 })

@@ -74,6 +74,28 @@ describe('AddFilterPalette', () => {
         expect(screen.getByText(/Within N hops of/i)).toBeInTheDocument()
     })
 
+    it('offers a degree condition as a Code entry, handing it off', async () => {
+        const user = userEvent.setup()
+        const onOpenCode = vi.fn()
+        render(<AddFilterPalette {...baseProps} onOpenCode={onOpenCode} />)
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText(/Number of edges/i))
+
+        expect(onOpenCode).toHaveBeenCalledWith('degree')
+    })
+
+    it('offers every entity as a condition of its own', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('Every entity'))
+
+        expect(onAdd).toHaveBeenCalledWith({ kind: 'all' })
+    })
+
     it('emits parsed predicates via onAddMany on a DSL paste', async () => {
         const user = userEvent.setup()
         const onAddMany = vi.fn()

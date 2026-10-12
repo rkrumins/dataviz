@@ -8,11 +8,16 @@
  * sampled at 200 nodes) but not free; we cache it per-mount and
  * invalidate by view change.
  */
-import { useEffect, useState, useMemo } from 'react'
+import { useCallback, useEffect, useState, useMemo } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { SearchDiscoverResult } from '@/types/search'
+import { RemoteGraphProvider, httpStatusOf } from '@/providers/RemoteGraphProvider'
+import type { SearchDiscoverResult, SearchValuesResult } from '@/types/search'
+
+
+/** A property's most common values in a view, narrowed to those whose text
+ *  contains `q` — or null when the backend cannot say. */
+export type ValueSuggester = (propertyKey: string, q: string) => Promise<SearchValuesResult | null>
 
 
 export interface UseDiscoveryResult {
@@ -22,8 +27,21 @@ export interface UseDiscoveryResult {
     /** True on the very first load only. Subsequent revalidations
      *  surface as `discovery` updates without flipping this. */
     isInitialLoading: boolean
-    /** Last error from the discover call, or null. */
+    /** Last error from the discover call, or null. Never set for a
+     *  refusal — see `unavailable`. */
     error: Error | null
+    /**
+     * Discovery is not offered to this caller — a 403.
+     *
+     * The live case is a share link: `/search/discover` samples every
+     * label in the DATA SOURCE, which is wider than the one view a
+     * capability identity was granted, so the backend refuses it. That
+     * arrives on every open and will never succeed, so it is not an
+     * `error`: there is no fault, nothing to retry and nothing the
+     * viewer can do. Surfaces read this to say nothing at all rather
+     * than to show a failure they cannot explain.
+     */
+    unavailable: boolean
     /** Union of all native property keys across every label. Useful
      *  for property-key autocomplete when the editor doesn't yet
      *  know which entity type the user is filtering by. */
@@ -44,6 +62,44 @@ export interface UseDiscoveryResult {
     keysByEdgeType: Record<string, string[]>
     /** Look up known sample values for an edge property key. */
     getEdgeValueSamples: (edgeType: string, propertyKey: string) => unknown[]
+    /** A property's most common values counted across the whole view —
+     *  not the sample `getValueSamples` reads — narrowed by typed text.
+     *  Resolves null when the backend cannot answer (a share link, a
+     *  provider without deep search); callers fall back to the samples. */
+    suggestValues: ValueSuggester
+}
+
+
+// Value suggestions per provider: "view, key, text" → the request, in
+// flight or settled. A picker asks again on every keystroke and reopen; a
+// minute's cache answers those without a round trip. A failure is cached as
+// null for the same minute, so a refusal is not re-asked per keystroke.
+const SUGGESTION_TTL_MS = 60_000
+const SUGGESTION_CACHE_MAX = 300
+const suggestionCache = new WeakMap<
+    RemoteGraphProvider,
+    Map<string, { at: number; result: Promise<SearchValuesResult | null> }>
+>()
+
+function cachedSuggestions(
+    provider: RemoteGraphProvider, viewId: string, key: string, q: string,
+): Promise<SearchValuesResult | null> {
+    let cache = suggestionCache.get(provider)
+    if (!cache) {
+        cache = new Map()
+        suggestionCache.set(provider, cache)
+    }
+    const slot = `${viewId}\u0000${key}\u0000${q}`
+    const hit = cache.get(slot)
+    if (hit && Date.now() - hit.at < SUGGESTION_TTL_MS) return hit.result
+    const result = provider.searchPropertyValues(viewId, key, q).catch(() => null)
+    cache.delete(slot)
+    cache.set(slot, { at: Date.now(), result })
+    if (cache.size > SUGGESTION_CACHE_MAX) {
+        const oldest = cache.keys().next().value
+        if (oldest !== undefined) cache.delete(oldest)
+    }
+    return result
 }
 
 
@@ -58,6 +114,7 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
     const [discovery, setDiscovery] = useState<SearchDiscoverResult | null>(null)
     const [isInitialLoading, setIsInitialLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
+    const [unavailable, setUnavailable] = useState(false)
 
     useEffect(() => {
         if (!viewId) {
@@ -80,11 +137,16 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
                 if (cancelled) return
                 setDiscovery(result)
                 setError(null)
+                setUnavailable(false)
                 setIsInitialLoading(false)
             })
             .catch((e: unknown) => {
                 if (cancelled) return
-                setError(e instanceof Error ? e : new Error(String(e)))
+                // A 403 is the backend declining, not failing. Only a real
+                // fault becomes an `error` a surface may report.
+                const refused = httpStatusOf(e) === 403
+                setUnavailable(refused)
+                setError(refused ? null : (e instanceof Error ? e : new Error(String(e))))
                 setIsInitialLoading(false)
             })
         return () => {
@@ -177,10 +239,18 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         }
     }, [discovery])
 
+    const suggestValues = useCallback<ValueSuggester>((propertyKey, q) => {
+        if (!viewId || !propertyKey || !(provider instanceof RemoteGraphProvider)) {
+            return Promise.resolve(null)
+        }
+        return cachedSuggestions(provider, viewId, propertyKey, q.trim())
+    }, [provider, viewId])
+
     return {
         discovery,
         isInitialLoading,
         error,
+        unavailable,
         allKeys,
         keysByEntityType,
         tagValues,
@@ -188,5 +258,6 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         edgeTypes,
         keysByEdgeType,
         getEdgeValueSamples,
+        suggestValues,
     }
 }

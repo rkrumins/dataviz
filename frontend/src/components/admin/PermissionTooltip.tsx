@@ -23,7 +23,7 @@
  * effects clipped or hid the popover. The portal sidesteps the entire
  * containment problem.
  *
- * Visual language matches the toast / AccessDeniedModal style —
+ * Visual language matches the notification / AccessDeniedModal style —
  * rounded panel, layered border, tinted icon box, no Radix.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'

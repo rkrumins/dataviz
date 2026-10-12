@@ -135,3 +135,15 @@ export function useEntityColorSet(typeId: string): { hex: string; bg: string; te
     accent: visual.color,
   }
 }
+
+/** The schema's name for an entity type ("Dataset") — matched exactly, else ignoring case, as the
+ *  canvas does — or the id when the schema has no such type. */
+export function useEntityTypeLabel(typeId: string | undefined): string | undefined {
+  return useSchemaStore((s) => {
+    if (!typeId) return undefined
+    const types = s.schema?.entityTypes ?? []
+    const lower = typeId.toLowerCase()
+    const t = types.find((e) => e.id === typeId) ?? types.find((e) => e.id.toLowerCase() === lower)
+    return t?.name || typeId
+  })
+}

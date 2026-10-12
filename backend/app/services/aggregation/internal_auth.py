@@ -11,8 +11,11 @@ holding ``AGGREGATION_INTERNAL_TOKEN`` are accepted.
 Enforcement:
 - Token SET (the deployed state — compose + k8s Secret): every route except
   the exempt set requires ``Authorization: Bearer <token>``.
-- Token UNSET: auth is disabled with a loud startup warning. A dev-only
-  convenience, never the deployed state.
+- Token UNSET in prod: the control plane refuses to start. "Never the
+  deployed state" was a warning in a log nobody reads, and the failure it
+  describes is an entire unauthenticated admin surface.
+- Token UNSET elsewhere: auth is disabled with a loud startup warning. A
+  dev-only convenience.
 
 This is defense-in-depth *behind* NetworkPolicies, not a replacement for them.
 The server (controlplane.py) and every client (viz-service proxy, insights
@@ -49,19 +52,36 @@ def internal_auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def log_auth_mode() -> None:
-    """Announce the enforcement state once at control-plane startup."""
+def assert_auth_mode_allowed() -> None:
+    """Announce the enforcement state at control-plane startup, and refuse
+    to start unauthenticated in production.
+
+    Fails closed for the same reason ``require_encryption_or_plaintext_ok``
+    does: an unset token does not degrade the control plane, it removes its
+    only authentication. Every trigger / cancel / delete / purge / settings
+    route on :8091 is then open to anything that can reach the port. That
+    was already documented as "never the deployed state" — as a log line,
+    which is not a control.
+    """
     if get_internal_token():
         logger.info(
             "Control Plane internal auth ENABLED — bearer token required on "
             "all routes except %s", sorted(_EXEMPT_PATHS),
         )
-    else:
-        logger.warning(
-            "Control Plane internal auth DISABLED — %s is unset, so every "
-            ":8091 route is open. Set it (compose / k8s Secret) to enforce. "
-            "This must never be the deployed state.", INTERNAL_TOKEN_ENV,
+        return
+
+    message = (
+        f"Control Plane internal auth is DISABLED: {INTERNAL_TOKEN_ENV} is "
+        "unset, so every :8091 route — job trigger, cancel, delete, purge "
+        "and settings — is open to anything that can reach the port."
+    )
+    if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+        raise RuntimeError(
+            message + f" Set {INTERNAL_TOKEN_ENV} (k8s Secret / compose) "
+            "before deploying."
         )
+    logger.warning("%s This is a dev-only mode.", message)
+
 
 
 async def require_internal_token(

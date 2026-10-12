@@ -43,9 +43,12 @@ provider actually sends, a worked example of one of its payloads, and the
 instructions for its console.
 
 If yours is not listed, **Other OIDC provider** or **Other SAML 2.0 provider**
-work with anything standards-compliant. **Corporate portal** is for the case
-where something in front of {brand} has already signed the user in and hands
-over their profile — see [Corporate portals](#corporate-portals) below.
+work with anything standards-compliant. Two entries cover the internal cases:
+**Corporate portal**, where something in front of {brand} has already signed the
+user in and hands over their profile — see
+[Corporate portals](#corporate-portals) — and **Enterprise gateway**, where an
+internal service will tell us who someone is if we ask it — see
+[Enterprise gateways](#enterprise-gateways).
 
 ### 2. Connect
 
@@ -92,12 +95,41 @@ can drift away from it. Leave the row empty and the field stays theirs to edit.
 **Full / display name** is never taken this way, whatever you map: it is the one
 name a person can always choose for themselves.
 
+**Avatar** maps a profile-picture URL (`picture`, `avatarUrl`, `photoUrl` and
+similar names resolve by default on a gateway connection), and it only
+participates while the connection's **Map their avatar from the claims** toggle
+— in the Behaviour section, off by default — is on. With it on, our server
+fetches the image during sign-in and serves it from here; browsers never load
+the external URL directly, so member lists cannot leak viewers to your photo
+host.
+
+The image host must be listed before anything is fetched. An **external**
+host — a public CDN, an avatar service — goes on **Avatar image hosts**
+(Settings tab): that list is the on-switch, and while it is empty every
+outside host is refused by name. A **private** host inside your own network
+goes on the internal-gateways allowlist instead, exactly like the gateway
+endpoints. What gets through is raster images only — PNG, JPEG, GIF, WebP or
+AVIF, up to 256 KiB; a raster is a grid of pixels, a finished picture, so an
+SVG (drawing instructions that can carry scripts) is refused. Redirects are
+followed up to three hops, and every host in the chain must be listed. When a
+picture is not arriving, **rehearse the connection**: the verdict now carries
+an avatar line that says exactly what happened — fetched (type and size), or
+refused and by which rule, naming the host to add.
+
+While the connection supplies a picture it is IdP-managed like the names:
+shown everywhere, re-applied at every sign-in, and the person's own picker
+says so instead of offering a change that would not survive. The image
+refreshes whenever the URL in the claims changes, and unlinking the identity
+clears it.
+
 #### If your IdP only sends one name
 
 Plenty do — Entra's `name`, a portal's `fullName` — with no separate given and
-family name. Nothing to configure: when both name rows would otherwise be empty,
-we split the full name and the rows say **split from `name`** rather than showing
-you an empty field.
+family name. Nothing to configure: `name`, `displayName`, `fullName` and
+`full_name` all resolve as the full name by default (SAML connections also read
+`cn` and its OID), and when both name rows would otherwise be empty, we split
+the full name and the rows say **split from `name`** rather than showing you an
+empty field.
 
 Splitting is a guess. `Doe, Alice` is read as *Alice Doe* — the comma marks the
 family name first, as Active Directory writes it — and everything else divides at
@@ -108,6 +140,13 @@ in the first name rather than being cut somewhere arbitrary.
 Because it is a guess, a split name is **not** marked IdP-managed: it fills the
 profile in and stays the person's to correct. Map a claim of its own — even a
 custom one — and the connection owns the field properly.
+
+The fill-in is not only for brand-new accounts. An account that already exists
+with both name rows blank picks the split up at its next sign-in, and the
+string your directory actually sent — `Doe, Alice`, comma and all — lands in
+**Full / display name** so nothing the IdP said is lost to the guess. Both
+stay the person's to edit, and a name somebody has already typed is never
+overwritten.
 
 > **Note:** *Where the sample came from matters.* Until someone signs in, the
 > preview runs against a worked example of your vendor's payload — good enough to
@@ -138,9 +177,33 @@ nobody but you can see it.
 ### Give people roles automatically
 
 **Admin → SSO → Access mapping.** Each rule reads as a sentence — *anyone in
-`engineering` from Corporate Entra gets Editor in Analytics* — and rules are
-re-evaluated on every sign-in and every session refresh, so your directory stays
-the source of truth.
+`engineering` from Corporate Entra gets Editor in Analytics*. Rules are
+re-evaluated on every sign-in and every session refresh, so a rule you change
+here applies to active sessions within minutes. The group list itself is read
+from your directory at sign-in — a change made there lands at that person's
+next full sign-in, within 24 hours at the latest.
+
+Live rules are edited in place: the pencil on a rule opens it as the same
+left-to-right sentence the New-rule card uses, pre-filled, with the preview
+underneath showing exactly what will be saved and a struck-through "was" line
+once something differs. Every guard that applies on create applies on save.
+When an edit (or a removal) takes away the last rule reaching a target, the
+access already granted under it is cleared immediately rather than lingering;
+a target another rule still reaches is left to the normal per-person
+re-evaluation.
+
+Where the groups come *from* is the connection's claim mapping (the pencil on
+its card → mapping studio). A directory that nests membership — say
+`{"entitlements": {"groups": ["group1", …]}}` — works out of the box, and on
+gateway connections the container's name does not matter: whatever the
+payload nests its user object under, one level is flattened automatically.
+Deeper nesting is one dotted key away (`authz.ad.memberships` reaches
+`{"authz": {"ad": {"memberships": […]}}}`). Paste a sample payload into the
+studio and the Groups row names exactly which key supplied the list. Large
+directories are fine too: a person arriving with 100+ AD groups keeps every
+name intact (distinguished names are never split on their commas), and the
+rules are matched in one query — only the names you actually mapped do
+anything; the rest ride along unused.
 
 There is more to this than fits here: what a rule can grant, why removing
 somebody from a group does not always remove their access, and what platform-
@@ -177,6 +240,273 @@ Two things decide whether this is safe:
   can set the header themselves and impersonate any user. This is why the
   header source is rated *asserted* rather than *verified* — from here, we cannot
   tell a correctly-configured proxy from a missing one.
+
+---
+
+## Enterprise gateways
+
+Some organisations have no OIDC or SAML in front of their internal apps at all.
+Instead there is a service that will tell you who someone is *if you ask it*,
+using the session they already have. If that describes yours, this is the kind
+to pick.
+
+It works differently from every other connection here, and the difference is
+worth understanding because it decides what you have to configure.
+
+### How it works
+
+The person's browser already carries a session token from your portal — a cookie
+on a domain {brand} shares with it. When they arrive at the sign-in link, we take
+that cookie and, from our server rather than their browser, make up to two calls:
+
+```mermaid
+flowchart LR
+  B[Their browser] -->|arrives with the session cookie| A[{brand}]
+  A -->|1. redeem the cookie| G[Your gateway]
+  G -->|a token| A
+  A -->|2. exchange the token| U[Your user endpoint]
+  U -->|their details| A
+  A -->|claim mapping| P[Profile and groups]
+```
+
+Two things follow from that shape:
+
+- **We never read the cookie.** It is opaque to us. We hand it straight back to
+  the service that issued it and believe what that service replies. So the
+  connection is only as strong as your gateway, which is the right place for the
+  decision to sit.
+- **We ask every time.** Because the answer is current rather than a signature
+  over something said earlier, a person your portal has just signed out stops
+  being able to use {brand} on their next session renewal — not whenever their
+  token would have expired. This is the one connection kind that closes that gap.
+
+### When the session does not exist yet
+
+The above assumes people already hold a session with your provider by
+the time they open {brand}. Often they do. Where they do not — Kerberos
+being the usual case, where the session is created on demand from the
+workstation&rsquo;s own login — one more call is needed first, and
+**that call is made by the browser rather than by {brand}**.
+
+This is not a preference. Your provider challenges the browser, and
+answering that challenge needs a ticket from the workstation&rsquo;s
+operating system. Only the browser, on that machine, can get one; our
+server cannot, ever. So {brand} makes the call from the sign-in page,
+with the browser&rsquo;s credentials attached, and the exchange with the
+operating system happens invisibly inside it.
+
+Fill in the **Sign-in trigger** section of the connection with the
+endpoint to call. Two things to know before you do:
+
+- It runs **automatically**, once per browser tab, for anyone opening
+  {brand}. A session the machine already holds should not need a button
+  press. If it fails — an off-network laptop, a browser that has not
+  been told to answer for that host — the ordinary sign-in form is still
+  there, and pressing the button will say what went wrong.
+- There is a **switch** on the section. Turning it off stops the call
+  without losing what you configured, which is what you want during an
+  incident on their side, or to check that people can still get in the
+  ordinary way. While it is off, nothing about the section reaches
+  anyone&rsquo;s browser.
+- **The headers on that section are public.** They are sent from the
+  user&rsquo;s browser and readable by anyone who opens the sign-in
+  page. They are *not* the same as the header fields on the two steps
+  below, which stay on our server. Put an application identifier there;
+  never a credential.
+- **When the exchange runs in the browser, the trigger&rsquo;s answer
+  can be forwarded.** Some translate endpoints require the token the
+  trigger answered with, POSTed back in a JSON body. Fill in the
+  trigger&rsquo;s *Token is at* path and name the body field in the
+  browser-exchange section, and the sign-in page carries it across.
+  Note that the switch above then switches off this whole sign-in
+  shape — with the trigger off there is no token to forward, and the
+  page says so rather than making a call the gateway would refuse.
+
+Your identity team will need to allow {brand}&rsquo;s exact origin for
+credentialed cross-origin calls, and your desktop team will need
+workstations configured to answer the challenge for that host. Both are
+in the contract document below.
+
+{brand}&rsquo;s own page has to allow the call too. Its
+Content-Security-Policy lets the page talk only to its own origin, so
+the browser blocks the trigger — and the browser-side translate call
+described below — before it is sent, unless whoever deploys {brand}
+lists your provider&rsquo;s origins in the frontend container&rsquo;s
+`CSP_CONNECT_SRC`: space-separated `https://` origins, scheme, host and
+port only, for example
+`CSP_CONNECT_SRC="https://sso.corp.example"`. The connection form
+names the origin to add under each URL you fill in. Anything that is
+not a bare `https://` or `wss://` origin stops the frontend from
+starting rather than weakening the policy.
+
+### What you need from your identity team
+
+Ask them for:
+
+- **The cookie's name**, and confirmation it is set on a domain {brand} shares.
+  If it is not, all is not lost — switch the connection's exchange to **the
+  browser**: the sign-in page makes the translate call itself (the user's
+  browser holds the cookie ours never sees) and hands over the reply. That
+  shape requires **one way to judge the reply**, because a token the browser
+  delivers is only as good as its signature. Any one of these works:
+  - their **JWKS URL** — the usual choice when they publish keys;
+  - their **public key, pasted in (PEM)** — ask for it when they sign the
+    token but publish no key set;
+  - a **shared secret** — for gateways that sign symmetrically (HS256);
+  - or, as a last resort, **Trust unverified sign-ins** — for a translate
+    endpoint that returns plain JSON claims with no signature at all. The
+    connection is then rated **Unverified** (it cannot grant platform-admin
+    roles, and every login through it is audited), and it is the one posture
+    that accepts *both* a token and plain JSON on the same row.
+
+  To see the difference: a signed reply is a compact token
+  (`eyJhbGciOi…` — three dot-separated parts), while an unsigned reply is
+  the claims object itself (`{"sub": "emp-1", "email": "ada@corp.example", …}`).
+  The rehearsal tells you which one your gateway answered and how it was
+  judged.
+
+  **If the reply varies by environment** — signed in production, plain JSON
+  in a test deployment — pick per environment: each deployment configures its
+  own connection row, so give each row the posture matching what *that*
+  environment's gateway actually returns. Or ask them to sign everywhere, or
+  run Trust unverified and accept the rating.
+
+  **If their translate endpoint wants the sign-in call's token in its body**
+  — the refusal usually reads "no request body is set" — ask where the token
+  sits in the authenticate reply and what the body field is called. The
+  authenticate call answers, say, `{"token": "eyJ…", "sessionId": "…"}`; the
+  translate call then expects `POST` with the body `{"token": "eyJ…"}`. Put
+  the reply path in the trigger's *Token is at* field and the field name in
+  the browser-exchange section's body field, set the translate method to
+  POST, and the sign-in page forwards it.
+- **The endpoint that redeems it**, and where in its reply the token sits.
+- **The endpoint that returns the user**, if that is a second call — some
+  gateways answer with the person's details straight away, and then you leave
+  the second endpoint blank.
+- **Whether the details arrive as a signed token (JWT).** Some translate
+  endpoints answer with a JWT — bare in the body, or under a field — whose
+  payload is the user object. Say so on the connection and the claims are read
+  from the payload; give it their JWKS URL as well and the signature is
+  verified too.
+- **Any headers the server's calls need** — an application id, a key. They go
+  in the connection's settings and are never sent to anyone's browser. (The
+  trigger's and the browser exchange's headers are the exception, and the form
+  says so where you type them: those calls are made *by* the browser, so their
+  headers are public.)
+- **Whether their reply includes an authentication time.** Without one there is
+  no way to tell when somebody actually signed in at your portal, so the daily
+  re-authentication ceiling is measured from each sign-in to {brand} instead.
+  The sign-in still succeeds, and the rehearsal verdict says when this happens.
+  With the time included, the ceiling measures from their own sign-in.
+- **A validate-only endpoint, if they have one.** The session re-check calls it
+  instead of the redeem endpoint (the connection's **Re-check URL**), so
+  renewals stop minting a token apiece.
+
+One more default worth knowing: corporate gateways rarely send an
+`email_verified` claim, so the connection treats their addresses as verified —
+that is what lets people land on their existing account, matched by email. An
+explicit `false` from the gateway is always respected, and the toggle is in the
+connection's Behaviour section.
+
+### Allowing the host first
+
+These endpoints are internal, and {brand} refuses to make requests into a private
+network unless someone has explicitly permitted the destination. So before the
+connection can work, its host must be on the allowlist:
+
+**Admin → SSO → Settings → *Internal gateways SSO may call***.
+
+An entry is one host and one port — permitting a gateway on 443 does not permit
+whatever else answers on the same machine. That list is managed under its own
+permission, separate from ordinary platform administration, because it decides
+where {brand} may send requests. You may need to ask someone else to add it.
+
+Some addresses are refused whatever is on the list — loopback, and the addresses
+cloud providers use to hand out credentials. Nothing in the admin UI can unlock
+those.
+
+### Trusting your gateway's TLS
+
+Gateways inside a corporate network usually serve TLS whose trust anchor is the
+company's own certificate authority — which this deployment does not trust out
+of the box, so every call fails with *certificate verify failed* and the
+rehearsal names it (`tls_verify_failed`).
+
+The fix is deployment-level, once, for every connection at the same time: hand
+the deployment your corporate CA bundle — one PEM file containing the issuing
+chain — and point the `SSO_OUTBOUND_TLS_CA_CERTS` environment variable at it.
+Every outbound SSO call verifies against it from the next request: the gateway
+legs, the session re-check, JWKS and OIDC discovery, SAML metadata imports, and
+avatar fetches. How to mount the file per deployment shape (docker-compose,
+Kubernetes, a bare host) is in the deployment guide.
+
+The per-connection **Skip TLS verification** toggle, in the connection's
+Behaviour section, is the warned last resort: it accepts *any* TLS answer on
+that connection's calls — the gateway legs and the avatar images its sign-ins
+fetch alike — drops the connection's rating to Unverified unless its replies
+are signed tokens checked against a pasted key or shared secret, and an
+Unverified connection cannot grant platform admin roles. Prefer the bundle.
+
+### Setting it up
+
+The five-step flow is the same, with the differences you would expect:
+
+| Step | What is different |
+|---|---|
+| **Connect** | No **Fetch** — there is no document to read. You fill in the two endpoints and where the token and the user details sit in their replies. |
+| **Fields** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
+| **Rehearse** | Works exactly as it does elsewhere, and matters more here: it is the only way to see what your gateway actually returned before anyone else depends on it. |
+| **Publish** | Refused if the connection is not configured enough to work. |
+
+If something is wrong, saving tells you which field and why. If a sign-in fails
+afterwards, see [When a sign-in fails](/guide/sso-operations#when-a-sign-in-fails).
+
+There is a document written for the team that owns the gateway rather
+than for you — the [Back-channel SSO Contract](/docs/sso-backchannel-contract)
+in the documentation. It states what their endpoints have to do, and is worth
+sending them before the work starts rather than after. The section on
+status codes is the one that cannot be fixed from this side afterwards:
+if their service returns a server error for an expired session, nobody
+will ever be signed out; if it returns "unauthorised" during an outage,
+everybody will be at once.
+
+### Keeping sessions in step
+
+By default, {brand} re-checks with your gateway each time it renews someone's
+session, which happens as often as your access tokens expire — a few minutes on
+the default setting. That is what makes signing out of your portal sign them out
+here too.
+
+If the gateway stops answering, sign-ins are not dropped immediately: existing
+sessions keep working for a grace period, measured from the last time the gateway
+actually answered rather than the last time we tried. So a brief outage is
+invisible, and a long one still ends sessions rather than extending them
+indefinitely. Both the re-check and the grace period are settings on the
+connection.
+
+And when the corporate session itself expires — they tend to live an hour or
+four — nobody is dumped on a login form. The app notices at the next renewal
+and silently re-runs the browser's part of the sign-in: the trigger, the
+translate call on a browser-exchange connection, and the sign-in itself, all
+behind the scenes. The user keeps working; the only way they find out is if the
+corporate side actually refuses, in which case the login page opens with the
+reason and tries again on its own a minute later. Browser-exchange connections
+have no server re-check at all — the translate token's own expiry plays that
+part, with the same silent recovery behind it.
+
+### Who presses the button
+
+By default the sign-in page attempts a gateway connection silently — nobody
+should press a button to spend a session their machine already holds. **Sign
+people in automatically**, in the connection's Behaviour section, turns that
+off: the page then waits for the button, and nothing else changes — the
+mid-session renewals above, the re-certification ceiling included, keep
+working either way.
+
+Signing out always sticks, whatever the toggle says: the tab that signed out
+(and every sibling tab) lands on a page that waits for a click, rather than
+being signed straight back in by a corporate session that is still alive
+upstream.
 
 ---
 
@@ -220,10 +550,12 @@ one combination no individual switch can warn you about.
 
 ---
 
-## What next
+## Where to next
 
-Your connection is live and people are signing in. The questions from here are
-about running it: who gets what, what happens when somebody leaves, and why one
-person cannot sign in when everybody else can.
-
-**→ [Running Single Sign-On](/guide/sso-operations)**
+- [Running Single Sign-On](/guide/sso-operations) — when your connection is
+  live and you want to decide who gets what, handle somebody leaving, or find
+  out why one person cannot sign in when everybody else can.
+- [Users & Access](/guide/users-access) — when you want to understand the roles
+  and groups your access rules grant.
+- [Troubleshooting](/guide/troubleshooting#a-new-user-cant-log-in) — when
+  someone can't sign in at all and you need the quick checks.

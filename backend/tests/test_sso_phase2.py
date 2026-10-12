@@ -9,6 +9,7 @@ linking policy variants, link-intent flow) live in
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -53,12 +54,16 @@ def test_extract_groups_missing_returns_empty():
     assert out.groups == ()
 
 
-def test_extract_groups_skips_non_strings():
+def test_extract_groups_keeps_numeric_ids_and_skips_the_rest():
+    # Numeric ids are real group keys in plenty of directories, so they
+    # stringify rather than vanish. Blanks and booleans are still not
+    # groups. (Ints used to be dropped; that silently unmapped every
+    # directory that keys groups by number.)
     out = apply_claim_mapping(
-        _claims(groups=["ok", 123, "", "  ", "Eng"]),
+        _claims(groups=["ok", 123, "", "  ", True, "Eng"]),
         kind="oidc", provider_slug="t",
     )
-    assert out.groups == ("ok", "Eng")
+    assert out.groups == ("ok", "123", "Eng")
 
 
 def test_extract_auth_time_int_and_string():
@@ -261,6 +266,30 @@ class _StubUserIdentityRepo:
 _NoopRefreshStore = InMemoryRefreshStore
 
 
+async def _mint_recorded_refresh(store, **kwargs):
+    """Mint a refresh token AND write its record, as login does.
+
+    Minting alone used to be enough here because
+    ``REFRESH_ADOPT_RECORDLESS`` defaulted on, so a token with no row was
+    adopted on first use. That default is off now — the migration window
+    it existed for closed long ago — and a token with no record is
+    correctly refused. Recording it is what production has always done;
+    these tests were relying on the ramp.
+    """
+    token, claims = token_module.create_refresh_token(**kwargs)
+    await store.record_mint(
+        jti=claims.jti,
+        family_id=claims.family_id,
+        user_id=claims.sub,
+        auth_time=claims.auth_time,
+        mint_ms=claims.mint_ms,
+        expires_at_iso=datetime.fromtimestamp(
+            claims.exp, tz=timezone.utc,
+        ).isoformat(),
+    )
+    return token
+
+
 class _NoopSession:
     async def __aenter__(self):
         return self
@@ -279,15 +308,15 @@ async def test_refresh_raises_sso_reauth_after_ceiling():
     from backend.auth_service.service import LocalIdentityService
 
     stale_auth_time = int(time.time()) - (SSO_SESSION_MAX_AGE_SECONDS + 10)
-    rt, _ = token_module.create_refresh_token(
-        user_id="usr_1", family_id="fam1", auth_time=stale_auth_time,
-    )
     killed: list[str] = []
 
     async def _killer(uid):
         killed.append(uid)
 
     store = _NoopRefreshStore()
+    rt = await _mint_recorded_refresh(
+        store, user_id="usr_1", family_id="fam1", auth_time=stale_auth_time,
+    )
     svc = LocalIdentityService(
         session_factory=_session_factory,
         user_repo=_StubUserRepo(),
@@ -302,7 +331,9 @@ async def test_refresh_raises_sso_reauth_after_ceiling():
         "/api/v1/auth/default-oidc/login"
     )
     assert "force=1" in exc_info.value.login_url
-    assert killed == ["usr_1"]
+    # This session's family ends; the user's other sessions carry their
+    # own auth_time and meet the ceiling on their own schedule.
+    assert killed == []
     assert store.revoked_family == "fam1"
 
 
@@ -312,14 +343,15 @@ async def test_refresh_succeeds_for_local_session():
     (no IdP) regardless of how many SSO identities the user has."""
     from backend.auth_service.service import LocalIdentityService
 
-    rt, _ = token_module.create_refresh_token(
-        user_id="usr_1", family_id="fam1",
+    store = _NoopRefreshStore()
+    rt = await _mint_recorded_refresh(
+        store, user_id="usr_1", family_id="fam1",
     )
     svc = LocalIdentityService(
         session_factory=_session_factory,
         user_repo=_StubUserRepo(),
         user_identity_repo=_StubUserIdentityRepo(has_identity=False),
-        refresh_store_factory=lambda s: _NoopRefreshStore(),
+        refresh_store_factory=lambda s: store,
     )
     user, _tokens = await svc.refresh(rt)
     assert user.id == "usr_1"

@@ -25,7 +25,12 @@ class LayerAssignmentRuleConfig(BaseModel):
     entity_types: Optional[List[str]] = Field(None, alias="entityTypes")
     tags: Optional[List[str]] = None
     urn_pattern: Optional[str] = Field(None, alias="urnPattern")
+    # Loose on purpose: only the placement contract reads it (view_placement), and a strict
+    # model would 422 a stored, half-filled propertyMatch that used to be dropped silently.
+    property_match: Optional[Dict[str, Any]] = Field(None, alias="propertyMatch")
     conditions: Optional[List[RuleCondition]] = None
+    # False: children of an entity this rule places do not inherit its layer (placement contract).
+    inherits_from_parent: Optional[bool] = Field(None, alias="inheritsFromParent")
 
     class Config:
         populate_by_name = True

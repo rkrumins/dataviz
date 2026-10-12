@@ -1,8 +1,9 @@
 """Platform-wide defaults.
 
-Currently just the node-identity mapping — the bottom of the resolution chain
-in ``backend.app.services.node_identity``, applied to every data source that
-does not resolve one from its own row, its provider, or its workspace.
+Two of them: the node-identity mapping — the bottom of the resolution chain in
+``backend.app.services.node_identity``, applied to every data source that does
+not resolve one from its own row, its provider, or its workspace — and the
+counts-history retention policy.
 
 This is the level an operator reaches for when a whole deployment's graphs are
 shaped the same way (everything keys on ``id``, everything names on ``title``),

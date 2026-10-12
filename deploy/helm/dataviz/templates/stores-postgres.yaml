@@ -65,6 +65,10 @@ spec:
       containers:
         - name: postgres
           image: {{ .Values.stores.postgres.image | quote }}
+          args:
+            - "postgres"
+            - "-c"
+            - "max_connections={{ .Values.stores.postgres.maxConnections }}"
           env:
             - name: POSTGRES_USER
               value: "synodic"

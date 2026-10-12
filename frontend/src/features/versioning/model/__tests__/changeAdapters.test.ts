@@ -72,3 +72,17 @@ describe('fromDiffVsMain', () => {
     expect(cs.byEntityId.get('urn:gone')?.origin).toEqual({ source: 'branch', branchId: 'br_x' })
   })
 })
+
+describe('fromDiffVsMain, slim', () => {
+  it('counts and indexes modified entities that come by id alone', () => {
+    const resp: DiffVsMainResponse = {
+      added: [{ entityId: 'urn:new', kind: 'node', after: { displayName: 'New', urn: 'urn:new' } }],
+      removed: [],
+      modified: [{ entityId: 'urn:m', kind: 'node' }, { entityId: 'e9', kind: 'edge' }],
+    }
+    const cs = fromDiffVsMain(resp, 'br_x')
+    expect(cs.counts).toEqual({ added: 1, modified: 2, removed: 0 })
+    expect(cs.byEntityId.get('urn:m')).toMatchObject({ status: 'modified', label: 'urn:m', fields: [] })
+    expect(cs.byEntityId.get('urn:new')?.after).toEqual({ displayName: 'New', urn: 'urn:new' })
+  })
+})

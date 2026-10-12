@@ -21,6 +21,17 @@ import { TIMEOUTS } from '@/config/timeouts'
 interface StaleEntry {
   /** Monotonic time-of-marking; used to compute auto-expiry. */
   ts: number
+  /**
+   * When this UNBROKEN run of stale-fallback answers began — carried across
+   * every re-mark, and only reset once the scope clears.
+   *
+   * ``ts`` answers "is the signal still live"; this answers "how long has the
+   * provider been unable to give us a fresh answer", which is the part a
+   * reader needs. The backend's last-known-good mirror lives for a day, so
+   * "may be slightly out of date" was an adjective covering anything from two
+   * seconds to twenty-four hours.
+   */
+  since: number
   /** Endpoint label that triggered the signal (children-with-edges, aggregated, …) — for diagnostics only. */
   endpoint?: string
 }
@@ -36,6 +47,9 @@ interface CacheStalenessState {
   clear: (workspaceId: string | undefined, dataSourceId: string | undefined) => void
   /** True iff this scope is currently flagged stale (within the TTL window). */
   isStale: (workspaceId: string | undefined, dataSourceId: string | undefined) => boolean
+  /** Epoch ms of the first stale-fallback in the current run, or null when
+   *  this scope is not currently flagged. */
+  staleSince: (workspaceId: string | undefined, dataSourceId: string | undefined) => number | null
   /** Wipe everything — entries + pending timers. Called by
    *  ``cleanupOnWorkspaceSwitch`` so the banner doesn't bleed across
    *  workspace boundaries. */
@@ -88,8 +102,10 @@ export const useCacheStalenessStore = create<CacheStalenessState>((set, get) => 
       }, STALE_TTL_MS))
       return
     }
+    // ``since`` survives a re-mark: an outage is one run however many
+    // responses it spans. Only ``clear`` ends it.
     const next = new Map(get().entries)
-    next.set(key, { ts: now, endpoint })
+    next.set(key, { ts: now, since: existing?.since ?? now, endpoint })
     set({ entries: next })
     // Schedule auto-clear so subscribers re-render when the window
     // closes — Zustand won't fire on a passive Date.now() tick.
@@ -116,6 +132,14 @@ export const useCacheStalenessStore = create<CacheStalenessState>((set, get) => 
     const entry = get().entries.get(key)
     if (!entry) return false
     return Date.now() - entry.ts < STALE_TTL_MS
+  },
+
+  staleSince: (workspaceId, dataSourceId) => {
+    const key = _key(workspaceId, dataSourceId)
+    if (!key) return null
+    const entry = get().entries.get(key)
+    if (!entry || Date.now() - entry.ts >= STALE_TTL_MS) return null
+    return entry.since
   },
 
   reset: () => {

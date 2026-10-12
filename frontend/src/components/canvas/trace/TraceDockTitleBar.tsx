@@ -20,6 +20,7 @@ import { useCountUp } from './useCountUp'
 import { TraceRecentPopover } from './TraceRecentPopover'
 import { TraceModeIndicator, deriveTraceMode } from './TraceModeIndicator'
 import { TraceSharePopover, type TraceShareSummary } from './TraceSharePopover'
+import { TraceSeedsPopover, type TraceSeed } from './TraceSeedsPopover'
 
 export interface TraceDockTitleBarProps {
   trace: UseUnifiedTraceResult
@@ -43,6 +44,11 @@ export interface TraceDockTitleBarProps {
    *  routinely on something the recipient has never expanded — which used to
    *  put a raw urn in the dock's focus chip. */
   focusLabel?: string
+  /** Every seed of a COMBINED trace (a multi-selection), in trace order.
+   *  With two or more and `onRemoveSeed`, the focus chip becomes
+   *  "Tracing N entities", which lists them and drops one on request. */
+  seeds?: readonly TraceSeed[]
+  onRemoveSeed?: (urn: string) => void
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -80,13 +86,22 @@ export function TraceDockTitleBar({
   nativeMode = false,
   share,
   focusLabel,
+  seeds,
+  onRemoveSeed,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
   const shareTriggerRef = useRef<HTMLButtonElement>(null)
+  const seedsTriggerRef = useRef<HTMLButtonElement>(null)
   const [recentOpen, setRecentOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [seedsOpen, setSeedsOpen] = useState(false)
   const [focusedIdx, setFocusedIdx] = useState(0)
+
+  // A combined trace narrowed to one seed is an ordinary trace again: the
+  // list closes with the chip, rather than re-opening on the next one.
+  const combined = !!onRemoveSeed && (seeds?.length ?? 0) > 1
+  if (seedsOpen && !combined) setSeedsOpen(false)
 
   const focusNode = trace.focusId ? displayMap.get(trace.focusId) : undefined
   const focusName = focusLabel || focusNode?.name || trace.focusId || 'Unknown'
@@ -151,6 +166,18 @@ export function TraceDockTitleBar({
     controlsRef.current.forEach((el, i) => { el.tabIndex = i === focusedIdx ? 0 : -1 })
   })
 
+  // Narrowing to one seed takes the "Tracing N entities" chip away, and with
+  // it whatever held focus (the chip, or the list's X): keep the keyboard in
+  // the toolbar rather than dropping it on the page.
+  const wasCombined = useRef(combined)
+  useEffect(() => {
+    const narrowed = wasCombined.current && !combined
+    wasCombined.current = combined
+    if (!narrowed) return
+    const active = document.activeElement
+    if (!active || active === document.body) containerRef.current?.focus()
+  }, [combined])
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     const items = controlsRef.current
     if (items.length === 0) return
@@ -203,7 +230,90 @@ export function TraceDockTitleBar({
         aria-hidden
       />
 
-      {/* Focus chip — neutral glass with bright name + accent micro-pills */}
+      {/* Focus chip — neutral glass with bright name + accent micro-pills.
+          A combined trace has no one name: the chip names how many, and
+          opens the list of them. */}
+      {combined ? (
+        // Shrinks with the dock like the single chip does — the label gives
+        // way first, the stack of initials never.
+        <div className="relative min-w-[4.5rem] shrink">
+          <button
+            ref={seedsTriggerRef}
+            type="button"
+            data-trace-control
+            aria-haspopup="dialog"
+            aria-expanded={seedsOpen}
+            aria-label={`Tracing ${seeds!.length} entities`}
+            title="The entities this trace follows"
+            onClick={() => setSeedsOpen(v => !v)}
+            className={cn(
+              'flex items-center gap-2 pl-1.5 pr-2.5 h-9 rounded-xl min-w-0 max-w-full overflow-hidden',
+              'transition-all duration-200',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+              seedsOpen
+                ? 'bg-accent-lineage/15 border border-accent-lineage/50 shadow-lg shadow-accent-lineage/20'
+                : 'bg-white/[0.06] border border-white/[0.12] hover:bg-white/[0.12] hover:border-accent-lineage/40',
+            )}
+          >
+            {/* The first few seeds as a stack of initials — "several things"
+                read at a glance, before the number is. */}
+            <span className="flex -space-x-1.5 shrink-0" aria-hidden>
+              {/* Past three, the last bubble counts the rest ("+2"), so the
+                  stack still says how many when a narrow dock has squeezed
+                  the label out. */}
+              {seeds!.slice(0, seeds!.length > 3 ? 2 : 3).map(seed => (
+                <span
+                  key={seed.urn}
+                  className={cn(
+                    'inline-flex items-center justify-center w-6 h-6 rounded-full',
+                    'bg-gradient-to-br from-accent-lineage to-purple-500 text-white',
+                    'text-[10px] font-bold uppercase ring-2 ring-canvas-elevated',
+                  )}
+                >
+                  {seed.label.charAt(0)}
+                </span>
+              ))}
+              {seeds!.length > 3 && (
+                <span
+                  className={cn(
+                    'inline-flex items-center justify-center min-w-6 h-6 px-1 rounded-full',
+                    'bg-accent-lineage/25 text-accent-lineage border border-accent-lineage/40',
+                    'text-[10px] font-bold tabular-nums ring-2 ring-canvas-elevated',
+                  )}
+                >
+                  +{seeds!.length - 2}
+                </span>
+              )}
+            </span>
+            {/* "Tracing" gives way before the count does: in a clipped,
+                wrapping row-reverse line it is the item that drops to the
+                hidden second line, so a narrow dock reads "3 entities",
+                never "Tra…". The button's aria-label keeps the reading order. */}
+            <span
+              aria-hidden
+              className="flex flex-row-reverse flex-wrap justify-end h-5 overflow-hidden min-w-0 text-sm font-display font-semibold text-ink tracking-tight"
+            >
+              <span className="min-w-0 truncate">
+                <span className="tabular-nums">{seeds!.length}</span> entities
+              </span>
+              <span className="whitespace-nowrap pr-[0.3em]">Tracing</span>
+            </span>
+            <ChevronDown
+              className={cn('w-3.5 h-3.5 shrink-0 text-ink-muted transition-transform duration-200', seedsOpen && 'rotate-180')}
+              strokeWidth={2.4}
+              aria-hidden
+            />
+          </button>
+          {seedsOpen && (
+            <TraceSeedsPopover
+              seeds={seeds!}
+              onRemove={onRemoveSeed!}
+              onClose={() => { setSeedsOpen(false); seedsTriggerRef.current?.focus() }}
+              triggerRef={seedsTriggerRef}
+            />
+          )}
+        </div>
+      ) : (
       <div
         className={cn(
           'flex items-center gap-2 px-3 h-9 rounded-xl min-w-0 shrink',
@@ -225,27 +335,28 @@ export function TraceDockTitleBar({
           </span>
         )}
       </div>
+      )}
 
       {/* Counts — neutral glass pills with accent icon + bright value */}
       <div className="flex items-center gap-2 shrink-0">
         <span
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
-            'bg-white/[0.06] border border-blue-400/40',
+            'bg-white/[0.06] border border-lineage-in/40',
           )}
           aria-label={`${trace.upstreamCount} upstream nodes`}
         >
-          <ArrowUp className="w-4 h-4 text-blue-600 dark:text-blue-400" strokeWidth={2.4} aria-hidden />
+          <ArrowUp className="w-4 h-4 text-lineage-in" strokeWidth={2.4} aria-hidden />
           <span className="text-sm font-bold tabular-nums text-ink">{upDisplay.toLocaleString()}</span>
         </span>
         <span
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
-            'bg-white/[0.06] border border-emerald-400/40',
+            'bg-white/[0.06] border border-lineage-out/40',
           )}
           aria-label={`${trace.downstreamCount} downstream nodes`}
         >
-          <ArrowDown className="w-4 h-4 text-emerald-600 dark:text-emerald-400" strokeWidth={2.4} aria-hidden />
+          <ArrowDown className="w-4 h-4 text-lineage-out" strokeWidth={2.4} aria-hidden />
           <span className="text-sm font-bold tabular-nums text-ink">{downDisplay.toLocaleString()}</span>
         </span>
       </div>

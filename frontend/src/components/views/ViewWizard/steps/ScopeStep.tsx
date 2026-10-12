@@ -11,6 +11,7 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
 import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
@@ -33,6 +34,7 @@ import {
     X,
     Sparkles,
     WifiOff,
+    FileUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -73,6 +75,20 @@ export interface ScopeStepProps {
     selectedOntologyId: string | null
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
+
+    // ── Hosting (the Import journey's target step reuses this picker) ──
+    title?: string
+    subtitle?: string
+    /** Off where the journey is already decided (picking where an imported view goes). */
+    showModeToggle?: boolean
+    /** Rendered between the heading and the picker (e.g. suggestions for an imported file). */
+    aboveSlot?: ReactNode
+    /** Blank mode: rendered in place of the published-semantic-layer picker (a new data source
+     *  copied from a view package is matched to a layer of its own). */
+    blankOntologySlot?: ReactNode
+    /** Blank mode: rendered in place of both pickers, when the selected workspace has nothing left
+     *  to pick (a view package's data source is already made there). */
+    blankBody?: ReactNode
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -694,7 +710,7 @@ function NoDataSourcesState({
 
 // ─── Blank-model mode ──────────────────────────────────────────────
 
-function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: ScopeMode) => void }) {
+export function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: ScopeMode) => void }) {
     // A blank model IS a versioned model — it exists only as drafts and commits. With version
     // control off it cannot be created at all, and the server refuses it. Offering the choice
     // and then bouncing the user back to "Use existing data" (which is what the guard further
@@ -706,10 +722,15 @@ function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: Sc
     // hand-drawn lineage was to turn version control off entirely, which also took drafts, reviews
     // and history with it — so nobody ever did, and the rule went unenforced.
     const blankAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')
+    // Importing a view from another environment is the third way to start, and its own switch.
+    const importAvailable = useViewPortability().canImport
     const options: { id: ScopeMode; label: string; icon: ReactNode }[] = [
         { id: 'existing', label: 'Use existing data', icon: <Database className="w-4 h-4" /> },
         ...(blankAvailable
             ? [{ id: 'blank' as const, label: 'Start from blank', icon: <Sparkles className="w-4 h-4" /> }]
+            : []),
+        ...(importAvailable
+            ? [{ id: 'import' as const, label: 'Import a view', icon: <FileUp className="w-4 h-4" /> }]
             : []),
     ]
     if (options.length < 2) return null            // nothing to toggle between
@@ -967,6 +988,7 @@ function BlankScopePickers({
     selectedOntologyId,
     onSelectProvider,
     onSelectOntology,
+    ontologySlot,
 }: {
     providers: ProviderScopeOption[]
     ontologies: OntologyDefinitionResponse[]
@@ -975,6 +997,7 @@ function BlankScopePickers({
     selectedOntologyId: string | null
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
+    ontologySlot?: ReactNode
 }) {
     const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
 
@@ -1055,7 +1078,7 @@ function BlankScopePickers({
             </section>
 
             {/* Ontology picker */}
-            <section className="space-y-3">
+            {ontologySlot ?? <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                     <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
@@ -1083,7 +1106,7 @@ function BlankScopePickers({
                         ))}
                     </div>
                 )}
-            </section>
+            </section>}
         </div>
     )
 }
@@ -1115,8 +1138,15 @@ export function ScopeStep({
     selectedOntologyId,
     onSelectProvider,
     onSelectOntology,
+    title,
+    subtitle,
+    showModeToggle = true,
+    aboveSlot,
+    blankOntologySlot,
+    blankBody,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
+    const importModeAvailable = useViewPortability().canImport
     // Blank models are versioning-native (authored via drafts/publishes) — the
     // whole mode disappears when the admin turns version control off.
     const blankModeAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')
@@ -1372,21 +1402,23 @@ export function ScopeStep({
                 className="text-center"
             >
                 <h3 className="text-xl font-bold text-slate-900 dark:text-white">
-                    Where should this view live?
+                    {title ?? 'Where should this view live?'}
                 </h3>
                 <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
-                    {isBlank
+                    {subtitle ?? (isBlank
                         ? 'Pick a workspace, a FalkorDB connection, and a published semantic layer'
-                        : 'Select the workspace and data source this view will be built from'}
+                        : 'Select the workspace and data source this view will be built from')}
                 </p>
             </motion.div>
 
             {/* Mode toggle */}
-            {blankModeAvailable && (
+            {showModeToggle && (blankModeAvailable || importModeAvailable) && (
                 <div className="flex justify-center">
                     <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
                 </div>
             )}
+
+            {aboveSlot}
 
             {/* Two-panel layout */}
             <motion.div
@@ -1478,7 +1510,9 @@ export function ScopeStep({
 
                 {/* Right: Data Source Cards, or blank-model pickers */}
                 <div className="flex-1 flex flex-col min-w-0">
-                    {selectedWorkspace && isBlank ? (
+                    {selectedWorkspace && isBlank && blankBody ? (
+                        blankBody
+                    ) : selectedWorkspace && isBlank ? (
                         <BlankScopePickers
                             providers={providers}
                             ontologies={ontologies}
@@ -1487,6 +1521,7 @@ export function ScopeStep({
                             selectedOntologyId={selectedOntologyId}
                             onSelectProvider={onSelectProvider}
                             onSelectOntology={onSelectOntology}
+                            ontologySlot={blankOntologySlot}
                         />
                     ) : selectedWorkspace ? (
                         <>

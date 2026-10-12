@@ -22,7 +22,7 @@ import {
   type SourceMappingFilter,
 } from '@/services/ontologyDefinitionService'
 import { confirmVariant } from '@/components/admin/workspace/VocabAlignmentWarning'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { formatDate } from '../../lib/ontology-parsers'
 import { FacetChip } from './AdoptionMatchSection'
@@ -47,7 +47,7 @@ function observedList(entry: SourceMappingEntry): string[] {
 
 export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) {
   const queryClient = useQueryClient()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const [searchInput, setSearchInput] = useState('')
   const search = useDebouncedValue(searchInput.trim(), 250)
   const [filter, setFilter] = useState<SourceMappingFilter>('all')
@@ -82,11 +82,11 @@ export function SourceMappingSection({ ontologyId }: SourceMappingSectionProps) 
     try {
       await confirmVariant(row.workspaceId, row.dataSourceId, declared, keep, dimension)
       await queryClient.invalidateQueries({ queryKey: ['ontology-source-mappings', ontologyId] })
-      showToast('success', keep
+      notify('success', keep
         ? `Kept all spellings of ${declared} merged`
         : `Split ${declared} — only the exact spelling stays mapped`)
     } catch (err) {
-      showToast('error', `Failed to record decision: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to record decision: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setDeciding(null)
     }

@@ -12,7 +12,7 @@
  * forward the ``X-CSRF-Token`` header. The general apiClient does.
  */
 
-import { fetchWithTimeout } from './fetchWithTimeout'
+import { adoptEnvironmentId, adoptServerClock, fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
@@ -48,9 +48,15 @@ export interface AuthUser {
     updatedAt: string
     /** Chosen avatar illustration, or null for the initials fallback. */
     avatarId?: string | null
-    /** True while the account must rotate its password before it can do
-     *  anything else. The API refuses everything but the change screen. */
+    /** The account's flag: its password was chosen by somebody else and
+     *  must be replaced at the next password sign-in. */
     mustChangePassword?: boolean
+    /** Whether THIS session must change the password before it can do
+     *  anything else — the API refuses everything but the change screen.
+     *  False for a session signed in through an identity provider, even
+     *  while the account's own password is pending a change. Set from
+     *  the session response by ``adoptSession``. */
+    passwordChangeRequired?: boolean
     /** IdP-mapped extras (department, employee_id, …). Phase 3. */
     attributes?: Record<string, unknown>
 }
@@ -65,12 +71,32 @@ export interface SsoProviderSummary {
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
-    /** Non-secret, per-kind hints needed to start the flow. Only
-     *  ``custom_profile`` populates it today: ``source`` always, plus
-     *  ``sourceKey`` when the payload lives in browser storage and the
-     *  client is the one that has to read it. */
+    /** Non-secret, per-kind hints needed to start the flow.
+     *
+     *  ``custom_profile``: ``source`` always, plus ``sourceKey`` when the
+     *  payload lives in browser storage and the client has to read it.
+     *
+     *  ``backchannel``: the four ``authenticate*`` keys when a sign-in
+     *  trigger is configured, and the ``browserExchange*`` keys when
+     *  the row's exchange runs in the browser — that is the translate
+     *  call the browser itself must make, so its shape is public by
+     *  design. The server whitelists all of these by name — the
+     *  settings blob they come from also holds the server-side
+     *  endpoint URLs and their credentials, none of which appear here. */
     config?: {
         source?: string
+        authenticateUrl?: string
+        authenticateMethod?: string
+        authenticateHeaders?: Record<string, string>
+        authenticateTokenPath?: string
+        browserExchangeUrl?: string
+        browserExchangeMethod?: string
+        browserExchangeHeaders?: Record<string, string>
+        browserExchangeTokenPath?: string
+        browserExchangeBodyField?: string
+        /** Published only when the operator turned the login page's
+         *  silent sign-in attempt off. Absence means on. */
+        autoSignIn?: boolean
         sourceKey?: string
     }
 }
@@ -98,6 +124,392 @@ export function needsBrowserPayload(p: SsoProviderSummary): boolean {
         p.kind === 'custom_profile' &&
         BROWSER_STORAGE_SOURCES.includes(p.config?.source ?? '')
     )
+}
+
+/** True when the sign-in button must leave this origin for the IdP.
+ *
+ *  Only OIDC and SAML do. A back-channel provider does its whole
+ *  exchange server-side, and a cookie- or header-sourced corporate
+ *  portal is read on the request — both land the user straight back
+ *  here. The button's affordance follows this, because promising a
+ *  hand-off that never happens is worse than a plain chevron. */
+export function leavesForIdp(p: SsoProviderSummary): boolean {
+    return p.kind === 'oidc' || p.kind === 'saml2'
+}
+
+/** True when signing in has to start with a call to the provider's own
+ *  authenticate endpoint before we can do anything.
+ *
+ *  This is the Kerberos/SPNEGO case, and the call CANNOT be made by our
+ *  server. The provider answers with `401 WWW-Authenticate: Negotiate`;
+ *  answering that needs a Service Ticket from the workstation's OS
+ *  credential store, which only the browser can obtain — via SSPI on
+ *  Windows, GSS-API elsewhere. `credentials: 'include'` is what lets the
+ *  browser do it, and the retry is automatic and invisible to us. */
+export function needsAuthenticateFirst(p: SsoProviderSummary): boolean {
+    return Boolean(p.config?.authenticateUrl)
+}
+
+/** Run that call.
+ *
+ *  Returns the handle when the provider answers with one, or null when
+ *  it works by setting a cookie — both are success. Throws only when the
+ *  call itself failed, so the caller can say so instead of navigating
+ *  into a sign-in that was never going to work.
+ *
+ *  Nothing here inspects the handle. It goes straight back to the
+ *  provider's own gateway, which is the only party that can say what it
+ *  means — see the note on `POST /auth/{slug}/backchannel`. */
+export async function runAuthenticateTrigger(
+    p: SsoProviderSummary,
+): Promise<string | null> {
+    return runAuthenticateCall({
+        url: p.config?.authenticateUrl as string,
+        method: p.config?.authenticateMethod as string,
+        headers: p.config?.authenticateHeaders,
+        tokenPath: p.config?.authenticateTokenPath as string,
+    })
+}
+
+/** The same call, from a provider's raw settings rather than its public
+ *  config.
+ *
+ *  The admin surfaces hold the settings blob, not the sign-in page's
+ *  view of it, and they need this too: rehearsing a connection opens a
+ *  tab that would arrive with no session at all unless the trigger has
+ *  run first. Same call, two callers, one implementation — the
+ *  alternative was an admin rehearsal that failed for a correctly
+ *  configured gateway and gave no reason why. */
+/** How long the browser waits on the provider's own authenticate (and
+ *  translate) endpoints. Generous — a Negotiate round trip can involve a
+ *  KDC — but bounded, so a dead endpoint fails the attempt instead of
+ *  leaving the login page silently stuck. */
+export const AUTHENTICATE_TIMEOUT_MS = 10_000
+
+/** A failed call from this page to the provider's own authenticate or
+ *  translate endpoint. ``transient`` says whether it is worth one more
+ *  try: a timeout, a 429 or a 5xx says nothing about the corporate
+ *  session — a VPN still connecting looks exactly like this — while a 4xx
+ *  or this page's own security policy refusing the call is an answer. */
+export class GatewayCallError extends Error {
+    readonly transient: boolean
+
+    constructor(message: string, transient: boolean) {
+        super(message)
+        this.name = 'GatewayCallError'
+        this.transient = transient
+    }
+}
+
+function originOf(url: string): string | null {
+    try {
+        return new URL(url, window.location.href).origin
+    } catch {
+        return null
+    }
+}
+
+/** ``fetch`` for the two browser-side gateway calls, with a timeout of
+ *  our own and failures that say what happened.
+ *
+ *  One failure needs detecting rather than reporting: the page's
+ *  Content-Security-Policy refusing the call. The browser blocks it before
+ *  it is sent, so neither server logs anything, and ``fetch`` rejects with
+ *  the same bare ``TypeError`` as a network outage. The
+ *  ``securitypolicyviolation`` event is the only witness, and it is a
+ *  task of its own that can land just after the rejection it caused —
+ *  hence the short wait, paid only on a call that already failed. */
+async function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
+    const target = originOf(url)
+    let blocked = false
+    const onViolation = (e: SecurityPolicyViolationEvent) => {
+        if (
+            e.disposition === 'enforce'
+            && e.effectiveDirective === 'connect-src'
+            && originOf(e.blockedURI) === target
+        ) {
+            blocked = true
+        }
+    }
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
+    document.addEventListener('securitypolicyviolation', onViolation)
+    let res: Response
+    try {
+        res = await fetch(url, { ...init, signal: abort.signal })
+    } catch (err) {
+        if (abort.signal.aborted) {
+            throw new GatewayCallError(
+                'The sign-in service did not answer in time.', true,
+            )
+        }
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 50))
+        if (blocked) {
+            throw new GatewayCallError(
+                "Blocked by this site's security policy — add "
+                + `${target} to CSP_CONNECT_SRC on the frontend.`,
+                false,
+            )
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+        document.removeEventListener('securitypolicyviolation', onViolation)
+    }
+    if (!res.ok) {
+        throw new GatewayCallError(
+            `The sign-in service answered ${res.status}.`,
+            res.status === 429 || res.status >= 500,
+        )
+    }
+    return res
+}
+
+export async function runAuthenticateCall(cfg: {
+    url?: string
+    method?: string
+    headers?: Record<string, string>
+    tokenPath?: string
+}): Promise<string | null> {
+    const url = cfg.url as string
+    const method = cfg.method || 'POST'
+    const headers = (cfg.headers ?? {}) as Record<string, string>
+    const tokenPath = cfg.tokenPath || ''
+
+    // Raw fetch on purpose (cross-origin, no CSRF, no refresh-on-401) —
+    // see ``gatewayFetch`` for the timeout and failures it brings.
+    const res = await gatewayFetch(url, {
+        method,
+        headers,
+        // The whole point. Without it the browser neither sends the
+        // provider's existing cookies nor offers to answer a Negotiate
+        // challenge from the OS.
+        credentials: 'include',
+    })
+    if (!tokenPath) return null
+
+    let body: unknown
+    try {
+        body = await res.json()
+    } catch {
+        throw new Error('The sign-in service did not return JSON.')
+    }
+    const handle = resolvePath(body, tokenPath)
+    if (typeof handle !== 'string' || !handle) {
+        throw new Error(
+            `The sign-in service returned no value at "${tokenPath}".`,
+        )
+    }
+    return handle
+}
+
+/** Walk a dotted/indexed path, mirroring what the server does with the
+ *  gateway and claims paths so an operator configures one syntax. */
+function resolvePath(value: unknown, path: string): unknown {
+    let cur: unknown = value
+    for (const seg of path.split('.')) {
+        const m = /^([^[\]]*)((\[\d+\])*)$/.exec(seg)
+        if (!m) return undefined
+        if (m[1]) {
+            if (!cur || typeof cur !== 'object') return undefined
+            cur = (cur as Record<string, unknown>)[m[1]]
+        }
+        for (const idx of m[2].matchAll(/\[(\d+)\]/g)) {
+            if (!Array.isArray(cur)) return undefined
+            cur = cur[Number(idx[1])]
+        }
+    }
+    return cur
+}
+
+/** True when the row's exchange runs in the browser: the corporate
+ *  cookie is scoped to the SSO host, so only this browser's cookie jar
+ *  can present it to the translate endpoint. The server publishes the
+ *  call's shape for exactly this case. */
+export function needsBrowserExchange(p: SsoProviderSummary): boolean {
+    return Boolean(p.config?.browserExchangeUrl)
+}
+
+/** Run the browser-side translate call and return the JWT it answered
+ *  with.
+ *
+ *  Same posture as the authenticate trigger: raw fetch (cross-origin,
+ *  no CSRF, no refresh-on-401), `credentials: 'include'` so the
+ *  corporate cookie rides along, and a timeout of our own. The token is
+ *  read from `browserExchangeTokenPath`, or the whole body when the
+ *  path is blank — the bare `application/jwt` shape. Nothing here
+ *  decodes it; the server verifies it against the connection's JWKS.
+ *
+ *  ``token`` is the sign-in trigger's answer: when the row names a
+ *  `browserExchangeBodyField`, it is POSTed back to the translate
+ *  endpoint as `{"<field>": token}` — some gateways require the token
+ *  they issued in the request body, not just the cookie. */
+export async function runBrowserExchange(
+    p: SsoProviderSummary,
+    token?: string | null,
+): Promise<string> {
+    return runBrowserExchangeCall({
+        url: p.config?.browserExchangeUrl as string,
+        method: p.config?.browserExchangeMethod as string,
+        headers: p.config?.browserExchangeHeaders,
+        tokenPath: p.config?.browserExchangeTokenPath as string,
+        bodyField: p.config?.browserExchangeBodyField,
+        token,
+    })
+}
+
+/** The same call, from a provider's raw settings rather than its public
+ *  config — the admin rehearsal surfaces hold the settings blob, and
+ *  rehearsing a browser-mode row means making the very call the sign-in
+ *  page would make. Same call, two callers, one implementation. */
+export async function runBrowserExchangeCall(cfg: {
+    url?: string
+    method?: string
+    headers?: Record<string, string>
+    tokenPath?: string
+    bodyField?: string
+    token?: string | null
+}): Promise<string> {
+    const bodyField = cfg.bodyField || ''
+    const headers = new Headers(cfg.headers ?? {})
+    let body: string | undefined
+    if (bodyField) {
+        if (typeof cfg.token !== 'string' || !cfg.token) {
+            // Refused before the fetch: a request we know is incomplete
+            // would only earn the gateway's opaque refusal.
+            throw new Error(
+                "This connection forwards the sign-in call's token in "
+                + 'the translate request, but no token was produced — '
+                + 'the sign-in trigger may be switched off or '
+                + 'misconfigured.',
+            )
+        }
+        body = JSON.stringify({ [bodyField]: cfg.token })
+        // An operator's explicit Content-Type header wins.
+        if (!headers.has('content-type')) {
+            headers.set('content-type', 'application/json')
+        }
+    }
+    const res = await gatewayFetch(cfg.url as string, {
+        method: cfg.method || 'GET',
+        headers,
+        credentials: 'include',
+        ...(body !== undefined ? { body } : {}),
+    })
+
+    const path = cfg.tokenPath || ''
+    let token: unknown
+    if (path) {
+        let body: unknown
+        try {
+            body = await res.json()
+        } catch {
+            throw new Error('The sign-in service did not return JSON.')
+        }
+        token = resolvePath(body, path)
+        if (token !== null && typeof token === 'object' && !Array.isArray(token)) {
+            // A bare-JSON gateway can nest the claims object itself at
+            // the path. The assertion POST carries a string, so hand
+            // the object over as JSON — the trust-unsigned posture is
+            // what reads it; a verifying row refuses it server-side.
+            token = JSON.stringify(token)
+        }
+    } else {
+        token = (await res.text()).trim()
+        // A translate endpoint answering JSON with a blank path is a
+        // configuration mismatch; a quoted string still reads cleanly.
+        if (typeof token === 'string' && token.startsWith('"')) {
+            try { token = JSON.parse(token) } catch { /* keep the text */ }
+        }
+    }
+    if (typeof token !== 'string' || !token) {
+        throw new Error(
+            path
+                ? `The sign-in service returned no value at "${path}".`
+                : 'The sign-in service returned an empty reply.',
+        )
+    }
+    return token
+}
+
+/** A back-channel sign-in the server refused, with the structure it
+ *  refused it in. ``code`` is the backend's error vocabulary; for
+ *  ``unsafe_auto_link`` the colliding ``email`` and the ``reasons``
+ *  that refused the link ride along, so the sign-in page can explain
+ *  the collision instead of shrugging. The message stays generic — it
+ *  is what generic error surfaces render. */
+export class BackchannelLoginError extends Error {
+    code: string
+    email?: string
+    reasons?: string[]
+    /** The handle the refusal was recorded under, for the person to quote. */
+    ref?: string
+
+    constructor(
+        code: string,
+        opts: { email?: string; reasons?: string[]; ref?: string } = {},
+    ) {
+        super('Signing in with that session did not work.')
+        this.name = 'BackchannelLoginError'
+        this.code = code
+        this.email = opts.email
+        this.reasons = opts.reasons
+        this.ref = opts.ref
+    }
+}
+
+/** Complete a back-channel sign-in. The body picks the shape: a handle
+ *  from the trigger, an assertion from the browser exchange, or nothing
+ *  at all — the server-mode JSON entry that reads the ambient cookie
+ *  off this very request. Returns the session payload so callers can
+ *  hydrate state without a second round trip; a refusal throws
+ *  {@link BackchannelLoginError} carrying the server's structured
+ *  detail. */
+export async function loginWithBackchannel(
+    slug: string,
+    body: { handle?: string; assertion?: string },
+    opts: { skipAuthRefresh?: boolean } = {},
+): Promise<SessionResponse> {
+    const res = await fetchWithTimeout(
+        `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
+        {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            skipAuthRefresh: opts.skipAuthRefresh ?? false,
+        },
+    )
+    if (!res.ok) {
+        type DenialDetail = {
+            error?: string; email?: string; reasons?: string[]; ref?: string
+        }
+        let detail: DenialDetail | null = null
+        try {
+            const parsed = (await res.json()) as { detail?: DenialDetail }
+            detail = parsed?.detail ?? null
+        } catch {
+            // Not a JSON body — the code below still says which layer.
+        }
+        throw new BackchannelLoginError(
+            detail?.error ?? `http_${res.status}`,
+            {
+                email: detail?.email,
+                reasons: Array.isArray(detail?.reasons)
+                    ? detail.reasons.map(String)
+                    : undefined,
+                ref: typeof detail?.ref === 'string' ? detail.ref : undefined,
+            },
+        )
+    }
+    return adoptSession((await res.json()) as SessionResponse)
+}
+
+/** Complete a back-channel sign-in with a handle the trigger returned. */
+export async function loginWithBackchannelHandle(
+    slug: string, handle: string,
+): Promise<void> {
+    await loginWithBackchannel(slug, { handle })
 }
 
 /** Read a custom-profile payload out of the browser store the provider
@@ -147,6 +559,8 @@ export interface SessionResponse {
      *  the backend sets no ``AUTH_ENVIRONMENT_ID``, which is also when
      *  those names are unscoped. */
     environment_id?: string | null
+    /** Whether this session must change the password first. */
+    passwordChangeRequired?: boolean
 }
 
 /**
@@ -165,12 +579,37 @@ export interface PermissionClaims {
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 
+/**
+ * Adopt the deployment a session response names, then hand it back.
+ *
+ * Every call here that establishes a session goes through this — the
+ * password, gateway, portal and invited-signup sign-ins, and ``/auth/me``
+ * — including the gateway's silent re-sign-in, which calls
+ * {@link loginWithBackchannel} directly. The session cookies it just set
+ * are read by an environment-scoped name, and this is the only place the
+ * page learns the name: an in-page sign-in never makes the bootstrap call.
+ */
+function adoptSession(resp: SessionResponse): SessionResponse {
+    adoptEnvironmentId(resp?.environment_id)
+    // The session's own requirement rides on the user the store keeps. A
+    // server that predates the field is answered as before, by the
+    // account's flag.
+    if (resp?.user) {
+        resp.user.passwordChangeRequired =
+            resp.passwordChangeRequired ?? resp.user.mustChangePassword ?? false
+    }
+    return resp
+}
+
 async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: boolean }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
+    // ``/auth/me`` among them: the keepalive's first schedule, straight
+    // after bootstrap, reads the server's clock from here.
+    adoptServerClock(res)
     if (!res.ok) {
         const text = await res.text()
         // Use the shared extractor so the structured permission /
@@ -196,9 +635,14 @@ export const authService = {
         user?: AuthUser | null
         redirectTo?: string | null
     }> {
-        return request<{ message: string }>(`${AUTH_API}/signup`, {
-            method: 'POST',
-            body: JSON.stringify(req),
+        return request<{ message: string; environmentId?: string | null }>(
+            `${AUTH_API}/signup`,
+            { method: 'POST', body: JSON.stringify(req) },
+        ).then((resp) => {
+            // Camel-cased like the rest of this DTO; the same field as
+            // ``SessionResponse.environment_id``.
+            adoptEnvironmentId(resp?.environmentId)
+            return resp
         })
     },
 
@@ -206,12 +650,12 @@ export const authService = {
         return request<SessionResponse>(`${AUTH_API}/login`, {
             method: 'POST',
             body: JSON.stringify(req),
-        })
+        }).then(adoptSession)
     },
 
     /** Validate the access cookie and return the current user. */
     me(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/me`)
+        return request<SessionResponse>(`${AUTH_API}/me`).then(adoptSession)
     },
 
     /**
@@ -230,11 +674,6 @@ export const authService = {
     /** Revoke the refresh-token family and clear cookies. Idempotent. */
     logout(): Promise<{ ok: boolean }> {
         return request<{ ok: boolean }>(`${AUTH_API}/logout`, { method: 'POST' })
-    },
-
-    /** Rotate access + refresh cookies. Used by apiClient on 401. */
-    refresh(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/refresh`, { method: 'POST' })
     },
 
     forgotPassword(email: string): Promise<{ message: string }> {
@@ -326,7 +765,7 @@ export const authService = {
         return request<SessionResponse>(
             `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
             { method: 'POST', body: JSON.stringify({ payload }) },
-        )
+        ).then(adoptSession)
     },
 
     /** Apply an invite to the already-signed-in user. The SSO route

@@ -41,7 +41,8 @@ async def _run() -> None:
     # ── no-change draft → empty patch set (the invariant's source) ──────────────
     d0 = await svc.open_draft(graph_id=gid, owner="u")
     assert await svc.branch_overlay_delta(graph_id=gid, branch_id=d0) == {
-        "nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [], "nodesNew": []}
+        "nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
+        "nodesNew": []}
     assert await svc.aggregated_overlay_adjust(
         graph_id=gid, branch_id=d0, source_urns=["A", "B"], target_urns=["A", "B"],
         lineage_delta=[], containment_edge_types=CONT) == {}
@@ -126,8 +127,11 @@ async def _run() -> None:
                         ops=[{"op": "update", "entity_kind": "node", "entity_id": "A",
                               "payload": {"urn": "A", "entityType": "Table", "displayName": "A-main2"}}])
     own = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_own)
-    a_own = [n for n in own["nodesUpsert"] if n["urn"] == "A"]
-    assert a_own and a_own[0]["displayName"] == "A-draft", own      # draft's own value — not rewound
+    # A node the draft modified comes by name alone; a read loads its value when it serves it.
+    assert own["nodesModified"] == [{"entityId": "A", "urn": "A"}], own
+    assert "A" not in [n["urn"] for n in own["nodesUpsert"]], own   # not rewound either
+    a_own, = await svc.overlay_payloads(graph_id=gid, branch_id=d_own, entity_ids=["A"])
+    assert a_own["displayName"] == "A-draft", a_own                 # draft's own value — not rewound
 
     # ── FORK GRAPH: a PARENT-SEEDED entity (no local rows in the fork) modified by a post-fork advance
     #    of the fork's main must be RESTORED to its fork-point value — a non-fork-aware base lookup

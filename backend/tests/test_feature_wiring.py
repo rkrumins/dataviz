@@ -31,7 +31,16 @@ from pathlib import Path
 import pytest
 
 from backend.app.config.feature_wiring import FEATURE_WIRING
-from backend.app.db.seed_feature_registry import SEED_CATEGORIES, SEED_DEFINITIONS
+# From the module that DEFINES them, not the ORM module that re-exports them
+# for scripts' convenience. This test is pure tree-parsing — its CI job
+# (.github/workflows/alembic-guards.yml, "Every feature flag is really wired")
+# installs pytest and nothing else, deliberately, because there is no database
+# and no app to start here. Importing the re-export dragged in
+# backend.app.db.models and therefore SQLAlchemy, so the job died at collection
+# with ModuleNotFoundError and the guard has been reporting red instead of
+# guarding anything. ``seed_feature_registry`` re-exports these two unchanged
+# (its ``__all__``), so this is the same data by a route that costs nothing.
+from backend.app.config.features_seed import SEED_CATEGORIES, SEED_DEFINITIONS
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "backend" / "app"
@@ -137,6 +146,21 @@ def test_every_seeded_flag_declares_its_wiring():
     )
 
 
+def test_every_definition_states_every_column_the_table_requires():
+    """One definition missing a NOT NULL column does not fail alone. The startup reconcile writes
+    NULL into it, the WHOLE seed transaction rolls back, and no flag added after it can ever reach
+    the database — which is how `analyticsShowEmailAddresses`, seeded without a `sort_order`, kept
+    every newer flag off Admin → Features on a deployment that looked perfectly healthy (the
+    failure is a startup WARNING, and the page simply lists fewer switches)."""
+    required = ("key", "name", "description", "category_id", "type", "default_value", "sort_order")
+    missing = {
+        d.get("key", "?"): [column for column in required if d.get(column) is None]
+        for d in SEED_DEFINITIONS
+    }
+    missing = {key: columns for key, columns in missing.items() if columns}
+    assert not missing, f"seeded definitions missing required columns: {missing}"
+
+
 def test_every_flag_belongs_to_a_real_category():
     known = {c["id"] for c in SEED_CATEGORIES}
     unknown = {d["key"]: d["category_id"] for d in SEED_DEFINITIONS if d["category_id"] not in known}
@@ -189,13 +213,36 @@ def test_an_ACTIVE_capability_flag_must_default_ON(key: str):
 
 
 def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
-    """The exemption is not a loophole: it has exactly one member, and adding another should
-    require someone to come here and say so out loud."""
-    off_by_default = [
+    """The exemption is not a loophole: adding a member should require someone to come here and
+    say so out loud. Said out loud, then:
+
+      * ``signupEnabled`` — ON means any stranger who reaches the login page can create an
+        account. The original reason this exemption exists.
+      * ``analyticsPublicEnabled`` — ON publishes platform-wide growth, headcount and the
+        existence of every workspace to everyone who can sign in. Redacted, but still a
+        disclosure, and one an operator should make deliberately rather than inherit from a
+        default nobody chose.
+      * ``analyticsShowEmailAddresses`` — ON puts several colleagues' addresses on one
+        ranked page. Each of them was already reachable from the thing they built, so this
+        is not what protects them; what it changes is how many arrive at once, and that is
+        a call about the deployment rather than a default anyone should inherit.
+      * ``analyticsWorkspaceVisibility`` — ON makes Analytics report on workspaces the rest
+        of the product hides from that reader. Reasonable in a single-company deployment
+        and wrong anywhere else, so it cannot be a default: the deployment shape is the
+        one thing the code cannot know.
+    """
+    # A single-select ladder has no "off" rung to ship on, so the boolean
+    # question this test asks does not apply to it.
+    off_by_default = sorted(
         k for k, w in FEATURE_WIRING.items()
         if w.posture == "security" and not _is_on(_default_of(k))
-    ]
-    assert off_by_default == ["signupEnabled"], (
+    )
+    # Sorted, so the assertion tracks membership rather than the order somebody
+    # happened to declare the flags in.
+    assert off_by_default == [
+        "analyticsPublicEnabled", "analyticsShowEmailAddresses",
+        "analyticsWorkspaceVisibility", "signupEnabled",
+    ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "
         f"somebody made, not one that crept in."

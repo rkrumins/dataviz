@@ -36,6 +36,12 @@ from urllib.parse import urlencode
 
 import httpx
 from authlib.jose import jwt as jose_jwt, JsonWebKey
+
+from .outbound import (
+    BlockedOutboundRequest,
+    fetch_metadata,
+    resolve_outbound_verify,
+)
 from authlib.jose.errors import JoseError as _AuthlibJoseError
 from authlib.oidc.core import CodeIDToken
 
@@ -220,10 +226,9 @@ class OidcProvider:
             return self._meta
         url = f"{self._s.issuer}/.well-known/openid-configuration"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                meta = resp.json()
+            meta = (await fetch_metadata(url, timeout=_HTTP_TIMEOUT)).json()
+        except BlockedOutboundRequest as exc:
+            raise OidcError(f"discovery target refused: {exc}") from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise OidcError(f"discovery fetch failed: {exc}") from exc
         # Defence-in-depth: the discovery doc's issuer must match the
@@ -241,11 +246,16 @@ class OidcProvider:
         ):
             return self._jwks
         meta = await self._discovery()
+        # The JWKS URI comes out of the discovery document, not out of
+        # the provider row an admin filled in — so it is one indirection
+        # further from anything we validated, and it names the keys that
+        # decide whether an ID token is genuine. It gets the same check.
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(meta["jwks_uri"])
-                resp.raise_for_status()
-                jwks = resp.json()
+            jwks = (
+                await fetch_metadata(meta["jwks_uri"], timeout=_HTTP_TIMEOUT)
+            ).json()
+        except BlockedOutboundRequest as exc:
+            raise OidcError(f"jwks target refused: {exc}") from exc
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             raise OidcError(f"jwks fetch failed: {exc}") from exc
         self._jwks = JsonWebKey.import_key_set(jwks)
@@ -332,7 +342,14 @@ class OidcProvider:
             "code_verifier": code_verifier,
         }
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            # The one credentialed call built outside outbound.py (it
+            # needs a form body request_json cannot carry). It still has
+            # to honor the deployment's trust anchor — a corporate-CA'd
+            # token endpoint would otherwise fail here AFTER discovery
+            # succeeded through the guarded path.
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, verify=resolve_outbound_verify(),
+            ) as client:
                 resp = await client.post(meta["token_endpoint"], data=data)
                 resp.raise_for_status()
                 token = resp.json()

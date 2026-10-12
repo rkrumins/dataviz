@@ -33,7 +33,9 @@ from backend.auth_service.cookies import (
     raise_if_foreign_session,
     read_access_cookie,
 )
-from backend.auth_service.core.tokens import decode_token, is_foreign_token_error
+from backend.auth_service.core.tokens import (
+    decode_token, is_foreign_token_error, password_change_pending,
+)
 from backend.auth_service.interface import IdentityService, User
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
@@ -66,6 +68,10 @@ _FAIL_CLOSED_PERMISSIONS = frozenset({
     "system:groups:manage",
     "system:workspaces:create",
     "workspace:admin",
+    # Editing the back-channel host allowlist decides where this service
+    # may send requests on the internal network. "I cannot confirm this
+    # session is still alive" must not read as "carry on" for that.
+    "system:sso:hosts:manage",
 })
 
 
@@ -82,13 +88,57 @@ def _flag(name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in ("false", "0", "no", "off")
 
 
+#: Every kill-switch that gates a real authorization check, so startup
+#: can say what state they are in rather than leaving it to a grep.
+#:
+#: These are not feature flags. ``RBAC_ENFORCE_VIEWS`` guards nineteen
+#: checks in ``endpoints/views.py``, including the ``can_read_view``
+#: object-level test, and the routes it guards take
+#: ``get_optional_user`` — which never 401s. Turned off, the flag is not
+#: "less strict"; it is the only authorization on that surface, gone,
+#: at runtime, with no redeploy and nothing in the audit log.
+RBAC_ENFORCEMENT_FLAGS = (
+    "RBAC_ENFORCE_VIEWS",
+    "RBAC_ENFORCE_WORKSPACES",
+)
+
+
 def rbac_flag(name: str) -> bool:
     """Read a kill-switch at request time.
 
     Reads the env var on every call so tests can flip a flag mid-run
-    via ``monkeypatch.setenv`` without touching module state.
+    via ``monkeypatch.setenv`` without touching module state. That is
+    also what makes an accidental production value take effect
+    instantly, which is why ``assert_rbac_enforcement_intact`` runs at
+    startup.
     """
     return _flag(name)
+
+
+def assert_rbac_enforcement_intact() -> None:
+    """Refuse to serve production with authorization switched off.
+
+    The switches exist for fast rollback if new enforcement causes an
+    incident, and that is a real need — so they are not being removed.
+    But an emergency lever left down is indistinguishable from one
+    nobody pulled, and nothing anywhere reported the difference. Now the
+    process will not start.
+    """
+    disabled = [n for n in RBAC_ENFORCEMENT_FLAGS if not _flag(n)]
+    if not disabled:
+        return
+    if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+        raise RuntimeError(
+            f"RBAC enforcement is disabled ({', '.join(disabled)}) and ENV is "
+            "production. These are emergency rollback levers, not settings — "
+            "with them off, the surfaces they guard have no authorization at "
+            "all. Unset them, or set ENV appropriately for a non-production "
+            "deployment."
+        )
+    logger.warning(
+        "RBAC enforcement DISABLED for: %s. The surfaces these guard have no "
+        "authorization while this holds.", ", ".join(disabled),
+    )
 
 
 def _identity_service(request: Request) -> IdentityService:
@@ -100,23 +150,75 @@ def _identity_service(request: Request) -> IdentityService:
     return svc
 
 
-#: The only routes reachable while a forced password change is pending.
+#: The only requests reachable while a forced password change is pending.
 #: Kept to what the change screen itself needs — read who you are, set
 #: the new password, or give up and sign out. Anything else would let
 #: the account keep working around the rotation it is being held for.
-_PASSWORD_CHANGE_ALLOWED_PATHS = frozenset({
-    "/api/v1/users/me",
-    "/api/v1/users/me/password",
-    "/api/v1/auth/me",
-    "/api/v1/auth/logout",
-    "/api/v1/auth/refresh",
-    "/api/v1/me/identities",
+#: Matched on method as well as path: reading your profile is part of the
+#: change screen, editing it is not.
+_PASSWORD_CHANGE_ALLOWED = frozenset({
+    ("GET", "/api/v1/users/me"),
+    ("POST", "/api/v1/users/me/password"),
+    ("GET", "/api/v1/auth/me"),
+    ("POST", "/api/v1/auth/logout"),
+    ("POST", "/api/v1/auth/refresh"),
+    ("GET", "/api/v1/me/identities"),
 })
 
 
 def _password_change_exempt(request: Request) -> bool:
     """True if this request is part of getting the password changed."""
-    return request.url.path.rstrip("/") in _PASSWORD_CHANGE_ALLOWED_PATHS
+    return (
+        request.method.upper(), request.url.path.rstrip("/"),
+    ) in _PASSWORD_CHANGE_ALLOWED
+
+
+def _hold_for_password_change(
+    request: Request, payload: dict, user: User | None = None,
+) -> None:
+    """Refuse the request while the account must change its password.
+
+    Every resolver that authenticates a request calls this — the user
+    resolvers and the claims resolver alike — because a route may sign in
+    through any of them. Enforced in the API rather than in the SPA
+    because a client-side redirect is a suggestion, not a control.
+
+    The token claim is minted from the account at sign-in and at every
+    refresh; the user record, where a resolver has one, is read on every
+    request, so a requirement set after sign-in holds from the next
+    request rather than the next refresh. Only a session signed in with
+    the password is held: one signed in through an identity provider
+    carries on (``password_change_pending``).
+    """
+    pending = password_change_pending(
+        payload, bool(user is not None and getattr(user, "must_change_password", False)),
+    )
+    if pending and not _password_change_exempt(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "password_change_required",
+                "message": (
+                    "This account is using a default or "
+                    "administrator-set password. Choose a new one "
+                    "before continuing."
+                ),
+            },
+        )
+
+
+def _payload(token: str | None) -> dict:
+    """The access token's claims, or ``{}`` if there is no usable token.
+
+    Only called after ``validate_session`` has accepted the same token, so
+    the failure branch is defensive.
+    """
+    if not token:
+        return {}
+    try:
+        return decode_token(token)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return {}
 
 
 async def get_current_user(request: Request) -> User:
@@ -134,7 +236,8 @@ async def get_current_user(request: Request) -> User:
     closed only applies on routes that explicitly opt-in via
     ``requires(...)`` against a sensitive permission.
     """
-    user = await _identity_service(request).validate_session(read_access_cookie(request))
+    token = read_access_cookie(request)
+    user = await _identity_service(request).validate_session(token)
     if user is None:
         raise_if_foreign_session(request)
         raise HTTPException(
@@ -147,46 +250,33 @@ async def get_current_user(request: Request) -> User:
     # also takes get_permission_claims). A missing sid means the
     # token predates the revocation feature — treat as not-revoked
     # and let the JWT TTL handle it.
-    token = read_access_cookie(request)
-    sid = ""
-    if token:
-        try:
-            payload = decode_token(token)
-            sid = payload.get("sid", "") or ""
-            # Phase 19: an account holding a password it must rotate can
-            # reach the handful of routes needed to rotate it, and
-            # nothing else. Enforced here rather than in the SPA because
-            # a client-side redirect is a suggestion, not a control —
-            # the API has to be the thing that refuses.
-            if payload.get("mcp") and not _password_change_exempt(request):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error": "password_change_required",
-                        "message": (
-                            "This account is using a default or "
-                            "administrator-set password. Choose a new one "
-                            "before continuing."
-                        ),
-                    },
-                )
-        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
-            # validate_session already rejected this above — defensive.
-            sid = ""
-
-    if sid:
-        try:
-            if await get_revocation_service().is_revoked(sid):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session revoked",
-                )
-        except RevocationBackendError as exc:
-            logger.warning(
-                "Revocation backend unavailable in get_current_user "
-                "(user=%s): %s — honouring JWT", user.id, exc,
-            )
+    payload = _payload(token)
+    sid = payload.get("sid", "") or ""
+    if sid and await _tombstoned(sid, user.id, where="get_current_user"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked",
+        )
+    # Phase 19: an account holding a password it must rotate can reach
+    # the handful of routes needed to rotate it, and nothing else. After
+    # the tombstone check: a revoked session is signed out, not held.
+    _hold_for_password_change(request, payload, user)
     return user
+
+
+async def _tombstoned(sid: str, user_id: str, *, where: str) -> bool:
+    """Whether this session was revoked — fail-open, like every check on
+    the ordinary request path: an unreachable backend honours the JWT,
+    whose short lifetime is the floor. ``assert_session_alive_or_503`` is
+    the fail-closed variant for sensitive routes."""
+    try:
+        return await get_revocation_service().is_revoked(sid)
+    except RevocationBackendError as exc:
+        logger.warning(
+            "Revocation backend unavailable in %s (user=%s): %s — "
+            "honouring JWT", where, user_id, exc,
+        )
+        return False
 
 
 async def get_optional_user(request: Request) -> User | None:
@@ -194,8 +284,69 @@ async def get_optional_user(request: Request) -> User | None:
 
     Useful for endpoints that work for both authenticated and anonymous
     users (e.g. created_by attribution that defaults to a sentinel).
+
+    A revoked session is anonymous here, as it is refused everywhere
+    else: signing out, a password reset or a role change has to take
+    effect on these routes on the next request too, not when the access
+    token happens to expire.
+
+    Optional means "may be anonymous", not "may skip the password-change
+    hold": a session that must change its password is refused here as it
+    is everywhere else.
     """
-    return await _identity_service(request).validate_session(read_access_cookie(request))
+    token = read_access_cookie(request)
+    user = await _identity_service(request).validate_session(token)
+    if user is None or not token:
+        return user
+    try:
+        payload = decode_token(token)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return None
+    sid = payload.get("sid", "") or ""
+    if sid and await _tombstoned(sid, user.id, where="get_optional_user"):
+        return None
+    _hold_for_password_change(request, payload, user)
+    return user
+
+
+async def assert_session_alive_or_503(
+    claims: "PermissionClaims", *, permission: str, user_id: str,
+) -> None:
+    """Confirm the session is not revoked, refusing if we cannot tell.
+
+    The second, opt-in revocation probe. ``get_current_user`` already
+    checks the tombstone on every authenticated request, but it does so
+    FAIL-OPEN: if the backend is unreachable it logs and honours the JWT,
+    because the token TTL is still a floor and a Redis blip must not sign
+    the whole platform out.
+
+    For a sensitive route that trade is the wrong way round. "I cannot
+    confirm this session is still alive" should not read as "carry on"
+    when the thing being authorised is platform administration, so here
+    an unreachable backend is a 503 rather than a pass.
+
+    Extracted so ``require_admin`` can run it too. It gates
+    ``system:admin`` — which is in ``_FAIL_CLOSED_PERMISSIONS`` — but it
+    never ran this probe, so its call sites (admin users, announcements,
+    ontologies, groups, stats-admin) were fail-OPEN despite being the
+    most sensitive surface in the product.
+    """
+    try:
+        if claims.sid and await get_revocation_service().is_revoked(claims.sid):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session revoked",
+            )
+    except RevocationBackendError as exc:
+        logger.warning(
+            "Revocation backend unavailable on fail-closed path "
+            "(perm=%s user=%s): %s",
+            permission, user_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization temporarily unavailable",
+        )
 
 
 async def require_admin(
@@ -221,6 +372,11 @@ async def require_admin(
     state: if you don't have the claim, you don't have admin.
     """
     claims = await get_permission_claims(request)
+    # Before the permission test, not after: a revoked session must not
+    # reach an admin route even to be told it lacks the claim.
+    await assert_session_alive_or_503(
+        claims, permission="system:admin", user_id=user.id,
+    )
     if has_permission(claims, "system:admin"):
         return user
     raise HTTPException(
@@ -287,12 +443,16 @@ async def get_permission_claims(request: Request) -> PermissionClaims:
             detail="Not authenticated",
         )
     claims = PermissionClaims.from_jwt_dict(payload)
-    if PermissionClaims.token_carries_ws(payload):
-        return claims
-    grants = await _workspace_grants_from_store(
-        claims.sid, str(payload.get("sub") or ""),
-    )
-    return claims.with_ws(grants)
+    if not PermissionClaims.token_carries_ws(payload):
+        grants = await _workspace_grants_from_store(
+            claims.sid, str(payload.get("sub") or ""),
+        )
+        claims = claims.with_ws(grants)
+    # A route can authorise on claims alone, so the password-change hold
+    # applies here too. After the store read, which refuses a revoked
+    # session: signed out beats held.
+    _hold_for_password_change(request, payload)
+    return claims
 
 
 async def _workspace_grants_from_store(
@@ -318,17 +478,26 @@ async def _workspace_grants_from_store(
         return {}
     try:
         state = await get_revocation_service().read_session(sid)
-        if state.claims is not None:
-            return PermissionClaims.from_jwt_dict(state.claims).ws_perms
-        logger.warning(
-            "No stored workspace grants for sid=%s; resolving from the "
-            "database. Expected only if the session entry expired.", sid,
-        )
     except Exception as exc:  # noqa: BLE001 — any store failure escalates
         logger.warning(
             "Session store unavailable for sid=%s (%s); resolving "
             "workspace grants from the database.", sid, exc,
         )
+        return await _workspace_grants_from_db(user_id)
+    # The same read carries the tombstone. Honouring it here is what makes
+    # a revocation reach the routes that authorise on claims alone, rather
+    # than only the ones that also resolve the user.
+    if state.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked",
+        )
+    if state.claims is not None:
+        return PermissionClaims.from_jwt_dict(state.claims).ws_perms
+    logger.warning(
+        "No stored workspace grants for sid=%s; resolving from the "
+        "database. Expected only if the session entry expired.", sid,
+    )
     return await _workspace_grants_from_db(user_id)
 
 
@@ -566,22 +735,9 @@ def requires(
         # be reached if we can't confirm the session is alive), so
         # we run a second, opt-in revocation probe here.
         if fail_closed:
-            try:
-                if claims.sid and await get_revocation_service().is_revoked(claims.sid):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Session revoked",
-                    )
-            except RevocationBackendError as exc:
-                logger.warning(
-                    "Revocation backend unavailable on fail-closed path "
-                    "(perm=%s user=%s): %s",
-                    permission, user.id, exc,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Authorization temporarily unavailable",
-                )
+            await assert_session_alive_or_503(
+                claims, permission=permission, user_id=user.id,
+            )
 
         # Resolve workspace id from the path, if scoped.
         workspace_id: Optional[str] = None
@@ -662,3 +818,5 @@ def requires(
     _dependency.workspace_any = workspace_any  # type: ignore[attr-defined]
 
     return _dependency
+
+

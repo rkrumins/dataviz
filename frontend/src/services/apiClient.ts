@@ -12,11 +12,14 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import { readJsonLossless } from '@/lib/losslessJson'
 
-export async function authFetch<T>(
+/** The request + failure handling every helper here shares: a failure
+ *  throws a readable Error, success hands back the Response. */
+async function checkedFetch(
     url: string,
     init?: RequestInit & { silent403?: boolean },
-): Promise<T> {
+): Promise<Response> {
     let res: Response
     try {
         res = await fetchWithTimeout(url, init)
@@ -37,10 +40,34 @@ export async function authFetch<T>(
         // so authService / ssoAdminService / future services can't
         // silently drift.
         const detail = extractErrorMessageFromText(text, res.statusText)
-        if (res.status === 401) throw new Error('Session expired')
-        throw new Error(detail)
+        // The status rides on the error (``httpStatusOf``), so a caller can
+        // tell a refusal from a server that failed: a job poll gives up at
+        // once on a 4xx, and asks again through a 502.
+        if (res.status === 401) throw Object.assign(new Error('Session expired'), { status: 401 })
+        throw Object.assign(new Error(detail), { status: res.status })
     }
+    return res
+}
 
+export async function authFetch<T>(
+    url: string,
+    init?: RequestInit & { silent403?: boolean },
+): Promise<T> {
+    const res = await checkedFetch(url, init)
     if (res.status === 204) return undefined as T
-    return res.json()
+    return readJsonLossless<T>(res)
+}
+
+/**
+ * One page of a list endpoint that reports its full size in
+ * ``X-Total-Count`` (``GET /admin/users``, ``GET /admin/workspaces?limit=``).
+ * A server that doesn't send the header yields the page length, so a pager
+ * degrades to "what we can see" instead of breaking — the same fallback as
+ * ``workspaceService.listPage``.
+ */
+export async function authFetchPage<T>(url: string): Promise<{ items: T[]; total: number }> {
+    const res = await checkedFetch(url)
+    const items: T[] = await readJsonLossless<T[]>(res)
+    const header = res.headers.get('X-Total-Count')
+    return { items, total: header ? Number(header) : items.length }
 }

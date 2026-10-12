@@ -15,6 +15,7 @@ import { AlertCircle, Code2 } from 'lucide-react'
 import type { IdpKind } from '@/services/ssoAdminService'
 import { OidcSettingsForm } from './OidcSettingsForm'
 import { SamlSettingsForm } from './SamlSettingsForm'
+import { BackchannelSettingsForm } from './BackchannelSettingsForm'
 import { CustomProfileSettingsForm } from './CustomProfileSettingsForm'
 import { TextAreaField } from './ui'
 
@@ -42,6 +43,9 @@ export function SettingsEditor({
             )}
             {kind === 'custom_profile' && (
                 <CustomProfileSettingsForm value={value} onChange={onChange} />
+            )}
+            {kind === 'backchannel' && (
+                <BackchannelSettingsForm value={value} onChange={onChange} />
             )}
 
             <AdvancedJson

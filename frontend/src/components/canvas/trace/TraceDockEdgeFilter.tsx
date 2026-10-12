@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Filter, Check, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 
 export interface TraceDockEdgeFilterProps {
   availableEdgeTypes: string[]
@@ -204,7 +205,7 @@ function PopoverFilter({
                       aria-hidden
                     />
                     <span className="flex-1 truncate uppercase tracking-wide font-semibold text-[11px]">
-                      {edgeType}
+                      {edgeTypeCopy(edgeType)?.label ?? edgeType}
                     </span>
                   </button>
                 )
@@ -249,7 +250,7 @@ function EdgeChip({ edgeType, color, visible, onToggle }: EdgeChipProps) {
         }}
         aria-hidden
       />
-      <span>{edgeType}</span>
+      <span>{edgeTypeCopy(edgeType)?.label ?? edgeType}</span>
     </button>
   )
 }

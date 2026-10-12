@@ -52,7 +52,12 @@ from typing import Any, Optional
 import jwt as pyjwt
 
 from .base import ProviderCredentials, ProviderIdentity
-from .claim_mapper import apply_claim_mapping, ClaimMappingError
+from .claim_mapper import (
+    apply_claim_mapping,
+    ClaimMappingError,
+    hoist_nested,
+)
+from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 from .registry import ProviderConfigSnapshot
 
 logger = logging.getLogger(__name__)
@@ -68,9 +73,12 @@ VALID_ENCODINGS = frozenset({"none", "base64url", "url"})
 VALID_FORMATS = frozenset({"jwt", "json"})
 VALID_ALGS = frozenset({"HS256", "RS256"})
 
-# Nested containers hoisted to the top level so a payload shaped like
-# ``{"user": {...}}`` maps without the operator writing dotted paths.
-_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes")
+# Hoisted FIRST, in this order, so precedence between the well-known
+# container names stays what it always was. Every other object-valued
+# key hoists after these — the container can be called anything.
+# Mirrors ``backchannel._NESTED_CONTAINERS``.
+_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes",
+                      "entitlements")
 
 
 class CustomProfileError(Exception):
@@ -197,6 +205,37 @@ def validate_settings(s: CustomProfileSettings) -> None:
         raise CustomProfileConfigError("max_age_seconds must be >= 0")
 
 
+class _MemoryJtiCache:
+    """Process-local single-use cache. Tests and single-process dev ONLY.
+
+    Mirrors ``saml2._MemoryReplayCache``, and fails the same two ways,
+    neither obvious:
+
+    * viz-service runs 4 gunicorn workers per container across N
+      replicas, each with its own dict, so a replayed payload only has
+      to land on a worker that has not seen it.
+    * ``ProviderRegistry`` rebuilds the provider every 60 s, and the
+      rebuild constructs a new empty dict — so even one worker forgets
+      every ``jti`` once a minute, well inside the payload's own TTL.
+
+    Which is exactly why ``app/main.py`` refuses to serve a signed
+    custom_profile provider in production without a shared store: this
+    fallback silently *looks* like replay protection.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, int] = {}
+
+    async def record(self, token_id: str, expires_at_epoch: int) -> bool:
+        now = int(time.time())
+        # Opportunistic prune; the dict is bounded by the TTL either way.
+        self._seen = {k: v for k, v in self._seen.items() if v > now}
+        if token_id in self._seen:
+            return False
+        self._seen[token_id] = int(expires_at_epoch)
+        return True
+
+
 class CustomProfileProvider:
     """Custom profile IdP. Stateless — the route pulls the raw payload
     string from whichever source the row configures and hands it over.
@@ -204,8 +243,19 @@ class CustomProfileProvider:
 
     name = "custom_profile"
 
-    def __init__(self, settings: CustomProfileSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: CustomProfileSettings | None = None,
+        *,
+        replay_cache=None,
+    ) -> None:
         self._s = settings or CustomProfileSettings()
+        # One-time-use enforcement for the payload's ``jti``. Injected
+        # rather than constructed here so ``auth_service`` keeps importing
+        # nothing from ``backend.app.*`` — the same wiring SAML uses,
+        # bound in ``app/main.py``, which is also where production
+        # refuses a signed provider that has no shared store.
+        self._replay = replay_cache or _MemoryJtiCache()
 
     @property
     def settings(self) -> CustomProfileSettings:
@@ -258,7 +308,28 @@ class CustomProfileProvider:
             if self._s.signing_alg == "HS256"
             else self._s.public_key
         )
-        options: dict[str, Any] = {"require": ["exp"]}
+        # ``iat`` and ``jti`` are required, not optional.
+        #
+        # ``exp`` alone was the only mandatory claim, and the age bound
+        # below was written as ``if issued is not None`` — so a payload
+        # with a far-future ``exp`` and NO ``iat`` skipped the freshness
+        # check entirely, which is the opposite of what SSO.md:622
+        # promises ("a portal minting a year-long token still can't hand
+        # out a year-long session"). ``jti`` is what makes the payload
+        # single-use; without it a copied token is replayable for its
+        # whole lifetime, which was the entire replay hole.
+        options: dict[str, Any] = {
+            "require": ["exp", "iat", "jti"],
+            # ``iat`` is validated below instead of here. pyjwt treats a
+            # future ``iat`` as not-yet-valid with ZERO tolerance, so a
+            # portal one second ahead of us failed every login — but its
+            # ``leeway`` knob applies to ``exp`` as well, and a payload
+            # that is single-use and short-lived should not also get a
+            # grace period past its own expiry. Splitting them keeps
+            # ``exp`` strict and tolerates skew only in the direction
+            # where skew is the likely explanation.
+            "verify_iat": False,
+        }
         decode_kwargs: dict[str, Any] = {}
         if self._s.audience:
             decode_kwargs["audience"] = self._s.audience
@@ -281,17 +352,27 @@ class CustomProfileProvider:
         if not isinstance(payload, dict):
             raise CustomProfileError("payload_malformed")
 
-        # ``exp`` alone lets a portal mint a year-long token; bound the
-        # age independently so a leaked payload has a short useful life.
-        if self._s.max_age_seconds:
-            issued = payload.get("iat")
-            if issued is not None:
-                try:
-                    age = time.time() - int(issued)
-                except (TypeError, ValueError):
-                    raise CustomProfileError("payload_bad_iat") from None
-                if age > self._s.max_age_seconds:
-                    raise CustomProfileError("payload_stale")
+        # Bound the age independently of ``exp`` so a leaked payload has
+        # a short useful life. ``iat`` is now in the required set above,
+        # so a missing one is refused by the decode rather than silently
+        # skipping this block.
+        try:
+            issued = int(payload["iat"])
+        except (KeyError, TypeError, ValueError):
+            raise CustomProfileError("payload_bad_iat") from None
+
+        now = time.time()
+        # A future ``iat`` matters beyond freshness: it feeds the 24h SSO
+        # re-auth ceiling by default — claim_mapper's auth_time
+        # candidates end in "iat" — so a future-dated payload yields a
+        # negative session age and never trips that ceiling. Refused
+        # rather than clamped, with enough tolerance that ordinary clock
+        # drift between the portal and us is not a login outage.
+        if (issued - now) > CLOCK_SKEW_LEEWAY_SECONDS:
+            raise CustomProfileError("payload_future_iat")
+
+        if self._s.max_age_seconds and (now - issued) > self._s.max_age_seconds:
+            raise CustomProfileError("payload_stale")
         return payload
 
     def _parse_json(self, blob: str) -> dict:
@@ -308,10 +389,43 @@ class CustomProfileProvider:
             raise CustomProfileError("payload_malformed")
         return payload
 
-    def fetch_identity(self, raw: str) -> ProviderIdentity:
+    async def _assert_not_replayed(self, payload: dict) -> None:
+        """Burn the payload's ``jti`` so it works exactly once.
+
+        A signature proves the portal minted this payload. It says
+        nothing about who is presenting it, so before this a copied
+        payload — lifted from a shared machine, a proxy log, a browser
+        extension reading localStorage — was a working credential for
+        its whole lifetime, and produced a legitimately minted session
+        of the attacker's own. There was nothing to revoke and no signal
+        that it had happened.
+
+        Not best-effort. A store failure raises, exactly as it does for
+        SAML assertions and for the same reason: everything else in the
+        auth path degrades because the token TTL is still a floor,
+        whereas "we could not check for a replay" has no floor under it
+        — it is the whole control.
+        """
+        if self._s.payload_format != "jwt":
+            return  # unsigned rows have no jti to burn; see validate_settings
+        jti = payload.get("jti")
+        if not jti or not isinstance(jti, str):
+            raise CustomProfileError("payload_missing_jti")
+        try:
+            exp = int(payload["exp"])
+        except (KeyError, TypeError, ValueError):
+            raise CustomProfileError("payload_bad_exp") from None
+
+        if not await self._replay.record(jti, exp):
+            raise CustomProfileError("payload_replayed")
+
+    async def fetch_identity(self, raw: str) -> ProviderIdentity:
         """Validate the profile payload and return a verified identity.
 
         Raises :class:`CustomProfileError` on any failure.
+
+        Async because the single-use check talks to the shared replay
+        store. The redirect-based providers are already awaited here.
         """
         if not raw or not raw.strip():
             raise CustomProfileError("payload_missing")
@@ -322,16 +436,17 @@ class CustomProfileProvider:
             if self._s.payload_format == "jwt"
             else self._parse_json(decoded)
         )
+        # After verification, never before: burning a jti off an
+        # unverified payload would let anyone invalidate a real one.
+        await self._assert_not_replayed(payload)
 
-        # Hoist one level of nesting so the operator maps ``firstName``
-        # rather than ``user.firstName``. Dotted paths still work for
-        # anything deeper — setdefault never shadows a top-level key.
-        claims = {**payload}
-        for container in _NESTED_CONTAINERS:
-            nested = payload.get(container)
-            if isinstance(nested, dict):
-                for k, v in nested.items():
-                    claims.setdefault(k, v)
+        # Hoist one level of nesting — whatever the container is called
+        # — so the operator maps ``firstName`` rather than
+        # ``user.firstName``. Dotted paths still work for anything
+        # deeper. Shared with the backchannel kind, including its
+        # emptyish rule: a vestigial top-level ``groups: []`` no longer
+        # shadows the populated list one level down.
+        claims = hoist_nested(payload, priority=_NESTED_CONTAINERS)
 
         try:
             return apply_claim_mapping(
@@ -346,9 +461,16 @@ class CustomProfileProvider:
 
 def build_custom_profile_provider(
     snap: ProviderConfigSnapshot,
+    *,
+    replay_cache=None,
 ) -> CustomProfileProvider:
     """Factory for the registry. Validates before returning so a
-    misconfigured row raises here rather than at login time."""
+    misconfigured row raises here rather than at login time.
+
+    ``replay_cache`` must be supplied by anything serving real traffic;
+    ``app/main.py`` binds it, and refuses to build a signed-payload
+    provider without one in production. The default is for tests.
+    """
     settings = settings_from_snapshot(snap)
     validate_settings(settings)
-    return CustomProfileProvider(settings)
+    return CustomProfileProvider(settings, replay_cache=replay_cache)

@@ -44,6 +44,12 @@ class ApproveRejectRequest(BaseModel):
     rejection_reason: Optional[str] = Field(None, alias="rejectionReason", max_length=500)
 
 
+class SetSystemAccountRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    is_system_account: bool = Field(alias="isSystemAccount")
+
+
 class ChangeRoleRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -91,6 +97,20 @@ class AdminResetPasswordRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     new_password: str = Field(alias="newPassword", min_length=8)
+    #: Required to give a password to an account that has none.
+    #:
+    #: An SSO-only account carries the disabled-password sentinel, and
+    #: that sentinel is what keeps the user on the IdP path — which is
+    #: where the org's conditional access and MFA live. Setting a
+    #: password removes it permanently and silently, converting a
+    #: federated identity into one that can sign in around the IdP.
+    #:
+    #: There are legitimate reasons to do it (an org retiring SSO), so
+    #: this is a deliberate switch rather than a refusal — but it has to
+    #: be asked for, and it is audited when used.
+    allow_sso_only_override: bool = Field(
+        default=False, alias="allowSsoOnlyOverride",
+    )
 
 
 class ChangeMyPasswordRequest(BaseModel):
@@ -177,6 +197,17 @@ class AccountActivityItem(BaseModel):
     by_admin: bool = Field(False, alias="byAdmin")
 
 
+class AdminUserIdentityRef(BaseModel):
+    """One linked SSO identity, as the admin user list carries it."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider_id: str = Field(alias="providerId")
+    slug: str
+    display_name: str = Field(alias="displayName")
+    kind: str
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+
+
 class AdminUserResponse(BaseModel):
     """Extended user info for admin views."""
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
@@ -194,6 +225,36 @@ class AdminUserResponse(BaseModel):
     # Surfaced so an admin can see at a glance which accounts are still
     # holding a shipped default credential.
     must_change_password: bool = Field(False, alias="mustChangePassword")
+    # How this account signs in: a usable password, linked SSO
+    # identities (with which IdP each is), and where the account came
+    # from in the first place — so the user table can say who is local,
+    # who is SSO, and from which provider.
+    has_password: bool = Field(False, alias="hasPassword")
+    signup_source: Optional[str] = Field(default=None, alias="signupSource")
+    identities: list[AdminUserIdentityRef] = Field(default_factory=list)
+    # Break-glass: keeps password sign-in under SSO enforcement, and
+    # forced sign-out sweeps skip it.
+    is_system_account: bool = Field(False, alias="isSystemAccount")
+    # When this person last used the platform — see ``UserORM``. NULL until
+    # the thing first happens; "last seen" and "last activity" are recorded
+    # to five minutes.
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+    last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
+    last_active_at: Optional[str] = Field(default=None, alias="lastActiveAt")
+
+
+class AdminUserStatsResponse(BaseModel):
+    """Counts across every account, for the admin user list's KPI cards and
+    status tabs — the list itself is paged, so it can only count its page."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    total: int
+    pending: int
+    active: int
+    suspended: int
+    # Platform admins: super_admin + org_admin.
+    admins: int
+    reset_requested: int = Field(alias="resetRequested")
 
 
 class LoginResponse(BaseModel):
@@ -219,6 +280,10 @@ class SignUpResponse(BaseModel):
     #: Where to land them — the invited workspace when the invite was
     #: workspace-scoped, otherwise the app root.
     redirect_to: Optional[str] = Field(default=None, alias="redirectTo")
+    #: Which deployment answered, set alongside the session cookies. The
+    #: page reads two of them by an environment-scoped name, and this is
+    #: how it learns the name — see ``SessionResponse.environment_id``.
+    environment_id: Optional[str] = Field(default=None, alias="environmentId")
 
 
 class ResetTokenResponse(BaseModel):

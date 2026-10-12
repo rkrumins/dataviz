@@ -318,8 +318,8 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
         # Index the urn on EVERY label we're about to write, BEFORE writing. Without a per-label
         # urn index, each node MERGE and each edge endpoint MATCH is a FULL label scan (O(N) per
         # row → O(N²) total) — the slowness and memory pressure behind the failure. `ensure_indices`
-        # otherwise only indexes a hardcoded default label set (domain/dataset/…), so the labels
-        # this load writes would never get indexed. Labels are sourced from the DECLARED model —
+        # indexes only the labels it is given, so the labels this load writes must be passed in.
+        # Labels are sourced from the DECLARED model —
         # default hierarchy (layer/object/group/attribute) or the --schema's entityTypes
         # (e.g. Roots/Node) via ``declared_labels`` — unioned with observed node types as a safety
         # net, declared-first so a sparse type is still indexed before its first write.

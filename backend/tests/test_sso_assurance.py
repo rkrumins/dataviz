@@ -59,6 +59,60 @@ SECRET = "s" * 48
     ("custom_profile",
      {"source": "cookie", "payload_format": "jwt", "trust_unsigned": "true"},
      UNVERIFIED),
+    # Back-channel: verified on the transport in server mode, on the
+    # signature in browser mode — whichever material carries it.
+    ("backchannel", {}, VERIFIED),
+    ("backchannel", {"exchange_mode": "server", "jwks_url": "https://gw/jwks"},
+     VERIFIED),
+    ("backchannel", {"exchange_mode": "browser", "jwks_url": "https://gw/jwks"},
+     VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "browser", "jwt_public_key": "-----BEGIN PUBLIC KEY-----"},
+     VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "browser", "jwt_shared_secret": "s3cr3t"}, VERIFIED),
+    # The one unsigned variant: browser-written claims nobody verified.
+    ("backchannel",
+     {"exchange_mode": "browser", "trust_unsigned": True}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "browser", "trust_unsigned": "true"}, UNVERIFIED),
+    # Server + trust_unsigned cannot be built (validation refuses it);
+    # were such a row seeded out of band, the transport basis stands.
+    ("backchannel",
+     {"exchange_mode": "server", "trust_unsigned": True}, VERIFIED),
+    # tls_verify off: server mode's VERIFIED rests on the transport, and
+    # with verification off anyone on the path can be the endpoint. Only
+    # PASTED signing material survives an unverifiable channel — a JWKS
+    # does not, because the key set itself arrives over that channel.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": "false"}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False,
+      "claims_format": "jwt", "jwks_url": "https://gw/jwks"}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False, "claims_format": "jwt",
+      "jwt_public_key": "-----BEGIN PUBLIC KEY-----"}, VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False, "claims_format": "jwt",
+      "jwt_shared_secret": "s3cr3t"}, VERIFIED),
+    # A server row with pasted material but unsigned claims verifies
+    # nothing — validation refuses saving it, and assurance fails closed.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False,
+      "jwt_public_key": "-----BEGIN PUBLIC KEY-----"}, UNVERIFIED),
+    # Browser mode: pasted material's trust chain uses no server-side
+    # TLS at all; a JWKS-verified row loses its key-source channel.
+    ("backchannel",
+     {"exchange_mode": "browser", "tls_verify": False,
+      "jwt_shared_secret": "s3cr3t"}, VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "browser", "tls_verify": False,
+      "jwks_url": "https://gw/jwks"}, UNVERIFIED),
+    # Explicit True and absent both keep today's ratings.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": True}, VERIFIED),
     # The dev mock signs its envelope, but it asserts whatever a developer
     # typed into a form. That is authorship, not identity proof.
     ("custom", {}, UNVERIFIED),
@@ -295,3 +349,93 @@ async def test_admin_dto_exposes_assurance_with_an_explanation(
     dto = next(p for p in resp.json() if p["slug"] == "shown")
     assert dto["assurance"] == UNVERIFIED
     assert "sign in as anyone" in dto["assuranceReason"]
+
+
+# ── The unsigned backchannel row meets the same gates ────────────────
+
+@pytest.mark.asyncio
+async def test_platform_admin_refused_from_an_unsigned_backchannel_row(
+    db_session,
+):
+    """The trust_unsigned browser posture accepts browser-written claims
+    nobody verified — precisely the payload that must never carry a
+    platform role. Same gate, same message as custom_profile."""
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-unsigned", display_name="Corp (unsigned)",
+        kind="backchannel",
+        settings={
+            "exchange_mode": "browser",
+            "browser_exchange_url": "https://sso.corp.example/translate",
+            "trust_unsigned": True,
+        },
+    )
+    await db_session.flush()
+    with pytest.raises(ForbiddenSsoRoleError, match="assurance"):
+        await idp_group_mapping_repo.create_role_binding_mapping(
+            db_session, idp_group="Admins", role_name="org_admin",
+            scope_type="global", scope_id=None, provider_id=provider.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_allowed_from_a_key_verified_backchannel_row(
+    db_session,
+):
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-pem", display_name="Corp (pem)",
+        kind="backchannel",
+        settings={
+            "exchange_mode": "browser",
+            "browser_exchange_url": "https://sso.corp.example/translate",
+            "jwt_public_key": "-----BEGIN PUBLIC KEY-----",
+        },
+    )
+    await db_session.flush()
+    row = await idp_group_mapping_repo.create_role_binding_mapping(
+        db_session, idp_group="Admins", role_name="org_admin",
+        scope_type="global", scope_id=None, provider_id=provider.id,
+    )
+    assert row.role_name == "org_admin"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_withholds_platform_roles_from_unsigned_backchannel(
+    db_session,
+):
+    """The reconcile-time half: a mapping written while the row verified
+    stops granting the moment the posture drops to trust_unsigned."""
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-drift", display_name="Corp (drift)",
+        kind="backchannel",
+        settings={
+            "exchange_mode": "browser",
+            "browser_exchange_url": "https://sso.corp.example/translate",
+            "jwks_url": "https://sso.corp.example/jwks",
+        },
+    )
+    await db_session.flush()
+    await idp_group_mapping_repo.create_role_binding_mapping(
+        db_session, idp_group="Admins", role_name="org_admin",
+        scope_type="global", scope_id=None, provider_id=provider.id,
+    )
+    await db_session.flush()
+
+    await idp_provider_repo.update_provider(
+        db_session, provider.id,
+        settings={
+            "exchange_mode": "browser",
+            "browser_exchange_url": "https://sso.corp.example/translate",
+            "trust_unsigned": True,
+        },
+    )
+    await db_session.flush()
+
+    out = await reconcile_sso_targets(
+        db_session, user_id="usr_bc_drift", idp_groups=["Admins"],
+        provider_id=provider.id,
+    )
+    assert out["created"] == 0
+    bindings = await binding_repo.list_for_subject(
+        db_session, subject_type="user", subject_id="usr_bc_drift",
+    )
+    assert [b.role_name for b in bindings] == []

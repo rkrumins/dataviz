@@ -12,7 +12,12 @@ spec:
     type: HTTP
     requestPath: /health
     port: 80
-  timeoutSec: 120
+  # The load balancer's limit on a whole response, so it must let a
+  # streamed export finish: an hour, as the pod nginx allows the export
+  # routes (proxy_read_timeout 3600s). Every other request is still cut
+  # far sooner by the app's own tiers (120s at most) and nginx (180s),
+  # so the app's structured JSON 504 still wins those races.
+  timeoutSec: 3600
   connectionDraining:
     drainingTimeoutSec: 15
   cdn:

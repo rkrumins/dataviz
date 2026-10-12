@@ -9,6 +9,7 @@
  * (unmapped types hit the fallback), a column holding several types, and a type
  * mapping to several columns (deterministic: first in `sortedLayers` wins).
  */
+import { matchRule, type CompiledPlacementSpec } from '@/lib/placement/placement'
 import type { BuildRow } from './buildRow'
 
 /** Minimal row shape needed to place a row. A full `BuildRow` satisfies it, but
@@ -39,6 +40,25 @@ export function buildTypeLayerMap(
     for (const type of layer.entityTypes ?? []) {
       const key = type.toLowerCase()
       if (!map.has(key)) map.set(key, layer.id)
+    }
+  }
+  return map
+}
+
+/**
+ * Flag-on twin of `buildTypeLayerMap` (One Placement Contract): each type a
+ * rule names, mapped to the column the contract picks for a bare entity of
+ * that type — first layer wins, authored priorities count, case folded. Keys
+ * lower-cased, as `resolveRowLayer` looks them up.
+ */
+export function buildTypeLayerMapFromContract(spec: CompiledPlacementSpec): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const rule of spec.rules) {
+    for (const type of rule.types ?? []) {
+      const key = type.toLowerCase()
+      if (map.has(key)) continue
+      const winner = matchRule(spec, { urn: '', entityType: type, tags: [], properties: {} })
+      if (winner) map.set(key, winner.layerId)
     }
   }
   return map

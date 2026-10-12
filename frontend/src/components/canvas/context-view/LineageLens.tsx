@@ -33,12 +33,13 @@
  */
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, startTransition } from 'react'
 import { createPortal } from 'react-dom'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
-import { relationshipLabel } from '@/lib/relationshipLabel'
+import { relationshipLabel, edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
-import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
+import { emptyWalkModel, type LensWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import { accountedLineageEdges } from './lens/rollup-accounting'
 import { rollupResiduals } from '@/hooks/lib/traceWireLedger'
 import {
@@ -80,6 +81,11 @@ import { LensStatusBar } from './lens/LensStatusBar'
 import { applyQueryDimming } from './lens/query-dimming'
 import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
+import { useThrottledWhileBusy } from '@/hooks/useThrottledWhileBusy'
+
+/** How often the board adopts a new model while a walk streams pages in. */
+const BOARD_BEAT_MS = 1200
+const sameFocal = (a: LensWalkModel | null, b: LensWalkModel | null) => (a?.focusUrn ?? null) === (b?.focusUrn ?? null)
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
@@ -328,7 +334,7 @@ export interface LineageLensProps {
   onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
   /** Reveal the node on the canvas (expand ancestors + scroll) without closing the lens. */
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<unknown>
   /** Open the entity drawer for a node. */
   onOpenDetails?: (nodeId: string) => void
   /** Reveal a set of neighbors and frame them on the canvas (closes the lens). */
@@ -435,7 +441,12 @@ export function LineageLens({
   const capsulePhase: WalkProgress['phase'] | null = walkProgress
     ? (walkProgress.phase === 'checkpoint' || walkProgress.phase === 'error' ? null : walkProgress.phase)
     : walkStatus === 'loading' ? 'loading' : null
-  const model = walk?.model ?? null
+  // The board's model, on a beat while pages stream in: every new model
+  // re-derives the whole board over everything walked so far, and a
+  // streaming walk lands a page about once a second (see
+  // useThrottledWhileBusy). A finished walk, or a new focal, lands at once.
+  const walkBusy = walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking'
+  const model = useThrottledWhileBusy(walk?.model ?? null, walkBusy, BOARD_BEAT_MS, sameFocal)
 
   // THE TOOLBAR's overflow: measured, never guessed — see useToolbarOverflow.
   const toolbarRowRef = useRef<HTMLDivElement | null>(null)
@@ -711,7 +722,15 @@ export function LineageLens({
     // a behavioural change. Since 2026-08-22 `editView` writes inside a
     // transition, so the rule no longer fires here at all — the feedback
     // is scheduled, not a synchronous cascade.
-    editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
+    // GROW-ONLY FOR REAL — this used to write `new Set(layout.walkedThrough)`,
+    // which is a REPLACE, and the comment above was describing an intent the code
+    // did not implement. `focus-layout` builds that set with
+    // `.filter(u => !bundled.has(u))`, and `bundled` is itself derived from a
+    // layout that consumed `view.walkedThrough`. So a urn the filter dropped
+    // changed the next layout, which could un-bundle it, which re-added it —
+    // A -> B -> A, at transition priority, each lap a full board re-layout. The
+    // union can only ever grow, so the guard above ends it in one pass.
+    editView(base => ({ ...base, walkedThrough: new Set([...seen, ...layout.walkedThrough]) }))
   }, [layout.walkedThrough, view.walkedThrough, editView, seedPendingForFocal])
 
   // And so is the ORDER. A card's rank comes from its weight, and weight
@@ -722,7 +741,13 @@ export function LineageLens({
   useEffect(() => {
     // See `seedPendingForFocal`'s own doc comment above.
     if (seedPendingForFocal) return
-    if (layout.drawnRank.size === view.drawnRank.size) return
+    // Compare CONTENT, not just size. A size-only guard silently swallows a
+    // same-size/different-content change — and `drawnRank` is what fixes each
+    // card's slot, so swallowing one leaves the board ordered by a stale rank.
+    if (
+      layout.drawnRank.size === view.drawnRank.size &&
+      [...layout.drawnRank].every(([urn, rank]) => view.drawnRank.get(urn) === rank)
+    ) return
     // Same ratified layout→view feedback as `walkedThrough` above, and
     // likewise scheduled rather than synchronous since `editView` became
     // a transition.
@@ -1170,7 +1195,11 @@ export function LineageLens({
   const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
     const m: EdgeTypeInfoMap = new Map()
     for (const rt of relationshipTypes) {
-      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
+      const copy = edgeTypeCopy(rt.id)
+      m.set(rt.id.toUpperCase(), {
+        label: copy?.label ?? (rt.name || relationshipLabel(rt.id)),
+        description: copy?.description ?? rt.description,
+      })
     }
     return m
   }, [relationshipTypes])
@@ -1554,28 +1583,25 @@ export function LineageLens({
   const toolbarInMenu = TOOLBAR_ORDER.filter(id => viewControls[id] && collapsedGroups.has(id))
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        key="lineage-lens"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        className="fixed inset-0 z-[9990] flex items-center justify-center p-6"
-      >
-        {/* Backdrop — the ONE click outside the room, and the one that
-            asks before throwing a walk away. */}
-        <div
-          className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-          onClick={requestClose}
-        />
-
+    // The house shape for a portaled overlay, and the reason it is shaped this
+    // way: this used to be one `fixed inset-0` motion.div INSIDE
+    // <AnimatePresence> carrying `exit`, with the scrim as its child and no
+    // `pointer-events-none`. An interrupted exit (StrictMode, a rapid toggle, a
+    // parent re-render) leaves that node in the body — invisible at opacity 0,
+    // pointer-events on, covering the whole viewport — and every click in the
+    // app dies until a reload. This repo has shipped that freeze three times.
+    // Now: the scrim is a plain CSS Backdrop and a SIBLING (nested, its onClick
+    // never gets the click), the full-viewport wrapper is inert and outside any
+    // presence tree, and only the room itself is interactive. Entrance-only —
+    // the lens unmounts with its focus, so there is no exit to strand.
+    <>
+      <Backdrop open onClick={requestClose} zClassName="z-[9990]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[9991] flex items-center justify-center p-6 pointer-events-none">
         <motion.div
           initial={{ opacity: 0, scale: 0.97, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.97, y: 8 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
+          className="pointer-events-auto relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
           style={
             // The focus room takes as much of the window as it can while
             // still reading as a room over the page, with a RESOLVED
@@ -1778,13 +1804,12 @@ export function LineageLens({
                             className="flex items-center"
                             title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
                           >
-                            {/* Amber is DOWNSTREAM everywhere else in the
-                                lens — the band arrows, the focal's "out"
-                                tally, the Data Consumers column. Sky
-                                upstream, amber down. */}
+                            {/* The lineage direction pair, as everywhere
+                                else in the lens: in for upstream, out for
+                                downstream (lib/lineageDirectionColors.ts). */}
                             {meta.downstream
-                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />
-                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-sky-500/80', isForward && 'opacity-50')} />}
+                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-lineage-out/80', isForward && 'opacity-50')} />
+                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-lineage-in/80', isForward && 'opacity-50')} />}
                           </span>
                         ) : (
                           <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
@@ -2152,7 +2177,7 @@ export function LineageLens({
               />
               {/* THE CAPSULE — the board says it is calculating, from the
                   moment Focus opens (2026-08-22: the header's narration and
-                  a toast at the foot of the board were missed — "the user
+                  a notification at the foot of the board were missed — "the user
                   might confuse that for nothing happening"). The same
                   capsule the canvas trace uses: headline, ticking counts,
                   the sounding line; it leaves by itself a beat after the
@@ -2230,11 +2255,11 @@ export function LineageLens({
                             <span className="truncate max-w-[180px]">{selectedInfo.parentLabel}</span>
                           </span>
                         )}
-                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                        <span className="flex items-center gap-1 text-lineage-in">
                           <LucideIcons.ArrowDownLeft className="w-3 h-3" />
                           {selectedInfo.inCount} in
                         </span>
-                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                        <span className="flex items-center gap-1 text-lineage-out">
                           <LucideIcons.ArrowUpRight className="w-3 h-3" />
                           {selectedInfo.outCount} out
                         </span>
@@ -2370,8 +2395,9 @@ export function LineageLens({
               only while the lens is open. So the way OUT asks, once
               there is something to lose. (The board's own background
               never gets here at all: it peels a layer and stops.) */}
+          {/* Scrim only, no `backdrop-filter` — see the outer backdrop above. */}
           {confirmClose && (
-            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40">
               <div
                 role="alertdialog"
                 aria-modal="true"
@@ -2403,8 +2429,8 @@ export function LineageLens({
             </div>
           )}
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </div>
+    </>,
     document.body,
   )
 }

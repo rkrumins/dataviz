@@ -26,14 +26,18 @@ import dataclasses
 import inspect
 import json
 import logging
-import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common.property_patch import InvalidPatch, normalize_update
+from backend.app.services.versioning.entity_audit import (
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
@@ -42,6 +46,15 @@ from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
+# Blank-model provisioning lives with the rest of managed-source provisioning.
+from backend.app.services.managed_sources import (
+    _graph_name_availability,
+    assert_provider_usable,
+    claim_graph_name,
+    create_managed_data_source,
+    drop_managed_data_source,
+    register_aggregation,
+)
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
@@ -51,6 +64,7 @@ from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
     ConcurrencyError,
+    DiffTooLarge,
     GraphVersioningService,
     MergeConflict,
     NotUpToDate,
@@ -61,7 +75,10 @@ from backend.app.services.versioning.service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# Matched on the RAW path so an encoded '/' stays inside its parameter — entity ids
+# carry URNs with paths (`…bucket/key…`, and edge ids built from two of them), which
+# the decoded path would split into a 404 (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 
 # ── Admin feature flags (Admin → Features) ────────────────────────────────────
@@ -110,6 +127,22 @@ def get_versioning_service() -> GraphVersioningService:
     return _service
 
 
+_ie_service = None
+
+
+def get_import_export_service():
+    """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
+    global _ie_service
+    if _ie_service is None:
+        from backend.app.services.versioning.import_export.service import ImportExportService
+        _ie_service = ImportExportService(
+            versioning=_service, scope_resolver=_resolve_export_view_scope,
+            ontology_resolver=_resolve_ontology_types,
+            layout_writer=_write_view_import_assignments,
+            publish_hook=_publish_from_job)
+    return _ie_service
+
+
 _read_factory = None  # lazily built FalkorDB read-client factory (name -> graph)
 
 
@@ -149,7 +182,7 @@ def _get_projector():
             return None
         from backend.app.services.versioning.projection import FalkorProjector
         from backend.app.services.projection_target import (
-            make_rollup_rebuild_hook, nudge_stats_after_projection,
+            make_rollup_rebuild_hook, after_projection,
             resolve_aggregation_edge_types,
         )
 
@@ -169,7 +202,7 @@ def _get_projector():
         _projector = FalkorProjector(
             factory, edge_types_resolver=resolve_aggregation_edge_types,
             on_rollups_stale=make_rollup_rebuild_hook(_agg_service),
-            on_projected=nudge_stats_after_projection)
+            on_projected=after_projection)
     return _projector
 
 
@@ -454,6 +487,10 @@ def _domain_errors():
             "title": exc.title, "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    except DiffTooLarge as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
+            "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -475,6 +512,24 @@ async def _live_containment_types(
     except Exception:
         logger.exception("containment-type resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
         return []
+
+
+async def _live_containment_map(
+    session: AsyncSession, workspace_id: Optional[str], data_source_id: Optional[str],
+) -> Dict[str, bool]:
+    """The CURRENT ontology's containment edge types WITH their direction (``{TYPE: child is
+    source}``), for the placement contract's view-scoped import roots. Best-effort like
+    :func:`_live_containment_types`: {} on failure."""
+    try:
+        from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from backend.app.ontology.service import LocalOntologyService
+        from backend.app.services.view_placement import containment_from_ontology
+        ont = LocalOntologyService(SQLAlchemyOntologyRepository(session))
+        resolved = await ont.resolve(workspace_id=workspace_id, data_source_id=data_source_id)
+        return containment_from_ontology(resolved)
+    except Exception:
+        logger.exception("containment-direction resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
+        return {}
 
 
 async def _pr_containment_types(svc, session, ws_id, pr) -> List[str]:
@@ -592,6 +647,27 @@ class StageOp(_ApiModel):
     payload: Optional[dict] = None
     ref: Optional[str] = None
     change_reason: Optional[str] = Field(default=None, alias="changeReason")
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to remove (an update merges properties key by key).")
+
+
+def _stage_ops(ops: List[StageOp]) -> List[dict]:
+    """Staged ops as the service takes them: an update's ``unsetProperties`` becomes the one
+    internal removal form (``property_patch``). A contradictory patch is a 422."""
+    out = []
+    for op in ops:
+        staged = op.model_dump(exclude_none=True)
+        unset = staged.pop("unset_properties", None)
+        try:
+            if unset and staged.get("op") != "update":
+                raise InvalidPatch(f"unsetProperties applies to an update, not a {staged.get('op')}")
+            if unset:
+                staged["payload"] = normalize_update(staged.get("payload"), unset)
+        except InvalidPatch as exc:
+            raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
+        out.append(staged)
+    return out
 
 
 class StageRequest(_ApiModel):
@@ -744,6 +820,24 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class PublishJobResponse(_ApiModel):
+    """A large draft's publish (or review merge), run as a job: poll until it's done. ``error`` is
+    ``{status, detail}``, the answer the route gives when it publishes inside the request."""
+    job_id: str = Field(alias="jobId")
+    graph_id: str = Field(alias="graphId")
+    status: str
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
+    error: Optional[dict] = None
+
+
+class RevisionModel(_ApiModel):
+    """The main commit a side of the watermark is at — so "version #12" names a real revision."""
+    commit_id: str = Field(alias="commitId")
+    created_at: Optional[str] = Field(default=None, alias="createdAt")
+    actor: Optional[str] = None
+    message: Optional[str] = None
+
+
 class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
@@ -760,6 +854,9 @@ class WatermarkModel(_ApiModel):
     last_projected_at: Optional[str] = Field(default=None, alias="lastProjectedAt")
     progress_done: Optional[int] = Field(default=None, alias="progressDone")
     progress_total: Optional[int] = Field(default=None, alias="progressTotal")
+    # The main revision each side is at: the system of record's head, and what the graph holds.
+    committed_revision: Optional[RevisionModel] = Field(default=None, alias="committedRevision")
+    projected_revision: Optional[RevisionModel] = Field(default=None, alias="projectedRevision")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -817,6 +914,9 @@ class DriftReportModel(_ApiModel):
     checked_at: str = Field(alias="checkedAt")
     duration_ms: int = Field(alias="durationMs")
     skipped_reason: Optional[str] = Field(default=None, alias="skippedReason")
+    # Rollup health: {"status": "ok" | "missing" | "untrusted", "aggregated", "stubs"}.
+    # "missing"/"untrusted" → "Rebuild fast read layer" hands them to the aggregation job.
+    rollups: Optional[Dict[str, Any]] = None
 
 
 class StateResponse(_ApiModel):
@@ -861,6 +961,8 @@ class RebaseResponse(_ApiModel):
     is why a pull could never tell the user what it had pulled."""
     clean: bool
     conflicts: List[dict] = Field(default_factory=list)
+    # On conflict: the draft's own value of each conflicting entity, to resolve from.
+    seeds: Dict[str, Optional[dict]] = Field(default_factory=dict)
     changes: Dict[str, int] = Field(default_factory=dict)
     incoming: Optional[IncomingModel] = None
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
@@ -869,8 +971,28 @@ class RebaseResponse(_ApiModel):
 
 class EntityHistoryResponse(_ApiModel):
     entity_id: str = Field(alias="entityId")
+    kind: Optional[str] = None
     versions: List[dict]
     # id → display name for every version's actor (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    has_more: bool = Field(default=False, alias="hasMore")
+    # Cursor for the next (older) page; pass it back as `before`.
+    next_before: Optional[str] = Field(default=None, alias="nextBefore")
+
+
+class EntitySummaryResponse(_ApiModel):
+    """Who created an entity and who last changed it, on the line being read (see entity_audit)."""
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    exists: bool
+    version: Optional[str] = None
+    inherited: bool = False
+    created: Optional[dict] = None
+    updated: Optional[dict] = None
+    revisions: Dict[str, int] = Field(default_factory=dict)
+    changed_on_main_since_branch: bool = Field(default=False, alias="changedOnMainSinceBranch")
+    base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+    value: Optional[dict] = None
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
@@ -934,6 +1056,9 @@ class DiffSummaryResponse(_ApiModel):
     entity_counts: Dict[str, int] = Field(default_factory=dict, alias="entityCounts")
     edge_counts: Dict[str, int] = Field(default_factory=dict, alias="edgeCounts")
     impact: Dict[str, int]
+    # ``{changed, limit}`` when the draft changes more entities than the tree lays out: counts
+    # only, no groups, and its children route answers 409 ``too_large_for_tree``.
+    too_large: Optional[Dict[str, int]] = Field(default=None, alias="tooLarge")
 
 
 class DiffChildrenResponse(_ApiModel):
@@ -1093,145 +1218,6 @@ async def create_graph(
     )
 
 
-# ── Physical graph naming (blank models) ─────────────────────────────────────
-# The graph name IS the FalkorDB key the model projects into, and a full
-# projection seed WIPES that key — a collision is destructive. Names are
-# therefore validated centrally: slug rules, reserved system prefixes, and
-# per-provider uniqueness across ALL workspaces (the DB unique constraint is
-# only per-workspace), plus a best-effort live GRAPH.LIST check.
-_GRAPH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
-_RESERVED_GRAPH_PREFIXES = ("gv_", "gvt_", "gvtest_", "blank_", "__fork_")
-
-
-#: "data_lineage_2" -> ("data_lineage", 2). Lets a suggestion keep counting from an
-#: already-numbered name instead of producing "data_lineage_2_2".
-_NUMBERED_SUFFIX_RE = re.compile(r"^(?P<base>.+?)_(?P<n>\d+)$")
-_MAX_GRAPH_NAME_LEN = 64
-
-
-async def _taken_graph_names(
-    session: AsyncSession, provider_id: str, base: str,
-) -> set:
-    """Every name on this connection that could collide with ``base`` or ``base_N``.
-
-    Fetched in ONE pass so suggesting a free name doesn't re-run the whole
-    availability check (and its live GRAPH.LIST) once per candidate.
-    """
-    from sqlalchemy import or_, select
-    from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
-
-    like = f"{base}%"
-    taken: set = set()
-
-    rows = (await session.execute(
-        select(WorkspaceDataSourceORM.graph_name, WorkspaceDataSourceORM.dedicated_graph_name)
-        .where(
-            WorkspaceDataSourceORM.provider_id == provider_id,
-            # A tombstone must not reserve its graph name forever. The live
-            # GRAPH.LIST pass below still guards the destructive case: while the
-            # deleted source's key physically exists, the name stays taken.
-            WorkspaceDataSourceORM.deleted_at.is_(None),
-            or_(WorkspaceDataSourceORM.graph_name.ilike(like),
-                WorkspaceDataSourceORM.dedicated_graph_name.ilike(like)),
-        ))).all()
-    for graph_name, dedicated in rows:
-        for value in (graph_name, dedicated):
-            if value:
-                taken.add(str(value).strip().lower())
-
-    cats = (await session.execute(
-        select(CatalogItemORM.source_identifier).where(
-            CatalogItemORM.provider_id == provider_id,
-            CatalogItemORM.source_identifier.ilike(like),
-        ))).scalars().all()
-    taken.update(str(c).strip().lower() for c in cats if c)
-
-    from backend.app.providers.falkor_graph_registry import list_graph_keys
-    keys = await list_graph_keys(provider_id)
-    if keys:
-        taken.update(
-            k.strip().lower() for k in keys
-            if k and k.strip().lower().startswith(base)
-        )
-    return taken
-
-
-def _next_free_graph_name(base: str, taken: set) -> Optional[str]:
-    """First free ``base_N`` (N >= 2). None when the family is exhausted."""
-    trimmed = base[: _MAX_GRAPH_NAME_LEN - 5] or base  # leave room for "_999"
-    for n in range(2, 1000):
-        candidate = f"{trimmed}_{n}"
-        if len(candidate) > _MAX_GRAPH_NAME_LEN:
-            return None
-        if candidate not in taken:
-            return candidate
-    return None
-
-
-async def _suggest_graph_name(
-    session: AsyncSession, provider_id: str, normalized: str,
-) -> Optional[str]:
-    match = _NUMBERED_SUFFIX_RE.match(normalized)
-    base = match.group("base") if match else normalized
-    taken = await _taken_graph_names(session, provider_id, base)
-    return _next_free_graph_name(base, taken)
-
-
-async def _graph_name_availability(
-    session: AsyncSession, provider_id: str, raw: str, *, suggest: bool = False,
-) -> Dict[str, object]:
-    """``{available, normalized, reason?, suggestion?}`` for a proposed graph name.
-
-    The graph name IS the FalkorDB key the model projects into, and a projection
-    seed WIPES that key — so a collision is destructive and this must never say
-    "available" for a name anything else already owns. When ``suggest`` is set, a
-    taken name also comes back with the first free ``<base>_<n>`` so the caller can
-    offer it instead of making the user invent one.
-    """
-    from sqlalchemy import or_, select
-    from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
-
-    normalized = (raw or "").strip().lower()
-    if not _GRAPH_NAME_RE.match(normalized):
-        return {"available": False, "normalized": normalized,
-                "reason": "Use 3–64 characters: lowercase letters, numbers, '-' or '_', "
-                          "starting with a letter or number."}
-    if normalized.startswith(_RESERVED_GRAPH_PREFIXES) or normalized.endswith("_proj"):
-        return {"available": False, "normalized": normalized,
-                "reason": "Names starting with gv_, gvt_, blank_, __fork_ or ending in "
-                          "_proj are reserved for the system."}
-
-    async def _taken(reason: str) -> Dict[str, object]:
-        out: Dict[str, object] = {"available": False, "normalized": normalized, "reason": reason}
-        if suggest:
-            out["suggestion"] = await _suggest_graph_name(session, provider_id, normalized)
-        return out
-
-    ds_taken = (await session.execute(
-        select(WorkspaceDataSourceORM.id).where(
-            WorkspaceDataSourceORM.provider_id == provider_id,
-            WorkspaceDataSourceORM.deleted_at.is_(None),
-            or_(WorkspaceDataSourceORM.graph_name == normalized,
-                WorkspaceDataSourceORM.dedicated_graph_name == normalized),
-        ).limit(1))).scalar_one_or_none()
-    if ds_taken:
-        return await _taken("Another data source on this connection already uses this name.")
-    cat_taken = (await session.execute(
-        select(CatalogItemORM.id).where(
-            CatalogItemORM.provider_id == provider_id,
-            CatalogItemORM.source_identifier == normalized,
-        ).limit(1))).scalar_one_or_none()
-    if cat_taken:
-        return await _taken("A catalogued graph on this connection already uses this name.")
-    # Live key check — best-effort (None = unreachable → registry checks stand alone;
-    # they cover every app-managed key, so only out-of-band keys slip past).
-    from backend.app.providers.falkor_graph_registry import list_graph_keys
-    keys = await list_graph_keys(provider_id)
-    if keys is not None and normalized in keys:
-        return await _taken("A graph with this name already exists on this connection.")
-    return {"available": True, "normalized": normalized}
-
-
 @router.get("/blank-graphs/name-check", response_model=GraphNameCheckResponse)
 async def check_blank_graph_name(
     ws_id: str,
@@ -1270,72 +1256,11 @@ async def create_blank_graph(
 
     Management and graphver may be separate DBs (no 2PC): the data source commits first
     and is compensated away if graph creation fails."""
-    from backend.app.db.repositories import ontology_definition_repo, provider_repo
-    from backend.common.models.management import DataSourceCreateRequest
+    from backend.app.db.repositories import ontology_definition_repo
 
-    # 1) Provider must exist, be active, FalkorDB (Neo4j later), and workspace-permitted.
-    prov = await provider_repo.get_provider_orm(session, body.provider_id)
-    if prov is None or not prov.is_active:
-        raise HTTPException(status_code=422, detail={
-            "type": "provider_unsupported",
-            "message": "The selected provider connection does not exist or is inactive."})
-    if prov.provider_type != "falkordb":
-        raise HTTPException(status_code=422, detail={
-            "type": "provider_unsupported",
-            "message": f"Blank models are FalkorDB-backed for now; '{prov.provider_type}' "
-                       "providers are not supported yet."})
-    try:
-        permitted = json.loads(prov.permitted_workspaces or '["*"]')
-    except Exception:
-        permitted = ["*"]
-    if "*" not in permitted and ws_id not in permitted:
-        raise HTTPException(status_code=403, detail="provider not permitted in this workspace")
-
-    # 1b) Provider must be REACHABLE, not merely enabled. A model is worthless if its
-    #     backing store is down, and a full projection would fail — so refuse up front.
-    #     First the cached breaker/warmup verdict (the SAME signal the UI's status dot
-    #     shows, via resolve_provider_status — zero I/O); then, only when that signal is
-    #     'unknown' (never warmed up), one bounded live probe so a genuinely-down but
-    #     un-observed provider can't slip through.
-    from backend.app.providers.manager import provider_manager as _provider_mgr
-    from backend.app.providers.reachability import resolve_provider_status
-    try:
-        _breakers = _provider_mgr.report_provider_states()
-    except Exception:
-        _breakers = {}
-    _warmup = getattr(_provider_mgr, "warmup_cache", {}) or {}
-    _status, _status_err = resolve_provider_status(
-        is_active=prov.is_active, provider_id=prov.id,
-        breaker_states=_breakers, warmup_cache=_warmup)
-    if _status == "unavailable":
-        raise HTTPException(status_code=422, detail={
-            "type": "provider_unreachable",
-            "message": f"'{prov.name}' is currently offline ({_status_err or 'connection failed'}). "
-                       "Reconnect it, then try again."})
-    if _status == "unknown":
-        # Never observed — probe live (bounded ~2.5s) rather than assume healthy.
-        try:
-            from backend.app.api.v1.endpoints.providers import _run_connectivity_probe
-            _creds = await provider_repo.get_credentials(session, prov.id)
-            try:
-                _extra = json.loads(prov.extra_config) if prov.extra_config else None
-            except (ValueError, TypeError):
-                _extra = None
-            _probe = await _run_connectivity_probe(
-                provider_type=prov.provider_type, host=prov.host, port=prov.port,
-                tls_enabled=prov.tls_enabled, creds=_creds, extra_config=_extra)
-            if not _probe.success:
-                raise HTTPException(status_code=422, detail={
-                    "type": "provider_unreachable",
-                    "message": f"'{prov.name}' could not be reached ({_probe.error or 'connection failed'}). "
-                               "Check the connection, then try again."})
-        except HTTPException:
-            raise
-        except Exception:
-            # Probe machinery unavailable (e.g. import/config issue) — don't hard-fail
-            # provisioning on a maybe-healthy provider; the cached gate already caught
-            # confirmed-down providers, and the first projection surfaces real errors.
-            logger.exception("blank-graph live reachability probe errored for %s", prov.id)
+    # 1) Provider must exist, be active, FalkorDB (Neo4j later), workspace-permitted and
+    #    REACHABLE — a model is worthless if its backing store is down.
+    await assert_provider_usable(session, ws_id, body.provider_id)
 
     # 2) Ontology must exist and be published — blank models are ontology-governed.
     ont = await ontology_definition_repo.get_ontology(session, body.ontology_id)
@@ -1353,70 +1278,31 @@ async def create_blank_graph(
     #    ``blank_<ds_id>`` is minted.
     user_graph_name: Optional[str] = None
     if body.graph_name:
-        from sqlalchemy import text as _sql_text
-        await session.execute(_sql_text(
-            "SELECT pg_advisory_xact_lock(hashtext(:k))"
-        ), {"k": f"graph-name:{body.provider_id}:{body.graph_name.strip().lower()}"})
-        verdict = await _graph_name_availability(
-            session, body.provider_id, body.graph_name, suggest=True)
-        if not verdict["available"]:
-            # Someone took the name while this wizard was open. Hand back a free one
-            # so the client can offer a single-click fix instead of a retry that can
-            # only ever fail again. NEVER fall through to the existing graph: a
-            # projection seed would wipe whatever lives under that key.
-            raise HTTPException(status_code=422, detail={
-                "type": "graph_name_unavailable",
-                "message": verdict["reason"],
-                "suggestion": verdict.get("suggestion"),
-            })
-        user_graph_name = str(verdict["normalized"])
-    ds = await data_source_repo.create_data_source(session, ws_id, DataSourceCreateRequest(
-        provider_id=body.provider_id, ontology_id=body.ontology_id,
-        label=body.name, access_level="write"))
-    row = await data_source_repo.get_data_source_orm(session, ds.id)
-    graph_name = user_graph_name or f"blank_{row.id}"
-    row.graph_name = graph_name
-    row.source_mode = "managed"
-    row.created_by = user.id
-    await session.commit()
+        user_graph_name = await claim_graph_name(session, body.provider_id, body.graph_name)
+    ds_id, graph_name = await create_managed_data_source(
+        session, ws_id, provider_id=body.provider_id, ontology_id=body.ontology_id,
+        label=body.name, actor=user.id, graph_name=user_graph_name)
 
     # 4) Genesis-only versioned graph pinned to the minted name + provider.
     try:
         created = await svc.create_graph(
-            data_source_id=ds.id, workspace_id=ws_id, kind="blank", actor=user.id,
+            data_source_id=ds_id, workspace_id=ws_id, kind="blank", actor=user.id,
             base_ontology_id=body.ontology_id, falkor_graph_name=graph_name,
             falkor_provider=body.provider_id, ontology_enforcement="strict",
             # A blank model HAS no source — WE mint its FalkorDB graph (`blank_<ds>`), so it is
             # ours to reclaim. This is the only user-facing case where a purge may drop the key.
             owns_falkor_graph=True)
     except Exception:
-        logger.exception("blank-graph creation failed for ds=%s; compensating", ds.id)
-        try:                                             # compensate: remove the orphan ds
-            await data_source_repo.delete_data_source(session, ds.id)
-            await session.commit()
-        except Exception:                                # pragma: no cover - double fault
-            logger.exception("compensating delete of ds=%s failed — orphan data source", ds.id)
+        logger.exception("blank-graph creation failed for ds=%s; compensating", ds_id)
+        await drop_managed_data_source(session, ds_id)  # compensate: remove the orphan ds
         raise HTTPException(status_code=502, detail={
             "type": "provisioning_failed",
             "message": "The model's version store could not be created; nothing was kept."})
 
-    # 5) Aggregation registration (best-effort, never fails provisioning): creates the
-    #    data source's aggregation state row so readiness reads "configured" instead of
-    #    "none", and wires the publish→rollup pipeline from day one. The projector's
-    #    on_rollups_stale hook self-heals later if this is skipped.
-    try:
-        from backend.app.main import app as _app
-        agg = getattr(_app.state, "aggregation_service", None)
-        if agg is not None:
-            from backend.app.services.aggregation.schemas import AggregationTriggerRequest
-            await agg.trigger(
-                ds.id,
-                AggregationTriggerRequest(idempotency_key=f"blank-provision:{created['graph_id']}"),
-                "onboarding", session)
-    except Exception as exc:
-        logger.info("blank-model aggregation registration skipped for ds=%s: %s", ds.id, exc)
+    # 5) Aggregation registration (best-effort, never fails provisioning).
+    await register_aggregation(session, ds_id, f"blank-provision:{created['graph_id']}")
 
-    return {"data_source_id": ds.id, "graph_id": created["graph_id"],
+    return {"data_source_id": ds_id, "graph_id": created["graph_id"],
             "main_branch_id": created["main_branch_id"], "graph_name": graph_name,
             "label": body.name}
 
@@ -1462,6 +1348,7 @@ async def resolve_graph_get(
     # capability callers — history/diff surfaces stay membership-only.
     user: User = Depends(require_ds_read_or_view),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve (workspace, dataSource) → versioned graph + the caller's open draft, if
     any, scoped to ``viewId`` when given (branch-per-view). Read-only: never opens a
@@ -1472,19 +1359,30 @@ async def resolve_graph_get(
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
-    return await _with_bootstrap(res, data_source_id, ws_id)
+    return await _with_bootstrap(res, data_source_id, ws_id, session)
 
 
-async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str) -> dict:
+async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str,
+                          session: AsyncSession) -> dict:
     """Attach the enablement job when the graph is still at genesis — the only window in
-    which one can exist, so the lookup costs nothing on a live graph."""
+    which one can exist, so the lookup costs nothing on a live graph.
+
+    Every state in which the graph is NOT live yet, ``needs_decision`` included: a pause can last
+    days, and without the job the UI reads the genesis-parked graph as versioned (exports its
+    empty main, edits into a 409). The job is the status poll's seed, so it carries what the
+    status route adds — who else reads the graph a collapse would change."""
     if int(res.get("main_head_commit_seq") or 0) > 1:
         return res
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
     job = await bootstrap_status(data_source_id=data_source_id, workspace_id=ws_id)
-    if job is not None and job.get("status") in ("pending", "running", "failed"):
-        return {**res, "bootstrap": job}
-    return res
+    if job is None or job.get("status") not in ("pending", "running", "needs_decision", "failed"):
+        return res
+    if job.get("duplicates"):
+        from backend.app.services.managed_sources import shared_with
+        ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+        if ds is not None:
+            job["duplicates"].update(await shared_with(session, ds))
+    return {**res, "bootstrap": job}
 
 
 @router.post("/resolve", response_model=ResolveResponse)
@@ -1574,10 +1472,11 @@ async def stage_changes(
     session: AsyncSession = Depends(get_db_session),
 ):
     rules = await _rules_for_meta(session, ws_id, _meta)
+    ops = _stage_ops(body.ops)
     with _domain_errors():
         assigned = await svc.stage_changes(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
-            ops=[op.model_dump(exclude_none=True) for op in body.ops],
+            ops=ops,
             ontology_rules=rules,
         )
     return {"assigned": assigned, "count": len(body.ops)}
@@ -1613,6 +1512,38 @@ async def merge_preview(
         return await svc.preview_merge(graph_id=graph_id, branch_id=branch_id)
 
 
+@router.get("/graphs/{graph_id}/branches/{branch_id}/view-changes")
+async def branch_view_changes(
+    ws_id: str, graph_id: str, branch_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What this draft changes in views, beside its graph changes: the views it creates (imports
+    waiting to go live) and updates (imports staged in it, and layer edits). They go live when the
+    draft is published, so a draft with nothing else is still worth publishing. Views the caller
+    can't read are counted (``hidden``), never shown."""
+    from backend.app.api.v1.endpoints.views import _viewer_context
+    from backend.app.auth.dependencies import rbac_flag
+    from backend.app.db.models import ViewORM
+    from backend.app.services import draft_views, view_access
+
+    changes = [c for c in await draft_views.changes_on(session, branch_id) if c["workspaceId"] == ws_id]
+    visible = changes
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and changes:
+        ctx = await _viewer_context(session, user, claims)
+        visible = []
+        for change in changes:
+            row = await session.get(ViewORM, change["viewId"])
+            if row is not None and await view_access.can_read_view(session, ctx, row):
+                visible.append(change)
+    names = await resolve_user_ids(session, {c["stagedBy"] for c in visible if c.get("stagedBy")})
+    for change in visible:
+        change["stagedByName"] = names.get(change.get("stagedBy") or "", (None, None))[0]
+    return {"branchId": branch_id, "views": visible, "hidden": len(changes) - len(visible)}
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=CommitResponse)
 async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
@@ -1621,7 +1552,13 @@ async def publish(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
 ):
+    """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
+    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
+    if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+        return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
+                                    branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
@@ -1635,6 +1572,87 @@ async def publish(
     await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
+
+
+async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, body,
+                         merge_request_id=None) -> JSONResponse:
+    job = await ie.create_publish_job(
+        workspace_id=workspace_id, data_source_id=(meta or {}).get("data_source_id"),
+        graph_id=graph_id, branch_id=branch_id, actor=actor, message=body.message,
+        resolutions=body.resolutions, merge_request_id=merge_request_id)
+    started = await ie.start_publish(job["job_id"])
+    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
+                                                  "status": started})
+
+
+_JOB_REFUSAL_MAX_VIOLATIONS = 100
+
+
+def _bounded_refusal(detail):
+    """A refusal as a publish job keeps it. A large draft can break the ontology on every entity it
+    changes (200k violations, 60 MB on the job and to the client, which shows the first two): keep
+    a hundred, and how many there were."""
+    violations = detail.get("violations") if isinstance(detail, dict) else None
+    if violations and len(violations) > _JOB_REFUSAL_MAX_VIOLATIONS:
+        return {**detail, "violations": violations[:_JOB_REFUSAL_MAX_VIOLATIONS], "total": len(violations)}
+    return detail
+
+
+async def _publish_from_job(job: dict) -> dict:
+    """Run a queued publish — or the merge of a draft's review — as the route runs one inside the
+    request: the target's live ontology, a refusal as the HTTP answer the route gives, then what a
+    publish sets off. It runs on the versioning worker's transfer lane, so the projection is left to
+    the projection lane (``nudge_projection``) rather than run here.
+
+    ``mergedCommitId`` says the draft is merged already — by an earlier attempt at the job, whose
+    worker died or was taken over before it finished the job: then nothing is published, and only
+    what a publish sets off runs again (each step is idempotent)."""
+    from backend.app.db.engine import get_async_session
+    svc = get_versioning_service()
+    graph_id, branch_id, actor = job["graphId"], job["branchId"], job["actor"]
+    commit_id = job.get("mergedCommitId")
+    if commit_id is None:
+        try:
+            with _domain_errors():
+                meta = await svc.get_graph(graph_id)
+                async with get_async_session() as session:
+                    cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
+                    rules = await _rules_for_meta(session, job["workspaceId"], meta)
+                if job.get("mergeRequestId"):
+                    commit_id = await svc.merge_mr(
+                        mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+                else:
+                    commit_id = await svc.publish(
+                        graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+        except HTTPException as exc:
+            return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+    await _bump_main_cache(graph_id)
+    await _touch_views_data_updated(graph_id, actor)
+    await _promote_view_layout_overlay(branch_id, actor)
+    await nudge_projection(graph_id)
+    return {"commitId": commit_id}
+
+
+@router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
+async def get_publish_job(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Where a large draft's publish (or review merge) is: pending, running, completed with its
+    commit, or failed with the answer a publish inside the request would have given."""
+    job = await ie.get_job(job_id)
+    if job is None or job["jobType"] != "publish" or job["graphId"] != graph_id:
+        raise HTTPException(status_code=404, detail="publish job not found")
+    summary = job.get("summary") or {}
+    error = summary.get("error")
+    if job["status"] == "failed" and error is None:          # died rather than refused
+        error = {"status": 500, "detail": job.get("errorMessage") or "publishing failed"}
+    return {"job_id": job_id, "graph_id": graph_id, "status": job["status"],
+            "commit_id": summary.get("commitId"), "error": error}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
@@ -1721,7 +1739,16 @@ def _watermark_model(wm: dict) -> WatermarkModel:
                           last_error=wm.get("last_error"),
                           last_projected_at=wm.get("last_projected_at"),
                           progress_done=wm.get("progress_done"),
-                          progress_total=wm.get("progress_total"))
+                          progress_total=wm.get("progress_total"),
+                          committed_revision=_revision_model(wm.get("committed_revision")),
+                          projected_revision=_revision_model(wm.get("projected_revision")))
+
+
+def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
+    return None if not rev else RevisionModel(
+        commit_id=rev["commit_id"], created_at=rev.get("created_at"),
+        actor=rev.get("actor"), message=rev.get("message"),
+    )
 
 
 @router.post("/graphs/{graph_id}/projection/rebuild", response_model=RebuildResponse)
@@ -1747,7 +1774,10 @@ async def rebuild_projection(
     # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.
     if not name or name == f"gv_{graph_id}":
         raise HTTPException(status_code=409, detail="no FalkorDB projection target for this graph")
-    started = await svc.request_projection_rebuild(graph_id)
+    try:
+        started = await svc.request_projection_rebuild(graph_id)
+    except ConcurrencyError as exc:            # enabling version control hasn't finished
+        raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
     # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
     # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
     # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
@@ -1885,19 +1915,67 @@ async def get_commit_state(
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
 
 
+async def _assert_line_readable(svc, graph_id: str, branch_id: Optional[str], viewer: Viewer) -> None:
+    """A draft named by ``branchId`` must be the caller's to read (403), and the graph's (404)."""
+    if branch_id:
+        with _domain_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+
+
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
 async def get_entity_history(
     ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId",
+                                     description="the draft being viewed — its own revisions join main's"),
+    scope: str = Query("all", pattern="^(all|draft|published)$"),
+    limit: int = Query(HISTORY_DEFAULT_LIMIT, ge=1, le=HISTORY_MAX_LIMIT),
+    before: Optional[str] = Query(None, description="`nextBefore` of the previous page"),
+    include: Optional[str] = Query(None, pattern="^payload$", description="`payload`: each revision's full value"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    versions = await svc.entity_history(graph_id=graph_id, entity_id=entity_id, viewer=viewer)
-    payload = {"entity_id": entity_id, "versions": versions}
-    await _attach_user_names(session, versions, wrapper=payload)
+    """An entity's revisions, newest first, a page at a time — ``main``'s and those of the draft
+    being viewed, never another user's. Each says what it changed, property by property."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        try:
+            page = await entity_history_page(
+                svc, graph_id=graph_id, entity_id=entity_id, branch_id=branch_id, scope=scope,
+                limit=limit, before=before, include_payload=include == "payload", kind=kind)
+        except InvalidCursor as exc:       # a ValueError, which would otherwise read as a 404
+            raise HTTPException(status_code=422, detail={"type": "invalid_cursor", "message": str(exc)})
+    payload = {"entity_id": entity_id, "kind": page.get("kind"), "versions": page["versions"],
+               "has_more": page["hasMore"], "next_before": page["nextBefore"]}
+    await _attach_user_names(session, page["versions"], wrapper=payload)
     return payload
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/summary", response_model=EntitySummaryResponse)
+async def get_entity_summary(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
+    include: Optional[str] = Query(None, pattern="^value$", description="`value`: the entity and its token"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who created the entity and who last changed it, as the line being read has it (a draft
+    sees ``main`` at its branch point), its revision counts and — ``include=value`` — its value
+    and optimistic-concurrency token. Bounded: a few index lookups, never the whole history."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        summary = await entity_summary(svc, graph_id=graph_id, entity_id=entity_id, branch_id=branch_id,
+                                       kind=kind, include_value=include == "value")
+    await _attach_user_names(session, [e for e in (summary["created"], summary["updated"]) if e],
+                             wrapper=summary)
+    return summary
 
 
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
@@ -1985,6 +2063,9 @@ async def get_diff_window(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
 async def get_diff_vs_main(
     ws_id: str, graph_id: str, branch_id: str,
+    payloads: Literal["all", "changes"] = Query(
+        "all", description="`changes`: a modified entity by id and kind alone, without its "
+                           "before/after payloads — enough to count changes and ring nodes."),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -1994,7 +2075,8 @@ async def get_diff_vs_main(
     as whole node/edge payloads with before/after — the shape the canvas diff overlay
     and Changes panel consume directly, without client-side state joins."""
     with _domain_errors():
-        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer,
+                                             payloads=payloads)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary",
@@ -2142,6 +2224,13 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
     FalkorDB in the P6 integration tests)."""
     from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
     d = int(depth)
+    # Both statements below are pure MATCH/RETURN, so they go as GRAPH.RO_QUERY:
+    # a master running with ``min-replicas-to-write`` refuses every write-flagged
+    # command while it is short of in-sync replicas, and GRAPH.QUERY is
+    # write-flagged whatever the Cypher says. It is the same node either way —
+    # no GRAPH.* command is in redis-py's read table, so nothing is routed to a
+    # replica. A client without ``ro_query`` (a test fake) behaves as before.
+    read = getattr(graph, "ro_query", None) or graph.query
     pat = {"out": f"(s)-[r*1..{d}]->(n)", "in": f"(s)<-[r*1..{d}]-(n)"}.get(direction, f"(s)-[r*1..{d}]-(n)")
     params = {"urn": urn, "limit": int(limit)}
     where = ""
@@ -2153,7 +2242,7 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
         f"WITH s, collect(DISTINCT n) AS ns "          # collect() drops nulls
         f"UNWIND ([s] + ns) AS x RETURN DISTINCT x LIMIT $limit"
     )
-    res = await asyncio.wait_for(graph.query(cypher, params=params), timeout=10.0)
+    res = await asyncio.wait_for(read(cypher, params=params), timeout=10.0)
     nodes, node_urns = [], set()
     for row in (getattr(res, "result_set", None) or []):
         props = dict(row[0].properties)
@@ -2169,7 +2258,7 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
                 node_urns.add(props["urn"])
     edges = []
     if node_urns:
-        er = await asyncio.wait_for(graph.query(
+        er = await asyncio.wait_for(read(
             "MATCH (a)-[r]->(b) WHERE a.urn IN $urns AND b.urn IN $urns "
             "RETURN a.urn, b.urn, type(r), r", params={"urns": list(node_urns)}), timeout=10.0)
         for row in (getattr(er, "result_set", None) or []):
@@ -2272,7 +2361,6 @@ async def sync_ingest(
 # Backend-driven + automation-friendly: the same endpoints power the UI and a  #
 # scripted client. Independent of the aggregation/ingestion worker.            #
 # --------------------------------------------------------------------------- #
-_ie_service = None
 
 
 async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, branch_id=None):
@@ -2288,29 +2376,42 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, bran
     if not (workspace_id and view_id):
         return None
     try:
-        from backend.app.db.engine import get_async_session
-        from backend.app.db.models import ViewORM
-        from backend.app.db.repositories.view_repo import effective_view_config
-        from backend.app.services.layout_config import parse_reference_layout
-        async with get_async_session() as session:
-            view = await session.get(ViewORM, view_id)
-            if view is None:
-                return None
-            # Branch-effective export scope: a draft export scopes to the draft's
-            # own layer assignments (base ⊕ overlay); no branch/overlay → base.
-            config = await effective_view_config(session, view, branch_id)
-            cont = await _live_containment_types(session, workspace_id, data_source_id)
-        layout = parse_reference_layout(config)
-        # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
-        # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
-        assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
-        inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
-        if not assigned:
-            return None                              # nothing explicitly scoped → export whole DS
-        return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": cont}
+        return await _view_export_scope(workspace_id, data_source_id, view_id, branch_id)
     except Exception:
         logger.exception("view-scope resolution failed for export (view=%s)", view_id)
         return None
+
+
+async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=None):
+    """:func:`_resolve_export_view_scope`'s work, raising on failure instead of failing open."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ViewORM
+    from backend.app.db.repositories.view_repo import effective_view_config
+    async with get_async_session() as session:
+        view = await session.get(ViewORM, view_id)
+        if view is None:
+            return None
+        # Branch-effective export scope: a draft export scopes to the draft's
+        # own layer assignments (base ⊕ overlay); no branch/overlay → base.
+        config = await effective_view_config(session, view, branch_id)
+        cont = await _live_containment_types(session, workspace_id, data_source_id)
+    return export_scope_of(config, cont)
+
+
+def export_scope_of(config, containment_types: List[str]) -> Optional[Dict[str, Any]]:
+    """The export scope a view's design gives — its stored ``config``, or a sealed version's
+    definition (a view package's data follows the version it holds): the placed URNs, those whose
+    containment descendants come too, and the containment types to follow. ``None`` when it places
+    nothing. Pure (walks the whole design: a caller on the event loop runs it in a thread)."""
+    from backend.app.services.layout_config import parse_reference_layout
+    layout = parse_reference_layout(config)
+    # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
+    # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
+    assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
+    inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
+    if not assigned:
+        return None             # nothing explicitly scoped → a view export takes the whole DS
+    return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": containment_types}
 
 
 async def _resolve_ontology_types(workspace_id, data_source_id):
@@ -2351,7 +2452,8 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     from backend.app.db.models import ViewORM
     from backend.app.db.repositories import view_repo
     from backend.app.services.versioning.import_export.import_worker import (
-        compute_import_root_assignments)
+        compute_import_root_assignments, contract_import_root_assignments)
+    from backend.app.services.view_placement import PlacementSpec, contract_enabled
     from backend.common.models.management import ViewLayoutUpdateRequest
 
     async with get_async_session() as session:
@@ -2365,9 +2467,14 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         if not isinstance(raw, dict) or not raw.get("layers"):
             return {"added": 0}                          # no layers → nowhere to place the roots
         existing = raw.get("assignments") if isinstance(raw.get("assignments"), dict) else {}
-        cont = await _live_containment_types(session, ws, ds)
-        new_entries = compute_import_root_assignments(
-            created_nodes, batch_edges, cont, raw.get("layers"), existing)
+        if await contract_enabled(session):
+            new_entries = contract_import_root_assignments(
+                created_nodes, batch_edges, PlacementSpec.from_config(config),
+                await _live_containment_map(session, ws, ds), raw.get("layers"), existing)
+        else:
+            cont = await _live_containment_types(session, ws, ds)
+            new_entries = compute_import_root_assignments(
+                created_nodes, batch_edges, cont, raw.get("layers"), existing)
         if not new_entries:
             return {"added": 0}
         merged = {**existing, **new_entries}
@@ -2377,18 +2484,6 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         await view_repo.update_view_layout(
             session, view_id, ViewLayoutUpdateRequest(reference_layout=new_ref))
     return {"added": len(new_entries)}
-
-
-def get_import_export_service():
-    """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
-    global _ie_service
-    if _ie_service is None:
-        from backend.app.services.versioning.import_export.service import ImportExportService
-        _ie_service = ImportExportService(
-            versioning=_service, scope_resolver=_resolve_export_view_scope,
-            ontology_resolver=_resolve_ontology_types,
-            layout_writer=_write_view_import_assignments)
-    return _ie_service
 
 
 class CreateImportResponse(_ApiModel):
@@ -2402,7 +2497,6 @@ class CreateImportResponse(_ApiModel):
 async def create_import(
     ws_id: str, graph_id: str,
     request: Request,
-    background: BackgroundTasks,
     format: str = Query("ndjson"),
     reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
@@ -2429,9 +2523,125 @@ async def create_import(
             branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
             idempotency_key=idempotency_key)
     await ie.store.put_stream(created["source_uri"], request.stream())
-    background.add_task(ie.run_import_safe, created["job_id"])
+    status = await ie.start_import(created["job_id"])
     return {"jobId": created["job_id"], "branchId": created["branch_id"],
-            "sourceUri": created["source_uri"], "status": "running"}
+            "sourceUri": created["source_uri"], "status": status}
+
+
+# Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
+# (import_export/uploads.py). The single-request POST /imports above stays for scripts.
+
+class CreateUploadRequest(_ApiModel):
+    fileName: str = Field(..., max_length=500)
+    size: int = Field(..., gt=0)
+    format: str = Field("ndjson", max_length=16)
+
+
+@contextmanager
+def _upload_errors():
+    from backend.app.services.versioning.import_export.uploads import UploadError
+    try:
+        yield
+    except UploadError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+def _upload_view(record: dict, received: List[int]) -> dict:
+    return {"uploadId": record["uploadId"], "fileName": record["fileName"], "size": record["size"],
+            "format": record["format"], "partBytes": record["partBytes"], "parts": record["parts"],
+            "received": received, "jobId": record.get("jobId")}
+
+
+async def _load_upload(ie, ws_id: str, graph_id: str, meta: dict, upload_id: str, user: User) -> dict:
+    from backend.app.services.versioning.import_export import uploads
+    with _upload_errors():
+        return await uploads.load(ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
+                                  graph_id=graph_id, upload_id=upload_id, owner=user.id)
+
+
+@router.post("/graphs/{graph_id}/imports/uploads", status_code=201)
+async def create_import_upload(
+    ws_id: str, graph_id: str, body: CreateUploadRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
+    A file too large for its format is refused here, before any of it is sent (413)."""
+    from backend.app.services.versioning.import_export import uploads
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    try:
+        get_adapter(body.format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    with _upload_errors():
+        record = await uploads.create(
+            ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower())
+    return _upload_view(record, [])
+
+
+@router.get("/graphs/{graph_id}/imports/uploads/{upload_id}")
+async def get_import_upload(
+    ws_id: str, graph_id: str, upload_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Which of the upload's parts arrived whole: what to send again to resume it."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    return _upload_view(record, await uploads.received(ie.store, record))
+
+
+@router.put("/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part}")
+async def put_import_upload_part(
+    ws_id: str, graph_id: str, upload_id: str, part: int, request: Request,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """One part of the file, the raw request body. Sending a part again replaces it."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    with _upload_errors():
+        size = await uploads.put_part(ie.store, record, part, request.stream())
+    return {"part": part, "size": size}
+
+
+@router.post("/graphs/{graph_id}/imports/uploads/{upload_id}/complete", response_model=CreateImportResponse,
+             status_code=202)
+async def complete_import_upload(
+    ws_id: str, graph_id: str, upload_id: str,
+    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Import the uploaded file, once every part is in: as ``POST /imports`` does with a request
+    body. Asking again answers with the import already started."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    if record.get("jobId"):
+        job = await ie.get_job(record["jobId"]) or {}
+        return {"jobId": record["jobId"], "branchId": record.get("branchId"),
+                "sourceUri": uploads.record_key(record), "status": job.get("status") or "pending"}
+    missing = record["parts"] - len(await uploads.received(ie.store, record))
+    if missing:
+        raise HTTPException(status_code=409, detail=f"{missing} of the file's {record['parts']} parts haven't "
+                                                    "arrived yet. Send them, then complete the upload.")
+    with _domain_errors():
+        created = await ie.create_import_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
+            source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
+            scope_view_id=view_id)
+    await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
+    status = await ie.start_import(created["job_id"])
+    return {"jobId": created["job_id"], "branchId": created["branch_id"],
+            "sourceUri": created["source_uri"], "status": status}
 
 
 @router.get("/graphs/{graph_id}/imports")
@@ -2507,7 +2717,6 @@ class CreateExportResponse(_ApiModel):
              dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def create_export(
     ws_id: str, graph_id: str,
-    background: BackgroundTasks,
     format: str = Query("ndjson"),
     as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
     view_id: Optional[str] = Query(None, alias="viewId"),
@@ -2516,70 +2725,273 @@ async def create_export(
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
     meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Export the graph (or an as-of snapshot, E5) to a downloadable, re-importable artifact.
-    A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status."""
+    A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status.
+    The same records as ``/exports/stream``, written by the workers and stored, so the download
+    that follows resumes: how the Export dialog exports a data source with version control."""
+    from backend.app.api.v1.endpoints.graph_export import download_name
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
+    await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
+                               user=user, claims=claims, session=session, svc=svc)
     with _domain_errors():
         created = await ie.create_export_job(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
             branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key)
-    background.add_task(ie.run_export_safe, created["job_id"])
-    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": "running"}
+            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key,
+            file_name=download_name(filename, format) if filename else None)
+    status = await ie.start_export(created["job_id"])
+    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": status}
+
+
+# Streamed exports. The export dialog asks for a plan (what the export holds, so an empty one is
+# never downloaded), then the browser downloads the stream itself: nothing is stored, any pod
+# serves it, and memory stays flat at any size (import_export/stream.py).
+
+def _split_list(value: Optional[str]) -> List[str]:
+    return [x.strip() for x in (value or "").split(",") if x.strip()]
+
+
+async def _check_export_access(
+    ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], view_id: Optional[str],
+    viewer: Viewer, user: User, claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+) -> None:
+    """What every export checks before it reads: a draft only its readers export (someone else's
+    private draft is 403), and a view only one the caller can read, of this data source (404)."""
+    from backend.app.api.v1.endpoints.view_guards import readable_view
+
+    if branch_id:
+        with _domain_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    if view_id:
+        row = await readable_view(session, view_id, user, claims)
+        if row.workspace_id != ws_id or row.data_source_id != meta.get("data_source_id"):
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+
+async def _export_selection(
+    ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
+    view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
+    claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+):
+    """The snapshot an export reads and the selection it keeps, with what the view contributed."""
+    from backend.app.services.versioning.import_export import stream
+    from backend.app.services.versioning.import_export.snapshot import open_snapshot
+
+    await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
+                               user=user, claims=claims, session=session, svc=svc)
+    try:
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    keep, view = None, None
+    if view_id:
+        scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
+        view = {"viewId": view_id, "placements": 0, "found": 0, "entities": None}
+        if scope:
+            found = await stream.view_entities(snap, scope)
+            keep = found["keep"]
+            view.update(placements=found["placed"], found=found["found"], entities=len(keep))
+    selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
+    return snap, selection, view
+
+
+@router.get("/graphs/{graph_id}/exports/plan", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def plan_export(
+    ws_id: str, graph_id: str,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """What an export would hold, before anything is downloaded: node and edge counts (``None``
+    when too large to count quickly), whether it is empty, what the view contributed, and whether
+    the format can hold it (an Excel sheet stops at 1,048,575 rows)."""
+    from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
+    from backend.app.services.versioning.import_export import stream
+    fmt = export_format(format)
+    snap, selection, view = await _export_selection(
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    counts = await stream.count(snap, selection)
+    if counts["exact"]:
+        empty = counts["nodes"] + counts["edges"] == 0
+    else:
+        empty = False if counts.get("seen") else None           # unknown: nothing seen yet
+    return {"format": fmt, "nodes": counts["nodes"], "edges": counts["edges"], "exact": counts["exact"],
+            "empty": empty, "asOfSeq": snap.as_of_seq, "branchId": snap.branch_id, "view": view,
+            "formatLimit": excel_limit(fmt, counts), "maxBytes": stream.MAX_BYTES}
+
+
+@router.get("/graphs/{graph_id}/exports/stream", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def stream_export(
+    ws_id: str, graph_id: str,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    # Closed before the body streams: a long download holds no database connection.
+    session: AsyncSession = Depends(get_db_session, scope="function"),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Download an export as it is produced: the same records as the export job, streamed from
+    one pinned snapshot, in flat memory at any size. A plain GET so the browser downloads it
+    natively. Exports take turns (``GRAPH_EXPORT_CONCURRENCY`` per server): one waits for a turn,
+    and gets 429 with ``Retry-After`` if none frees up in time."""
+    from backend.app.api.v1.endpoints.graph_export import (
+        ExportStreamResponse, export_format, take_turn, xlsx_columns,
+    )
+    from backend.app.services.versioning.import_export import stream
+    fmt = export_format(format)
+    snap, selection, _view = await _export_selection(
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    turn = await take_turn()
+    try:
+        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
+    except BaseException:
+        stream.slots.release(turn)
+        raise
+    return ExportStreamResponse(
+        stream.write_export(lambda: stream.record_pages(snap, selection), fmt=fmt, columns=columns,
+                            props=_split_list(props)), turn=turn, fmt=fmt,
+        filename=filename or f"{meta.get('data_source_id') or graph_id}-export",
+        headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
+
+
+async def _may_read_export(ws_id: str, graph_id: str, meta: dict, job: Dict[str, Any], **caller) -> bool:
+    """Whether the caller may read an export job: what creating it checked, asked again, since
+    access changes. An export of a draft is its readers' only, and one of a view its readers'."""
+    try:
+        await _check_export_access(ws_id, graph_id, meta, branch_id=job.get("branchId"),
+                                   view_id=job.get("scopeViewId"), **caller)
+    except HTTPException as exc:
+        if exc.status_code in (403, 404):
+            return False
+        raise
+    return True
+
+
+async def _readable_export(ws_id: str, graph_id: str, job_id: str, meta: dict, ie, **caller) -> Dict[str, Any]:
+    """This graph's export job ``job_id``, when the caller may read it; else 404, as for none."""
+    job = await ie.get_job(job_id)
+    if (job is None or job.get("graphId") != graph_id or job.get("jobType") != "export"
+            or not await _may_read_export(ws_id, graph_id, meta, job, **caller)):
+        raise HTTPException(status_code=404, detail="export not found")
+    return job
 
 
 @router.get("/graphs/{graph_id}/exports")
 async def list_exports(
     ws_id: str, graph_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    return await ie.list_jobs(graph_id=graph_id, job_type="export")
+    """The graph's export jobs the caller may read, newest first."""
+    caller = dict(viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    readable: Dict[tuple, bool] = {}                    # one check per draft and view, not per job
+    jobs = []
+    for job in await ie.list_jobs(graph_id=graph_id, job_type="export"):
+        key = (job.get("branchId"), job.get("scopeViewId"))
+        if key not in readable:
+            readable[key] = await _may_read_export(ws_id, graph_id, meta, job, **caller)
+        if readable[key]:
+            jobs.append(job)
+    return jobs
 
 
 @router.get("/graphs/{graph_id}/exports/{job_id}")
 async def get_export(
     ws_id: str, graph_id: str, job_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    job = await ie.get_job(job_id)
-    if job is None or job.get("graphId") != graph_id:
-        raise HTTPException(status_code=404, detail="export job not found")
+    """An export job: its status, its place in the queue, and how far it has got while it runs
+    (``summary``: this pass's nodes and edges, the passes so far, the bytes written). A finished
+    one says whether its file is still ``kept`` to download (the store sweeps it after a day)."""
+    job = await _readable_export(ws_id, graph_id, job_id, meta, ie, viewer=viewer, user=user, claims=claims,
+                                 session=session, svc=svc)
+    if job.get("status") == "completed" and job.get("resultUri"):
+        job["kept"] = (await ie.store.stat(job["resultUri"])).exists
     return job
 
 
 @router.get("/graphs/{graph_id}/exports/{job_id}/download",
             dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def download_export(
-    ws_id: str, graph_id: str, job_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    ws_id: str, graph_id: str, job_id: str, request: Request,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    # Closed before the body streams: a download that takes hours holds no database connection.
+    session: AsyncSession = Depends(get_db_session, scope="function"),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    from fastapi.responses import StreamingResponse
-    result = await ie.open_result(job_id)
-    if result is None or result[0].get("graphId") != graph_id:
-        raise HTTPException(status_code=404, detail="export not found")
-    job, stream = result
+    """A finished export's file, as a download that resumes: ``Range`` asks for the part a broken
+    download lacks, and ``If-Range`` gets the whole file instead should it no longer be the one
+    that part came from."""
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
+
+    from backend.app.api.v1.endpoints.graph_export import stored_download
+
+    job = await _readable_export(ws_id, graph_id, job_id, meta, ie, viewer=viewer, user=user, claims=claims,
+                                 session=session, svc=svc)
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
+    stat = await ie.store.stat(job["resultUri"])
+    if not stat.exists:
+        raise HTTPException(status_code=404, detail="This export is no longer kept. Export again.")
     fmt = job.get("importFormat") or "ndjson"
-    return StreamingResponse(
-        stream, media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="export-{job_id}.{fmt}"'})
+    filename = job.get("fileName") or f"export-{job_id}.{fmt}"
+    modified = (format_datetime(datetime.fromisoformat(job["completedAt"]).astimezone(timezone.utc), usegmt=True)
+                if job.get("completedAt") else None)
+    return await stored_download(
+        ie.store, job["resultUri"], size=stat.size, etag=f'"{job_id}-{stat.size}"', modified=modified,
+        filename=filename, media_type="application/zip" if filename.endswith(".zip") else "application/octet-stream",
+        range_header=request.headers.get("range"), if_range=request.headers.get("if-range"))
 
 
 # --------------------------------------------------------------------------- #
@@ -2747,10 +3159,15 @@ async def merge_pull_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    target = await svc.get_graph(str(_pr["target_graph_id"]))     # judged by the TARGET's ontology
+    cset = await _live_containment_types(session, ws_id, (target or {}).get("data_source_id"))
+    rules = await _rules_for_meta(session, ws_id, target)
     with _domain_errors():
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
+            containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
@@ -2971,7 +3388,16 @@ async def merge_merge_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
 ):
+    """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
+    entities is merged by a job instead: 202 with the job to poll, as for publish."""
+    target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    if source and await svc.branch_change_count(
+            graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+        return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
+                                    graph_id=target, branch_id=str(source), actor=user.id,
+                                    body=body, merge_request_id=pr_id)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     with _domain_errors():

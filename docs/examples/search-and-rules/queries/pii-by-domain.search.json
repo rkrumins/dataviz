@@ -1,0 +1,16 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": {
+    "results": "aggregates",
+    "aggregations": [
+      { "by": "ancestorType", "ancestorEntityTypes": ["domain"], "maxBuckets": 50, "sampleHitsPerBucket": 3 }
+    ]
+  }
+}

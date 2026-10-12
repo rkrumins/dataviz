@@ -43,7 +43,7 @@ def _bounded_query(client, cypher: str, params=None):
     its own init, so a module-level import is circular."""
     from .projection import _READ_TIMEOUT_MS, _q
 
-    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
+    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
 
 from . import config
 from .models import (
@@ -56,11 +56,9 @@ from .models import (
 )
 
 # Derived in-graph bookkeeping, excluded from every cache-vs-committed-main
-# comparison. Built from the ONE definition in ``config`` — see the note there
-# on why a second copy of this list was a bug.
-_NOT_DERIVED = " AND ".join(
-    f"NOT '{label}' IN labels(n)" for label in config.DERIVED_LABELS
-)
+# comparison. Built from the ONE definition in ``common.derived_artifacts`` —
+# see the note there on the two separate ways a second copy of this list broke.
+_NOT_DERIVED = config.not_derived_clause("n")
 
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
 # label the projector wrote (``_sanitize_label(entityType)``), not the raw ontology type.
@@ -130,11 +128,25 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
         ).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
             EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
+            # EXCLUDE THE ROLLUP LAYER, exactly as `falkor_counts` does.
+            #
+            # Reconciliation is about RAW committed lineage; `:AGGREGATED` edges are a
+            # derived cache the aggregation worker maintains. FalkorDB's side has always
+            # excluded them (`type(r) <> 'AGGREGATED'`) on the assumption that they are
+            # never committed to main. On a graph where they ARE — publishing a draft can
+            # commit materialised rollups into the version log — the two sides counted
+            # different things and the verify became PERMANENTLY unsatisfiable:
+            # Postgres 4,959 against FalkorDB 2,267, a difference of exactly the 2,692
+            # rollups. Every heal wrote all 4,959 edges correctly, then failed a comparison
+            # it could not satisfy, held the watermark back, and routed every read to
+            # Postgres — which serves no rollups at all. One publish silently cost a data
+            # source its entire aggregated-lineage layer, with no way to recover.
+            EdgeVersionORM.edge_type != "AGGREGATED",
         ))).scalar_one()
     return int(pg_nodes), int(triples)
 
 
-async def falkor_counts(client) -> Tuple[int, int]:
+async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
     """Node/edge counts in a FalkorDB cache graph, excluding derived-cache artifacts.
 
     The ``:AGGREGATED`` rollup layer and the bookkeeping nodes beside it are derived (aggregation
@@ -146,7 +158,28 @@ async def falkor_counts(client) -> Tuple[int, int]:
     graph, so omitting it left the count one high after ANY aggregation job (including one the
     projector queued itself via ``on_rollups_stale``). ``_sweep_tombstoned`` cannot clear it — it
     carries no tombstone — so the verify reported extra entities, ``published`` went False, and
-    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand."""
+    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand.
+
+    ``owned=False`` is a graph the projector did not mint (``projection_state.owns_falkor_graph``):
+    a customer's own graph, pinned by "enable version control". Postgres holds only what the reader
+    can see of it (``bootstrap_worker``), so that is what is counted: nodes with a (non-empty) ``urn``, and
+    edges between two of them as DISTINCT ``(source, type, target)`` triples — the same shape as
+    :func:`pg_live_counts_projectable`, because such a graph may hold parallel relationships of one
+    type between one pair, which the projector's own graphs never do. Counting every node and every
+    relationship there reported the urn-less nodes and the parallel copies as "extra entities" on
+    every verify. A graph the projector owns is counted as before: anything there that it did not
+    write IS drift."""
+    if not owned:
+        fn = await _bounded_query(
+            client,
+            f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND {_NOT_DERIVED} "
+            "RETURN count(n) AS c")
+        fe = await _bounded_query(
+            client,
+            "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL "
+            "AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
+            "RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c")
+        return int(fn.result_set[0][0]), int(fe.result_set[0][0])
     fn = await _bounded_query(
         client,
         f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
@@ -154,6 +187,67 @@ async def falkor_counts(client) -> Tuple[int, int]:
         client,
         "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
+
+
+@dataclass
+class RollupHealth:
+    """What a graph's ``:AGGREGATED`` rollups can be trusted for. The ONE reading of it —
+    the projector decides "move by delta vs hand to the batch job" on it, and "Check sync"
+    reports it — so the two can never disagree about a graph."""
+    aggregated: int              # rollup relationships stored
+    stubs: int                   # rollups with no aggKey: rows replayed from an old import, never computed
+    baseline: bool               # an aggregation run derived the whole set (its _AggMeta stamp is present)
+    maintained: bool             # the projector has been moving them by delta (_GVRollupMeta present)
+    reconcile_interrupted: bool  # a reconcile died between its raw and rollup writes, and no
+                                 # aggregation run has STARTED since to re-derive them
+
+    def trusted(self, lineage_edges: int) -> bool:
+        """Exactly what the raw edges imply, so a difference can be applied by delta: a set an
+        aggregation run derived (and deltas have kept since), or the empty set over no lineage.
+        Anything else — a first seed, a restore after eviction, a graph no run ever covered —
+        goes to the batch job, which also writes the _AggMeta stamp readers need."""
+        if self.stubs or self.reconcile_interrupted:
+            return False
+        return self.baseline or (self.aggregated == 0 and lineage_edges == 0)
+
+    @property
+    def status(self) -> str:
+        if self.stubs or self.reconcile_interrupted:
+            return "untrusted"
+        if self.aggregated == 0 and not (self.baseline or self.maintained):
+            return "missing"
+        return "ok"
+
+
+async def _one(client, cypher: str):
+    res = await _bounded_query(client, cypher)
+    rows = getattr(res, "result_set", None) or []
+    return rows[0][0] if rows and rows[0] else None
+
+
+async def reconcile_interrupted(client) -> bool:
+    """Two point reads — cheap enough for every projection pass. See :class:`RollupHealth`."""
+    reconciling = await _one(client, "MATCH (m:_GVRollupMeta) RETURN m.reconciling")
+    if not reconciling:
+        return False
+    run_start = await _one(client, "MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.runStartMs")
+    return not (run_start and int(run_start) > int(reconciling))
+
+
+async def rollup_health(client) -> RollupHealth:
+    """Read a graph's rollup health (a few small reads; the stub count scans the rollup layer
+    only). A reconcile's ``reconciling`` flag is cleared by the reconcile that set it, or
+    superseded by an aggregation run that STARTED after it (``_AggMeta.runStartMs``) — a run
+    that read the graph before the interruption cannot vouch for what was written after."""
+    aggregated = int(await _one(client, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") or 0)
+    stubs = int(await _one(
+        client, "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL RETURN count(r)") or 0) \
+        if aggregated else 0
+    baseline = int(await _one(client, "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)") or 0) > 0
+    maintained = int(await _one(client, "MATCH (m:_GVRollupMeta) RETURN count(m)") or 0) > 0
+    interrupted = await reconcile_interrupted(client)
+    return RollupHealth(aggregated=aggregated, stubs=stubs, baseline=baseline,
+                        maintained=maintained, reconcile_interrupted=interrupted)
 
 
 # --- Scan cypher (streamed via SKIP/LIMIT; see docstring on the pagination cost) --- #
@@ -207,6 +301,7 @@ class DriftReport:
     checked_at: str
     duration_ms: int
     skipped_reason: Optional[str] = None                 # "no projection target" | "projection in flight"
+    rollups: Optional[dict] = None                        # {status, aggregated, stubs} — see RollupHealth
 
 
 _SENTINEL = object()
@@ -277,6 +372,7 @@ class ProjectionReconciler:
             status = ps.status if ps is not None else "idle"
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
+            owned = bool(ps.owns_falkor_graph) if ps is not None else True
             # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
             # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
             # is NOT reported as a false shortfall / out-of-sync.
@@ -316,7 +412,7 @@ class ProjectionReconciler:
         client = self._client(name, provider_id)
         if inspect.isawaitable(client):
             client = await client
-        falkor_nodes, falkor_edges = await falkor_counts(client)
+        falkor_nodes, falkor_edges = await falkor_counts(client, owned=owned)
 
         missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
             client, graph_id, main_id, sample_limit, deep)
@@ -334,7 +430,15 @@ class ProjectionReconciler:
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
+        try:
+            health = await rollup_health(client)
+            rollups = {"status": health.status, "aggregated": health.aggregated,
+                       "stubs": health.stubs}
+        except Exception:                                # pragma: no cover - infra
+            logger.debug("rollup health unavailable for %s", graph_id, exc_info=True)
+            rollups = None
         return _report(
+            rollups=rollups,
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
             missing_edges=[], extra_edges=[],

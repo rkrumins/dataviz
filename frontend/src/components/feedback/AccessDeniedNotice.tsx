@@ -17,7 +17,7 @@
  *                   pills that used to render under inputs.
  *
  * Visual language mirrors the existing ``RequirePermission`` DeniedPanel
- * and ``AccessDeniedModal`` toast: amber/500 gradient icon box for
+ * and ``AccessDeniedModal`` notification: amber/500 gradient icon box for
  * permission denials, red/500 for unexpected errors. Same family of
  * monospace permission chips as the rest of the admin shell.
  */

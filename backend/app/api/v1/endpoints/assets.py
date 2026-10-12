@@ -64,7 +64,9 @@ async def get_rule_set(
 ):
     """Get a single assignment rule set."""
     await _require_workspace(session, ws_id)
-    rs = await assignment_repo.get_rule_set(session, rule_set_id)
+    rs = await assignment_repo.get_rule_set_for_workspace(
+        session, ws_id, rule_set_id,
+    )
     if not rs:
         raise HTTPException(status_code=404, detail=f"Rule set '{rule_set_id}' not found")
     return rs
@@ -79,6 +81,8 @@ async def delete_rule_set(
 ):
     """Delete an assignment rule set."""
     await _require_workspace(session, ws_id)
-    deleted = await assignment_repo.delete_rule_set(session, rule_set_id)
+    deleted = await assignment_repo.delete_rule_set_for_workspace(
+        session, ws_id, rule_set_id,
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Rule set '{rule_set_id}' not found")

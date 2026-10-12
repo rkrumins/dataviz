@@ -63,13 +63,18 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Per-probe deadline (seconds). Hard budget for one provider's
-# preflight. Keep tight — preflight is a TCP + tiny handshake, anything
-# beyond ~1s is a network problem we want to record, not wait for.
-PER_PROBE_DEADLINE_S: float = _env_float("PROVIDER_WARMUP_PROBE_DEADLINE_S", 1.5)
+# preflight. This loop runs OFF the request path, so the budget costs
+# nothing per user request — it only decides how often a healthy-but-busy
+# instance is misread as down. 3s (was 1.5s): a FalkorDB serializing a large
+# reply or forking for an RDB snapshot answers a fresh AUTH+PING late on its
+# main thread, and at 1.5s those misses were recorded as ``connect_timeout``,
+# then gated reads and flagged the provider unhealthy while it was serving.
+# A dead host still fails in one TCP connect timeout, well inside 3s.
+PER_PROBE_DEADLINE_S: float = _env_float("PROVIDER_WARMUP_PROBE_DEADLINE_S", 3.0)
 
 # Wall-clock backstop on top of the deadline (just in case preflight
 # misbehaves). Should be slightly larger than PER_PROBE_DEADLINE_S.
-PER_PROBE_WALL_CLOCK_S: float = _env_float("PROVIDER_WARMUP_PROBE_WALL_CLOCK_S", 2.0)
+PER_PROBE_WALL_CLOCK_S: float = _env_float("PROVIDER_WARMUP_PROBE_WALL_CLOCK_S", 4.0)
 
 # Sentinel / Cluster providers need a LARGER budget: their preflight does two
 # hops — topology discovery (Sentinel discover-master or CLUSTER SLOTS, itself a

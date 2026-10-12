@@ -1,109 +1,53 @@
 /**
- * useLogicalNodes
+ * useLogicalNodes — group (logical node) management for the View Wizard's layers.
  *
- * State machine for logical node CRUD within ViewWizard layers.
- * Provides undo/redo (20 steps), and pure functional helpers for
- * add / rename / delete / move operations on LogicalNodeConfig trees.
- *
- * Design: callers pass `layers` in and receive updates via `onUpdate`.
- * The hook owns the undo stack internally.
+ * ONE implementation with the Context View canvas: every operation is the canvas's own pure
+ * transform (`layerMutations` for the group tree, `assignmentMutations` for the entities placed in
+ * groups), applied to the WHOLE layout — layers and the canonical assignments together — and handed
+ * to the host's single `commit`, so the wizard's one undo history covers group edits too. It used to
+ * be a separate copy with its own rules: moving a group into its own descendant deleted it, deleting
+ * a group released its entities only in the legacy per-layer array (the canonical record kept
+ * pointing at a group that no longer existed), and there was no ungroup or "move everything into".
  */
-
-import { useCallback, useRef, useState } from 'react'
+import { useCallback } from 'react'
 import { generateId } from '@/lib/utils'
-import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from '@/types/schema'
-
-const MAX_UNDO_STACK = 20
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Deep-clone a lightweight POJO tree (no Dates / functions) */
-const cloneLayers = (layers: ViewLayerConfig[]): ViewLayerConfig[] =>
-    JSON.parse(JSON.stringify(layers))
-
-/** Find a logical node by ID anywhere in a recursive tree */
-function findNode(
-    nodes: LogicalNodeConfig[],
-    id: string
-): LogicalNodeConfig | undefined {
-    for (const n of nodes) {
-        if (n.id === id) return n
-        if (n.children?.length) {
-            const found = findNode(n.children, id)
-            if (found) return found
-        }
-    }
-}
-
-/** Remove a node from tree by ID, return [removed node, pruned tree] */
-function removeNode(
-    nodes: LogicalNodeConfig[],
-    id: string
-): [LogicalNodeConfig | null, LogicalNodeConfig[]] {
-    let removed: LogicalNodeConfig | null = null
-    const filtered = nodes.reduce<LogicalNodeConfig[]>((acc, n) => {
-        if (n.id === id) {
-            removed = n
-            return acc
-        }
-        const [rem, children] = removeNode(n.children ?? [], id)
-        if (rem) removed = rem
-        acc.push({ ...n, children })
-        return acc
-    }, [])
-    return [removed, filtered]
-}
-
-/** Insert a node into a tree (as child of parentId, or at root if parentId undefined) */
-function insertNode(
-    nodes: LogicalNodeConfig[],
-    node: LogicalNodeConfig,
-    parentId?: string
-): LogicalNodeConfig[] {
-    if (!parentId) return [...nodes, node]
-    return nodes.map(n => {
-        if (n.id === parentId) {
-            return { ...n, children: [...(n.children ?? []), node] }
-        }
-        return { ...n, children: insertNode(n.children ?? [], node, parentId) }
-    })
-}
-
-/** Update a node in tree */
-function updateNode(
-    nodes: LogicalNodeConfig[],
-    id: string,
-    patch: Partial<LogicalNodeConfig>
-): LogicalNodeConfig[] {
-    return nodes.map(n => {
-        if (n.id === id) return { ...n, ...patch }
-        return { ...n, children: updateNode(n.children ?? [], id, patch) }
-    })
-}
-
-/** Collect all entity assignments for a node and its children (for cascade on delete) */
-function collectNodeIds(node: LogicalNodeConfig): string[] {
-    return [node.id, ...(node.children ?? []).flatMap(collectNodeIds)]
-}
-
-// ─── Hook ─────────────────────────────────────────────────────────────────────
+import type { LogicalNodeConfig } from '@/types/schema'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import * as layerOps from '@/components/canvas/context-view/layerMutations'
+import { reassignGroupMembers, releaseGroupMembers } from '@/components/canvas/context-view/assignmentMutations'
 
 export interface UseLogicalNodesReturn {
     /** Add a top-level or nested group to a layer */
     addNode: (layerId: string, name: string, parentId?: string) => LogicalNodeConfig
     /** Rename an existing group */
     renameNode: (layerId: string, nodeId: string, name: string) => void
-    /** Delete a group — entity assignments cascade to the parent layer root */
+    /** Delete a group (and the groups inside it); its entities stay in the layer, ungrouped */
     deleteNode: (layerId: string, nodeId: string) => void
-    /** Move a node to a new parent (re-nest) */
+    /** Move a group into another group, or to the layer's top level (no parent). Never into itself
+     *  or its own descendants. */
     moveNode: (layerId: string, nodeId: string, newParentId?: string) => void
+    /** Move a group, with everything in it, to another layer — to its top level or into one of its
+     *  groups. The entities placed in it (and in its sub-groups) go along. */
+    moveNodeToLayer: (fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => string | null
+    /** Every layer with its groups — where a group can move to. */
+    layerChoices: () => Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
+    /** Dismantle a group: its sub-groups and entities move up one level */
+    ungroupNode: (layerId: string, nodeId: string) => string | null
+    /** Move everything in one group (entities and sub-groups) into another */
+    moveContents: (layerId: string, fromId: string, toId: string) => string | null
+    /** Is `name` already used by a group directly inside `parentId` (null = the layer's top level),
+     *  other than `exceptId`? Two groups side by side can't share a name — every operation refuses
+     *  that, and the moves above return the clashing name (null when done). */
+    nameTaken: (layerId: string, name: string, parentId: string | null, exceptId?: string) => boolean
+    /** The group a group sits in (null = the layer's top level). */
+    parentOf: (layerId: string, nodeId: string) => string | null
     /** Toggle collapse/expand visual state */
     toggleCollapse: (layerId: string, nodeId: string) => void
 
-    /** Flat list of all logical nodes for a layer (for quick lookup) */
+    /** The groups at the top of a layer (each carries its own children) */
     nodesForLayer: (layerId: string) => LogicalNodeConfig[]
 
-    /** Build the full display path for a logicalNodeId, e.g. "Finance > Data Mart" */
+    /** Build the full display path for a logicalNodeId, e.g. "Finance › Data Mart" */
     nodePathLabel: (layerId: string, nodeId: string) => string
 
     canUndo: boolean
@@ -112,195 +56,111 @@ export interface UseLogicalNodesReturn {
     redo: () => void
 }
 
+/** The host's undo history (the wizard's single one — group edits are part of it). */
+export interface LayoutHistory {
+    canUndo: boolean
+    canRedo: boolean
+    undo: () => void
+    redo: () => void
+}
+
+const NO_HISTORY: LayoutHistory = { canUndo: false, canRedo: false, undo: () => {}, redo: () => {} }
+
 export function useLogicalNodes(
-    layers: ViewLayerConfig[],
-    onUpdate: (layers: ViewLayerConfig[]) => void
+    layout: NormalizedReferenceLayout,
+    commit: (next: NormalizedReferenceLayout) => void,
+    history: LayoutHistory = NO_HISTORY,
+    /** Apply without an undo entry — for purely visual state (collapse). Defaults to `commit`. */
+    applyQuietly: (next: NormalizedReferenceLayout) => void = commit,
 ): UseLogicalNodesReturn {
-    // Undo/redo stacks hold full snapshots of layers
-    const undoStack = useRef<ViewLayerConfig[][]>([])
-    const redoStack = useRef<ViewLayerConfig[][]>([])
-    const [, forceRender] = useState(0)
-
-    // ── Snapshot helpers ────────────────────────────────────────────────────────
-
-    const pushSnapshot = useCallback((before: ViewLayerConfig[]) => {
-        undoStack.current = [
-            ...undoStack.current.slice(-MAX_UNDO_STACK + 1),
-            cloneLayers(before),
-        ]
-        redoStack.current = []
-        forceRender(n => n + 1)
-    }, [])
-
-    const commitUpdate = useCallback(
-        (before: ViewLayerConfig[], next: ViewLayerConfig[]) => {
-            pushSnapshot(before)
-            onUpdate(next)
-        },
-        [pushSnapshot, onUpdate]
+    const withLayers = useCallback(
+        (layers: NormalizedReferenceLayout['layers']): NormalizedReferenceLayout => ({ ...layout, layers }),
+        [layout],
     )
 
-    // ── CRUD operations ──────────────────────────────────────────────────────────
+    const addNode = useCallback((layerId: string, name: string, parentId?: string): LogicalNodeConfig => {
+        const node: LogicalNodeConfig = { id: generateId(), name: name.trim() || 'New Group', type: 'group', children: [] }
+        commit(withLayers(layerOps.addGroup(layout.layers, layerId, node, parentId)))
+        return node
+    }, [layout, commit, withLayers])
 
-    const addNode = useCallback(
-        (layerId: string, name: string, parentId?: string): LogicalNodeConfig => {
-            const newNode: LogicalNodeConfig = {
-                id: generateId(),
-                name: name.trim() || 'New Group',
-                type: 'group',
-                children: [],
-                collapsed: false,
-            }
-            const next = cloneLayers(layers).map(l => {
-                if (l.id !== layerId) return l
-                return {
-                    ...l,
-                    logicalNodes: insertNode(l.logicalNodes ?? [], newNode, parentId),
-                }
-            })
-            commitUpdate(layers, next)
-            return newNode
-        },
-        [layers, commitUpdate]
+    const renameNode = useCallback((layerId: string, nodeId: string, name: string) => {
+        const trimmed = name.trim()
+        if (trimmed) commit(withLayers(layerOps.renameGroup(layout.layers, layerId, nodeId, trimmed)))
+    }, [layout, commit, withLayers])
+
+    const deleteNode = useCallback((layerId: string, nodeId: string) => {
+        const removed = layerOps.groupSubtreeIds(layout.layers, layerId, nodeId)
+        commit(releaseGroupMembers(withLayers(layerOps.removeGroup(layout.layers, layerId, nodeId)), removed))
+    }, [layout, commit, withLayers])
+
+    const moveNode = useCallback((layerId: string, nodeId: string, newParentId?: string) => {
+        const layers = layerOps.moveGroup(layout.layers, layerId, nodeId, newParentId ?? null)
+        if (layers !== layout.layers) commit(withLayers(layers))
+    }, [layout, commit, withLayers])
+
+    const moveNodeToLayer = useCallback((fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => {
+        const next = layerOps.moveGroupToLayer(layout, fromLayerId, nodeId, toLayerId, newParentId ?? null)
+        if (next !== layout) { commit(next); return null }
+        const name = layerOps.listGroups(layout.layers, fromLayerId).find(g => g.id === nodeId)?.name
+        return name ? layerOps.groupNameClash(layout.layers, toLayerId, newParentId ?? null, [name], [nodeId]) : null
+    }, [layout, commit])
+
+    const layerChoices = useCallback(
+        () => layout.layers.map(l => ({ layerId: l.id, layerName: l.name, groups: layerOps.listGroups(layout.layers, l.id) })),
+        [layout],
     )
 
-    const renameNode = useCallback(
-        (layerId: string, nodeId: string, name: string) => {
-            const next = cloneLayers(layers).map(l => {
-                if (l.id !== layerId) return l
-                return {
-                    ...l,
-                    logicalNodes: updateNode(l.logicalNodes ?? [], nodeId, { name }),
-                }
-            })
-            commitUpdate(layers, next)
-        },
-        [layers, commitUpdate]
+    const ungroupNode = useCallback((layerId: string, nodeId: string) => {
+        const parent = layerOps.parentGroupOf(layout.layers, layerId, nodeId) ?? null
+        const clash = layerOps.groupNameClash(layout.layers, layerId, parent, layerOps.childGroupNames(layout.layers, layerId, nodeId), [nodeId])
+        if (clash) return clash
+        commit(reassignGroupMembers(withLayers(layerOps.ungroup(layout.layers, layerId, nodeId)), [nodeId], parent))
+        return null
+    }, [layout, commit, withLayers])
+
+    const moveContents = useCallback((layerId: string, fromId: string, toId: string) => {
+        const clash = layerOps.groupNameClash(layout.layers, layerId, toId, layerOps.childGroupNames(layout.layers, layerId, fromId))
+        if (clash) return clash
+        const layers = layerOps.moveGroupContents(layout.layers, layerId, fromId, toId)
+        const next = reassignGroupMembers(withLayers(layers), [fromId], toId)
+        if (next.layers !== layout.layers || next.assignments !== layout.assignments) commit(next)
+        return null
+    }, [layout, commit, withLayers])
+
+    const nameTaken = useCallback(
+        (layerId: string, name: string, parentId: string | null, exceptId?: string) =>
+            !!layerOps.groupNameClash(layout.layers, layerId, parentId, [name], exceptId ? [exceptId] : []),
+        [layout],
+    )
+    const parentOf = useCallback(
+        (layerId: string, nodeId: string) => layerOps.parentGroupOf(layout.layers, layerId, nodeId) ?? null,
+        [layout],
     )
 
-    const deleteNode = useCallback(
-        (layerId: string, nodeId: string) => {
-            const next = cloneLayers(layers).map(l => {
-                if (l.id !== layerId) return l
-
-                const [removed, prunedNodes] = removeNode(l.logicalNodes ?? [], nodeId)
-
-                // Cascade: clear logicalNodeId from any assignments that pointed at this node or its children
-                const idsToRemove = removed ? new Set(collectNodeIds(removed)) : new Set<string>()
-                const cleanedAssignments: EntityAssignmentConfig[] = (l.entityAssignments ?? []).map(a =>
-                    a.logicalNodeId && idsToRemove.has(a.logicalNodeId)
-                        ? { ...a, logicalNodeId: undefined }
-                        : a
-                )
-
-                return { ...l, logicalNodes: prunedNodes, entityAssignments: cleanedAssignments }
-            })
-            commitUpdate(layers, next)
-        },
-        [layers, commitUpdate]
-    )
-
-    const moveNode = useCallback(
-        (layerId: string, nodeId: string, newParentId?: string) => {
-            const next = cloneLayers(layers).map(l => {
-                if (l.id !== layerId) return l
-
-                const [removed, pruned] = removeNode(l.logicalNodes ?? [], nodeId)
-                if (!removed) return l
-
-                return {
-                    ...l,
-                    logicalNodes: insertNode(pruned, removed, newParentId),
-                }
-            })
-            commitUpdate(layers, next)
-        },
-        [layers, commitUpdate]
-    )
-
-    const toggleCollapse = useCallback(
-        (layerId: string, nodeId: string) => {
-            const next = cloneLayers(layers).map(l => {
-                if (l.id !== layerId) return l
-                const node = findNode(l.logicalNodes ?? [], nodeId)
-                if (!node) return l
-                return {
-                    ...l,
-                    logicalNodes: updateNode(l.logicalNodes ?? [], nodeId, { collapsed: !node.collapsed }),
-                }
-            })
-            // toggleCollapse is purely visual — don't push to undo stack
-            onUpdate(next)
-        },
-        [layers, onUpdate]
-    )
-
-    // ── Derived helpers ──────────────────────────────────────────────────────────
+    const toggleCollapse = useCallback((layerId: string, nodeId: string) => {
+        const toggle = (gs: LogicalNodeConfig[]): LogicalNodeConfig[] => gs.map(g => ({
+            ...g,
+            ...(g.id === nodeId ? { collapsed: !g.collapsed } : {}),
+            ...(g.children ? { children: toggle(g.children) } : {}),
+        }))
+        applyQuietly(withLayers(layout.layers.map(l => (l.id === layerId ? { ...l, logicalNodes: toggle(l.logicalNodes ?? []) } : l))))
+    }, [layout, applyQuietly, withLayers])
 
     const nodesForLayer = useCallback(
-        (layerId: string): LogicalNodeConfig[] => {
-            const layer = layers.find(l => l.id === layerId)
-            return layer?.logicalNodes ?? []
-        },
-        [layers]
+        (layerId: string): LogicalNodeConfig[] => layout.layers.find(l => l.id === layerId)?.logicalNodes ?? [],
+        [layout],
     )
-
-    const buildPath = (
-        nodes: LogicalNodeConfig[],
-        nodeId: string,
-        path: string[] = []
-    ): string[] | null => {
-        for (const n of nodes) {
-            if (n.id === nodeId) return [...path, n.name]
-            const found = buildPath(n.children ?? [], nodeId, [...path, n.name])
-            if (found) return found
-        }
-        return null
-    }
 
     const nodePathLabel = useCallback(
-        (layerId: string, nodeId: string): string => {
-            const layer = layers.find(l => l.id === layerId)
-            if (!layer) return ''
-            const path = buildPath(layer.logicalNodes ?? [], nodeId)
-            return path?.join(' → ') ?? ''
-        },
-        [layers]
+        (layerId: string, nodeId: string): string =>
+            layerOps.listGroups(layout.layers, layerId).find(g => g.id === nodeId)?.path ?? '',
+        [layout],
     )
 
-    // ── Undo / Redo ──────────────────────────────────────────────────────────────
-
-    const undo = useCallback(() => {
-        const stack = undoStack.current
-        if (!stack.length) return
-        const prev = stack[stack.length - 1]
-        undoStack.current = stack.slice(0, -1)
-        redoStack.current = [...redoStack.current, cloneLayers(layers)]
-        onUpdate(prev)
-        forceRender(n => n + 1)
-    }, [layers, onUpdate])
-
-    const redo = useCallback(() => {
-        const stack = redoStack.current
-        if (!stack.length) return
-        const next = stack[stack.length - 1]
-        redoStack.current = stack.slice(0, -1)
-        undoStack.current = [...undoStack.current, cloneLayers(layers)]
-        onUpdate(next)
-        forceRender(n => n + 1)
-    }, [layers, onUpdate])
-
     return {
-        addNode,
-        renameNode,
-        deleteNode,
-        moveNode,
-        toggleCollapse,
-        nodesForLayer,
-        nodePathLabel,
-        canUndo: undoStack.current.length > 0,
-        canRedo: redoStack.current.length > 0,
-        undo,
-        redo,
+        addNode, renameNode, deleteNode, moveNode, moveNodeToLayer, layerChoices, nameTaken, parentOf, ungroupNode, moveContents, toggleCollapse,
+        nodesForLayer, nodePathLabel,
+        canUndo: history.canUndo, canRedo: history.canRedo, undo: history.undo, redo: history.redo,
     }
 }

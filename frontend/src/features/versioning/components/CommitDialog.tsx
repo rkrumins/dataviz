@@ -2,7 +2,7 @@
  * CommitDialog — take a draft to main. PR-by-default: the primary action opens a
  * merge request (review path); "Publish directly" is the `:manage`-gated shortcut.
  * Conflict-aware: a 409 (main moved) surfaces a summary + the escape hatch, rather
- * than a generic error toast.
+ * than a generic error notification.
  *
  * ALREADY-IN-REVIEW. A branch may have only one live review, because a PR's diff is computed live
  * from its source branch — so edits made after it was raised are ALREADY in it. Raising a second
@@ -14,25 +14,35 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, X, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
-import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch } from '../hooks/useVersioning'
+import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
+import { invalidateViewVersions } from '@/hooks/useViewVersions'
+import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
+import { queryClient } from '@/lib/queryClient'
 import { MergeConflictError, NotUpToDateError, PullRequestExistsError } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
+import { DraftViewChanges } from './DraftViewChanges'
 import type { ChangeSet } from '../model/changeModel'
 
-interface CommitDialogProps {
+export interface CommitDialogProps {
   workspaceId: string
   graphId: string
   branchId: string
   changeSet: ChangeSet
   onClose: () => void
+  /** For a host that is itself a dialog (an import's success step): called once this dialog has
+   *  taken the person elsewhere (to the review, or to a view on the draft), so the host closes too. */
+  onLeave?: () => void
+  /** Called once the draft is published. */
+  onPublished?: () => void
 }
 
-export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose }: CommitDialogProps) {
+export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
@@ -41,7 +51,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const [raced, setRaced] = useState<{ prId: string; title?: string | null } | null>(null)
   /** "Publish now" while a review is open bypasses it — make that an explicit second step. */
   const [confirmBypass, setConfirmBypass] = useState(false)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const switchToMain = useBranchStore((s) => s.switchToMain)
@@ -51,7 +61,12 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const openMr = useOpenMergeRequest(workspaceId, graphId)
   const { livePr, pending: prPending } = useLivePrForBranch(workspaceId, graphId, branchId)
   const busy = publish.isPending || openMr.isPending
-  const hasChanges = changeSet.changes.length > 0
+  // A draft can change views too (imports staged in it, layer edits): they go live with it, so a
+  // draft of views alone is still worth publishing.
+  const viewChangesQ = useBranchViewChanges(workspaceId, graphId, branchId)
+  const viewChanges = viewChangesQ.data
+  const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
+  const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
 
   // The review that already covers this branch — from the list, or from a lost race.
   const existingPr = livePr ? { prId: livePr.prId, title: livePr.title } : raced
@@ -60,6 +75,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const goToReview = (prId: string) => {
     onClose()
     navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
+    onLeave?.()
   }
 
   const handleError = (e: unknown) => {
@@ -71,7 +87,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       // We lost a race (or the list was stale). Don't dead-end — show the review that won.
       setRaced({ prId: e.prId, title: e.prTitle })
     } else {
-      showToast('error', (e as Error).message)
+      notify('error', (e as Error).message)
     }
   }
 
@@ -82,9 +98,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, title: message || undefined, description: description || undefined },
       {
         onSuccess: (res) => {
-          showToast('success', 'Sent for review.')
-          onClose()
-          navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
+          notify('success', 'Sent for review.')
+          goToReview(res.prId)
         },
         onError: handleError,
       },
@@ -104,10 +119,17 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, message: message || 'Publish draft' },
       {
         onSuccess: (res) => {
-          // The receipt (not a toast) is the confirmation — the bar renders it until dismissed.
+          // Views the draft changed are live now: whatever showed them before is stale.
+          for (const v of viewChanges?.views ?? []) {
+            void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, v.viewId] })
+            invalidateViewVersions(queryClient, v.viewId)
+          }
+          if (viewChangeCount) void queryClient.invalidateQueries({ queryKey: ['views'] })
+          // The receipt (not a notification) is the confirmation — the bar renders it until dismissed.
           setReceipt({ commitId: res.commitId, graphId, counts: changeSet.counts, via: 'publish' })
           switchToMain()
           onClose()
+          onPublished?.()
         },
         onError: handleError,
       },
@@ -144,13 +166,25 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
         </div>
 
         <div className="px-6 pb-4 space-y-3">
-          {hasChanges ? (
+          {changeSet.changes.length > 0 && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted">This draft changes</span>
               <ChangeCountChips changeSet={changeSet} />
             </div>
-          ) : (
-            <p className="text-xs text-ink-muted">No changes detected in this draft yet.</p>
+          )}
+          {viewChanges && viewChangeCount > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-ink-muted">
+                {changeSet.changes.length > 0 ? 'And views, which go live with it:' : 'This draft changes views, which go live with it:'}
+              </p>
+              <DraftViewChanges changes={viewChanges} branchId={branchId} onNavigate={() => { onClose(); onLeave?.() }}
+                className="max-h-40 overflow-y-auto" />
+            </div>
+          )}
+          {!hasChanges && (
+            <p className="text-xs text-ink-muted">
+              {viewChangesQ.isLoading ? 'Looking for changes in this draft…' : 'No changes detected in this draft yet.'}
+            </p>
           )}
 
           {inReview ? (
@@ -240,6 +274,13 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
 
         <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
           {canManage && (
+            <HoverTip
+              className="inline-flex"
+              label={inReview
+                ? 'Publish straight to the live version, bypassing the open review'
+                : 'Publish straight to the live version, skipping review'}
+              detail="Everyone sees the result immediately"
+            >
             <button
               onClick={handlePublish}
               disabled={busy || !hasChanges}
@@ -249,13 +290,11 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
                   ? 'text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
                   : 'text-ink hover:bg-canvas-overlay',
               )}
-              title={inReview
-                ? 'Publish straight to the live version, bypassing the open review'
-                : 'Publish straight to the live version, skipping review'}
             >
               {publish.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
               {confirmBypass ? 'Publish anyway' : 'Publish now'}
             </button>
+            </HoverTip>
           )}
           {inReview ? (
             <button

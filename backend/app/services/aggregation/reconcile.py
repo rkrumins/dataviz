@@ -31,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Optional, Tuple
 
+from .holds import Hold, pause_active as _pause_active, resolve_source_hold, skip_for
+
 # ── Vocabulary ───────────────────────────────────────────────────────────
 # Both tuples are the single source of truth for their vocabulary: the API
 # schemas, the frontend labels and the tests all derive from them.
@@ -48,7 +50,9 @@ REASONS: Tuple[str, ...] = (
 # row was stale" look identical without this.
 SKIP_REASONS: Tuple[str, ...] = (
     "deleted",            # soft-deleted or deactivated data source
-    "platform_mastered",  # versioned — the projector owns its rollups
+    "platform_mastered",  # versioned — the projector owns its rollups,
+                          # and is demonstrably keeping up
+    "projection_stalled",  # versioned, but the projector is NOT keeping up
     "no_ontology",        # trigger() would raise OntologyResolutionError
     "no_stats",           # the stats service has never profiled it
     "stats_stale",        # counts too old to trust
@@ -57,6 +61,8 @@ SKIP_REASONS: Tuple[str, ...] = (
     "already_marked",     # the stale-marker reconciler owns it
     "cooldown",           # inside the rebuild throttle window
     "paused",             # snoozed by an operator until a time
+    "provider_held",      # the whole provider is paused/stopped by an operator
+    "fleet_held",         # the whole fleet is paused/stopped by an operator
     "failed_backoff",     # last attempt failed inside the cadence window
     "opted_out",          # aggregation_status == 'skipped'
     "disabled",           # auto-reconcile turned off for this source
@@ -71,6 +77,14 @@ SKIP_REASONS: Tuple[str, ...] = (
 DRIFT_STATES: Tuple[str, ...] = (
     "inSync", "drifting", "overlayMissing", "neverBuilt",
     "blocked", "unobservable", "suspended", "managed",
+    # RED, and worse than ``drifting``. ``drifting`` says the raw graph moved
+    # and the rollups need rebuilding; this says the rollups are not being
+    # SERVED AT ALL — while the projection watermark trails the published head
+    # every main read falls back to the version log, which holds none, so
+    # aggregated lineage is missing from the product right now. Deliberately
+    # NOT folded onto ``drifting``: that would under-state the problem and
+    # point the operator at a rebuild, which is not the fix.
+    "projectionStalled",
 )
 
 # Reason → the drift state it implies.
@@ -88,6 +102,7 @@ _SKIP_STATE: Dict[str, str] = {
     "suspended": "suspended",
     "in_sync": "inSync",
     "platform_mastered": "managed",
+    "projection_stalled": "projectionStalled",
 }
 
 
@@ -110,6 +125,21 @@ class Observation:
     # Postgres is the source of truth and FalkorDB a rebuildable read cache.
     # Resolved by the sweeper; see ``_guard``.
     platform_mastered: bool = False
+
+    # ── graphver.projection_state ⋈ graphver.graphs ────────────────────
+    # Only ever populated for a platform-mastered source, and only from a
+    # graph that is actually PINNED to a FalkorDB target — an unpinned graph
+    # projects nothing by design and must never read as wedged. All None
+    # means "not versioned, or nothing is projected here"; the sweeper never
+    # reaches evaluation with these unknown for a versioned source, because a
+    # health lookup it cannot answer defers the whole pass.
+    projection_commits_behind: Optional[int] = None
+    projection_last_error: Optional[str] = None
+    projection_checked_at: Optional[str] = None
+    # A projection pass is running for this graph right now. The watermark
+    # legitimately trails the head while one is in flight, so this is the
+    # normal state for the seconds after every publish rather than a wedge.
+    projection_in_progress: bool = False
 
     # ── public.data_source_stats (the stats service's output) ─────────
     has_stats: bool = False
@@ -142,6 +172,12 @@ class Observation:
     # source is still evaluated and still reports its finding, so the cockpit
     # can show what is wrong with something it has been told to leave alone.
     paused_until: Optional[str] = None
+    # A FLEET- or PROVIDER-scoped hold in force for this source, resolved by
+    # the sweeper once per pass from ``automation_holds`` (most restrictive
+    # wins — see ``holds.resolve_scope_hold``). Source-scope holds are NOT
+    # carried here; ``_hold`` derives them from ``paused_until`` and
+    # ``reconcile_enabled`` so an Observation built by hand still behaves.
+    scope_hold: Optional[Hold] = None
     recently_failed: bool = False
     # projection_mode == 'dedicated' ⇒ the overlay lives in ANOTHER graph
     # that get_stats() never scans, so observed_aggregated is meaningless.
@@ -152,6 +188,38 @@ class Observation:
 
     # ── resolved policy ───────────────────────────────────────────────
     reconcile_enabled: bool = True
+
+    @property
+    def projection_stalled(self) -> bool:
+        """The projector that owns this source's rollups is not current.
+
+        ONE narrow fact: the watermark trails the published head and no pass is
+        closing the gap. That is precisely — and only — what every string this
+        verdict renders asserts. Main reads fall back to the version log, which
+        holds no ``:AGGREGATED`` rows, so aggregated lineage is missing from
+        the product right now, and it clears on its own the moment the
+        watermark catches up.
+
+        Two readings are deliberately NOT this state, because for neither is
+        any of that sentence true:
+
+        * A pass in flight (``projecting``/``rebuilding``). It is working, not
+          wedged; the prescribed action ("someone has to look at version
+          control for it") is wrong, and a verdict that fires on ordinary
+          operation is a verdict operators learn to ignore. The drift
+          reconciler and the infrastructure panel already exclude it.
+        * A recorded ``last_error`` on a graph that has caught up. A failed
+          verify deliberately holds the watermark back, so a projector really
+          failing to publish is already behind; what is left over is a stale
+          error from a pass that ran weeks ago, which nothing ever clears. Ten
+          live graphs sat in that shape permanently. It stays EVIDENCE
+          (``projection_last_error``, still on the wire and still in the
+          infrastructure panel's not-publishing list), not a verdict.
+        """
+        if self.projection_in_progress:
+            return False
+        behind = self.projection_commits_behind
+        return behind is not None and behind > 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +244,7 @@ class Policy:
 # from absolute guards (deleted, no stats, …) which cannot evaluate at all.
 _HOLD_SKIPS: Tuple[str, ...] = (
     "cooldown", "failed_backoff", "disabled", "suspended", "paused",
+    "provider_held", "fleet_held",
 )
 
 
@@ -212,6 +281,10 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
             skip=skip,
             # Named skip states only — everything else preserves the prior stamp.
             drift_state=_SKIP_STATE.get(skip),
+            evidence=(
+                _projection_evidence(obs) if skip == "projection_stalled"
+                else {}
+            ),
         )
 
     for detector in (
@@ -288,6 +361,21 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # So this comes SECOND, ahead of every "someone else owns this" guard,
         # because that is exactly what it asserts. Recorded and surfaced as
         # 'managed', never acted on.
+        #
+        # BUT ONLY WHILE THE PROJECTOR IS ACTUALLY KEEPING UP. That whole
+        # justification is a claim about a running subsystem, and for fourteen
+        # hours on 2026-08-30 the claim was false: a wedged projection left
+        # ``projected_commit_seq`` below ``main_head_commit_seq``, every main
+        # read fell back to the version log — which holds no ``:AGGREGATED``
+        # rows — and aggregated lineage disappeared from the canvas while this
+        # guard kept stamping 'managed', i.e. "someone else owns this and is
+        # doing fine". So the claim is now VERIFIED rather than assumed.
+        #
+        # Still never acted on: a versioned source's recovery is a deliberate
+        # operator action on the projector, not a rebuild the sweep can queue.
+        # This is report-only, and it is the report that was missing.
+        if obs.projection_stalled:
+            return "projection_stalled"
         return "platform_mastered"
     if obs.aggregation_status == "skipped":
         return "opted_out"
@@ -326,33 +414,32 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
 
 def _hold(obs: Observation, policy: Policy) -> Optional[str]:
     """Post-detector refusal to act. Unlike ``_guard``, these run AFTER the
-    detectors so a held source still carries a reason and evidence."""
-    if _pause_active(obs.paused_until):
-        return "paused"
+    detectors so a held source still carries a reason and evidence.
+
+    The breaker is checked FIRST. It used to come last, after the pause, so
+    a source that was both paused and at the cap reported ``paused``, never
+    stamped ``suspended``, and never fired the suspension notice — while the
+    UI chip precedence ("Needs a person" outranks "Paused") said the
+    opposite. Now the tally and the chip agree.
+
+    Then the operator holds, widest scope first (``holds.resolve_hold``):
+    a fleet or provider hold arrives pre-resolved on ``obs.scope_hold``; the
+    source's own comes from its two columns. A hold does not clear the
+    finding — the whole point is that the cockpit keeps showing what is
+    wrong with something it has been told to leave alone.
+    """
+    if obs.consecutive_actions >= policy.breaker_cap:
+        return "suspended"
+    held = obs.scope_hold or resolve_source_hold(
+        obs.paused_until, obs.reconcile_enabled,
+    )
+    if held is not None:
+        return skip_for(held)
     if obs.in_cooldown:
         return "cooldown"
     if obs.recently_failed:
         return "failed_backoff"
-    if not obs.reconcile_enabled:
-        return "disabled"
-    if obs.consecutive_actions >= policy.breaker_cap:
-        return "suspended"
     return None
-
-
-def _pause_active(paused_until: Optional[str]) -> bool:
-    """True while a snooze is still in force. An unparseable stamp is treated
-    as expired: a corrupt value must not pause a source forever."""
-    if not paused_until:
-        return False
-    from datetime import datetime, timezone
-    try:
-        until = datetime.fromisoformat(paused_until)
-    except (TypeError, ValueError):
-        return False
-    if until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
-    return until > datetime.now(timezone.utc)
 
 
 def _idle_state(obs: Observation) -> str:
@@ -451,6 +538,20 @@ def _raw_drift(obs, policy) -> Tuple[Optional[str], Dict]:
     if obs.stored_raw_fingerprint == obs.observed_raw_fingerprint:
         return None, {}
     return "raw_drift", {}
+
+
+def _projection_evidence(obs: Observation) -> Dict:
+    """Why we refused to call a versioned source healthy, in the operator's
+    own units. Deliberately NOT merged into ``_base_evidence``: the raw
+    node/edge counts a projection-stalled source reports were measured against
+    whichever backend happened to answer, and quoting them beside this verdict
+    would invite exactly the "so rebuild it" reading this state exists to
+    prevent."""
+    return {
+        "projectionCommitsBehind": obs.projection_commits_behind,
+        "projectionLastError": obs.projection_last_error,
+        "projectionCheckedAt": obs.projection_checked_at,
+    }
 
 
 def _base_evidence(obs: Observation) -> Dict:

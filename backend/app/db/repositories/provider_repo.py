@@ -221,6 +221,17 @@ async def get_credentials(
     return _decrypt(row.credentials)
 
 
+def credentials_of(row: Optional[ProviderORM]) -> dict:
+    """Decrypted credentials for a row the caller ALREADY holds.
+
+    ``get_credentials`` re-reads the row; a caller iterating every provider
+    (the graph store topology sweep) would pay one query per provider for
+    data it just selected."""
+    if row is None or not row.credentials:
+        return {}
+    return _decrypt(row.credentials)
+
+
 async def has_workspaces(session: AsyncSession, provider_id: str) -> bool:
     """Check if any workspaces subscribe to catalog items from this provider."""
     from ..models import WorkspaceDataSourceORM, CatalogItemORM

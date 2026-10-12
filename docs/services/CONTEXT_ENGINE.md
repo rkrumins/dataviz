@@ -54,7 +54,9 @@ On top of ontology resolution, the engine exposes the read surface the product
 is built on, including:
 
 - Node / edge reads and queries (`get_nodes_query`, `get_edges`,
-  `get_children_with_edges`, `get_top_level_or_orphan_nodes`).
+  `get_children_with_edges`, `get_top_level_or_orphan_nodes`, and
+  `orphan_entity_types`, which returns the declared non-root types — the types
+  whose top-level instances are orphans — for `orphansOnly=true`).
 - Lineage and tracing (`get_lineage`, `trace`, `get_trace_v2`,
   `get_trace_delta_v2`, `expand_aggregated_edge`).
 - Aggregated edges (`get_aggregated_edges`, `materialize_aggregated_edges`).

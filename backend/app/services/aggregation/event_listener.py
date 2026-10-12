@@ -169,6 +169,7 @@ class AggregationEventListener:
                 )
                 await self._invalidate_aggregated_cache(
                     payload.get("workspace_id"), data_source_id,
+                    identity_stamped=payload.get("identity_stamped"),
                 )
                 await self._clear_stale_marker(
                     payload.get("workspace_id"), data_source_id,
@@ -230,13 +231,31 @@ class AggregationEventListener:
 
     async def _invalidate_aggregated_cache(
         self, workspace_id: Any, data_source_id: str,
+        identity_stamped: Any = None,
     ) -> None:
         """Any event that rewrote the :AGGREGATED layer (run completed,
         purge, failed/cancelled mid-write) invalidates the aggregated
         read caches through the shared choke point. Events from workers
         that predate the workspace_id field skip silently (the cache
         keys are workspace-scoped, so the scope can't be built without
-        it)."""
+        it).
+
+        ``identity_stamped`` is how many identity properties the run wrote
+        onto NODES. A rollup rebuild normally touches only the :AGGREGATED
+        layer, so the choke point invalidates the rollup reads and leaves the
+        hierarchy ones — top-level, children, the canvas bootstrap — warm,
+        which is what keeps a source's cache from going cold on every
+        rebuild. But the identity stamp writes ``urn`` and ``displayName``
+        onto the nodes themselves, and the hierarchy endpoints render those:
+        a run that stamped anything has changed more than the rollup layer
+        and must invalidate both. A conforming source stamps nothing and
+        reports 0, which is the common case.
+
+        Absent (an older worker, or an event that is not a completion) reads
+        as 0 — the narrow invalidation. That is the safe default only because
+        stamping is fill-only: it cannot silently change a value it did not
+        write, so a missed hint costs a stale display name until the next
+        bump, not a wrong graph."""
         if not workspace_id:
             logger.debug(
                 "aggregation event for %s carried no workspace_id — "
@@ -244,8 +263,14 @@ class AggregationEventListener:
             )
             return
         try:
+            stamped = int(identity_stamped or 0)
+        except (TypeError, ValueError):
+            stamped = 0
+        try:
             from backend.app.services.graph_cache import invalidate_aggregated_reads
-            await invalidate_aggregated_reads(str(workspace_id), data_source_id)
+            await invalidate_aggregated_reads(
+                str(workspace_id), data_source_id, identity_stamped=stamped,
+            )
         except Exception as e:
             logger.warning(
                 "Aggregated-edge cache invalidation failed for %s: %s",

@@ -12,8 +12,10 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -216,6 +218,38 @@ class PlatformSettingsORM(Base):
     id = Column(Integer, primary_key=True, default=1)
     identity_property = Column(Text, nullable=True)
     name_property = Column(Text, nullable=True)
+    # Counts-history retention, same "NULL means unset" semantics as the
+    # identity columns above: unset falls through to the PROFILING_*
+    # env defaults. Here rather than in env alone for the reason this table
+    # exists at all — retention is the kind of knob an operator changes in
+    # response to something, and a row carries ``updated_by``.
+    history_retention_days = Column(Integer, nullable=True)
+    history_max_rows_per_source = Column(Integer, nullable=True)
+    history_heartbeat_secs = Column(Integer, nullable=True)
+    # The other two tiers. `history_retention_days` predates them and holds
+    # the HOURLY window; these complete the set so an operator can size every
+    # tier without a redeploy. Same NULL-means-unset semantics.
+    profiling_raw_retention_days = Column(Integer, nullable=True)
+    profiling_daily_retention_days = Column(Integer, nullable=True)
+    #: How long after its last observation a source is called SILENT. A
+    #: product judgement — how patient to be before saying a source has gone
+    #: away — not a deployment one, so it belongs with the other overrides.
+    profiling_silent_after_secs = Column(Integer, nullable=True)
+    # Counts-anomaly alerting. Same NULL-means-unset semantics again.
+    # ``history_alert_min_severity`` is the floor: 'severe' alerts only on the
+    # extreme tail, 'notable' widens it. Nullable Boolean rather than a
+    # non-null default because "the operator turned this off" and "nobody has
+    # ever touched it" are different states, and only the first should
+    # override the deployment default.
+    #: Whether the profiling breakdowns SHOW the platform's own rolled-up
+    #: relationship types. Default on (see `resolve_retention_policy`): the
+    #: rollup is the lineage every view draws and a large share of the graph,
+    #: so hiding it made the chart disagree with the store. NULL = unset.
+    #: Governs EDGE types only — derived NODE labels stay hidden always.
+    profiling_include_derived_edges = Column(Boolean, nullable=True)
+    history_alerts_enabled = Column(Boolean, nullable=True)
+    history_alert_min_severity = Column(Text, nullable=True)
+    history_alert_cooldown_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -858,6 +892,19 @@ class ViewORM(Base):
     data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # The identity that travels with a view between environments. `id` is minted
+    # per environment; this one is copied into an exported file and adopted by the
+    # import, so dev's view and prod's copy of it can recognise each other and a
+    # second import updates the first instead of duplicating it. Not unique: a
+    # workspace may legitimately hold a view and a separate copy of it. NULL only
+    # on rows that predate the column and escaped its backfill.
+    portable_id = Column(Text, nullable=True, default=lambda: f"pv_{uuid.uuid4().hex}")
+    # Set while the view exists only in a draft: an import staged for review. It goes live,
+    # and this clears, when that draft is published or its review merges; abandoning the draft
+    # discards the view. Until then it is in no list, count or metric (``view_is_live``) and
+    # stays private. A logical ref to a graph-versioning branch, with no cross-schema FK (as
+    # ``view_layout_overlays.branch_id``).
+    draft_branch_id = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -874,6 +921,8 @@ class ViewORM(Base):
         Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_portable", "portable_id"),
+        Index("idx_view_draft_branch", "draft_branch_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
@@ -882,6 +931,15 @@ class ViewORM(Base):
 
     def __repr__(self) -> str:
         return f"<View id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+
+
+def view_is_live():
+    """The views there are: not deleted, and not waiting in a draft to go live.
+
+    Every query that lists, counts or measures views filters on this rather than on
+    ``deleted_at`` alone, so a view staged in a draft shows up nowhere until the draft is
+    published (tests/test_view_live_filter.py keeps new queries from missing it)."""
+    return and_(ViewORM.deleted_at.is_(None), ViewORM.draft_branch_id.is_(None))
 
 
 # ------------------------------------------------------------------ #
@@ -917,7 +975,8 @@ class ViewActivityLogORM(Base):
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
-            "'admin_viewed')",
+            "'admin_viewed', 'imported', 'exported', 'version_saved', "
+            "'version_restored')",
             name="ck_val_action_enum",
         ),
     )
@@ -941,12 +1000,24 @@ class ProductEventORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"pev_{uuid.uuid4().hex[:12]}")
     event_type = Column(Text, nullable=False)   # e.g. 'docs.feedback', 'docs.search_miss'
     actor_id = Column(Text, nullable=True)       # principal id who acted (if authenticated)
+    # What the event is ABOUT, denormalised out of the JSON payload so it can
+    # be grouped and filtered in SQL. Analytics counted opens per view by
+    # SELECTing every event in the window and decoding its payload in Python:
+    # correct, and linear in usage on a table that exists to grow with usage.
+    # NULL for the event types that have no single subject worth indexing (a
+    # docs vote, a finished tour), which is why it is nullable rather than a
+    # second required field on every signal.
+    subject_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=True)        # JSON string
     created_at = Column(Text, nullable=False, default=_now)
 
     __table_args__ = (
         Index("idx_product_events_type_created", "event_type", "created_at"),
         Index("idx_product_events_created", "created_at"),
+        # Serves both shapes the dashboard asks for: "opens per view over this
+        # window" (equality on type, group on subject) and "this one view's
+        # opens" (equality on both, range on created_at).
+        Index("idx_product_events_subject", "event_type", "subject_id", "created_at"),
     )
 
     def __repr__(self) -> str:
@@ -983,6 +1054,17 @@ class ViewLayoutOverlayORM(Base):
     # JSON: base bare referenceLayout snapshot captured at draft open.
     fork_base_layout = Column(Text, nullable=False, default="{}")
     fork_base_entity_scope = Column(Text, nullable=True)
+    # A draft that imports a file into the view proposes more than a layout: the rest of its
+    # design (``definition``: the portable definition minus the layout and scope above) and its
+    # label (name, description, icon, tags, view type), each beside the published value it
+    # replaces, so publishing merges them 3-way as it does the layout. NULL when the draft only
+    # edited layers. ``staged_provenance`` is the import's record (where the file came from,
+    # how it matched, its request id), written into the view's history when the draft goes live.
+    definition = Column(Text, nullable=True)
+    fork_base_definition = Column(Text, nullable=True)
+    label = Column(Text, nullable=True)
+    fork_base_label = Column(Text, nullable=True)
+    staged_provenance = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -992,6 +1074,147 @@ class ViewLayoutOverlayORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewLayoutOverlay view_id={self.view_id!r} branch_id={self.branch_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# view_versions (the history of a view's design)                       #
+# ------------------------------------------------------------------ #
+class ViewVersionORM(Base):
+    """One immutable, content-addressed checkpoint of a view's design.
+
+    ``definition`` is the portable definition (``view_transfer.canonical``) as canonical JSON,
+    and ``content_hash`` is its SHA-256. The same design hashes the same in every
+    environment, which is how an imported view proves nothing was lost and how a later import
+    finds the version the two sides last agreed on.
+
+    This is NOT graph version control. Drafts, commits and pull requests version the graph's
+    DATA; this table versions the view's layers, assignments and settings, for every view
+    whether or not its data source is version-controlled.
+
+    Checkpoints are taken at deliberate moments (create, wizard save, import, restore, draft
+    promote, export, "Save version"), never per canvas autosave, so history stays readable and
+    bounded. ``name``/``description``/``icon``/``tags``/``view_type`` snapshot the label at that
+    moment; ``provenance`` records where an imported or restored version came from.
+    """
+    __tablename__ = "view_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"vv_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    definition = Column(Text, nullable=False)                 # canonical JSON
+    # Import versions only, when what was stored differs from the file (entities remapped or
+    # dropped, a merge, edits in the wizard): the FILE's design hash. A later file from the
+    # same lineage carries that hash in its history, so this version is still its merge base;
+    # the file's design itself is kept in ``provenance["originDefinition"]``.
+    origin_hash = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    icon = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                        # JSON array
+    view_type = Column(Text, nullable=False)
+    # baseline | create | wizard | import | restore | promote | export | manual | snapshot
+    source = Column(Text, nullable=False)
+    message = Column(Text, nullable=True)
+    parent_version = Column(Integer, nullable=True)
+    stats = Column(Text, nullable=True)                       # JSON: headline counts
+    provenance = Column(Text, nullable=True)                  # JSON: origin / restoredFrom / report
+    ontology_digest = Column(Text, nullable=True)
+    # Client-supplied idempotency key: a retried import returns the version its first
+    # attempt wrote instead of writing a second one.
+    request_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "version", name="uq_view_versions_view_version"),
+        Index("idx_vv_view_created", "view_id", "created_at"),
+        # Partial on both dialects: a bare postgresql_where is silently dropped on SQLite,
+        # where the repo tests run (see the uq_ds_* indexes above for the same trap).
+        Index("uq_vv_request_id", "request_id",
+              unique=True,
+              postgresql_where=text("request_id IS NOT NULL"),
+              sqlite_where=text("request_id IS NOT NULL")),
+        CheckConstraint(
+            "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
+            "'promote', 'export', 'manual', 'snapshot')",
+            name="ck_view_versions_source",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewVersion view_id={self.view_id!r} v{self.version} {self.content_hash[:15]!r}>"
+
+
+# ------------------------------------------------------------------ #
+# object_store_objects / object_store_chunks (import/export artifacts) #
+# ------------------------------------------------------------------ #
+
+class ObjectStoreObjectORM(Base):
+    """One import/export artifact (an upload, an export, a view package) in the shared store.
+
+    Every API pod reads and writes these rows, so a file stored by one pod is there for the
+    next request whichever pod serves it. The bytes are ``object_store_chunks`` rows of
+    ``blob_id``. An overwrite writes a new blob and repoints this row in one transaction, so a
+    reader never sees half an object (``services/storage/object_store.DatabaseObjectStore``).
+    """
+    __tablename__ = "object_store_objects"
+
+    key = Column(Text, primary_key=True)                      # {ws}/{ds}/{graph}/{job}/{name}
+    blob_id = Column(Text, nullable=False)
+    size = Column(BigInteger, nullable=False)
+    chunk_count = Column(Integer, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+class ObjectStoreChunkORM(Base):
+    """Chunk ``seq`` of blob ``blob_id``: 1 MiB of an artifact's bytes (the last may be shorter)."""
+    __tablename__ = "object_store_chunks"
+
+    blob_id = Column(Text, primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+# ------------------------------------------------------------------ #
+# view_saved_queries (a view's library)                                #
+# ------------------------------------------------------------------ #
+class ViewSavedQueryORM(Base):
+    """A search kept under a name in a view's library, for everyone who can
+    open the view. Saved queries belong to the view, not to a branch.
+
+    ``predicate`` is the search predicate as the client wrote it (JSON),
+    validated as a search's is. ``position`` orders the library's list."""
+    __tablename__ = "view_saved_queries"
+
+    id = Column(Text, primary_key=True)
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False, default=0)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    predicate = Column(Text, nullable=False)                  # JSON
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped by the service when the query itself changes — not by a
+    # reorder, which moves every row's position.
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_vsq_view", "view_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewSavedQuery id={self.id!r} view_id={self.view_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -1010,6 +1233,14 @@ class DataSourceStatsORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
     schema_stats = Column(Text, nullable=False, default="{}")        # JSON
     ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
     graph_schema = Column(Text, nullable=False, default="{}")        # JSON
@@ -1036,6 +1267,14 @@ class DataSourceStatsORM(Base):
     counts_digest = Column(Text, nullable=True)
     last_probed_at = Column(Text, nullable=True)
 
+    # Counts-history cadence marker. The history capture is change-gated on
+    # ``counts_digest``; this is what lets it also emit a continuity row when
+    # nothing has changed for a while, without a second query — the row is
+    # already loaded by the upsert that would capture. Same role
+    # ``last_probed_at`` plays for the probe lane. NULL until the first
+    # snapshot lands.
+    last_snapshot_at = Column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_ds_stats_probe_due", "last_probed_at"),
     )
@@ -1045,6 +1284,346 @@ class DataSourceStatsORM(Base):
 
     def __repr__(self) -> str:
         return f"<DataSourceStats ds_id={self.data_source_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_snapshots (historical entity counts)               #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountSnapshotORM(Base):
+    """One observation of a data source's entity/edge counts, kept forever
+    (until purged) instead of overwritten.
+
+    ``data_source_stats`` answers "how big is this graph NOW" and destroys the
+    previous answer on every write. This table is the append-only twin: what
+    the graph looked like at a point in time, broken down per label, with the
+    delta against the observation it replaced. It is what makes "an external
+    loader deleted half of this on Tuesday" a question anyone can answer.
+
+    **Not written on every counts poll.** Capture is change-gated on
+    ``counts_digest`` plus a heartbeat — see
+    ``stats_history_repo.maybe_capture_snapshot``. A source polled every 60s by
+    the drift probe produces a row when something actually moves and one
+    continuity row an hour otherwise, not 1,440 identical rows a day.
+
+    **No foreign key**, deliberately, and unlike ``data_source_stats``: this is
+    an audit trail, and the history of a source that was removed is exactly the
+    history someone comes looking for. ``data_source_id`` is a logical
+    reference, the same convention ``refresh_events`` already uses. Purge is
+    the only thing that deletes rows here.
+    """
+
+    __tablename__ = "data_source_count_snapshots"
+
+    id = Column(Text, primary_key=True, default=lambda: f"snp_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    captured_at = Column(Text, nullable=False, default=_now)
+
+    # Denormalised rollup keys. DOMAIN_OWNERSHIP.md sanctions exactly this
+    # ("add a denormalised workspace_id column when a real tenant-filtering
+    # query is needed") and here it earns its keep twice: the per-provider
+    # rollup reads this table alone instead of JOINing out of the stats domain
+    # into workspace/provider, and a row still names what it described after
+    # the data source row is gone.
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
+    edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
+    # The same digest ``data_source_stats.counts_digest`` carries, stored beside
+    # the counts it describes so "did this observation differ from the last
+    # one" stays answerable from this table alone.
+    counts_digest = Column(Text, nullable=False, default="")
+
+    # Which collection lane observed it. Kept because the lanes have very
+    # different cost and cadence, and "only the hourly sweep ever sees this
+    # source" is a real diagnosis.
+    lane = Column(Text, nullable=False, default="poll")
+    # Why the row exists. ``heartbeat`` rows are continuity, not events — the
+    # change ledger filters to ``changed`` so a reader sees movement, not ticks.
+    # NOT named ``trigger``: that is a reserved word in SQL.
+    capture_reason = Column(Text, nullable=False, default="changed")
+
+    # Deltas against the observation this one replaced. NULL on the first
+    # snapshot of a source, which has nothing to be a delta from.
+    prev_captured_at = Column(Text, nullable=True)
+    node_delta = Column(Integer, nullable=True)
+    edge_delta = Column(Integer, nullable=True)
+    # JSON: {"nodes": {"added": {lbl: n}, "removed": {lbl: n},
+    #                  "changed": {lbl: [before, after]}}, "edges": {...}}
+    # Stored rather than derived on read so a purged neighbour cannot silently
+    # change what a surviving row says happened.
+    type_deltas = Column(Text, nullable=True)
+
+    #: The refresh event whose run produced this observation, when one did.
+    #: Correlating by timestamp answers "what was running around then"; this
+    #: answers "what this run did", which is the question an operator asks
+    #: after a load. NULL for the cadence lanes, which belong to no run.
+    refresh_event_id = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dscs_ds_captured", "data_source_id", "captured_at"),
+        Index("ix_dscs_captured", "captured_at"),
+        Index("ix_dscs_provider_captured", "provider_id", "captured_at"),
+        # Tenant-scoped reads filter on this and had to scan without it. The
+        # column was already denormalised here; only the index was missing.
+        Index("ix_dscs_ws_captured", "workspace_id", "captured_at"),
+        Index("ix_dscs_refresh_event", "refresh_event_id"),
+        # A retried transaction can re-run capture with the same instant. Two
+        # rows for one observation make the rollup's "last value in bucket"
+        # arbitrary, so the pair is the real identity of a row here.
+        UniqueConstraint(
+            "data_source_id", "captured_at", name="uq_dscs_ds_instant",
+        ),
+        CheckConstraint(
+            "lane IN ('probe', 'poll', 'deep', 'sweep', 'write')",
+            name="ck_dscs_lane",
+        ),
+        CheckConstraint(
+            "capture_reason IN ('first', 'changed', 'heartbeat', 'run')",
+            name="ck_dscs_reason",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountSnapshot ds_id={self.data_source_id!r} "
+            f"at={self.captured_at!r} nodes={self.node_count}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_rollups (the compacted tiers)                      #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountRollupORM(Base):
+    """One time bucket of one data source's profile, compacted from raw.
+
+    Raw snapshots are the record of what was observed; this is the record of
+    what a period looked like. Both exist because they age differently: raw
+    resolution matters for days and is ruinous to keep for months, while a
+    30-day trend is cheap forever. The compactor builds ``hour`` rows from raw
+    BEFORE raw is purged, and ``day`` rows from ``hour`` — so coverage outlives
+    resolution instead of being bounded by it.
+
+    That inversion is the point. Retention used to be an age cutoff plus a
+    per-source row cap, and the cap could evict a thrashing source below the
+    30-day floor the product promises — the very source whose history someone
+    would come looking for. Here the floor is structural: a day bucket is one
+    row however violently the source moved inside it.
+
+    **Per source only.** Workspace, provider and platform series are sums of
+    these rows computed at read time. Materialising those scopes as their own
+    rows would mean four things to keep in agreement, and a membership ledger
+    that drifts is how :AGGREGATED weights got silently double-counted once
+    already. A sum over an indexed range is fast; a wrong number is not.
+
+    **Bucket-closing values, plus the extremes.** ``node_count`` is the last
+    observation in the bucket, which is what "how big was it at the end of
+    Tuesday" means. But a drop that happened and recovered inside the bucket is
+    exactly the event this feature exists to surface, and a closing value hides
+    it — so ``node_min``/``node_max`` are carried too, and the chart draws them
+    as a band at hour and day grain.
+    """
+
+    __tablename__ = "data_source_count_rollups"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rlp_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    #: ``hour`` | ``day``. Raw is not a grain here — raw lives in the snapshot
+    #: table and is compacted INTO this one.
+    grain = Column(Text, nullable=False)
+    #: Inclusive start of the bucket, as an ISO prefix padded to a full
+    #: instant (``2026-08-23T14:00:00+00:00``). Text like every other instant
+    #: in this schema, so lexical ordering is chronological ordering.
+    bucket_start = Column(Text, nullable=False)
+
+    # Denormalised from the snapshot rows, for the same reason they are
+    # denormalised there: scope filtering must not JOIN out of the stats domain.
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+
+    # Bucket-closing values.
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
+    edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
+
+    # Intra-bucket extremes, so a downsample cannot hide a dip that recovered.
+    node_min = Column(Integer, nullable=True)
+    node_max = Column(Integer, nullable=True)
+    edge_min = Column(Integer, nullable=True)
+    edge_max = Column(Integer, nullable=True)
+
+    # Movement across the bucket boundary — closing value minus the previous
+    # bucket's. Stored rather than derived so a purged neighbour cannot change
+    # what a surviving row says happened, matching the raw table's rule.
+    node_delta = Column(Integer, nullable=True)
+    edge_delta = Column(Integer, nullable=True)
+
+    #: How many raw observations went into this bucket, and how many of those
+    #: actually moved. "One observation all day" and "1,440 observations, all
+    #: identical" are the same line on a chart and very different facts.
+    observations = Column(Integer, nullable=False, default=0)
+    changed_observations = Column(Integer, nullable=False, default=0)
+
+    #: When the compactor wrote this row. A bucket at the trailing edge is
+    #: rebuilt as more raw arrives, so this is not the bucket's own time.
+    compacted_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # One row per source per bucket per grain — the compactor upserts on
+        # this, so a re-run over a trailing bucket refines it instead of
+        # duplicating it. That is what makes compaction safe to retry.
+        UniqueConstraint(
+            "data_source_id", "grain", "bucket_start", name="uq_dscr_bucket",
+        ),
+        Index("ix_dscr_ds_grain_bucket", "data_source_id", "grain", "bucket_start"),
+        Index("ix_dscr_grain_bucket", "grain", "bucket_start"),
+        Index("ix_dscr_provider_grain_bucket", "provider_id", "grain", "bucket_start"),
+        Index("ix_dscr_ws_grain_bucket", "workspace_id", "grain", "bucket_start"),
+        CheckConstraint("grain IN ('hour', 'day')", name="ck_dscr_grain"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountRollup ds_id={self.data_source_id!r} "
+            f"{self.grain}@{self.bucket_start!r} nodes={self.node_count}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_alerts (anomalies worth waking someone for)        #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountAlertORM(Base):
+    """One recorded anomaly in a data source's counts.
+
+    The snapshot table records what happened; this records what was worth
+    telling someone about. They are separate tables because they answer
+    different questions and age differently: snapshots are a dense series
+    purged on a retention window, alerts are sparse, are acknowledged by a
+    person, and must survive long enough to still be there when someone
+    follows the notification days later.
+
+    **Not derived on read.** The classification depends on the baseline of the
+    window it was evaluated in, and that window moves. An alert recomputed
+    later against a different baseline could quietly downgrade itself to
+    "normal" — so the verdict and the evidence behind it are frozen here at
+    the moment they were reached.
+
+    No foreign key, for the same reason as the snapshots: an alert about a
+    source someone then deleted is precisely the alert worth keeping.
+    """
+
+    __tablename__ = "data_source_count_alerts"
+
+    id = Column(Text, primary_key=True, default=lambda: f"alr_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    #: The observation that tripped it. Logical reference — the snapshot may
+    #: be purged out from under a long-lived alert, which is survivable
+    #: because everything needed to explain the alert is frozen below.
+    snapshot_id = Column(Text, nullable=True)
+    detected_at = Column(Text, nullable=False, default=_now)
+    #: When the movement itself happened, which is NOT when it was detected:
+    #: evaluation runs on a tick, so the two differ by up to one interval and
+    #: a reader ordering by the wrong one gets a confusing story.
+    observed_at = Column(Text, nullable=False)
+
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+    #: Resolved once, at alert time, so the notification can deep-link into
+    #: the history view (which is routed by catalog id, not data source id).
+    #: NULL when the graph has no catalog entry, or lost it since.
+    catalog_item_id = Column(Text, nullable=True)
+    #: Human names, frozen alongside the ids for the same reason everything
+    #: else here is frozen: an alert has to still say WHICH source under WHICH
+    #: provider was affected after the provider is renamed, the source is
+    #: relabelled, or either is deleted. An id alone sends the reader hunting.
+    provider_name = Column(Text, nullable=True)
+    data_source_label = Column(Text, nullable=True)
+
+    severity = Column(Text, nullable=False)   # notable | severe | critical
+    direction = Column(Text, nullable=False)  # drop | rise
+    node_delta = Column(Integer, nullable=False, default=0)
+    node_count = Column(Integer, nullable=False, default=0)
+    #: The baseline it was judged against, frozen. Without it the UI can say
+    #: "unusual" but not "unusual COMPARED TO WHAT", which is the difference
+    #: between a claim and an argument.
+    baseline = Column(Integer, nullable=False, default=0)
+    #: JSON: the per-label movement behind it, so the alert explains itself
+    #: without a second read.
+    evidence = Column(Text, nullable=True)
+
+    acknowledged_at = Column(Text, nullable=True)
+    acknowledged_by = Column(Text, nullable=True)
+
+    #: Which measure moved. Nodes and edges fail independently — a loader that
+    #: drops every relationship while leaving every entity intact is a total
+    #: failure that a node-only alerter cannot see — so the metric is part of
+    #: the alert's identity, not a detail inside its evidence.
+    metric = Column(Text, nullable=False, default="nodes", server_default="nodes")
+
+    #: What kind of finding this is. ``movement`` is the original: a delta far
+    #: outside what is ordinary for this source. The others are categorical and
+    #: cannot be expressed as a multiple of a baseline at all — a type that
+    #: reached zero, or a source that stopped answering.
+    finding = Column(
+        Text, nullable=False, default="movement", server_default="movement",
+    )
+
+    #: The entity/relationship type a ``type_gone`` finding is about. NULL for
+    #: findings that are about the source as a whole.
+    subject_type = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dsca_ds_detected", "data_source_id", "detected_at"),
+        # The fleet inbox: unacknowledged first, newest first. Partial indexes
+        # are not portable to the SQLite the tests use, so this is a plain
+        # composite the planner can still walk.
+        Index("ix_dsca_open", "acknowledged_at", "detected_at"),
+        CheckConstraint(
+            "severity IN ('notable', 'severe', 'critical')",
+            name="ck_dsca_severity",
+        ),
+        CheckConstraint(
+            "direction IN ('drop', 'rise')", name="ck_dsca_direction",
+        ),
+        CheckConstraint(
+            "metric IN ('nodes', 'edges')", name="ck_dsca_metric",
+        ),
+        CheckConstraint(
+            "finding IN ('movement', 'type_gone', 'silent')",
+            name="ck_dsca_finding",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountAlert ds_id={self.data_source_id!r} "
+            f"{self.severity}/{self.direction} delta={self.node_delta}>"
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -1251,22 +1830,56 @@ class UserORM(Base):
     metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
-    # Force a rotation on the next request. Set on the bootstrap admin
-    # when it is seeded with a shipped default password; cleared by
-    # ``user_repo.update_password``. Carried into the access token as a
-    # claim and enforced by ``get_current_user``.
+    # Force a rotation on the next request. Set on a password somebody
+    # else chose: the bootstrap admin's starting password (see
+    # ``auth/bootstrap.py``) and one an administrator sets for this account.
+    # Cleared when the account holder sets their own. Carried into the
+    # access token as a claim and enforced by every resolver in
+    # ``auth/dependencies.py``.
     must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
+    # Break-glass. A system account is out of scope for the SSO
+    # enforcement machinery: it keeps password sign-in while
+    # ``allow_local_login`` is off, forced sign-out sweeps skip it, and
+    # the admin-lockout guard does not count it. Set on the seeded
+    # bootstrap admin; toggled per user in Admin → Users.
+    is_system_account = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)
+    # Provider-supplied profile picture, fetched server-side at SSO
+    # login (the CSP forbids hotlinking a remote URL) and re-served from
+    # our own origin. ``avatar_source_url`` remembers where the bytes
+    # came from, so an unchanged claim skips the refetch and a changed
+    # one refreshes the image.
+    avatar_image = Column(Text, nullable=True)          # base64 bytes
+    avatar_image_type = Column(Text, nullable=True)     # e.g. image/png
+    avatar_source_url = Column(Text, nullable=True)
     # ISO instant before which refresh tokens are refused. Revoking
     # sessions only tombstones access-token ``sid``s, and ``refresh()``
     # mints a fresh ``sid`` rather than reusing one — so without this
     # cutoff a client that silently refreshed on a 401 walked straight
     # back in. Stamped by ``user_repo.revoke_sessions_from_now``.
     sessions_valid_from = Column(Text, nullable=True)
+    # When this person last used the platform, for Admin → Users. ISO
+    # instants like the columns around them, NULL until the thing first
+    # happens. Written through the conditional ``user_repo.touch_*``
+    # updates, which leave ``updated_at`` alone — that column means "the
+    # account was edited", and a sign-in is not an edit.
+    #: The last successful sign-in of any kind: password, invite, every SSO
+    #: kind, and a gateway's silent re-sign-in.
+    last_login_at = Column(Text, nullable=True)
+    #: The last authenticated request — the app open and in use. Recorded
+    #: at most once per ``user_activity.RESOLUTION_SECONDS``.
+    last_seen_at = Column(Text, nullable=True)
+    #: The last action that counts toward Activity analytics (a view
+    #: opened, a search or trace, an export or publish, a view edited) —
+    #: the same rows ``analytics_repo`` reads for "active users". Same
+    #: resolution as ``last_seen_at``.
+    last_active_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True)                       # soft delete
@@ -1368,7 +1981,8 @@ class IdpProviderORM(Base):
         UniqueConstraint("slug", name="uq_idp_providers_slug"),
         Index("idx_idp_providers_kind_enabled", "kind", "enabled"),
         CheckConstraint(
-            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile')",
+            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile', "
+            "'backchannel')",
             name="ck_idp_providers_kind",
         ),
         CheckConstraint(
@@ -1383,6 +1997,70 @@ class IdpProviderORM(Base):
 
     def __repr__(self) -> str:
         return f"<IdpProvider id={self.id!r} slug={self.slug!r} kind={self.kind!r}>"
+
+
+# ------------------------------------------------------------------ #
+# sso_backchannel_hosts  (which internal addresses SSO may reach)      #
+# ------------------------------------------------------------------ #
+
+
+class SsoBackchannelHostORM(Base):
+    """Internal hosts a ``backchannel`` provider is permitted to call.
+
+    ``assert_fetchable`` refuses every private address, which is right
+    for IdP metadata — that is published on the public internet — and
+    wrong for a back-channel identity gateway, which is on RFC1918 by
+    definition. This table is the exception, and it is a table rather
+    than a per-provider setting because a per-provider allowlist would
+    be circular: "the URL you typed is permitted" is not a control.
+
+    Why a row per entry rather than a JSON column: the security
+    argument for letting operators edit this at all rests on it being
+    attributable and revocable, so ``created_by`` and a delete that
+    takes effect on the next request are load-bearing, not decoration.
+
+    ``port`` is never implicit. Permitting a gateway on 443 must not
+    also permit whatever answers on 6379 on the same box, so the pair
+    is the key.
+
+    What an entry cannot do: reach loopback, link-local (cloud
+    metadata), multicast or reserved space. Those are refused in
+    ``providers/outbound.py`` regardless of what is stored here.
+    """
+
+    __tablename__ = "sso_backchannel_hosts"
+
+    id = Column(
+        Text, primary_key=True,
+        default=lambda: f"bch_{uuid.uuid4().hex[:12]}",
+    )
+    #: Which outbound flow the entry serves. ``gateway`` rows relax the
+    #: private-address refusal for the back-channel legs; ``avatar`` rows
+    #: name the external image hosts in-app avatars may be fetched from
+    #: (with the avatar list empty, external avatar hosts are refused —
+    #: the list is the on-switch, not a narrowing).
+    purpose = Column(Text, nullable=False, default="gateway",
+                     server_default="gateway")
+    #: Lowercased, trailing root dot stripped — normalised by the repo so
+    #: one destination is one row rather than three spellings.
+    host = Column(Text, nullable=False)
+    port = Column(Integer, nullable=False, default=443)
+    #: Free text: which gateway this is, who asked for it. Operators
+    #: come back to this list months later.
+    note = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("purpose", "host", "port",
+                         name="uq_sso_backchannel_purpose_host_port"),
+        CheckConstraint(
+            "port > 0 AND port <= 65535", name="ck_sso_backchannel_port",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SsoBackchannelHost {self.purpose}:{self.host}:{self.port}>"
 
 
 # ------------------------------------------------------------------ #
@@ -2442,6 +3120,24 @@ class RefreshTokenORM(Base):
     # to be hand-sized to outlive every token it guarded.
     revoked_at = Column(Text, nullable=True)
 
+    # Which IdP row minted this session; NULL for local password logins.
+    # Held here for the same reason ``auth_time`` above is: the refresh
+    # path needs it BEFORE it trusts anything in the token, and a claim
+    # the token can simply omit is not a fact about the session.
+    #
+    # Read by the ``backchannel`` liveness check, which re-confirms the
+    # upstream session on each rotation and needs to know which provider
+    # to ask — and, just as importantly, needs to know when NOT to ask,
+    # so a local or OIDC session is never probed.
+    idp_provider_id = Column(Text, nullable=True)
+
+    # Epoch seconds of the last SUCCESSFUL upstream liveness
+    # confirmation. Advanced only on a real answer, never on a timeout:
+    # it is the anchor the grace window is measured from, so letting a
+    # failed probe move it would make an outage renew the very
+    # permission it should be spending down.
+    idp_checked_at = Column(Integer, nullable=True)
+
     __table_args__ = (
         Index("idx_refresh_tokens_family", "family_id"),
         Index("idx_refresh_tokens_user", "user_id"),
@@ -2533,6 +3229,9 @@ class OutboxEventORM(Base):
         Index("idx_outbox_processed_created", "processed", "created_at"),
         Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id"),
         Index("idx_outbox_event_type", "event_type"),
+        # "These kinds of event, newest first, since then" — the shape of
+        # every per-kind read of this table, which only grows.
+        Index("idx_outbox_event_type_created", "event_type", "created_at"),
     )
 
     def __repr__(self) -> str:

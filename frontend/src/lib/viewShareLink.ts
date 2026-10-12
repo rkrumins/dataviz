@@ -8,20 +8,20 @@
  * with (the backend authorizes by view, not by membership).
  */
 import { useCallback } from 'react'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 
 export function buildViewShareUrl(viewId: string): string {
     return `${window.location.origin}/views/${encodeURIComponent(viewId)}`
 }
 
 export function useCopyViewLink() {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     return useCallback(async (viewId: string) => {
         try {
             await navigator.clipboard.writeText(buildViewShareUrl(viewId))
-            showToast('success', 'Link copied — anyone the view is shared with can open it')
+            notify('success', 'Link copied — anyone the view is shared with can open it')
         } catch {
-            showToast('error', 'Couldn’t copy the link')
+            notify('error', 'Couldn’t copy the link')
         }
-    }, [showToast])
+    }, [notify])
 }

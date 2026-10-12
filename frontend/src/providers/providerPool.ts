@@ -29,6 +29,17 @@ export function poolKey(
   return `${wsId}:${dsId ?? 'default'}:${branchId ?? 'main'}:${viewId ?? 'none'}`
 }
 
+/** Release every pooled provider's cached responses — the memory gauge's
+ *  "Free memory". Returns how many responses were dropped. */
+export function releaseProviderCaches(): number {
+  let dropped = 0
+  for (const { provider } of providerPool.values()) {
+    dropped += provider.cachedResponseCount
+    provider.releaseCaches()
+  }
+  return dropped
+}
+
 export function getOrCreateProvider(
   wsId: string,
   dsId: string | null,

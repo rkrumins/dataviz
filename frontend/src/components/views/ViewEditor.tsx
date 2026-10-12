@@ -21,6 +21,7 @@ import { EntityAssignmentPanel } from './EntityAssignmentPanel'
 import { LayerDropZoneRow } from './LayerDropZone'
 import { ReferenceModelBuilder } from './ReferenceModelBuilder'
 import { useInstanceAssignments } from '@/store/referenceModelStore'
+import { viewTypeLabel } from '@/lib/domainLabels'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -44,9 +45,9 @@ const GRANULARITY_LEVELS = [
 ]
 
 const LAYOUT_TYPES = [
-  { value: 'graph', label: 'Graph', icon: 'Network', description: 'Force-directed or DAG layout' },
-  { value: 'hierarchy', label: 'Hierarchy', icon: 'ListTree', description: 'Nested tree view' },
-  { value: 'reference', label: 'Context View', icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
+  { value: 'graph', label: viewTypeLabel('graph'), icon: 'Network', description: 'Force-directed or DAG layout' },
+  { value: 'hierarchy', label: viewTypeLabel('hierarchy'), icon: 'ListTree', description: 'Nested tree view' },
+  { value: 'reference', label: viewTypeLabel('reference'), icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
 ]
 
 export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
@@ -70,7 +71,6 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         visibleRelationshipTypes: schema?.relationshipTypes.map((r) => r.id) ?? [],
         defaultDepth: 5,
         maxDepth: 10,
-        rootEntityTypes: ['domain'],
       },
       layout: {
         type: 'graph',
@@ -222,8 +222,10 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
     onSave(finalView)
   }
 
+  // The full-viewport wrapper is inert; only the modal below opts back in, so
+  // nothing here can outlive an interrupted exit as a viewport-wide click-blocker.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
       {/* Backdrop */}
       <Backdrop open={true} onClick={onClose} zClassName="" className="bg-black/50" />
 
@@ -232,7 +234,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
-        className="relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-lg overflow-hidden flex flex-col"
+        className="pointer-events-auto relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-lg overflow-hidden flex flex-col"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border">

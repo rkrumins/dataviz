@@ -50,6 +50,7 @@ from lib.auth import authenticate, AuthError  # noqa: E402
 from lib.data import discover, IdPool  # noqa: E402
 from scenarios.aggregation_jobs import AggregationJobsTasks  # noqa: E402
 from scenarios.announcements import AnnouncementsTasks  # noqa: E402
+from scenarios.canvas_open import CanvasOpenTasks  # noqa: E402
 from scenarios.graph_children import GraphChildrenTasks  # noqa: E402
 from scenarios.graph_lineage import GraphLineageTasks  # noqa: E402
 from scenarios.graph_schema import GraphSchemaTasks  # noqa: E402
@@ -75,6 +76,10 @@ MIXED_TASKS = {
     GraphLineageTasks: 1,       # Tier-1 heavy: POST /graph/trace/v2
     GraphWalksTasks: 1,         # Tier-1 heavy: GET ancestors / descendants
     GraphChildrenTasks: 1,      # Tier-1 heavy: GET children / children-with-edges
+    # The view open itself: nodes/query batches + one edges/between. Twice the
+    # weight of a navigation query because every canvas session starts with
+    # one, and it is the path that turned load into "graph unavailable".
+    CanvasOpenTasks: 2,
 }
 
 

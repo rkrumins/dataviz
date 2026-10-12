@@ -50,7 +50,8 @@ class User(BaseModel):
     # Chosen avatar illustration, or None to fall back to initials.
     avatar_id: Optional[str] = Field(None, alias="avatarId")
     # True while the account is holding a password it must rotate before
-    # it can do anything else. See ``get_current_user``.
+    # it can do anything else. See ``_hold_for_password_change`` in
+    # ``backend/app/auth/dependencies.py``.
     must_change_password: bool = Field(False, alias="mustChangePassword")
     # IdP-mapped attributes. Empty dict for local-only users.
     attributes: dict = Field(default_factory=dict)
@@ -95,24 +96,56 @@ class IdentityService(Protocol):
         invalid, expired, or the user is not active."""
         ...
 
-    async def login(self, email: str, password: str) -> tuple[User, SessionTokens]:
+    async def login(
+        self, email: str, password: str, *, client: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
         """Authenticate by credentials and issue a fresh session.
 
         Raises ``InvalidCredentials`` for any failure (wrong password,
-        unknown email, inactive account) — never reveals which.
+        unknown email, inactive account) — never reveals which to the
+        caller. ``client`` (where the attempt came from) is recorded with
+        a refusal, alongside which of those it was.
         """
         ...
 
-    async def logout(self, refresh_token: Optional[str]) -> None:
-        """Revoke the refresh token and its rotation family. Idempotent."""
+    async def logout(
+        self,
+        refresh_token: Optional[str],
+        access_token: Optional[str] = None,
+    ) -> None:
+        """End the session: revoke the refresh family AND tombstone the
+        access token's ``sid`` so the token already in the caller's
+        hands stops being honoured. Idempotent.
+
+        ``access_token`` is optional only so a caller with no access
+        cookie (an already-expired session signing out) still works —
+        not because it is safe to omit. Omitting it when one is present
+        leaves the access token live until it expires.
+        """
         ...
 
-    async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:
+    async def refresh(
+        self, refresh_token: str, *,
+        ambient_cookies: Optional[dict] = None,
+        ambient_headers: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
         """Rotate a refresh token: returns new (user, tokens).
 
         Raises ``InvalidRefreshToken`` if the token is missing/invalid/expired,
         or — critically — if the same refresh token is presented twice
         (reuse detection: revokes the entire family).
+
+        ``ambient_cookies`` / ``ambient_headers`` are the inbound request's
+        own, forwarded so a session minted by a back-channel provider can be
+        re-confirmed with its IdP on this rotation — which is what stops our
+        session outliving the upstream session that created it. Declared here
+        because the route layer passes them; both default to None, and a
+        session that needs them and is not given them is treated as having no
+        ambient token, so a caller that forgets to forward gets a re-auth
+        prompt rather than a free pass.
+
+        May also raise ``SsoReauthRequired`` — for the 24h re-auth ceiling, or
+        when the upstream IdP no longer backs this session.
         """
         ...
 
@@ -157,9 +190,22 @@ class InvalidRefreshToken(AuthError):
 
 class SSOAuthError(AuthError):
     """SSO login could not be completed — e.g. the IdP subject's email
-    collides with an existing account and auto-linking is unsafe. The
-    route maps this to a generic failure; the reason is audited, not
-    shown to the browser."""
+    collides with an existing account and auto-linking is unsafe.
+
+    The route maps this to a generic failure and the full story is
+    audited. ``deny_reasons`` is the one deliberate exception: for
+    ``unsafe_auto_link`` the fetch-based routes surface it so the
+    sign-in page can say which rule refused the link — disclosure to
+    someone who has just proved control of the colliding email at the
+    IdP, not to an anonymous caller."""
+
+    def __init__(self, code: str, *, deny_reasons: tuple[str, ...] = (),
+                 user_id: Optional[str] = None):
+        super().__init__(code)
+        self.deny_reasons = deny_reasons
+        #: The existing account the refusal concerns, when there is one —
+        #: for the audit record, never for the caller.
+        self.user_id = user_id
 
 
 class SsoReauthRequired(AuthError):

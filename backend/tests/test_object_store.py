@@ -1,19 +1,43 @@
-"""LocalFsObjectStore — the v1 object-store backend for import/export artifacts (no infra).
+"""The object stores for import/export artifacts: the database store (the default), LocalFs, and
+the optional S3 store.
 
-Pure filesystem + asyncio, so it runs under the per-file runner
-(``PYTHONPATH=/tmp/pystub:/app python backend/tests/test_object_store.py``). Pins the behaviours
-the import/export pipeline relies on: streamed put/open round-trips without buffering the whole
-file, stat/existence, single-object + prefix (job-dir) deletion for the cleanup sweep, key
-traversal safety (a key can never escape IMPORT_STORE_ROOT), the self-describing
-{ws}/{ds}/{graph}/{job}/{name} key layout, and the LocalFs "backend" upload mode.
+The contract at the end runs the same behaviours against every store: LocalFs, the database, and an
+S3-compatible endpoint when ``OBJECT_STORE_S3_TEST_ENDPOINT`` is set (with boto3 installed).
+
+Pins the behaviours the import/export pipeline relies on: streamed put/open round-trips without
+buffering the whole file, stat/existence, single-object + prefix (job-dir) deletion for the cleanup
+sweep, key traversal safety (a key can never escape IMPORT_STORE_ROOT), the self-describing
+{ws}/{ds}/{graph}/{job}/{name} key layout, and the "backend" upload mode.
+
+The database store is what lets several API pods share artifacts, so it is held to more: bytes
+land in 1 MiB chunks whatever sizes arrive, a read can start at any offset, an overwrite is
+invisible until it is whole, a failed put leaves nothing behind, and the sweep reclaims expired
+objects and the chunks of puts that died. Those run on the unit-test database (SQLite).
 """
 import asyncio
+import contextlib
+import os
+import random
 import shutil
 import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
+from backend.app.db.models import ObjectStoreChunkORM, ObjectStoreObjectORM
+from backend.app.services.storage import object_store
+from backend.app.services.storage.object_store import (
+    DatabaseObjectStore,
+    LocalFsObjectStore,
+    ObjectStat,
+    get_object_store,
+    storage_key,
+)
+
+MiB = 1 << 20
 
 
 async def _drain(aiter):
@@ -74,6 +98,370 @@ async def _run() -> None:
 
 def test_object_store():
     asyncio.run(_run())
+
+
+async def test_local_fs_reads_from_an_offset_and_sweeps_old_files(tmp_path):
+    store = LocalFsObjectStore(tmp_path)
+    data = bytes(range(256)) * 40
+    await store.put_stream("ws1/job1/source.ndjson", _chunks(data))
+    for start in (0, 1000, len(data), len(data) + 5):
+        assert await _drain(store.open_stream("ws1/job1/source.ndjson", start=start)) == data[start:]
+
+    await store.put_stream("ws1/job2/export.ndjson", _chunks(b"old"))
+    past = time.time() - 2 * 3600
+    os.utime(tmp_path / "ws1" / "job2" / "export.ndjson", (past, past))
+    assert await store.sweep(older_than_hours=1) == 1
+    assert (await store.stat("ws1/job2/export.ndjson")).exists is False
+    assert (await store.stat("ws1/job1/source.ndjson")).exists is True
+
+
+async def test_local_fs_failed_put_leaves_no_half_file(tmp_path, monkeypatch):
+    """A mount's reader must never take half a file for the whole one: a put that fails, while
+    writing or when closing (on a bucket mount, closing is the upload), leaves nothing."""
+    store = LocalFsObjectStore(tmp_path)
+
+    async def broken():
+        yield b"x" * 1000
+        raise RuntimeError("the client went away")
+
+    with pytest.raises(RuntimeError):
+        await store.put_stream("ws1/job1/source.ndjson", broken())
+    assert (await store.stat("ws1/job1/source.ndjson")).exists is False
+
+    real_open = open
+
+    class _FailsOnClose:
+        def __init__(self, f):
+            self._f = f
+
+        def write(self, data):
+            return self._f.write(data)
+
+        def close(self):
+            self._f.close()
+            raise OSError("the bucket refused the upload")
+
+    monkeypatch.setattr("builtins.open", lambda *a, **k: _FailsOnClose(real_open(*a, **k)))
+    with pytest.raises(OSError):
+        await store.put_stream("ws1/job2/export.ndjson", _chunks(b"all of it"))
+    monkeypatch.undo()
+    assert (await store.stat("ws1/job2/export.ndjson")).exists is False
+
+
+def test_the_database_is_the_default_store(monkeypatch, tmp_path):
+    """Every API pod must see what another stored, so the shared database is the default."""
+    monkeypatch.delenv("OBJECT_STORE_BACKEND", raising=False)
+    assert isinstance(get_object_store(), DatabaseObjectStore)
+    monkeypatch.setenv("OBJECT_STORE_BACKEND", "local")
+    monkeypatch.setenv("IMPORT_STORE_ROOT", str(tmp_path))
+    assert isinstance(get_object_store(), LocalFsObjectStore)
+    monkeypatch.setenv("OBJECT_STORE_BACKEND", "s3")           # optional, and says what it lacks
+    monkeypatch.delenv("OBJECT_STORE_S3_BUCKET", raising=False)
+    with pytest.raises(RuntimeError, match="OBJECT_STORE_S3_BUCKET"):
+        get_object_store()
+
+
+async def test_the_worker_sweeps_the_store_daily(monkeypatch):
+    """The versioning worker's daily pass reclaims every kind of artifact, not only uploads."""
+    from backend.app.services import draft_views
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.worker import ProjectionWorker
+
+    swept = []
+
+    class _Store:
+        async def sweep(self, *, older_than_hours, keep_prefixes=()):
+            swept.append(older_than_hours)
+            return 0
+
+    class _Versioning:
+        async def sweep_idle_drafts(self):
+            return []
+
+    async def _settle(_versioning):
+        return {}
+
+    async def _no_pins():
+        return set()
+
+    from backend.app.services.versioning.import_export import uploads
+
+    monkeypatch.setattr(object_store, "get_object_store", lambda: _Store())
+    monkeypatch.setattr(draft_views, "settle", _settle)
+    monkeypatch.setattr(uploads, "jobs_input_prefixes", _no_pins)   # pins: test_upload_pins.py
+    await ProjectionWorker(None, versioning=_Versioning()).sweep_once()
+    assert swept == [config.OBJECT_STORE_TTL_HOURS]
+
+
+# ── DatabaseObjectStore ──────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def sessions(db_engine, db_session):
+    """Committing sessions on the unit-test database, as ``get_async_session`` behaves in
+    production. ``db_session`` creates the tables (and drops them afterwards)."""
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    @contextlib.asynccontextmanager
+    async def session():
+        async with factory() as s, s.begin():
+            yield s
+
+    return session
+
+
+@pytest.fixture()
+def db_store(sessions):
+    return DatabaseObjectStore(session_factory=sessions)
+
+
+async def _uneven(data: bytes):
+    """``data`` in small chunks of uneven sizes, the way a request body arrives."""
+    rng, i = random.Random(7), 0
+    while i < len(data):
+        n = rng.randint(1, 96 * 1024)
+        yield data[i:i + n]
+        i += n
+
+
+async def _chunk_rows(sessions, blob_id=None):
+    """``(blob_id, seq, bytes)`` for every stored chunk, or only ``blob_id``'s."""
+    q = select(ObjectStoreChunkORM.blob_id, ObjectStoreChunkORM.seq, func.length(ObjectStoreChunkORM.data))
+    if blob_id is not None:
+        q = q.where(ObjectStoreChunkORM.blob_id == blob_id)
+    async with sessions() as s:
+        return [tuple(r) for r in (await s.execute(
+            q.order_by(ObjectStoreChunkORM.blob_id, ObjectStoreChunkORM.seq))).all()]
+
+
+async def _blob_of(sessions, key):
+    async with sessions() as s:
+        return (await s.execute(
+            select(ObjectStoreObjectORM.blob_id).where(ObjectStoreObjectORM.key == key))).scalar_one_or_none()
+
+
+async def test_db_store_round_trips_an_object_in_1_mib_chunks(db_store, sessions):
+    data = random.Random(1).randbytes(3 * MiB + MiB // 2)
+    key = storage_key("ws1", "ds1", "g1", "job1", "source.ndjson")
+
+    stat = await db_store.put_stream(key, _uneven(data))
+    assert stat == ObjectStat(key=key, size=len(data), exists=True)
+    assert await db_store.stat(key) == stat
+    assert await _drain(db_store.open_stream(key)) == data
+    assert [n for _, _, n in await _chunk_rows(sessions)] == [MiB, MiB, MiB, MiB // 2], \
+        "whatever sizes arrive, the bytes land in 1 MiB chunks"
+    assert db_store.upload_target(key).mode == "backend"
+
+
+async def test_db_store_reads_from_any_offset(db_store):
+    data = random.Random(2).randbytes(3 * MiB + MiB // 2)
+    await db_store.put_stream("ws1/job1/export.ndjson", _uneven(data))
+    for start in (0, 12_345, MiB + 777, 2 * MiB, 3 * MiB, len(data) - 1, len(data), len(data) + 10, 5 * MiB):
+        assert await _drain(db_store.open_stream("ws1/job1/export.ndjson", start=start)) == data[start:], start
+
+    pieces = [len(c) async for c in db_store.open_stream("ws1/job1/export.ndjson", chunk_size=100_000, start=5)]
+    assert max(pieces) <= 100_000 and sum(pieces) == len(data) - 5
+
+
+async def test_db_store_overwrite_is_invisible_until_whole(db_store, sessions, monkeypatch):
+    monkeypatch.setattr(object_store, "_CHUNKS_PER_TXN", 2)   # so the rewrite commits as it goes
+    key = "ws1/job1/export.ndjson"
+    old = random.Random(3).randbytes(2 * MiB + 10)
+    await db_store.put_stream(key, _chunks(old))
+    old_blob = await _blob_of(sessions, key)
+    new = random.Random(4).randbytes(5 * MiB + 20)
+    seen, committed = [], []
+
+    async def rewrite():
+        for i in range(0, len(new), MiB):
+            yield new[i:i + MiB]
+            seen.append((await _drain(db_store.open_stream(key)), (await db_store.stat(key)).size))
+            committed.append(len(await _chunk_rows(sessions)) - len(await _chunk_rows(sessions, old_blob)))
+
+    await db_store.put_stream(key, rewrite())
+    assert max(committed) >= 4, "the rewrite committed chunks before it finished"
+    assert all(body == old and size == len(old) for body, size in seen), \
+        "until then every reader got the old object, whole"
+    assert await _drain(db_store.open_stream(key)) == new
+    assert await _chunk_rows(sessions, old_blob) == [], "the old chunks went with the swap"
+    assert len(await _chunk_rows(sessions)) == 6
+
+
+async def test_db_store_failed_put_leaves_nothing(db_store, sessions, monkeypatch):
+    monkeypatch.setattr(object_store, "_CHUNKS_PER_TXN", 2)
+    await db_store.put_stream("ws1/job1/upload.json", _chunks(b"old"))
+
+    async def broken():
+        for _ in range(5):
+            yield b"x" * MiB
+        raise RuntimeError("the client went away")
+
+    for key in ("ws1/job1/upload.json", "ws1/job2/upload.json"):
+        with pytest.raises(RuntimeError):
+            await db_store.put_stream(key, broken())
+    assert (await db_store.stat("ws1/job2/upload.json")).exists is False
+    assert await _drain(db_store.open_stream("ws1/job1/upload.json")) == b"old", "the object it was replacing is intact"
+    assert len(await _chunk_rows(sessions)) == 1, "and no chunk of either failed put is left"
+
+
+async def test_db_store_missing_key(db_store):
+    stream = db_store.open_stream("ws1/job1/missing")    # nothing is read until it is iterated
+    with pytest.raises(FileNotFoundError):
+        await stream.__anext__()
+    assert await db_store.stat("ws1/job1/missing") == ObjectStat(key="ws1/job1/missing", size=0, exists=False)
+    await db_store.delete("ws1/job1/missing")
+
+
+async def test_db_store_delete_and_delete_prefix_match_keys_literally(db_store, sessions):
+    keys = ["ws/g/job_1/source.ndjson", "ws/g/job_1/rejected.ndjson", "ws/g/jobX1/source.ndjson",
+            "ws/g/job_10/source.ndjson", "ws/g/job%1/source.ndjson", "ws/g/job_1"]
+    for key in keys:
+        await db_store.put_stream(key, _chunks(key.encode()))
+
+    async def left():
+        return [k for k in keys if (await db_store.stat(k)).exists]
+
+    await db_store.delete_prefix("ws/g/job_1")
+    assert await left() == ["ws/g/jobX1/source.ndjson", "ws/g/job_10/source.ndjson",
+                            "ws/g/job%1/source.ndjson", "ws/g/job_1"], \
+        "only what is under the job's directory: '_' is not a wildcard"
+    await db_store.delete_prefix("ws/g/job%1/")
+    assert await left() == ["ws/g/jobX1/source.ndjson", "ws/g/job_10/source.ndjson", "ws/g/job_1"], \
+        "nor is '%'"
+    await db_store.delete("ws/g/jobX1/source.ndjson")
+    assert await left() == ["ws/g/job_10/source.ndjson", "ws/g/job_1"]
+    assert len(await _chunk_rows(sessions)) == 2, "the chunks went with their objects"
+
+
+async def test_db_store_reads_a_few_chunks_per_session(db_store, sessions):
+    """A read takes ``_CHUNKS_PER_TXN`` chunks per session, not a session (and a round trip) per
+    MiB — from any offset, in order."""
+    data = random.Random(5).randbytes(20 * MiB + 5)
+    await db_store.put_stream("ws/g/job/big", _chunks(data))
+    opened = []
+
+    @contextlib.asynccontextmanager
+    async def counted():
+        opened.append(1)
+        async with sessions() as s:
+            yield s
+
+    reader = DatabaseObjectStore(session_factory=counted)
+    assert await _drain(reader.open_stream("ws/g/job/big")) == data
+    assert len(opened) == 1 + 3, "the object's row, then 21 chunks in 3 sessions"
+    assert await _drain(reader.open_stream("ws/g/job/big", start=9 * MiB + 7)) == data[9 * MiB + 7:]
+
+
+async def test_db_store_sweep_reclaims_old_objects_and_dead_puts(db_store, sessions):
+    await db_store.put_stream("ws1/job1/export.ndjson", _chunks(b"o" * (MiB + 1)))
+    await db_store.put_stream("ws1/job2/export.ndjson", _chunks(b"n"))
+    ago = lambda **kw: (datetime.now(timezone.utc) - timedelta(**kw)).isoformat()  # noqa: E731
+    async with sessions() as s:
+        await s.execute(update(ObjectStoreObjectORM).where(ObjectStoreObjectORM.key == "ws1/job1/export.ndjson")
+                        .values(created_at=ago(days=2)))
+        s.add(ObjectStoreChunkORM(blob_id="died", seq=0, data=b"d", created_at=ago(hours=2)))
+        s.add(ObjectStoreChunkORM(blob_id="running", seq=0, data=b"r", created_at=ago(minutes=5)))
+
+    assert await db_store.sweep(older_than_hours=24) == 1
+    assert (await db_store.stat("ws1/job1/export.ndjson")).exists is False
+    assert await _drain(db_store.open_stream("ws1/job2/export.ndjson")) == b"n"
+    assert {b for b, _, _ in await _chunk_rows(sessions)} == \
+        {await _blob_of(sessions, "ws1/job2/export.ndjson"), "running"}, \
+        "an hour-old orphan goes; a put still running keeps its chunks"
+
+
+# ── The contract every store keeps ───────────────────────────────────────────
+
+
+@pytest.fixture(params=["local", "database", "s3"])
+def any_store(request, tmp_path, monkeypatch):
+    """Each store in turn: S3 on the live endpoint the S3 tests use, under a prefix of its own
+    (skipped without one), emptied afterwards."""
+    if request.param == "local":
+        yield LocalFsObjectStore(tmp_path)
+    elif request.param == "database":
+        yield DatabaseObjectStore(session_factory=request.getfixturevalue("sessions"))
+    else:
+        from backend.tests.test_s3_object_store import live_store
+
+        store = live_store(monkeypatch)
+        yield store
+        asyncio.run(store.sweep(older_than_hours=-1))
+
+
+async def test_contract_round_trip_stat_and_reads_from_any_offset(any_store):
+    data = random.Random(8).randbytes(3 * MiB + 12_345)
+    key = storage_key("ws1", "ds1", "g1", "job1", "export.ndjson")
+
+    assert await any_store.put_stream(key, _uneven(data)) == ObjectStat(key=key, size=len(data), exists=True)
+    assert await any_store.stat(key) == ObjectStat(key=key, size=len(data), exists=True)
+    for start in (0, 1, MiB + 7, len(data) - 1, len(data), len(data) + 10):
+        assert await _drain(any_store.open_stream(key, start=start)) == data[start:], start
+    pieces = [len(c) async for c in any_store.open_stream(key, chunk_size=100_000, start=5)]
+    assert max(pieces) <= 100_000 and sum(pieces) == len(data) - 5
+
+    await any_store.put_stream(key, _chunks(b"rewritten"))
+    assert await _drain(any_store.open_stream(key)) == b"rewritten"
+    assert await any_store.put_stream("ws1/job1/empty", _chunks()) == \
+        ObjectStat(key="ws1/job1/empty", size=0, exists=True)
+    assert await _drain(any_store.open_stream("ws1/job1/empty")) == b""
+
+    assert await any_store.stat("ws1/job1/missing") == ObjectStat(key="ws1/job1/missing", size=0, exists=False)
+    with pytest.raises(FileNotFoundError):
+        await _drain(any_store.open_stream("ws1/job1/missing"))
+    assert any_store.upload_target(key).mode == "backend"
+
+
+async def test_contract_a_failed_put_leaves_nothing(any_store):
+    async def broken():
+        yield b"x" * MiB
+        raise RuntimeError("the client went away")
+
+    with pytest.raises(RuntimeError):
+        await any_store.put_stream("ws1/job1/upload.json", broken())
+    assert (await any_store.stat("ws1/job1/upload.json")).exists is False
+
+
+async def test_contract_deletes(any_store):
+    keys = ["ws/g/job_1/source.ndjson", "ws/g/job_1/rejected.ndjson", "ws/g/job_10/source.ndjson",
+            "ws/g/jobX1/source.ndjson"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(key.encode()))
+
+    async def left():
+        return [k for k in keys if (await any_store.stat(k)).exists]
+
+    await any_store.delete_prefix("ws/g/job_1")
+    assert await left() == ["ws/g/job_10/source.ndjson", "ws/g/jobX1/source.ndjson"], "only that job's folder"
+    await any_store.delete("ws/g/jobX1/source.ndjson")
+    await any_store.delete("ws/g/jobX1/source.ndjson")             # already gone: no error
+    assert await left() == ["ws/g/job_10/source.ndjson"]
+
+
+async def test_contract_the_sweep_keeps_what_jobs_still_read(any_store):
+    keys = ["ws/ds/g/j1/export.zip", "transfer-uploads/up_1/part-00000", "transfer-uploads/up_10/part-00000"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(b"x"))
+
+    assert await any_store.sweep(older_than_hours=1) == 0, "nothing is an hour old yet"
+    # A cutoff an hour ahead makes everything old (no store's clock can be set back).
+    assert await any_store.sweep(older_than_hours=-1, keep_prefixes={"transfer-uploads/up_1"}) == 2
+    assert [k for k in keys if (await any_store.stat(k)).exists] == ["transfer-uploads/up_1/part-00000"]
+
+
+async def test_contract_old_uploads_are_pruned_whole(any_store):
+    if not hasattr(any_store, "prune_older_than"):
+        pytest.skip("a store that can't tell an upload's age keeps it (prune_uploads)")
+    keys = ["transfer-uploads/up_1/part-00000", "transfer-uploads/up_2/part-00000",
+            "transfer-uploads/up_2/upload.json", "ws/ds/g/j1/export.zip"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(b"x"))
+
+    assert await any_store.prune_older_than("transfer-uploads", 3600) == 0
+    assert await any_store.prune_older_than("transfer-uploads", -3600,
+                                            keep_prefixes={"transfer-uploads/up_1"}) == 1, "up_2, whole"
+    assert [k for k in keys if (await any_store.stat(k)).exists] == \
+        ["transfer-uploads/up_1/part-00000", "ws/ds/g/j1/export.zip"]
 
 
 if __name__ == "__main__":

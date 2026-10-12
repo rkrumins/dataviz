@@ -8,12 +8,12 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
-    TraceClosureRequest, TraceClosureResult,
+    TraceClosureRequest, TraceClosureResult, EdgesBeneathResult,
 )
 
 from ..providers.base import GraphDataProvider
@@ -674,7 +674,9 @@ class ContextEngine:
     async def get_stats(self) -> Dict[str, Any]:
         return await self.provider.get_stats()
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
     async def _ensure_containment_edge_types(self, edge_types: Optional[List[str]]) -> List[str]:
@@ -714,18 +716,23 @@ class ContextEngine:
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         edge_types = await self._ensure_containment_edge_types(edge_types)
         if not lineage_edge_types:
             resolved = await self._resolve_ontology()
             if resolved and resolved.lineage_edge_types:
                 lineage_edge_types = list(resolved.lineage_edge_types)
+        # Forwarded only when widened, so a provider override that predates the
+        # parameter keeps working for every default-scope caller.
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
         return await self.provider.get_children_with_edges(
             urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
             sort_direction=sort_direction,
+            **scope_kw,
         )
 
     async def get_top_level_or_orphan_nodes(
@@ -810,6 +817,22 @@ class ContextEngine:
                 include_child_count=include_child_count,
             )
 
+    async def orphan_entity_types(self, requested: Optional[List[str]] = None) -> List[str]:
+        """Types whose top-level instances are orphans: every type the resolved
+        ontology defines that is not a root type, narrowed to ``requested``
+        case-insensitively. Introspected types are roots, so never listed; the
+        degraded fallback defines no types, so it lists none."""
+        resolved = await self._resolve_ontology()
+        if resolved is None:
+            return []
+        roots = {str(t).lower() for t in (getattr(resolved, "root_entity_types", None) or [])}
+        types = [t for t in (getattr(resolved, "entity_type_definitions", None) or {})
+                 if str(t).lower() not in roots]
+        if requested:
+            wanted = {str(t).lower() for t in requested}
+            types = [t for t in types if str(t).lower() in wanted]
+        return types
+
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()
         return await self.provider.get_edges(query)
@@ -822,16 +845,32 @@ class ContextEngine:
         """Execute an advanced node query."""
         return await self.provider.get_nodes(query)
 
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """One page of a node query, with whether another follows and where it
+        starts — as the provider counts it (see NodePage)."""
+        return await self.provider.get_nodes_page(query)
+
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         """Get distinct values for a node property."""
         return await self.provider.get_distinct_values(property_name)
 
-    async def get_node_degrees(self, urns, edge_types=None):
-        """Total lineage degree per URN (see provider docstring). Providers
-        without the capability degrade to {} — absent means unknown."""
+    async def get_node_degrees(self, urns, edge_types=None, include_rollups=False):
+        """Total lineage degree per URN (see provider docstring). A draft
+        counts through its base, moved by its own flows. The versioned-branch
+        reader cannot count at all, and says so the way its other unsupported
+        reads do (a 501 at the route): answering {} read as "unknown" for
+        every urn, which the canvas asked about again. It holds no roll-up
+        cells, so a collapsed container's presence would cost a containment
+        descent per container on every open, and raw counts alone would read
+        each such container as having no lineage.
+        Roll-up presence is passed on only when asked for."""
         fn = getattr(self.provider, "get_node_degrees", None)
         if fn is None:
-            return {}
+            raise NotImplementedError(
+                f"node degrees are not available on {type(self.provider).__name__}"
+            )
+        if include_rollups:
+            return await fn(urns, edge_types, include_rollups=True)
         return await fn(urns, edge_types)
 
     async def save_custom_graph(
@@ -1588,6 +1627,69 @@ class ContextEngine:
                 drill_anchor=getattr(req, "drill_anchor", None),
             )
 
+    #: Bounds for ``get_edges_beneath``: containment depth walked, entities per side, edges returned,
+    #: and children reads in flight at once (each one a query, or a pooled Postgres session on a draft).
+    BENEATH_MAX_DEPTH = 16
+    BENEATH_MAX_NODES = 2000
+    BENEATH_MAX_EDGES = 1000
+    BENEATH_CONCURRENCY = 8
+
+    async def get_edges_beneath(self, source_urn: str, target_urn: str) -> EdgesBeneathResult:
+        """The real lineage relationships a roll-up between two entities stands for: from the source
+        or anything it contains (any depth) to the target or anything it contains. Built only on
+        ``get_children`` and ``get_edges``, so every provider — a draft's included — answers it."""
+        resolved = await self._resolve_ontology()
+        lineage = _real_lineage_types(resolved.lineage_edge_types or []) if resolved else []
+        containment = list(resolved.containment_edge_types or []) if resolved else []
+        if not lineage:
+            return EdgesBeneathResult(edges=[], total=0)
+
+        (sources, cut_s), (targets, cut_t) = await asyncio.gather(
+            self._contents(source_urn, containment),
+            self._contents(target_urn, containment),
+        )
+        found = await self.provider.get_edges(EdgeQuery(
+            source_urns=sources, target_urns=targets, edge_types=lineage,
+            limit=self.BENEATH_MAX_EDGES,
+        ))
+        src, tgt = set(sources), set(targets)
+        edges = {
+            e.id: e for e in found
+            if e.source_urn in src and e.target_urn in tgt and e.source_urn != e.target_urn
+            and e.edge_type.upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
+        }
+        ordered = sorted(edges.values(), key=lambda e: (e.source_urn, e.target_urn, e.edge_type))
+        return EdgesBeneathResult(
+            edges=ordered, total=len(ordered),
+            truncated=cut_s or cut_t or len(found) >= self.BENEATH_MAX_EDGES,
+        )
+
+    async def _contents(self, root: str, containment: List[str]) -> Tuple[List[str], bool]:
+        """The entity and everything it contains, one containment level at a time, within the
+        depth and size bounds. True when a bound cut the walk short."""
+        seen, level = [root], [root]
+        known = {root}
+        gate = asyncio.Semaphore(self.BENEATH_CONCURRENCY)
+
+        async def children(parent: str):
+            async with gate:
+                return await self.provider.get_children(parent, edge_types=containment, limit=self.BENEATH_MAX_NODES)
+
+        for _ in range(self.BENEATH_MAX_DEPTH):
+            if not level or not containment:
+                return seen, False
+            pages = await asyncio.gather(*(children(p) for p in level))
+            level = []
+            for child in (c for page in pages for c in page):
+                if child.urn in known:
+                    continue
+                if len(seen) >= self.BENEATH_MAX_NODES:
+                    return seen, True
+                known.add(child.urn)
+                seen.append(child.urn)
+                level.append(child.urn)
+        return seen, bool(level)
+
     async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:
         """Resolve a level specifier (``"auto" | int | entity-type-id``) to an int.
 
@@ -1686,6 +1788,17 @@ class ContextEngine:
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_ancestors(urn, limit=limit, offset=offset)
+
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """See ``GraphDataProvider.get_ancestor_chains``. The draft and
+        versioned-branch readers carry no containment walk at all, and say
+        so the way their other unsupported reads do (a 501 at the route)."""
+        chains = getattr(self.provider, "get_ancestor_chains", None)
+        if not callable(chains):
+            raise NotImplementedError(
+                f"ancestor chains are not available on {type(self.provider).__name__}"
+            )
+        return await chains(urns)
 
     async def get_descendants(
         self, 
@@ -2016,6 +2129,25 @@ class ContextEngine:
         # affordance; the one-time migration heals the legacy
         # stampVersion<2 backlog. See readpath-perf plan, trigger-model
         # decision (2026-07-12).
+
+        # ``excludeInternal``: a selected container's roll-ups with no far side
+        # named hold a cell to each of its own descendants a flow inside it
+        # reaches, and to the ancestors it shares with a far end. The canvas
+        # cannot tell those apart for the rows of a closed container it never
+        # loaded, and they are the heaviest cells, so they filled its bound and
+        # cut off the partners it asked for. Both ends are placed through their
+        # chains (the chain cache, on FalkorDB); an end with no known chain
+        # cannot be told inside, and its cell is kept.
+        if request.exclude_internal and result.aggregated_edges:
+            chains = await self.get_ancestor_chains(sorted(
+                {u for e in result.aggregated_edges for u in (e.source_urn, e.target_urn)}))
+            kept = [e for e in result.aggregated_edges
+                    if e.source_urn not in chains.get(e.target_urn, ())
+                    and e.target_urn not in chains.get(e.source_urn, ())]
+            if len(kept) < len(result.aggregated_edges):
+                result = result.model_copy(update={
+                    "aggregated_edges": kept,
+                    "total_source_edges": sum(e.edge_count for e in kept)})
         return result
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
@@ -2182,6 +2314,7 @@ class ContextEngine:
         import uuid as _uuid
         from backend.app.ontology.mutation_validator import MutationOp, validate_edge_mutation
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import strip_deletes
 
         resolved = await self._get_resolved_ontology()
 
@@ -2212,7 +2345,7 @@ class ContextEngine:
             targetUrn=request.target_urn,
             edgeType=request.edge_type,
             confidence=1.0,
-            properties=request.properties,
+            properties=strip_deletes(request.properties) or {},
         )
 
         try:
@@ -2229,11 +2362,15 @@ class ContextEngine:
         return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
 
     async def update_edge(self, edge_id: str, request) -> Any:
-        """Update mutable edge properties."""
+        """Update mutable edge properties — a PATCH: ``properties`` sets, ``unsetProperties``
+        removes, everything else is kept. Raises ``InvalidPatch`` for a contradictory request."""
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import normalize_update
 
+        patch = normalize_update(
+            {"properties": request.properties}, getattr(request, "unset_properties", None))["properties"]
         try:
-            edge = await self.provider.update_edge(edge_id, request.properties)
+            edge = await self.provider.update_edge(edge_id, patch)
             if edge is None:
                 return EdgeMutationResult(success=False, error=f"Edge '{edge_id}' not found")
             return EdgeMutationResult(edge=edge, success=True)

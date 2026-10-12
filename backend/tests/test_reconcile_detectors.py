@@ -16,6 +16,7 @@ production incident:
 import pytest
 
 from backend.app.services.aggregation.fingerprint import (
+    counts_digest_from_counts,
     fingerprint_from_stats,
     raw_fingerprint_from_counts,
 )
@@ -458,6 +459,45 @@ def test_raw_fingerprint_is_invariant_across_a_rebuild():
     assert before == after
 
 
+def test_raw_fingerprint_is_invariant_across_the_run_stamp_too():
+    """The other half of the same invariant, and the half that was missing.
+
+    ``_stamp_run_meta`` MERGEs an ``_AggMeta`` singleton at the end of every
+    run, so the FIRST aggregation of a source added a node key to this digest
+    and moved the very baseline the next sweep compared against. ``_raw_drift``
+    then reported drift and queued a rebuild with nothing to fix — which
+    stamped it again."""
+    before, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10}, {"FLOWS_TO": 5},
+    )
+    after, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10, "_AggMeta": 1, "_Projection": 1, "_GVRollupMeta": 1},
+        {"FLOWS_TO": 5, "AGGREGATED": 1_204_318},
+    )
+    assert before == after
+
+
+def test_raw_fingerprint_still_moves_for_a_customer_underscore_label():
+    """Membership is the explicit derived list, not a "_" prefix rule: a
+    customer's own ``_internal`` nodes are their data, and a change in them is
+    real drift."""
+    a, _, _ = raw_fingerprint_from_counts({"Table": 10}, {"FLOWS_TO": 5})
+    b, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10, "_internal": 3}, {"FLOWS_TO": 5},
+    )
+    assert a != b
+
+
+def test_the_tripwire_deliberately_still_sees_the_derived_artifacts():
+    """``counts_digest_from_counts`` is the opposite of the baseline above and
+    must NOT be aligned with it. It answers "did anything at all move since we
+    last looked", and ``_AggMeta`` disappearing IS the signal that the overlay
+    was wiped or reseeded — the failure the sweep exists to catch."""
+    a = counts_digest_from_counts({"Table": 10, "_AggMeta": 1}, {"FLOWS_TO": 5})
+    b = counts_digest_from_counts({"Table": 10}, {"FLOWS_TO": 5})
+    assert a != b
+
+
 def test_raw_fingerprint_moves_when_raw_counts_move():
     a, _, _ = raw_fingerprint_from_counts({"Table": 10}, {"FLOWS_TO": 5})
     b, _, _ = raw_fingerprint_from_counts({"Table": 11}, {"FLOWS_TO": 5})
@@ -544,3 +584,60 @@ def test_unparseable_counts_degrade_to_zero_rather_than_raising():
 def test_missing_counts_are_tolerated():
     fp, agg, edges = raw_fingerprint_from_counts(None, None)
     assert fp and agg == 0 and edges == 0
+
+
+# ── holds: the breaker outranks a pause, and wider scopes report themselves ─
+
+
+def _drifting_obs(**over):
+    base = dict(
+        data_source_id="ds_1", ontology_id="bp_1", has_stats=True,
+        stats_age_secs=10, aggregation_status="ready",
+        expected_aggregated=500, observed_aggregated=0, has_completed_job=True,
+    )
+    base.update(over)
+    return Observation(**base)
+
+
+def test_a_paused_source_at_the_breaker_cap_is_suspended_not_paused():
+    """The breaker used to be checked LAST, after the pause — so a source
+    both paused and at the cap reported ``paused``, never stamped
+    ``suspended``, and never fired the suspension notice, while the UI chip
+    precedence ("Needs a person" outranks "Paused") said the opposite. The
+    tally and the chip now agree."""
+    v = evaluate(_drifting_obs(
+        consecutive_actions=99, paused_until="2999-01-01T00:00:00+00:00",
+    ), Policy())
+    assert v.reason == "overlay_missing"
+    assert v.skip == "suspended"
+    assert v.drift_state == "suspended"
+
+
+def test_a_provider_hold_is_reported_as_the_provider_holding_it():
+    """Most restrictive wins decides WHETHER the source is held; the report
+    names the WIDEST scope so the operator goes to the control that will
+    release it — a source-level Resume would change nothing here."""
+    from backend.app.services.aggregation.holds import Hold
+
+    v = evaluate(_drifting_obs(
+        scope_hold=Hold("provider", "stopped", scope_id="prov_1"),
+        paused_until="2999-01-01T00:00:00+00:00",   # a source pause too
+    ), Policy())
+    assert v.reason == "overlay_missing"            # finding still recorded
+    assert v.skip == "provider_held"
+    assert v.drift_state == "overlayMissing"        # a hold, never a guard
+    assert v.should_act is False
+
+
+def test_a_fleet_hold_is_reported_as_fleet_held():
+    from backend.app.services.aggregation.holds import Hold
+
+    v = evaluate(_drifting_obs(scope_hold=Hold("fleet", "paused", until="2999-01-01T00:00:00+00:00")), Policy())
+    assert v.skip == "fleet_held" and v.should_act is False
+    assert "fleet_held" in SKIP_REASONS and "provider_held" in SKIP_REASONS
+
+
+def test_automation_off_is_reported_as_disabled_unchanged():
+    """The per-source stop keeps its historical skip name."""
+    v = evaluate(_drifting_obs(reconcile_enabled=False), Policy())
+    assert v.skip == "disabled" and v.should_act is False

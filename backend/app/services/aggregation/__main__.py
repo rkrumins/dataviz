@@ -681,6 +681,44 @@ async def _run_health_server(consumer: _JobConsumer, port: int) -> None:
     await run_health_server(port, role="aggregation-worker", status_payload_fn=_payload)
 
 
+async def _serve_metrics():
+    """A scrape endpoint for a process that has no HTTP server otherwise.
+
+    Deliberately its own tiny app rather than the control plane's: a worker
+    pod is scraped at its own address, and routing this through another
+    service would mean the numbers stop the moment that service is the thing
+    having trouble. Returns the running server (for shutdown) or None.
+
+    Best-effort throughout — a worker that cannot bind its metrics port must
+    still process jobs. That is the whole trade: metrics are for watching the
+    work, never a precondition for it.
+    """
+    from backend.app.api.v1.endpoints.metrics import metrics_enabled
+
+    if not metrics_enabled():
+        return None
+    try:
+        import uvicorn
+        from fastapi import FastAPI
+
+        from backend.app.api.v1.endpoints import metrics as metrics_endpoint
+
+        port = int(os.getenv("METRICS_PORT", "9100"))
+        metrics_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+        metrics_app.include_router(metrics_endpoint.router)
+        config = uvicorn.Config(
+            metrics_app, host="0.0.0.0", port=port,
+            log_level="warning", access_log=False,
+        )
+        server = uvicorn.Server(config)
+        asyncio.create_task(server.serve(), name="agg-metrics")
+        logger.info("metrics: worker scrape endpoint on :%d/metrics", port)
+        return server
+    except Exception as exc:              # noqa: BLE001 — never fail the worker
+        logger.warning("metrics: worker scrape endpoint not started: %s", exc)
+        return None
+
+
 async def main() -> None:
     """Standalone worker entrypoint."""
     from backend.app.db.engine import get_jobs_session
@@ -693,6 +731,23 @@ async def main() -> None:
         level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # The metrics backend, in every process that emits. The governor,
+    # admission and pacing counters are raised HERE, not in the web tier, so
+    # a worker without this installed counts nothing at all.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
+    # …and a way to READ them. The worker raises the counters that matter
+    # most — every governor hold, every admission slot that failed open, every
+    # write-budget refusal — and it is the one process with no HTTP server, so
+    # without this they would be counted in a registry nobody can reach. Same
+    # opt-in switch as every other tier; off, this starts nothing.
+    metrics_server = await _serve_metrics()
 
     concurrency = int(os.getenv("WORKER_CONCURRENCY", "4"))
     max_per_graph = int(os.getenv("MAX_CONCURRENT_PER_GRAPH", "2"))
@@ -835,6 +890,9 @@ async def main() -> None:
             await asyncio.gather(*warmup_tasks, return_exceptions=True)
         await registry.evict_all()
         await fleet.deregister()
+        if metrics_server is not None:
+            # Last, so a scrape during the drain still sees the run-out.
+            metrics_server.should_exit = True
         await close_redis()
         logger.info("=== Aggregation Worker shutdown complete ===")
 

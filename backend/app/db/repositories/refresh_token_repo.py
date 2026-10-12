@@ -28,7 +28,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +81,151 @@ async def purge_expired(session: AsyncSession, *, batch: int = 5_000) -> int:
     return len(doomed)
 
 
+def _provider_predicate(provider_id: Optional[str]):
+    """Rows minted by one IdP row — or by any IdP at all when
+    ``provider_id`` is None, which is the master-switch sweep. Local
+    password sessions leave the column NULL and are never matched."""
+    if provider_id is None:
+        return RefreshTokenORM.idp_provider_id.is_not(None)
+    return RefreshTokenORM.idp_provider_id == provider_id
+
+
+async def count_active_provider_users(
+    session: AsyncSession, *, provider_id: Optional[str],
+) -> int:
+    """Distinct users currently holding a live refresh token minted by
+    this provider (None = any SSO provider). "Live" means presentable:
+    not revoked, not consumed, not expired. This is the number a
+    confirm dialog shows before ``revoke_provider_tokens`` — it can
+    drift slightly from the real sweep under concurrent logins, which
+    is fine for a count and stated where it is served."""
+    return (
+        await session.execute(
+            select(func.count(func.distinct(RefreshTokenORM.user_id))).where(
+                _provider_predicate(provider_id),
+                RefreshTokenORM.revoked_at.is_(None),
+                RefreshTokenORM.consumed_at.is_(None),
+                RefreshTokenORM.expires_at > _now_iso(),
+            )
+        )
+    ).scalar_one()
+
+
+async def count_active_users(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> int:
+    """Distinct users currently holding ANY live refresh token —
+    password and SSO alike. The platform sweep's confirm-dialog number.
+
+    ``exclude_user_ids`` subtracts the system accounts the sweep will
+    skip; calling this twice (with and without the set) and taking the
+    difference answers "how many system accounts stay signed in".
+    Same drift caveat as :func:`count_active_provider_users`.
+    """
+    clauses = [
+        RefreshTokenORM.revoked_at.is_(None),
+        RefreshTokenORM.consumed_at.is_(None),
+        RefreshTokenORM.expires_at > _now_iso(),
+    ]
+    if exclude_user_ids:
+        clauses.append(RefreshTokenORM.user_id.not_in(exclude_user_ids))
+    return (
+        await session.execute(
+            select(func.count(func.distinct(RefreshTokenORM.user_id)))
+            .where(*clauses)
+        )
+    ).scalar_one()
+
+
+async def revoke_all_tokens(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> tuple[set[str], int]:
+    """Stamp ``revoked_at`` on every un-revoked refresh row — password
+    AND SSO — except rows belonging to ``exclude_user_ids`` (the system
+    accounts a platform sweep must leave signed in).
+
+    Multi-pass for the same mid-sweep-rotation reason as
+    :func:`revoke_provider_tokens`, and with the same deliberate
+    absence of a consumed/expiry filter: marking an already-dead row
+    revoked can only ever cause a refusal.
+
+    Returns ``(distinct user_ids touched, rows marked)``.
+    """
+    def _clauses():
+        clauses = [RefreshTokenORM.revoked_at.is_(None)]
+        if exclude_user_ids:
+            clauses.append(RefreshTokenORM.user_id.not_in(exclude_user_ids))
+        return clauses
+
+    users: set[str] = set()
+    rows_marked = 0
+    for _ in range(_REVOKE_FAMILY_PASSES):
+        touched = (
+            await session.execute(
+                select(func.distinct(RefreshTokenORM.user_id))
+                .where(*_clauses())
+            )
+        ).scalars().all()
+        users.update(u for u in touched if u)
+        result = await session.execute(
+            update(RefreshTokenORM)
+            .where(*_clauses())
+            .values(revoked_at=_now_iso())
+        )
+        marked = int(result.rowcount or 0)
+        rows_marked += marked
+        if marked == 0:
+            break
+    await session.flush()
+    return users, rows_marked
+
+
+async def revoke_provider_tokens(
+    session: AsyncSession, *, provider_id: Optional[str],
+    user_id: Optional[str] = None,
+) -> tuple[set[str], int]:
+    """Stamp ``revoked_at`` on every un-revoked refresh row minted by
+    this provider (None = every SSO row), and report who was touched.
+    ``user_id`` narrows it to one person's sessions through that provider.
+
+    Multi-pass for the same reason ``revoke_family`` is: a rotation in
+    flight when the sweep starts can commit its successor after a
+    pass's scan has moved past it, and that successor carries the same
+    ``idp_provider_id``. The loop exits as soon as a pass marks
+    nothing; the pass bound is a backstop, not an expectation.
+
+    Deliberately no consumed/expiry filter on the UPDATE — marking an
+    already-dead row revoked can only ever cause a refusal, and the
+    belt-and-braces matches ``revoke_family``.
+
+    Returns ``(distinct user_ids touched, rows marked)``.
+    """
+    users: set[str] = set()
+    rows_marked = 0
+    for _ in range(_REVOKE_FAMILY_PASSES):
+        scope = [_provider_predicate(provider_id),
+                 RefreshTokenORM.revoked_at.is_(None)]
+        if user_id is not None:
+            scope.append(RefreshTokenORM.user_id == user_id)
+        touched = (
+            await session.execute(
+                select(func.distinct(RefreshTokenORM.user_id)).where(*scope)
+            )
+        ).scalars().all()
+        users.update(u for u in touched if u)
+        result = await session.execute(
+            update(RefreshTokenORM)
+            .where(*scope)
+            .values(revoked_at=_now_iso())
+        )
+        marked = int(result.rowcount or 0)
+        rows_marked += marked
+        if marked == 0:
+            break
+    await session.flush()
+    return users, rows_marked
+
+
 class SQLAlchemyRefreshStore:
     """Implements ``RefreshStore`` against the management DB."""
 
@@ -97,6 +242,8 @@ class SQLAlchemyRefreshStore:
         mint_ms: int,
         expires_at_iso: str,
         revoked_at_iso: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_checked_at: Optional[int] = None,
     ) -> bool:
         """Write the row that makes a freshly minted token usable.
 
@@ -121,6 +268,8 @@ class SQLAlchemyRefreshStore:
                         expires_at=expires_at_iso,
                         created_at=_now_iso(),
                         revoked_at=revoked_at_iso,
+                        idp_provider_id=idp_provider_id,
+                        idp_checked_at=idp_checked_at,
                     )
                 )
             return True
@@ -146,7 +295,25 @@ class SQLAlchemyRefreshStore:
             consumed_at_iso=row.consumed_at,
             successor_jti=row.successor_jti,
             revoked_at_iso=row.revoked_at,
+            idp_provider_id=row.idp_provider_id,
+            idp_checked_at=row.idp_checked_at,
         )
+
+    async def touch_idp_check(self, jti: str, *, checked_at: int) -> bool:
+        """Record a SUCCESSFUL upstream liveness confirmation.
+
+        Never called on a failure. The value is the anchor the outage
+        grace window measures from, so advancing it when the gateway did
+        not answer would let an outage renew the very allowance it
+        should be spending down — the session would ride out an
+        indefinite outage one grace window at a time.
+        """
+        result = await self._session.execute(
+            update(RefreshTokenORM)
+            .where(RefreshTokenORM.jti == jti)
+            .values(idp_checked_at=int(checked_at))
+        )
+        return bool(result.rowcount)
 
     async def consume(self, jti: str, *, successor_jti: str) -> bool:
         """Rotate this token away, atomically.
@@ -218,6 +385,26 @@ class SQLAlchemyRefreshStore:
             )
         ).scalar_one_or_none()
         return row is not None
+
+    async def family_started_ms(self, family_id: str) -> Optional[int]:
+        """When this session first signed in, in epoch milliseconds.
+
+        The earliest mint in the family, which is the original login —
+        every later row is a rotation of it. This is what the absolute
+        session ceiling measures from; the presented token's own
+        ``mint_ms`` cannot serve, because rotation resets it and that is
+        exactly how a session came to live forever.
+
+        ``None`` when the family has no rows, which under allow-by-record
+        the caller has already refused.
+        """
+        return (
+            await self._session.execute(
+                select(func.min(RefreshTokenORM.mint_ms)).where(
+                    RefreshTokenORM.family_id == family_id,
+                )
+            )
+        ).scalar_one_or_none()
 
 
 def make_refresh_store(session: AsyncSession) -> SQLAlchemyRefreshStore:

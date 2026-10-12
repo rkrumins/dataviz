@@ -39,6 +39,31 @@ import { renderCounts, resetRenderCounts } from '../renderProbe'
 
 const noop = () => {}
 
+/** A mouse event that carries a `view`, which jsdom will not construct.
+ *
+ *  React Flow's drag goes through d3-drag, whose mousedown handler reads
+ *  `event.view.document` straight away. A real browser always populates
+ *  `view`; jsdom defaults it to null, and passing one to the constructor
+ *  is refused — vitest's global `window` is a proxy, so it fails jsdom's
+ *  IDL check even when it IS the document's own `defaultView`.
+ *
+ *  So the property is defined on the instance instead, shadowing the
+ *  prototype getter. Without this the handler throws inside
+ *  `dispatchEvent`, where jsdom reports it to the window rather than to
+ *  the caller: the test itself passes, an unhandled error is recorded,
+ *  and the run exits non-zero with nothing failing. */
+function mouseEventWithView(
+  target: Element, type: string, init: MouseEventInit,
+): MouseEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true, cancelable: true, ...init,
+  })
+  Object.defineProperty(event, 'view', {
+    value: target.ownerDocument.defaultView, configurable: true,
+  })
+  return event
+}
+
 /** Aggregates every `<Profiler onRender>` call in a window into one
  *  summary: how many commits, and how long React spent on them. */
 function makeProfilerRecorder() {
@@ -679,8 +704,12 @@ describe('P0 — perf harness (Task 20)', () => {
       // for exactly the node under the pointer.
       const target = board[0]
       act(() => {
-        fireEvent.mouseDown(target, { clientX: 0, clientY: 0, button: 0 })
-        fireEvent.mouseMove(target, { clientX: 40, clientY: 24 })
+        fireEvent(target, mouseEventWithView(target, 'mousedown', {
+          clientX: 0, clientY: 0, button: 0,
+        }))
+        fireEvent(target, mouseEventWithView(target, 'mousemove', {
+          clientX: 40, clientY: 24,
+        }))
       })
       const rendered = [...renderCounts.entries()].filter(([k]) => k.startsWith('FocusNode'))
       const total = rendered.reduce((n, [, v]) => n + v, 0)

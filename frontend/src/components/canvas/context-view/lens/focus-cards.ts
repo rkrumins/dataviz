@@ -13,19 +13,20 @@
  * contract outlives the builder: it belongs here.
  */
 import type { LineageNode } from '@/store/canvas'
-import { relationshipLabel } from '@/lib/relationshipLabel'
+import { relationshipLabel, edgeTypeCopy } from '@/lib/relationshipLabel'
 import { gutterWidth } from './frame-flow'
 
 /** Ontology wording for edge types, keyed by UPPERCASE id: the
  *  schema's display name + description when defined. */
 export type EdgeTypeInfoMap = Map<string, { label: string; description?: string }>
 
-/** Human wording for a normalized edge type — the ontology's display
- *  name when defined, a readable fallback otherwise ("FLOWS_TO" →
- *  "Flows to"). Raw ids are engineer-speak; every lens surface uses this
- *  so the wording never drifts. */
+/** Human wording for a normalized edge type — the app's own copy where it
+ *  has some (the system AGGREGATED type), the ontology's display name when
+ *  defined, a readable fallback otherwise ("FLOWS_TO" → "Flows to"). Raw ids
+ *  are engineer-speak; every lens surface uses this so the wording never
+ *  drifts. */
 export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
-  norm ? (info?.get(norm)?.label ?? relationshipLabel(norm)) : 'relationship'
+  norm ? (edgeTypeCopy(norm)?.label ?? info?.get(norm)?.label ?? relationshipLabel(norm)) : 'relationship'
 
 /**
  * One half of the focal's ORIENTATION SENTENCE — "Fed by 3 sources

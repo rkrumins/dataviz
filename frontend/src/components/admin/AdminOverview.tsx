@@ -2,7 +2,7 @@
  * AdminOverview — The global health dashboard.
  * Merges the navigational landing page with system-wide Insights.
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -85,6 +85,17 @@ export function AdminOverview() {
                 byWs.set(wsId, agg)
             }
 
+            // A failed bulk read is "we don't know", not "there are none". One
+            // unhealthy data source can fail this single request for every
+            // workspace; overwriting good counts with zeros then told the
+            // operator the fleet was empty. Keep what we had.
+            if (bulk === null) {
+                console.warn('[admin-overview] cached-stats refresh failed; keeping the last known counts')
+                setInsights(prev => prev.length > 0 ? prev : workspaces.map(ws => ({
+                    ws, nodes: 0, edges: 0, sources: ws.dataSources?.length || 0, types: new Set<string>(),
+                })))
+                return
+            }
             const results: WsInsight[] = workspaces.map(ws => {
                 const agg = byWs.get(ws.id) ?? { nodes: 0, edges: 0, types: new Set<string>() }
                 return {

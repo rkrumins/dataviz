@@ -80,7 +80,7 @@ export function DevLogin() {
 
   if (!enabled) {
     return (
-      <div className="min-h-screen w-screen flex items-center justify-center bg-canvas">
+      <div className="min-h-full w-full flex items-center justify-center py-8 bg-canvas">
         <div className="max-w-md text-center p-8 rounded-2xl glass-panel">
           <h1 className="text-lg font-semibold mb-2 text-ink">Dev Login disabled</h1>
           <p className="text-sm text-ink-muted">
@@ -156,7 +156,7 @@ export function DevLogin() {
   }
 
   return (
-    <div className="min-h-screen w-screen flex items-center justify-center bg-canvas">
+    <div className="min-h-full w-full flex items-center justify-center py-8 bg-canvas">
       <form
         onSubmit={onSubmit}
         className="glass-panel w-[480px] max-w-full p-8 rounded-2xl space-y-4"

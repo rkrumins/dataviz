@@ -199,6 +199,75 @@ async def bench_write_kill(g) -> None:
         )
 
 
+async def bench_query_mem(db, g, *, range_width: int) -> None:
+    """Pin the premise the scan shrink ladder rests on: that NARROWING an
+    ID range actually reduces a query's accounted memory.
+
+    It holds because FalkorDB materializes a query's entire result set
+    inside the tracked per-query budget rather than streaming it, and these
+    scans are plain projections with no sort or aggregation buffer — so the
+    tracked bytes track the rows returned. If this ever prints a FLAT
+    result on a newer engine, the ladder cannot help and the fix has to move
+    to narrowing the PROJECTION instead of the range.
+
+    Squeezes QUERY_MEM_CAPACITY down, sweeps the width, and restores the
+    original ceiling. Uses the node-directory projection (id + urn +
+    labels), the widest shape this script's seed can produce.
+    """
+    print("\n=== (d) per-query memory ceiling vs range width ===")
+    try:
+        prev = int(await db.config_get("QUERY_MEM_CAPACITY"))
+    except Exception as exc:
+        print(f"!! cannot read QUERY_MEM_CAPACITY ({exc!r}) — skipping.")
+        return
+    # 32 MiB: low enough that the widest sweep step refuses on a seeded
+    # graph, high enough that the narrow steps still pass.
+    squeezed = 32 * 1024 * 1024
+    cypher = (
+        "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
+        "RETURN ID(n), n.urn, labels(n)"
+    )
+    widths = [range_width, range_width // 2, range_width // 4, range_width // 8]
+    try:
+        await db.config_set("QUERY_MEM_CAPACITY", squeezed)
+    except Exception as exc:
+        print(f"!! cannot set QUERY_MEM_CAPACITY ({exc!r}) — skipping. Start "
+              f"the server with a small QUERY_MEM_CAPACITY to run this arm.")
+        return
+    try:
+        outcomes = []
+        for w in widths:
+            if w < 1:
+                continue
+            try:
+                res = await g.ro_query(cypher, params={"lo": 0, "hi": w})
+                outcomes.append((w, True, len(res.result_set or [])))
+                print(f"width {w:>9,}: OK ({len(res.result_set or []):,} rows)")
+            except Exception as exc:
+                refused = "mem consumption exceeded" in str(exc).lower()
+                outcomes.append((w, False, 0))
+                print(f"width {w:>9,}: {'REFUSED' if refused else repr(exc)}")
+    finally:
+        try:
+            await db.config_set("QUERY_MEM_CAPACITY", prev)
+        except Exception as exc:      # pragma: no cover - diagnostics only
+            print(f"!! FAILED TO RESTORE QUERY_MEM_CAPACITY to {prev}: {exc!r}")
+
+    refused = [w for w, ok, _ in outcomes if not ok]
+    passed = [w for w, ok, _ in outcomes if ok]
+    if refused and passed and min(refused) > max(passed):
+        print(f"OK — halving recovered a refused scan "
+              f"(refused at {min(refused):,}, passed at {max(passed):,}). "
+              f"The shrink ladder's premise holds on this engine.")
+    elif not refused:
+        print("!! nothing was refused — raise --nodes or lower the squeezed "
+              "ceiling so the widest step actually trips it.")
+    else:
+        print("!! EVERY width was refused. Narrowing the range does NOT "
+              "reduce accounted query memory on this engine — the ladder "
+              "cannot help and the projection must shrink instead.")
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="localhost")
@@ -229,6 +298,7 @@ async def main() -> None:
     await bench_scan(g, range_width=args.range_width, pages=args.pages)
     await bench_merge(g)
     await bench_write_kill(g)
+    await bench_query_mem(db, g, range_width=args.range_width)
 
 
 if __name__ == "__main__":

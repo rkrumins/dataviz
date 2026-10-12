@@ -20,6 +20,7 @@ import {
     Sparkles, GitBranch, Lock, Mail, ExternalLink,
 } from 'lucide-react'
 import type { UserAccessResponse, AccessBinding } from '@/services/permissionsService'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { ROLE_VISUAL, roleVisualFor } from '@/lib/roleVisual'
@@ -73,12 +74,19 @@ export function AccessSummary({
         <div className="overflow-y-auto p-6 space-y-6">
             {!hideHeader && (
                 <div className="flex items-start gap-4">
-                    <div className={cn(
-                        'w-14 h-14 rounded-2xl bg-gradient-to-br flex items-center justify-center text-base font-bold text-white shrink-0 shadow-md',
-                        avatarGradient(access.user.displayName),
-                    )}>
-                        {initialsOf(access.user.displayName)}
-                    </div>
+                    <UserAvatar
+                        userId={access.user.id}
+                        name={access.user.displayName}
+                        className="w-14 h-14 rounded-2xl text-base font-bold shadow-md"
+                        fallback={(
+                            <span className={cn(
+                                'flex h-full w-full items-center justify-center rounded-2xl bg-gradient-to-br text-white',
+                                avatarGradient(access.user.displayName),
+                            )}>
+                                {initialsOf(access.user.displayName)}
+                            </span>
+                        )}
+                    />
                     <div className="min-w-0 flex-1">
                         <h2 className="text-xl font-bold text-ink truncate">{access.user.displayName}</h2>
                         <div className="flex items-center gap-1 mt-0.5">

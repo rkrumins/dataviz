@@ -74,6 +74,62 @@ async def test_bounded_compute_degrades_without_cache_key() -> None:
     assert await wrapped() == 42
 
 
+@pytest.fixture
+def slot(monkeypatch):
+    """``acquire_provider_slot`` on a real semaphore, recording each take."""
+    from backend.app.api.v1.endpoints import graph as graph_mod
+
+    sem = asyncio.Semaphore(1)
+    acquisitions: list = []
+
+    async def _acquire(provider_id, graph_name=""):
+        acquisitions.append((provider_id, graph_name))
+        await sem.acquire()
+        return sem
+
+    monkeypatch.setattr(graph_mod.provider_manager, "acquire_provider_slot", _acquire)
+    return {"sem": sem, "acquisitions": acquisitions}
+
+
+def _engine_recording_the_slot(sem, method):
+    held: list = []
+
+    async def _read(*args, **kwargs):
+        held.append(sem.locked())
+        return []
+
+    engine = SimpleNamespace(provider=SimpleNamespace(manager_cache_key=("p", "g")))
+    setattr(engine, method, _read)
+    return engine, held
+
+
+@pytest.mark.asyncio
+async def test_edge_query_runs_inside_the_provider_slot(slot) -> None:
+    """primeLineageFor, the Lens and the anchored feeds all read here; a
+    burst of them piled onto the store past every bound."""
+    from backend.app.api.v1.endpoints import graph as graph_mod
+    from backend.common.models.graph import EdgeQuery
+
+    engine, held = _engine_recording_the_slot(slot["sem"], "get_edges")
+    await graph_mod.query_edges(query=EdgeQuery(source_urns=["u"]), engine=engine)
+
+    assert slot["acquisitions"] == [("p", "g")]
+    assert held == [True]
+    assert not slot["sem"].locked()
+
+
+@pytest.mark.asyncio
+async def test_ancestors_run_inside_the_provider_slot(slot) -> None:
+    from backend.app.api.v1.endpoints import graph as graph_mod
+
+    engine, held = _engine_recording_the_slot(slot["sem"], "get_ancestors")
+    await graph_mod.get_node_ancestors(urn="u", limit=100, offset=0, engine=engine)
+
+    assert slot["acquisitions"] == [("p", "g")]
+    assert held == [True]
+    assert not slot["sem"].locked()
+
+
 def _bare_engine(**attrs) -> ContextEngine:
     """A ContextEngine without running __init__ — the semaphore registry
     lives on the class, which is exactly what these tests pin."""

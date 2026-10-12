@@ -285,7 +285,7 @@ function CandidateChips({
 function AddKey({ onAdd }: { onAdd: (key: string) => void }) {
     return (
         <input
-            placeholder="add a key…"
+            placeholder="add a key… dots reach nested ones"
             aria-label="Add a source key"
             onBlur={e => {
                 const v = e.target.value.trim()

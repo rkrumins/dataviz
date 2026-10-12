@@ -86,3 +86,32 @@ describe('the hint on a row', () => {
         expect(container).toBeEmptyDOMElement()
     })
 })
+
+describe('the refusals an account can meet', () => {
+    it('tells an account with no password from a wrong password', () => {
+        expect(explainReason('no_local_password')?.what).toMatch(/has no password/i)
+        expect(explainReason('invalid_credentials')?.what).toMatch(/wrong password/i)
+        expect(explainReason('account_inactive')?.next).toMatch(/admin → users/i)
+    })
+
+    it('reads a password failure summary', () => {
+        expect(codesIn('Failed password sign-in for a@b.io: no_local_password'))
+            .toEqual(['no_local_password'])
+    })
+
+    it('reads a failure that names the person', () => {
+        expect(codesIn('[ab12cd34] Sign-in via corp failed for a@b.io: backchannel_no_session'))
+            .toEqual(['backchannel_no_session'])
+    })
+
+    it('explains the code inside a rejected sign-in', () => {
+        expect(explainReason('sso_login_rejected:jit_disabled'))
+            .toEqual(explainReason('jit_disabled'))
+        expect(explainReason('sso_login_rejected:made_up')?.what).toMatch(/made_up/)
+    })
+
+    it('explains why a session stopped renewing', () => {
+        expect(explainReason('reuse_detected')?.what).toMatch(/used twice/i)
+        expect(explainReason('idp_rejected:idp_rejected:401')?.what).toMatch(/401/)
+    })
+})

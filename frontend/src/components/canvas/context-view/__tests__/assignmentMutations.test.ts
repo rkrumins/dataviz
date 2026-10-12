@@ -3,7 +3,6 @@ import {
   assignEntities,
   unassignEntities,
   remapAssignmentUrn,
-  checkAssignmentConflict,
   pruneTempAssignments,
   isTempUrn,
   setAssignmentOrderKey,
@@ -140,42 +139,6 @@ describe('assignmentMutations — create -> move -> undo (documents the ContextV
     const remapped = remapAssignmentUrn(afterMove, 'urn:staged:x', 'urn:real:x')
     expect(remapped.assignments['urn:staged:x']).toBeUndefined()
     expect(remapped.assignments['urn:real:x'].layerId).toBe('B')
-  })
-})
-
-describe('assignmentMutations — checkAssignmentConflict', () => {
-  const parentMap = new Map<string, string>([
-    ['child', 'parent'],
-    ['grandchild', 'child'],
-  ])
-
-  it('blocks assigning a child to a different layer than its parent (containment_locked)', () => {
-    const assignments = { parent: { layerId: 'A', inheritsChildren: true } as LayerAssignmentEntry }
-    const conflict = checkAssignmentConflict(parentMap, assignments, 'child', 'B')
-    expect(conflict?.type).toBe('containment_locked')
-    expect(conflict?.conflictingEntityId).toBe('parent')
-    expect(conflict?.conflictingLayerId).toBe('A')
-  })
-
-  it('allows assigning a child to the SAME layer as its parent', () => {
-    const assignments = { parent: { layerId: 'A', inheritsChildren: true } as LayerAssignmentEntry }
-    expect(checkAssignmentConflict(parentMap, assignments, 'child', 'A')).toBeNull()
-  })
-
-  it('walks up to the nearest explicitly-assigned ancestor (grandparent)', () => {
-    const assignments = { parent: { layerId: 'A', inheritsChildren: true } as LayerAssignmentEntry }
-    const conflict = checkAssignmentConflict(parentMap, assignments, 'grandchild', 'B')
-    expect(conflict?.type).toBe('containment_locked')
-    expect(conflict?.conflictingEntityId).toBe('parent')
-  })
-
-  it('returns null when no ancestor has an explicit assignment', () => {
-    expect(checkAssignmentConflict(parentMap, {}, 'child', 'B')).toBeNull()
-  })
-
-  it('returns null for a root node (no parent)', () => {
-    const assignments = { root: { layerId: 'A', inheritsChildren: true } as LayerAssignmentEntry }
-    expect(checkAssignmentConflict(parentMap, assignments, 'root', 'B')).toBeNull()
   })
 })
 

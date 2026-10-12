@@ -13,11 +13,24 @@ task) — its behavior must be best-effort and never-raising.
 import asyncio
 import fnmatch
 
+import pytest
+
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def bumps(monkeypatch):
+    """Record generation bumps instead of reaching the real job-bus Redis."""
+    calls = []
+
+    async def _bump(graph_name, *, reason, redis_client=None):
+        calls.append((graph_name, reason))
+    monkeypatch.setattr("backend.app.providers.graph_generation.bump_graph_generation", _bump)
+    return calls
 
 
 async def _noop_connect():
@@ -87,3 +100,18 @@ def test_redis_failure_is_logged_and_swallowed():
     _run(p.clear_content_caches())  # must not raise
 
     assert p._agg_meta_cached is None
+
+
+def test_records_that_the_graph_changed_for_every_process(bumps):
+    # A confirmed source change may be a drop and reload: a new id catalogue under
+    # the same name. Every process's handles must forget the old one, not only this
+    # provider's — and that holds even when the cache Redis is down.
+    for redis in (None, _BoomRedis()):
+        bumps.clear()
+        p = FalkorDBProvider(host="x", graph_name="g")
+        p._redis = redis
+        p._ensure_connected = _noop_connect
+
+        _run(p.clear_content_caches())
+
+        assert bumps == [("g", "source changed")]

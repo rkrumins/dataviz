@@ -96,8 +96,14 @@ def _not_after(cert) -> datetime:
 
 
 async def probe_provider(provider_id: str, slug: str, kind: str,
-                         settings: dict) -> IdpHealth:
-    """Probe one provider. Never raises — an unreachable IdP is a *result*."""
+                         settings: dict,
+                         allow_hosts: frozenset[str] = frozenset()) -> IdpHealth:
+    """Probe one provider. Never raises — an unreachable IdP is a *result*.
+
+    ``allow_hosts`` is the back-channel allowlist, needed only by the
+    ``backchannel`` kind and defaulted so every other caller is
+    unaffected.
+    """
     health = IdpHealth(provider_id=provider_id, slug=slug, checked_at=_now_iso())
 
     if kind == "saml2":
@@ -157,6 +163,9 @@ async def probe_provider(provider_id: str, slug: str, kind: str,
         )
         return health
 
+    if kind == "backchannel":
+        return _probe_backchannel(health, settings, allow_hosts)
+
     # custom / custom_profile have no remote endpoint to probe — they are
     # handed a payload rather than fetching one. Reporting "unknown" is
     # honest; reporting "ok" would imply a check that never ran.
@@ -165,9 +174,60 @@ async def probe_provider(provider_id: str, slug: str, kind: str,
     return health
 
 
+def _probe_backchannel(
+    health: IdpHealth, settings: dict, allow_hosts: frozenset[str],
+) -> IdpHealth:
+    """Check that this row's endpoints are still permitted destinations.
+
+    Deliberately NOT a live request. Calling the gateway without an
+    ambient token would earn a 401 — a healthy answer that looks like a
+    failure — while adding authentication noise to somebody else's
+    identity service every fifteen minutes, for every provider, forever.
+
+    What it checks instead is the failure that actually happens:
+    allowlist drift. The endpoints are internal, so they are reachable
+    only because an operator added their hosts to
+    ``sso_backchannel_hosts``. Remove or retype an entry — or move the
+    gateway to a new port — and every login through this provider stops,
+    with nothing anywhere saying why. This says why.
+    """
+    from backend.auth_service.providers.outbound import (
+        BlockedOutboundRequest, assert_fetchable,
+    )
+
+    targets = [
+        ("gateway_url", str(settings.get("gateway_url") or "")),
+        ("exchange_url", str(settings.get("exchange_url") or "")),
+    ]
+    problems: list[str] = []
+    for label, url in targets:
+        if not url:
+            continue  # exchange_url is optional by design
+        try:
+            assert_fetchable(url, allow_hosts=allow_hosts)
+        except BlockedOutboundRequest as exc:
+            problems.append(f"{label}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — a probe never raises
+            problems.append(f"{label}: {exc}")
+
+    if not targets[0][1]:
+        health.status = "unavailable"
+        health.detail = "No gateway_url configured; this provider cannot sign anyone in."
+        return health
+    if problems:
+        health.status = "unavailable"
+        health.detail = "; ".join(problems)
+        return health
+    health.status = "ok"
+    health.detail = "Endpoints are configured and permitted destinations."
+    return health
+
+
 async def sweep_once(session_factory, cache: dict) -> int:
     """Probe every enabled provider and refresh *cache* in place."""
     from backend.app.db.repositories import idp_provider_repo
+
+    from backend.app.db.repositories import backchannel_host_repo
 
     async with session_factory() as session:
         rows = await idp_provider_repo.list_providers(session, only_enabled=True)
@@ -176,13 +236,17 @@ async def sweep_once(session_factory, cache: dict) -> int:
              idp_provider_repo.decrypt_settings(r.settings))
             for r in rows
         ]
+        # Read once per sweep rather than once per provider: it is the
+        # same answer for all of them, and the sweep is deliberately
+        # sequential.
+        allow_hosts = await backchannel_host_repo.allowed_host_keys(session)
 
     # Sequential on purpose. The sweep is slow-cadence and this avoids the
     # concurrent-probe storm the frontend version was reverted for.
     for provider_id, slug, kind, settings in targets:
         try:
             cache[provider_id] = await probe_provider(
-                provider_id, slug, kind, settings,
+                provider_id, slug, kind, settings, allow_hosts,
             )
         except Exception as exc:  # noqa: BLE001 — one bad row must not stop the sweep
             logger.warning("IdP health probe failed (slug=%s): %s", slug, exc)

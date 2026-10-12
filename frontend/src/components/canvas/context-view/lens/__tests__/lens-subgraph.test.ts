@@ -214,6 +214,38 @@ describe('buildLensSubgraph — hop distance (hopUp / hopDown)', () => {
   })
 })
 
+describe('buildLensSubgraph — a combined trace (focusUrns)', () => {
+  // Two seeds whose lineage never meets: `a`, and the container T whose
+  // column carries its lineage. pa -> a; T.c -> pb -> pc.
+  const input = {
+    focusUrn: 'a',
+    nodes: [n('a'), n('pa'), n('T'), n('T.c'), n('pb'), n('pc')],
+    lineageEdges: [le('pa', 'a'), le('T.c', 'pb'), le('pb', 'pc')],
+    containmentEdges: [ce('T', 'T.c')],
+  }
+
+  it('seeds hop 0 from EVERY seed and its descendants; a partner’s hop is to its nearest seed', () => {
+    const sg = buildLensSubgraph({ ...input, focusUrns: ['a', 'T'] })
+    for (const urn of ['a', 'T', 'T.c']) {
+      expect(sg.nodes.get(urn)!.hopUp).toBe(0)
+      expect(sg.nodes.get(urn)!.hopDown).toBe(0)
+    }
+    expect(sg.nodes.get('pa')!.hopUp).toBe(1)
+    expect(sg.nodes.get('pb')!.hopDown).toBe(1)
+    expect(sg.nodes.get('pc')!.hopDown).toBe(2)
+    // The seeds are the focus; what is inside one is not, exactly as with one seed.
+    expect([...sg.nodes.values()].filter(x => x.isFocus).map(x => x.urn)).toEqual(['a', 'T'])
+    expect(sg.focusUrn).toBe('a')
+
+    // Off the first seed alone, the second seed's side has no hops at all.
+    expect(buildLensSubgraph(input).nodes.get('pb')!.hopDown).toBeNull()
+  })
+
+  it('omitted, it is exactly [focusUrn] — the Focus Lens passes nothing and sees no change', () => {
+    expect(buildLensSubgraph({ ...input, focusUrns: ['a'] })).toEqual(buildLensSubgraph(input))
+  })
+})
+
 describe('buildLensSubgraph — degreeUp / degreeDown', () => {
   it('parallel edges (distinct ids, same pair) both count', () => {
     const sg = buildLensSubgraph({
@@ -304,8 +336,8 @@ describe('projectLensEdges — directional projection', () => {
     const result = projectLensEdges(sg, population, visible)
     expect(result).toHaveLength(2)
     const byKey = new Map(result.map(e => [`${e.sourceUrn}>${e.targetUrn}`, e]))
-    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
-    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', edgeTypes: ['FLOWS'], coarse: false })
+    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', edgeTypes: ['FLOWS'], coarse: false })
   })
 
   it('collapses hops from two children of a collapsed container into one bundle, weight 2, container as endpoint', () => {
@@ -318,7 +350,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['D1', 'a1', 'a1b', 'D2'])
     const visible = new Set(['D1', 'D2'])   // a1 / a1b collapsed under D1
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS', coarse: false },
+      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS', edgeTypes: ['FLOWS'], coarse: false },
     ])
   })
 
@@ -344,7 +376,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['X', 'Y'])
     const visible = new Set(['X', 'Y'])
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '', coarse: false },
+      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '', edgeTypes: ['FLOWS', 'COPIES'], coarse: false },
     ])
   })
 
@@ -481,8 +513,8 @@ describe('projectLensEdges — a rollup cell weighs what it summarises (Part G)'
     })
     const all = new Set(['F', 'P', 'c', 'q'])
     const byKey = new Map(projectLensEdges(sg, all, all).map(b => [`${b.sourceUrn}>${b.targetUrn}`, b]))
-    expect(byKey.get('F>P')).toEqual({ sourceUrn: 'F', targetUrn: 'P', weight: 30, isLeafEdge: false, edgeTypeNorm: 'AGGREGATED', coarse: true })
-    expect(byKey.get('c>q')).toEqual({ sourceUrn: 'c', targetUrn: 'q', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(byKey.get('F>P')).toEqual({ sourceUrn: 'F', targetUrn: 'P', weight: 30, isLeafEdge: false, edgeTypeNorm: 'AGGREGATED', edgeTypes: ['AGGREGATED'], coarse: true })
+    expect(byKey.get('c>q')).toEqual({ sourceUrn: 'c', targetUrn: 'q', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', edgeTypes: ['FLOWS'], coarse: false })
     expect(sg.nodes.get('F')!.degreeDown).toBe(30)
     expect(sg.nodes.get('P')!.degreeUp).toBe(30)
   })

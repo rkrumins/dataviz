@@ -104,3 +104,16 @@ def test_unscoped_falls_back_to_the_placed_entities_read_whole():
     assert sorted(nq.urns) == ["urn:a", "urn:c"]
     assert nq.limit == 2  # read whole, no truncation
     assert result.stats.truncated is False
+
+
+def test_open_scope_unmatched_entity_is_reported_unassigned():
+    """Open scope: an entity no layer claims is NOT defaulted into the first
+    layer — it is reported unassigned (shown only by a showUnassigned layer)."""
+    fake = _FakeEngine([
+        _node("urn:t"),
+        GraphNode(urn="urn:v", displayName="urn:v", entityType="view"),
+    ])
+    result = _run(AssignmentEngine().compute_assignments(
+        _request(urns=["urn:t", "urn:v"]), engine=fake))
+    assert set(result.assignments) == {"urn:t"}
+    assert result.unassigned_entity_ids == ["urn:v"]

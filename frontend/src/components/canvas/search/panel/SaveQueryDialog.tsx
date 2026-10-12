@@ -1,6 +1,8 @@
 /**
- * SaveQueryDialog — name + description prompt for promoting a recent
- * query into the user's named "Mine" library.
+ * SaveQueryDialog — name + description prompt for keeping a query: in the
+ * view's library, for everyone who can open the view, or in the user's own
+ * "Mine" library in this browser. Someone who can't edit the view keeps
+ * queries for themselves only.
  *
  * Lightweight modal (not a Radix Dialog — the project's existing
  * panels use div-based modals via a fixed overlay). Shows the DSL
@@ -16,7 +18,7 @@
  * panel width instead of full-screen.
  */
 import { motion } from 'framer-motion'
-import { BookmarkPlus, X } from 'lucide-react'
+import { BookmarkPlus, User, Users, X } from 'lucide-react'
 import {
     type FC, type KeyboardEvent, useCallback, useEffect,
     useRef, useState,
@@ -28,35 +30,53 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import type { RecentQueryEntry } from '@/store/searchStore'
 
 
+/** Where a query is kept: the view's library, or this browser's "Mine". */
+export type SaveQueryDestination = 'view' | 'me'
+
 export interface SaveQueryDialogProps {
     entry: RecentQueryEntry
     onCancel: () => void
-    onSave: (name: string, description?: string) => void
+    /** A promise that rejects keeps the dialog open with the reason shown
+     *  (the view already has a query by that name, say). */
+    onSave: (name: string, description: string | undefined, destination: SaveQueryDestination) => void | Promise<void>
+    /** Whether the caller may save to the view's library. */
+    canSaveToView?: boolean
 }
 
 
 export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
-    entry, onCancel, onSave,
+    entry, onCancel, onSave, canSaveToView = false,
 }) => {
-    const [name, setName] = useState('')
-    const [description, setDescription] = useState('')
+    const [name, setName] = useState(entry.name ?? '')
+    const [description, setDescription] = useState(entry.description ?? '')
+    const [destination, setDestination] = useState<SaveQueryDestination>(canSaveToView ? 'view' : 'me')
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState<string | null>(null)
     const nameRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
         nameRef.current?.focus()
     }, [])
 
-    const canSave = name.trim().length > 0
+    const canSave = name.trim().length > 0 && !saving
 
-    const handleSubmit = useCallback(() => {
+    const handleSubmit = useCallback(async () => {
         if (!canSave) return
-        onSave(name.trim(), description.trim() || undefined)
-    }, [canSave, name, description, onSave])
+        setSaving(true)
+        setError(null)
+        try {
+            await onSave(name.trim(), description.trim() || undefined, destination)
+        } catch (e) {
+            setError((e as Error).message)
+        } finally {
+            setSaving(false)
+        }
+    }, [canSave, name, description, destination, onSave])
 
     const handleKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter' && canSave) {
             e.preventDefault()
-            handleSubmit()
+            void handleSubmit()
         } else if (e.key === 'Escape') {
             e.preventDefault()
             onCancel()
@@ -112,7 +132,9 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
                             Save query
                         </h3>
                         <p className="text-[11.5px] text-ink-muted mt-0.5">
-                            Give it a name so you can find it later.
+                            {destination === 'view'
+                                ? 'Everyone who can open this view will find it in its library.'
+                                : 'Give it a name so you can find it later.'}
                         </p>
                     </div>
                     <button
@@ -131,6 +153,35 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
 
                 {/* Body */}
                 <div className="px-5 py-4 space-y-4">
+                    {canSaveToView && (
+                        <div role="radiogroup" aria-label="Save for" className="grid grid-cols-2 gap-2">
+                            {([
+                                ['view', Users, 'Everyone on this view', "In the view's library"],
+                                ['me', User, 'Just me', 'In this browser'],
+                            ] as const).map(([value, Icon, label, hint]) => (
+                                <button
+                                    key={value}
+                                    type="button"
+                                    role="radio"
+                                    aria-checked={destination === value}
+                                    onClick={() => setDestination(value)}
+                                    className={cn(
+                                        'flex items-start gap-2 rounded-xl border px-3 py-2 text-left transition-colors',
+                                        destination === value
+                                            ? 'border-cyan-500/60 bg-cyan-50 dark:bg-cyan-950/30'
+                                            : 'border-slate-200 dark:border-glass-border hover:border-cyan-500/40',
+                                    )}
+                                >
+                                    <Icon className="w-4 h-4 mt-0.5 text-cyan-500 shrink-0" />
+                                    <span>
+                                        <span className="block text-[12px] font-semibold text-ink">{label}</span>
+                                        <span className="block text-[10.5px] text-ink-muted">{hint}</span>
+                                    </span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
                     <label className="block">
                         <span className="block text-[11.5px] font-semibold text-ink-secondary mb-1.5">
                             Name
@@ -203,6 +254,11 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
                     'border-t border-slate-200 dark:border-glass-border/60',
                     'bg-black/[0.02] dark:bg-white/[0.02]',
                 )}>
+                    {error && (
+                        <span role="alert" className="mr-auto text-[11.5px] text-rose-500 truncate" title={error}>
+                            {error}
+                        </span>
+                    )}
                     <button
                         type="button"
                         onClick={onCancel}
@@ -218,7 +274,7 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
                     </button>
                     <button
                         type="button"
-                        onClick={handleSubmit}
+                        onClick={() => void handleSubmit()}
                         disabled={!canSave}
                         className={cn(
                             'inline-flex items-center gap-1.5 px-3.5 h-8 rounded-lg',
@@ -239,7 +295,7 @@ export const SaveQueryDialog: FC<SaveQueryDialogProps> = ({
                         )}
                     >
                         <BookmarkPlus className="w-3.5 h-3.5" />
-                        Save
+                        {saving ? 'Saving…' : 'Save'}
                     </button>
                 </div>
             </motion.div>

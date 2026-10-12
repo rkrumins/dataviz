@@ -131,6 +131,18 @@ export function normalizeReferenceLayout(raw: unknown): NormalizedReferenceLayou
  * 'curated' count as explicit — anything else falls through to
  * derivation, matching derive_entity_scope in layout_config.py); else
  * derived from whether any layer assignments exist.
+ *
+ * THE DERIVED BRANCH IS A LAST RESORT, NOT THE NORMAL PATH. Every stored view
+ * now carries an explicit scope: the backend stamps one at creation
+ * (`view_repo.create_view`) and migration 20260920_1200_view_entity_scope
+ * backfilled the existing rows with the value this function would have
+ * returned for them. What reaches the fallback is a config that never went
+ * through either — a hand-edited row, or a fixture.
+ *
+ * That matters because the derived answer is not stable: "has any assignment"
+ * CHANGES as a view is edited, so a rule-driven view reads 'all' until the
+ * first drag and 'curated' after — and that flip switches off the very rules
+ * placing its contents. Deriving is safe to fall back on and wrong to rely on.
  */
 export function deriveEntityScope(
     content: ViewContentConfig | undefined,

@@ -11,7 +11,8 @@ const ADMIN = '/api/v1/admin'
 
 /** Provider kinds the backend accepts — mirrors ``VALID_KINDS`` in
  *  ``idp_provider_repo`` and the ``ck_idp_providers_kind`` CHECK. */
-export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+export type IdpKind =
+    | 'oidc' | 'saml2' | 'custom' | 'custom_profile' | 'backchannel'
 
 /** How much a provider's word is worth — derived server-side from kind +
  *  settings on every read, never stored. Ordered worst to best. */
@@ -39,6 +40,53 @@ export interface CustomProfileSettings {
     audience?: string
     max_age_seconds?: number
     trusted_proxy_acknowledged?: boolean
+}
+
+/** Typed view of a ``backchannel`` row's settings blob. Optional
+ *  throughout for the same reason as above: the form builds it up and
+ *  the server owns validation. ``gateway_headers`` / ``exchange_headers``
+ *  come back redacted as a whole — we cannot know which of an
+ *  operator's own header names carries the credential. */
+export interface BackchannelSettings {
+    token_source?: 'cookie' | 'header'
+    token_source_key?: string
+    gateway_url?: string
+    gateway_method?: 'POST' | 'GET'
+    gateway_send_as?: 'cookie' | 'header' | 'body'
+    gateway_token_header?: string
+    gateway_token_prefix?: string
+    gateway_body_field?: string
+    gateway_headers?: Record<string, string>
+    gateway_token_path?: string
+    exchange_url?: string
+    exchange_method?: 'POST' | 'GET'
+    exchange_send_as?: 'body' | 'header'
+    exchange_body_field?: string
+    exchange_token_header?: string
+    exchange_token_prefix?: string
+    exchange_headers?: Record<string, string>
+    exchange_claims_path?: string
+    timeout_seconds?: number
+    liveness_on_refresh?: boolean
+    liveness_grace_seconds?: number
+}
+
+/** One permitted internal destination for a back-channel provider.
+ *  Platform-level rather than per-provider: a per-provider allowlist
+ *  would be circular. Managed under ``system:sso:hosts:manage``. */
+/** Which outbound flow a host entry serves: 'gateway' rows unlock
+ *  internal destinations for the back-channel legs; 'avatar' rows name
+ *  the external image hosts in-app avatars may be fetched from. */
+export type HostPurpose = 'gateway' | 'avatar'
+
+export interface BackchannelHost {
+    id: string
+    purpose?: HostPurpose
+    host: string
+    port: number
+    note?: string | null
+    createdAt?: string | null
+    createdBy?: string | null
 }
 
 export interface IdpProvider {
@@ -140,6 +188,10 @@ export interface TestMappingResult {
         last_name: string
         groups: string[]
         auth_time: number | null
+        /** The full-name string as the IdP released it; absent on older
+         *  servers. */
+        display_name?: string | null
+        avatar_url?: string | null
         attributes: Record<string, unknown>
     }
     /**
@@ -199,6 +251,23 @@ export interface AuthConfigPatch {
     expectedVersion?: number
 }
 
+/** Outcome of an end-sessions call. With ``dryRun`` nothing was written
+ *  and ``usersAffected`` is the count a confirm dialog shows; without it
+ *  the numbers are what actually happened. */
+export interface EndSessionsResult {
+    /** Absent on the platform-wide sweep. */
+    providerId?: string
+    usersAffected: number
+    tokensRevoked: number
+    dryRun: boolean
+}
+
+/** Outcome of the everyone sweep — every session, password and SSO,
+ *  except system accounts, which the extra count reports. */
+export interface EndAllSessionsResult extends EndSessionsResult {
+    systemAccountsSkipped: number
+}
+
 
 // ── Phase 4: user lookup + search response shapes ───────────────────
 
@@ -239,6 +308,162 @@ export interface UserSummary {
     identities: UserIdentityRef[]
     attributes: UserAttributeRef[]
     matchedOn?: string[] | null
+}
+
+/** What a back-channel rehearsal reports — the dry-run envelope from
+ *  ``preview_sso_login``, snake_case as the server writes it. */
+export interface RehearsalOutcome {
+    action?: string
+    reason?: string
+    deny_reasons?: string[]
+    email?: string
+    external_id?: string
+    user_email?: string
+    groups?: string[]
+    reconcile?: {
+        matched?: {
+            idp_group?: string
+            target_type?: string
+            role_name?: string | null
+            group_id?: string | null
+            scope_type?: string | null
+            scope_id?: string | null
+        }[]
+        unmatched_groups?: string[]
+    }
+    /** Browser-assertion rehearsals only: which case the gateway's
+     *  reply turned out to be, and what judged it. Absent for handle
+     *  and server rehearsals. */
+    verification?: {
+        shape?: 'jwt' | 'json'
+        verified?: boolean
+        material?: 'jwks' | 'public_key' | 'shared_secret' | 'none'
+    }
+    /** Whether the claims carried a usable authentication time, and the
+     *  re-certification ceiling measured against it. Absent from older
+     *  servers — absent means say nothing. */
+    auth_time?: { present?: boolean; ceiling_hours?: number }
+    /** The avatar leg: the rehearsal makes the same guarded image GET a
+     *  real sign-in would (storing nothing) and reports the verdict.
+     *  Absent from older servers — absent means say nothing. */
+    avatar?: {
+        url?: string | null
+        fetched?: boolean
+        content_type?: string
+        size?: number
+        reason?: string
+        detail?: string
+    }
+}
+
+/** The avatar verdict as one operator-readable line, or null for the
+ *  no-URL case on a connection that maps no avatar — a fact worth a
+ *  line only when someone expected a picture, which the caller cannot
+ *  know; the rehearsal page itself prints it, this summary stays
+ *  quiet. */
+function avatarLine(
+    a: NonNullable<RehearsalOutcome['avatar']>,
+): string | null {
+    if (!a.url) return null
+    if (a.fetched) {
+        const kib = Math.max(1, Math.round((a.size ?? 0) / 1024))
+        return `Their picture would arrive (${a.content_type ?? 'image'}, `
+            + `${kib} KiB) — a real sign-in stores and shows it.`
+    }
+    const why = a.reason === 'host_not_allowlisted'
+        ? 'its host is not on the avatar image hosts list (Settings tab)'
+        : a.reason === 'not_an_image'
+            ? 'the URL does not serve a raster image (PNG, JPEG, GIF, '
+              + 'WebP or AVIF)'
+            : a.reason === 'too_many_redirects'
+                ? 'the URL redirects more than three times'
+                : a.reason === 'tls_verify_failed'
+                    ? "the host's TLS does not validate against this "
+                      + "deployment's trust — mount your corporate CA "
+                      + 'bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it'
+                    : a.detail || a.reason || 'the fetch failed'
+    return `Their picture would NOT arrive: ${why}.`
+}
+
+/** The verification verdict as one operator-readable line, or null when
+ *  the outcome carries none (handle/server rehearsals). */
+function verificationLine(
+    v: NonNullable<RehearsalOutcome['verification']>,
+): string {
+    if (v.verified) {
+        const material = v.material === 'public_key'
+            ? 'your pasted public key'
+            : v.material === 'shared_secret'
+                ? 'the shared secret'
+                : "the connection's published keys (JWKS)"
+        return `The reply was a signed token, verified against ${material}.`
+    }
+    return v.shape === 'json'
+        ? 'The reply was unsigned JSON, accepted only because Trust '
+          + 'unsigned is on — this connection is rated Unverified.'
+        : 'The reply was a signed token accepted WITHOUT verification '
+          + 'because Trust unsigned is on — this connection is rated '
+          + 'Unverified.'
+}
+
+/** The rehearsal's group story, as lines an operator can read.
+ *
+ *  The whole point of rehearsing is answering "what would this sign-in
+ *  DO" — and the outcome's groups and matched mappings are exactly the
+ *  part operators are debugging when access doesn't appear. Discarding
+ *  them made the rehearsal say only who, never what.
+ */
+export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
+    const lines: string[] = []
+    if (outcome.verification) {
+        // First, because it answers the question a varying gateway
+        // makes operators ask: which case did we just see, and was it
+        // verified?
+        lines.push(verificationLine(outcome.verification))
+    }
+    if (outcome.auth_time?.present === false) {
+        // Only a requirement-off row reaches a verdict without one —
+        // and then the ceiling quietly measures from each sign-in.
+        lines.push(
+            'The claims carried no authentication time — the '
+            + `${outcome.auth_time.ceiling_hours ?? 24}-hour `
+            + 're-certification will measure from each sign-in instead '
+            + 'of from the IdP.',
+        )
+    }
+    if (outcome.avatar) {
+        const line = avatarLine(outcome.avatar)
+        if (line) lines.push(line)
+    }
+    const groups = outcome.groups ?? []
+    lines.push(
+        groups.length
+            ? `Groups asserted: ${groups.join(', ')}.`
+            : 'The claims carried no groups.',
+    )
+    const matched = outcome.reconcile?.matched ?? []
+    if (matched.length) {
+        const described = matched.map((m) =>
+            m.target_type === 'group_membership'
+                ? `${m.idp_group} → group membership`
+                : `${m.idp_group} → ${m.role_name ?? 'role'}${
+                    m.scope_type === 'workspace' && m.scope_id
+                        ? ` in workspace ${m.scope_id}`
+                        : ''
+                }`,
+        )
+        lines.push(`Mappings that would apply: ${described.join('; ')}.`)
+    } else if (groups.length) {
+        lines.push('No group mapping matched — nothing would be granted.')
+    }
+    const unmatched = outcome.reconcile?.unmatched_groups ?? []
+    if (unmatched.length && matched.length) {
+        lines.push(`Groups matching no mapping: ${unmatched.join(', ')}.`)
+    }
+    if (outcome.action === 'rejected' && outcome.deny_reasons?.length) {
+        lines.push(`Refused because: ${outcome.deny_reasons.join(', ')}.`)
+    }
+    return lines
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -287,6 +512,42 @@ export const ssoAdminService = {
         )
     },
 
+    // ── Outbound host allowlists ─────────────────────────────────────
+    //
+    // Two lists on one route, told apart by ?purpose=: 'gateway'
+    // (default — which internal addresses a back-channel provider may
+    // call) and 'avatar' (which external image hosts in-app avatars may
+    // be fetched from). Gated server-side on
+    // ``system:sso:hosts:manage`` rather than ``system:admin``, so
+    // these three can 403 for someone who can edit every other thing on
+    // this page — the UI has to say so rather than showing an empty
+    // list.
+
+    listBackchannelHosts(purpose?: HostPurpose): Promise<BackchannelHost[]> {
+        return request<BackchannelHost[]>(
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
+        )
+    },
+
+    addBackchannelHost(
+        body: { host: string; port?: number; note?: string },
+        purpose?: HostPurpose,
+    ): Promise<BackchannelHost> {
+        return request<BackchannelHost>(
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
+            { method: 'POST', body: JSON.stringify(body) },
+        )
+    },
+
+    deleteBackchannelHost(id: string): Promise<void> {
+        return request<void>(
+            `${ADMIN}/idp-providers/backchannel-hosts/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+        )
+    },
+
     /** Promote a draft to live — the moment it appears on the login page
      *  for every user. Deliberately its own call, not a PATCH: making a
      *  provider public is a different kind of act from renaming it. */
@@ -294,6 +555,23 @@ export const ssoAdminService = {
         return request<IdpProvider>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}/publish`,
             { method: 'POST' },
+        )
+    },
+
+    /** End every session this connection minted — or, with ``dryRun``,
+     *  just count who that would sign out. Password sessions are never
+     *  touched, so "switch back to local accounts" starts immediately.
+     *  Works whether the row is enabled or not: the usual moment for
+     *  this is right after turning it off. */
+    endProviderSessions(
+        id: string, opts?: { dryRun?: boolean },
+    ): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/end-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
         )
     },
 
@@ -305,6 +583,49 @@ export const ssoAdminService = {
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}/dry-run/start`,
             { method: 'POST' },
         )
+    },
+
+    /** Complete a back-channel rehearsal inline — the shapes that have
+     *  nothing for an opened tab to carry (a handle, a browser-mode
+     *  assertion). Call after ``startDryRun`` so the marker cookie rides
+     *  along; the server answers the would-be outcome and writes
+     *  nothing. Returns a line to show the operator either way — the
+     *  verdict of a rehearsal is a result, not an error. */
+    async rehearseBackchannel(
+        slug: string, body: { handle?: string; assertion?: string },
+    ): Promise<{ ok: boolean; line: string; outcome?: RehearsalOutcome }> {
+        const res = await fetchWithTimeout(
+            `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                skipAuthRefresh: true,
+            },
+        )
+        const payload = await res.json().catch(() => null)
+        if (!res.ok) {
+            return {
+                ok: false,
+                line: `Rehearsal failed: ${
+                    payload?.detail?.error ?? res.status
+                }`,
+            }
+        }
+        const outcome = payload?.outcome as RehearsalOutcome | undefined
+        if (!outcome) {
+            return { ok: true, line: 'Rehearsal completed, but reported nothing.' }
+        }
+        return {
+            ok: true,
+            // The envelope is snake_case — reading ``externalId`` here
+            // used to make a subject with no email an "unnamed identity".
+            line: `Rehearsal: would sign in as ${
+                outcome.email ?? outcome.external_id ?? 'an unnamed identity'
+            } (${outcome.action ?? 'no action recorded'}).`,
+            outcome,
+        }
     },
 
     /** The most recent assertion a provider sent, for mapping against
@@ -417,6 +738,25 @@ export const ssoAdminService = {
         )
     },
 
+    /** Replace one live rule in place. The whole rule is sent — a rule
+     *  is one sentence — and the server validates it exactly as on
+     *  create. Grants under the old target adjust at each person's next
+     *  session refresh (or at once, when the edit orphaned the target). */
+    updateGroupMapping(id: string, body: {
+        providerId?: string | null
+        idpGroup: string
+        targetType: 'role_binding' | 'group_membership'
+        roleName?: string | null
+        scopeType?: 'global' | 'workspace' | null
+        scopeId?: string | null
+        targetGroupId?: string | null
+    }): Promise<IdpGroupMapping> {
+        return request<IdpGroupMapping>(
+            `${ADMIN}/idp-group-mappings/${encodeURIComponent(id)}`,
+            { method: 'PUT', body: JSON.stringify(body) },
+        )
+    },
+
     deleteMapping(id: string): Promise<void> {
         return request<void>(
             `${ADMIN}/idp-group-mappings/${encodeURIComponent(id)}`,
@@ -434,6 +774,33 @@ export const ssoAdminService = {
         return request<AuthConfig>(`${ADMIN}/sso/config`, {
             method: 'PATCH', body: JSON.stringify(patch),
         })
+    },
+
+    /** The master-switch companion to ``endProviderSessions``: end every
+     *  session minted through any connection at once. Deliberately
+     *  callable with ``ssoEnabled`` already off — that is when an
+     *  operator reaches for it. */
+    endSsoSessions(opts?: { dryRun?: boolean }): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/sso/config/end-sso-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
+    },
+
+    /** Require everyone to sign in again: end every session — password
+     *  AND SSO — except system accounts. The caller's own session is
+     *  included unless it is one, so the UI warns before calling. */
+    endAllSessions(opts?: { dryRun?: boolean }): Promise<EndAllSessionsResult> {
+        return request<EndAllSessionsResult>(
+            `${ADMIN}/sso/config/end-all-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
     },
 
     // ── Phase 4: user lookup + search ────────────────────────────────
@@ -465,4 +832,158 @@ export const ssoAdminService = {
         const qs = new URLSearchParams({ q, limit: String(limit) })
         return request<UserSummary[]>(`${ADMIN}/users/search?${qs.toString()}`)
     },
+
+    // ── Sign-in diagnostics ──────────────────────────────────────────
+
+    /** Failed sign-ins in a window, one entry per person. Needs
+     *  ``system:audit:read``. */
+    failureDigest(params: FailureDigestParams = {}): Promise<FailureDigest> {
+        const qs = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) {
+            if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+        }
+        const suffix = qs.toString() ? `?${qs.toString()}` : ''
+        return request<FailureDigest>(`${ADMIN}/sso/failures${suffix}`)
+    },
+
+    /** One page of the SSO activity log, filtered on the server. Needs
+     *  ``system:audit:read``. */
+    activity(params: ActivityParams = {}): Promise<ActivityPage> {
+        const qs = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) {
+            if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+        }
+        const suffix = qs.toString() ? `?${qs.toString()}` : ''
+        return request<ActivityPage>(`${ADMIN}/sso/activity${suffix}`)
+    },
+}
+
+/** What an SSO activity row means to the reader. */
+export type ActivityOutcome =
+    | 'signed_in' | 'failed' | 'session_ended' | 'signed_out'
+    | 'account' | 'trust' | 'config'
+
+export interface ActivityParams {
+    fromTs?: string
+    outcome?: ActivityOutcome
+    /** A connection's slug, or ``password``. */
+    connection?: string
+    /** A person (name, email, id) or any text in the record — a
+     *  reference, an address, an IdP subject. */
+    q?: string
+    cursor?: string
+    limit?: number
+}
+
+export interface ActivityPerson {
+    userId?: string | null
+    name?: string | null
+    email?: string | null
+    avatarId?: string | null
+    deleted: boolean
+}
+
+export interface ActivityRow {
+    id: string
+    at: string
+    eventType: string
+    outcome: ActivityOutcome
+    severity: 'critical' | 'warning' | 'info'
+    summary: string
+    person?: ActivityPerson | null
+    /** Who did it, when that is not the person it concerns. */
+    actor?: ActivityPerson | null
+    connection?: { slug: string; name?: string | null } | null
+    reason?: string | null
+    detail?: string | null
+    ref?: string | null
+    clientIp?: string | null
+    userAgent?: string | null
+    payload: Record<string, unknown>
+}
+
+export interface ActivityPage {
+    rows: ActivityRow[]
+    nextCursor?: string | null
+    /** Events per outcome under the window, connection and search. */
+    counts: Record<ActivityOutcome, number>
+}
+
+export interface FailureDigestParams {
+    fromTs?: string
+    reason?: string
+    /** A connection's slug, or ``password``. */
+    provider?: string
+    /** A person: name, email, user id or IdP subject. */
+    q?: string
+    limit?: number
+}
+
+export interface FailureAttempt {
+    at: string
+    code: string
+    detail?: string | null
+    provider: string
+    providerName?: string | null
+    ref?: string | null
+    clientIp?: string | null
+    userAgent?: string | null
+}
+
+export interface PersonFailures {
+    /** Stable per person for the window. */
+    key: string
+    /** ``account`` — resolved to a user; ``no_account`` — an address with no
+     *  account behind it; ``unidentified`` — attempts that never got far
+     *  enough to say who. */
+    kind: 'account' | 'no_account' | 'unidentified'
+    userId?: string | null
+    email?: string | null
+    externalId?: string | null
+    name?: string | null
+    avatarId?: string | null
+    status?: string | null
+    deleted: boolean
+    passwordSet?: boolean | null
+    waysIn: { slug: string; name?: string | null; lastUsedAt?: string | null }[]
+    lastSignInAt?: string | null
+    attempts: number
+    firstAt: string
+    lastAt: string
+    /** ``null`` when there is no account to have signed in to. */
+    stillFailing?: boolean | null
+    latest: {
+        code: string
+        detail?: string | null
+        provider: string
+        providerName?: string | null
+        ref?: string | null
+    }
+    reasons: { code: string; count: number }[]
+    /** Distinct network addresses the attempts came from. */
+    clients: number
+    sessionEnds: {
+        at: string
+        eventType: string
+        reason: string
+        provider?: string | null
+    }[]
+    recent: FailureAttempt[]
+    /** Failures nobody could be named for, from the same network address
+     *  and browser shortly before this person's attempts. Likely theirs,
+     *  not certainly — an office can share an address. */
+    related: FailureAttempt[]
+}
+
+export interface FailureDigest {
+    window: { from: string; scanned: number; truncated: boolean }
+    totals: {
+        attempts: number
+        people: number
+        stillFailing: number
+        unidentified: number
+    }
+    reasons: { code: string; count: number }[]
+    providers: { slug: string; name?: string | null; count: number }[]
+    people: PersonFailures[]
 }

@@ -1,0 +1,606 @@
+"""Outbound HTTP for IdP metadata, with the target constrained.
+
+Three provider paths fetch a URL an administrator typed: OIDC discovery,
+the JWKS endpoint named by that discovery document, and SAML IdP
+metadata. Each used a bare ``httpx`` GET, which made
+``POST /admin/idp-providers/discover`` an arbitrary-URL request issued
+from inside the cluster, with the response body handed back to the
+caller. ``http://169.254.169.254/latest/meta-data/`` is the canonical
+example; a Redis admin port or an internal service's health endpoint is
+the more useful one.
+
+It is admin-gated, so this is not an unauthenticated hole. It is still
+worth closing: the whole point of the network position this service
+holds is that it can reach things the admin's browser cannot, and
+"an admin would never" is not an access control.
+
+What this does NOT fully solve is DNS rebinding — the name is resolved
+here and resolved again by the connection, and a hostile resolver can
+answer differently. Pinning the checked address into the connection
+needs a custom transport; the resolve-time check raises the bar
+substantially and is where the standard mitigations sit.
+"""
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import json
+import logging
+import os
+import re
+import socket
+import ssl
+from typing import Any
+from urllib.parse import urljoin, urlsplit
+
+import httpx
+
+from backend.common.adapters.redis_tls import _normalize_cert_path
+
+logger = logging.getLogger(__name__)
+
+#: The shape of a compact JWS: three base64url segments. A transport-level
+#: check only — whether the token verifies is the caller's business. The
+#: signature segment may be empty here because the *shape* of an unsecured
+#: JWT is still this shape; the decode layer refuses ``alg: none``.
+_COMPACT_JWS_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
+
+#: Metadata documents are small. A cap stops a hostile or misconfigured
+#: endpoint streaming until the worker runs out of memory.
+MAX_METADATA_BYTES = 1024 * 1024
+
+_PROD_ENV_VALUES = {"prod", "production"}
+
+
+class OutboundError(RuntimeError):
+    """An outbound request that did not produce a usable response.
+
+    ``reason`` is a short machine-readable token (``"not_an_image"``,
+    ``"too_many_redirects"``…) for the surfaces that report a refusal to
+    an operator — the rehearsal verdict, chiefly. The message remains
+    the human half; the token is stable where the wording is not.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class BlockedOutboundRequest(OutboundError):
+    """The URL resolves somewhere this service must not reach, or the
+    response broke one of the transport rules — a redirect, an oversized
+    body, a body that is not JSON."""
+
+
+class OutboundStatusError(OutboundError):
+    """The endpoint answered, with a status we cannot use.
+
+    Separate from :class:`BlockedOutboundRequest` because the *status*
+    is the whole signal for one caller: the back-channel liveness check
+    has to tell "the IdP says this session is over" (401/403 — act on
+    it, end the session) from "the IdP did not answer properly"
+    (5xx — do not act on it, this is an outage). Collapsing the two
+    would either log everyone out during a gateway incident or keep
+    sessions alive after they were revoked upstream.
+    """
+
+    def __init__(self, url: str, status_code: int) -> None:
+        super().__init__(
+            f"{url!r} answered HTTP {status_code}.",
+            reason=f"http_{status_code}",
+        )
+        self.status_code = status_code
+
+
+def _is_prod() -> bool:
+    return os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES
+
+
+#: Deployment-level trust anchor for outbound SSO TLS: a PEM bundle
+#: path (``file:`` URIs tolerated, like the ``REDIS_*_TLS_CA_CERTS``
+#: family). Read at CALL time, like :func:`_is_prod`, so tests
+#: (``monkeypatch.setenv``) and restartless reconfigures take effect on
+#: the next request.
+SSO_OUTBOUND_TLS_CA_CERTS_ENV = "SSO_OUTBOUND_TLS_CA_CERTS"
+
+#: One ``ssl.SSLContext`` per bundle path. Building one re-reads the
+#: PEM from disk; a login burst should not pay that per call. Failures
+#: are deliberately NOT cached: a bundle that appears later (a Secret
+#: mounted after boot) starts working on the next call, and until then
+#: every call logs.
+_SSL_CONTEXT_CACHE: dict[str, ssl.SSLContext] = {}
+
+
+def _bundle_context(raw: str) -> ssl.SSLContext | None:
+    path = _normalize_cert_path(raw)
+    if not path:
+        return None
+    ctx = _SSL_CONTEXT_CACHE.get(path)
+    if ctx is not None:
+        return ctx
+    try:
+        ctx = ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError) as exc:
+        logger.error(
+            "%s names %r, which cannot be loaded (%s). Outbound TLS "
+            "verification stays on the SYSTEM trust store — hosts signed "
+            "by your corporate CA keep failing, with this line saying "
+            "why, until the path names a readable PEM bundle.",
+            SSO_OUTBOUND_TLS_CA_CERTS_ENV, path, exc,
+        )
+        return None
+    _SSL_CONTEXT_CACHE[path] = ctx
+    return ctx
+
+
+def resolve_outbound_verify(
+    override: bool | str | ssl.SSLContext | None = None,
+) -> bool | ssl.SSLContext:
+    """The ``verify=`` value for one outbound TLS connection.
+
+    Precedence: an explicit per-call *override* (``False`` is
+    meaningful — the back-channel per-connection escape hatch; a str is
+    treated as a bundle path), then the deployment bundle named by
+    :data:`SSO_OUTBOUND_TLS_CA_CERTS_ENV`, then ``True`` — full
+    verification against the system trust store.
+
+    A bundle path that cannot be loaded FAILS CLOSED to ``True``: a
+    typo must not take down every login, and ``True`` is the strictest
+    posture — the only consequence is that corporate-CA hosts keep
+    failing exactly as before, now with an ERROR log naming the fix.
+    Returns a context rather than the path because httpx deprecates
+    ``verify=<str>``.
+    """
+    if override is not None:
+        if isinstance(override, str):
+            return _bundle_context(override) or True
+        return override
+    configured = os.getenv(SSO_OUTBOUND_TLS_CA_CERTS_ENV, "").strip()
+    if not configured:
+        return True
+    return _bundle_context(configured) or True
+
+
+def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
+    """Resolve an IPv4-mapped IPv6 address to its IPv4 form.
+
+    ``::ffff:169.254.169.254`` is the same destination as
+    ``169.254.169.254``, and a check that reads only the properties of
+    the outer form misses it.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return mapped if mapped is not None else ip
+
+
+def _address_is_never_reachable(ip: ipaddress._BaseAddress) -> bool:
+    """True for addresses no allowlist may ever unlock.
+
+    ``assert_fetchable`` can be told to permit a private address, because
+    an internal IdP gateway legitimately lives on one. These are the
+    addresses where that argument does not apply:
+
+    * **link-local** — ``169.254.169.254`` is the cloud metadata service.
+      This is the entry that matters. Reaching it turns a
+      request-forgery into instance-credential theft, and no identity
+      provider is ever hosted there.
+    * **loopback** — the process's own admin surfaces: Redis, debug
+      ports, the app's internal endpoints.
+    * multicast, reserved, unspecified — not a destination at all.
+
+    Kept as a property check rather than a CIDR list so the IPv6 forms
+    come along for free.
+    """
+    ip = _unwrap(ip)
+    return (
+        ip.is_loopback
+        or ip.is_link_local    # 169.254.0.0/16 — cloud metadata
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _address_is_reachable(ip: ipaddress._BaseAddress) -> bool:
+    """False for anything that is not a public internet address.
+
+    Deliberately a denylist of address *properties* rather than of
+    literals: ``is_private`` alone misses link-local (cloud metadata),
+    and a hand-written list of CIDRs misses IPv6 forms of the same
+    ranges — ``::ffff:169.254.169.254`` being the obvious one, which is
+    why mapped addresses are unwrapped first.
+    """
+    ip = _unwrap(ip)
+    return not (
+        ip.is_private          # RFC1918, ULA
+        or _address_is_never_reachable(ip)
+    )
+
+
+def host_port_key(url: str) -> str:
+    """The ``host:port`` an allowlist entry has to match, exactly.
+
+    Normalised so ``GW.Corp.Internal.`` and ``gw.corp.internal:443``
+    are one entry rather than three. The port is always explicit: an
+    operator permitting ``gw.corp.internal`` for https must not thereby
+    permit ``gw.corp.internal:6379``, which is a different service
+    entirely on the same box.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
+    return f"{host}:{port}"
+
+
+async def _assert_fetchable_off_loop(
+    url: str, *, allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """:func:`assert_fetchable` from async code, on a worker thread.
+
+    The check resolves the host with ``socket.getaddrinfo``, which blocks —
+    and these callers run on the event loop, one of them (the gateway
+    liveness check) once per active session per access lifetime. A slow
+    corporate resolver froze every request on the worker for as long as it
+    took. Same check, same answer; only where it waits has changed.
+    """
+    await asyncio.to_thread(assert_fetchable, url, allow_hosts=allow_hosts)
+
+
+def assert_fetchable(
+    url: str, *, allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Raise unless *url* is an endpoint we may request.
+
+    Called before the request rather than relying on the response,
+    because an SSRF's value is often in the side effect (a POST-like GET
+    to an internal admin endpoint) rather than in what comes back.
+
+    ``allow_hosts`` holds ``host:port`` strings — see :func:`host_port_key`
+    — that may resolve to a **private** address. An internal identity
+    gateway is the reason it exists: it is on RFC1918 by definition, so
+    without an exception this function refuses the only destination that
+    flow has. It relaxes exactly one check. Scheme, the production https
+    requirement, and :func:`_address_is_never_reachable` are unchanged by
+    it, so no allowlist entry can reach cloud metadata or loopback.
+
+    Note what an entry does and does not buy: it names a *host*, not an
+    address, so a host whose DNS is hostile can still move between
+    private addresses. That is the same reach the entry already grants,
+    which is why it is acceptable — and why the never-reachable floor is
+    an address check rather than a name check.
+    """
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+
+    if scheme not in ("http", "https"):
+        raise BlockedOutboundRequest(
+            f"{scheme or 'relative'!r} is not a fetchable scheme; "
+            "IdP metadata must be served over https.",
+            reason="unsupported_scheme",
+        )
+    if scheme == "http" and _is_prod():
+        raise BlockedOutboundRequest(
+            "refusing to fetch IdP metadata over plain http in production — "
+            "the document decides which keys verify your users' tokens.",
+            reason="plain_http_in_production",
+        )
+    host = parts.hostname
+    if not host:
+        raise BlockedOutboundRequest(f"no host in {url!r}", reason="no_host")
+
+    try:
+        resolved = socket.getaddrinfo(
+            host, parts.port or (443 if scheme == "https" else 80),
+        )
+    except socket.gaierror:
+        # Cannot resolve, so cannot judge — and cannot reach either. The
+        # connection is about to consult the same resolver and fail with
+        # a better message than anything invented here, so this is not
+        # treated as a refusal. Blocking would add no protection (an
+        # unresolvable host is not an SSRF target) while breaking
+        # split-horizon DNS and every transient resolver blip.
+        logger.debug("Skipping address check for unresolvable host %r", host)
+        return
+
+    permitted = host_port_key(url) in {
+        str(entry).strip().lower() for entry in allow_hosts
+    }
+
+    for family, _type, _proto, _canon, sockaddr in resolved:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        ip = ipaddress.ip_address(sockaddr[0])
+        if _address_is_never_reachable(ip):
+            # Deliberately checked before the allowlist, and worded so
+            # the log says which floor was hit. An operator who has
+            # allowlisted this host still does not get here.
+            raise BlockedOutboundRequest(
+                f"{host!r} resolves to {ip}, which is a loopback, "
+                "link-local, or otherwise non-routable address. No "
+                "allowlist entry permits this.",
+                reason="unroutable_address",
+            )
+        if not _address_is_reachable(ip) and not permitted:
+            raise BlockedOutboundRequest(
+                f"{host!r} resolves to {ip}, which is inside this "
+                "deployment's own network, and "
+                f"{host_port_key(url)!r} is not in the allowlist.",
+                reason="private_address_not_allowlisted",
+            )
+
+
+async def fetch_metadata(
+    url: str, *, timeout: float,
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> httpx.Response:
+    """GET *url* once, with redirects off and the body bounded.
+
+    Redirects are disabled rather than followed-and-rechecked: a 302 to
+    an internal address is the standard way around a pre-flight check,
+    and no IdP needs one to serve its own metadata.
+    """
+    await _assert_fetchable_off_loop(url)
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
+    ) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        if len(resp.content) > MAX_METADATA_BYTES:
+            raise BlockedOutboundRequest(
+                f"{url!r} returned {len(resp.content)} bytes; the cap is "
+                f"{MAX_METADATA_BYTES}."
+            )
+        return resp
+
+
+#: Back-channel identity responses are a user object, not a document.
+#: Separate from ``MAX_METADATA_BYTES`` so tightening one does not
+#: silently retune the other.
+MAX_JSON_BYTES = 256 * 1024
+
+
+async def request_json(
+    url: str,
+    *,
+    method: str = "POST",
+    json_body: dict | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float,
+    max_bytes: int = MAX_JSON_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+    accept_jwt: bool = False,
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> Any:
+    """Make one guarded credentialed request and return the parsed JSON.
+
+    ``accept_jwt`` widens exactly one refusal: a body that is not JSON
+    but *is* a compact JWS (three base64url segments — the way a corporate
+    token-translation endpoint answers with the token as the whole body)
+    is returned as a string instead of being blocked. Anything else that
+    is not JSON stays an error. A JWT arriving inside JSON needs no flag
+    — it is just a string value the caller resolves a path to.
+
+    The helper this module should have had from the start.
+    :func:`fetch_metadata` is GET-only, so the one credentialed
+    back-channel call that already existed — the OIDC token exchange —
+    was written as a bare ``httpx.post`` and inherited none of the
+    protections here: no pre-flight address check, redirects followed,
+    no size cap. Moving that call onto this function is worth doing and
+    is deliberately not done in the same change.
+
+    What is guarded:
+
+    * the destination, via :func:`assert_fetchable` before we connect;
+    * **redirects, which are refused rather than followed** — a 302 to
+      an internal address is the standard way around a pre-flight check,
+      so a 3xx is an error here, not a hop;
+    * the response size, capped **while streaming** rather than after
+      the fact, so a hostile endpoint cannot exhaust the worker before
+      the check runs;
+    * the clock, via an explicit caller-supplied timeout.
+
+    Errors never carry the response body. This is called on behalf of an
+    administrator who may be shown the failure, and a helper that echoed
+    what an internal address replied would turn a blocked request into a
+    working one.
+    """
+    await _assert_fetchable_off_loop(url, allow_hosts=allow_hosts)
+
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
+    ) as client:
+        async with client.stream(
+            method.upper(), url,
+            json=json_body, headers=headers, cookies=cookies,
+        ) as resp:
+            if 300 <= resp.status_code < 400:
+                raise BlockedOutboundRequest(
+                    f"{url!r} answered {resp.status_code} with a redirect; "
+                    "redirects are refused because they are how a "
+                    "pre-flight address check gets bypassed."
+                )
+            if resp.status_code >= 400:
+                raise OutboundStatusError(url, resp.status_code)
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise BlockedOutboundRequest(
+                        f"{url!r} exceeded the {max_bytes}-byte response cap."
+                    )
+
+    try:
+        return json.loads(bytes(body))
+    except (ValueError, UnicodeDecodeError) as exc:
+        if accept_jwt:
+            try:
+                text = bytes(body).decode("ascii").strip()
+            except UnicodeDecodeError:
+                text = ""
+            if _COMPACT_JWS_RE.fullmatch(text):
+                return text
+        # The parse error, not the payload — see the note above.
+        raise BlockedOutboundRequest(
+            f"{url!r} did not return valid JSON ({type(exc).__name__})."
+        ) from exc
+
+
+#: Profile pictures fetched at SSO login. Small on purpose: this is an
+#: avatar, not an asset store, and the bytes are re-served from our own
+#: origin on every member list.
+MAX_AVATAR_BYTES = 256 * 1024
+
+#: The content types an avatar fetch will accept, parameter-stripped and
+#: case-folded: raster images only. ``image/jpg`` is not a registered
+#: type, but enough photo hosts serve it that refusing the alias only
+#: punishes their users. Anything else — HTML, JSON, SVG (scriptable) —
+#: is not an image we are willing to re-serve.
+_AVATAR_IMAGE_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp",
+    "image/avif",
+})
+
+#: Redirect hops an avatar fetch will follow. Photo services routinely
+#: 302 to a CDN (Gravatar, Google, GitHub all do), so unlike the
+#: metadata calls a bounded, re-checked follow is the difference between
+#: "works" and "silently never stores".
+_MAX_AVATAR_REDIRECTS = 3
+
+
+async def fetch_image(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int = MAX_AVATAR_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+    require_hosts: frozenset[str] | set[str] | None = None,
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> tuple[bytes, str]:
+    """GET one image with :func:`request_json`'s guards, returning
+    ``(bytes, content_type)``.
+
+    Same posture as every outbound call here — destination pre-checked,
+    the body capped while streaming — with two image-specific turns:
+    redirects are followed up to :data:`_MAX_AVATAR_REDIRECTS` hops,
+    with :func:`assert_fetchable` re-run on **every** hop so a 302
+    cannot route past the pre-flight check; and the content-type must be
+    a raster image, because the bytes are stored and re-served from our
+    own origin, so a reply that is not one is a refusal, not a
+    passthrough.
+
+    ``require_hosts`` is the avatar allowlist, and it inverts the
+    default posture: when it is not ``None``, EVERY hop's ``host:port``
+    must appear in it — public hosts included — or the fetch is refused.
+    ``allow_hosts`` keeps its usual meaning (which entries may resolve
+    private). An empty ``require_hosts`` set therefore refuses every
+    destination: the list is the on-switch.
+    """
+    current = url
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
+    ) as client:
+        for _hop in range(_MAX_AVATAR_REDIRECTS + 1):
+            if require_hosts is not None:
+                key = host_port_key(current)
+                if key not in {
+                    str(entry).strip().lower() for entry in require_hosts
+                }:
+                    raise BlockedOutboundRequest(
+                        f"{key.rsplit(':', 1)[0]!r} is not on the avatar "
+                        "image hosts list, so this image will not be "
+                        f"fetched. Add {key!r} to the list to allow it.",
+                        reason="host_not_allowlisted",
+                    )
+            await _assert_fetchable_off_loop(current, allow_hosts=allow_hosts)
+            async with client.stream("GET", current) as resp:
+                if 300 <= resp.status_code < 400:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} answered {resp.status_code} "
+                            "with no Location header.",
+                            reason="redirect_without_location",
+                        )
+                    current = urljoin(current, location)
+                    continue
+                if resp.status_code >= 400:
+                    raise OutboundStatusError(current, resp.status_code)
+                content_type = (
+                    resp.headers.get("content-type") or ""
+                ).split(";")[0].strip().lower()
+                if content_type not in _AVATAR_IMAGE_TYPES:
+                    raise BlockedOutboundRequest(
+                        f"{current!r} answered with content-type "
+                        f"{content_type or 'unknown'!r}, which is not a "
+                        "raster image type this fetch accepts.",
+                        reason="not_an_image",
+                    )
+                body = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} exceeded the {max_bytes}-byte "
+                            "image cap.",
+                            reason="too_large",
+                        )
+                return bytes(body), content_type
+    raise BlockedOutboundRequest(
+        f"{url!r} redirected more than {_MAX_AVATAR_REDIRECTS} times.",
+        reason="too_many_redirects",
+    )
+
+
+def is_tls_verification_failure(exc: BaseException) -> bool:
+    """True when *exc* is (or wraps) a TLS certificate-verification
+    failure.
+
+    httpx surfaces these as ``ConnectError`` with no ``.reason`` of the
+    kind :class:`OutboundError` carries — only the ssl error's text —
+    so the cause chain is walked first and the message match is the
+    fallback, not the mechanism. Lets the rehearsal name a trust
+    problem as a trust problem instead of a generic fetch failure.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    msg = str(exc).lower()
+    return (
+        "certificate_verify_failed" in msg
+        or "certificate verify failed" in msg
+    )
+
+
+async def fetch_jwks(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int = MAX_JSON_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> dict:
+    """GET a JWKS document through the same guards as every other call.
+
+    Exists so nobody reaches for PyJWT's ``PyJWKClient``, which fetches
+    with its own urllib stack — no pre-flight address check, redirects
+    followed, no size cap. The key set decides which signatures verify,
+    so it is fetched with *more* care than an identity response, not
+    less.
+    """
+    doc = await request_json(
+        url, method="GET", timeout=timeout, max_bytes=max_bytes,
+        allow_hosts=allow_hosts, verify=verify,
+    )
+    if not isinstance(doc, dict) or not isinstance(doc.get("keys"), list):
+        raise BlockedOutboundRequest(
+            f"{url!r} did not return a JWKS document (an object with a "
+            "'keys' array)."
+        )
+    return doc

@@ -13,7 +13,12 @@
  * and then surfaced as the original 401, with the session left alone.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fetchWithTimeout, resetSessionLostLatch } from './fetchWithTimeout'
+import { fetchWithTimeout, refreshNow, resetSessionLostLatch } from './fetchWithTimeout'
+
+const { attemptSilentReauth } = vi.hoisted(() => ({
+    attemptSilentReauth: vi.fn(),
+}))
+vi.mock('./backchannelReauth', () => ({ attemptSilentReauth }))
 
 const REFRESH_URL = '/api/v1/auth/refresh'
 const PROTECTED_URL = '/api/v1/workspaces'
@@ -57,10 +62,13 @@ function refreshCalls(f: ReturnType<typeof mockFetch>): number {
 let sessionLost: number
 const countSessionLost = () => { sessionLost += 1 }
 
-function setPath(pathname: string) {
+function setPath(pathname: string, search = '') {
     Object.defineProperty(window, 'location', {
         configurable: true,
-        value: { pathname, href: `http://localhost${pathname}`, assign: vi.fn() },
+        value: {
+            pathname, search, origin: 'http://localhost',
+            href: `http://localhost${pathname}${search}`, assign: vi.fn(),
+        },
     })
 }
 
@@ -69,6 +77,8 @@ beforeEach(() => {
     window.addEventListener('auth:session-lost', countSessionLost)
     resetSessionLostLatch()
     setPath('/dashboard')
+    attemptSilentReauth.mockReset()
+    attemptSilentReauth.mockResolvedValue('not-applicable')
 })
 
 afterEach(() => {
@@ -160,6 +170,50 @@ describe('an inconclusive refresh', () => {
 })
 
 
+describe('a renewal no request asked for', () => {
+    it('announces a dead session itself', async () => {
+        // The proactive renewal learns the session is gone from this call
+        // alone. Unannounced, an idle tab sat "signed in" on a page whose
+        // every request would fail.
+        globalThis.fetch = mockFetch([unauthorized]) as unknown as typeof fetch
+
+        expect(await refreshNow()).toBe('expired')
+        expect(sessionLost).toBe(1)
+    })
+})
+
+
+describe('a refresh that never answers', () => {
+    it('is abandoned inside the rotation grace, and signs nobody out', async () => {
+        // Retried after the server may well have rotated: the retry has to
+        // land inside its 30s grace, or the old token reads as replayed.
+        vi.useFakeTimers()
+        try {
+            const f = vi.fn((_url: unknown, init?: RequestInit) =>
+                new Promise<Response>((_resolve, reject) => {
+                    init?.signal?.addEventListener('abort', () =>
+                        reject(new DOMException('aborted', 'AbortError')))
+                }))
+            globalThis.fetch = f as unknown as typeof fetch
+
+            const outcome = refreshNow()
+            await vi.advanceTimersByTimeAsync(20_000)
+            // No answer at all: the one retry waits a jittered second or
+            // two rather than going straight back into the same outage.
+            expect(f).toHaveBeenCalledTimes(1)
+            await vi.advanceTimersByTimeAsync(2_000)
+            expect(f).toHaveBeenCalledTimes(2)
+            await vi.advanceTimersByTimeAsync(20_000)
+
+            expect(await outcome).toBe('retryable')
+            expect(sessionLost).toBe(0)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+})
+
+
 describe('the SSO re-auth envelope', () => {
     it('navigates to the IdP instead of signing the user out', async () => {
         const f = mockFetch([ssoReauth])
@@ -167,7 +221,107 @@ describe('the SSO re-auth envelope', () => {
 
         await fetchWithTimeout(PROTECTED_URL)
 
+        expect(window.location.href)
+            .toBe('/api/v1/auth/entra/login?next=%2Fdashboard')
+        expect(sessionLost).toBe(0)
+    })
+
+    it('brings the user back to the page they were on, query and all', async () => {
+        // The server's login_url can only say ``next=/`` — it never saw
+        // the page. Signing in again must not cost the user their place.
+        setPath('/views/v1', '?tab=lineage')
+        globalThis.fetch = mockFetch([ssoReauth]) as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href).toBe(
+            '/api/v1/auth/entra/login?next=%2Fviews%2Fv1%3Ftab%3Dlineage',
+        )
+    })
+
+    it('leaves the URL alone from the app root', async () => {
+        setPath('/')
+        globalThis.fetch = mockFetch([ssoReauth]) as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
         expect(window.location.href).toBe('/api/v1/auth/entra/login')
+    })
+})
+
+
+describe('the silent back-channel recovery', () => {
+    const gatewayReauth = async () =>
+        new Response(
+            JSON.stringify({
+                detail: {
+                    error: 'sso_reauth_required',
+                    provider: 'corp-gateway',
+                    login_url: '/api/v1/auth/corp-gateway/login?next=%2F&force=1',
+                },
+            }),
+            { status: 401 },
+        )
+
+    it('reads a recovery as a successful refresh — no navigation, request retried', async () => {
+        attemptSilentReauth.mockResolvedValue('recovered')
+        let protectedCalls = 0
+        globalThis.fetch = vi.fn(async (...args: Parameters<typeof fetch>) => {
+            if (String(args[0]) === REFRESH_URL) return gatewayReauth()
+            protectedCalls += 1
+            // 401 before the recovery, 200 after — the retried request
+            // rides the re-established cookies.
+            return protectedCalls === 1
+                ? new Response('{}', { status: 401 })
+                : new Response('{}', { status: 200 })
+        }) as unknown as typeof fetch
+
+        const res = await fetchWithTimeout(PROTECTED_URL)
+
+        expect(attemptSilentReauth).toHaveBeenCalledWith('corp-gateway')
+        expect(res.status).toBe(200)
+        expect(window.location.href).toBe('http://localhost/dashboard')
+        expect(sessionLost).toBe(0)
+    })
+
+    it('lands a failed recovery on the sign-in page, with a clean page load', async () => {
+        // The session is already over server-side. A full load of /login —
+        // which reads the latched reason and never refreshes silently —
+        // beats an in-app sign-out that leaves stale caches and module
+        // state behind for the next sign-in to start from.
+        attemptSilentReauth.mockResolvedValue('failed')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href).toBe('/login?next=%2Fdashboard')
+        expect(sessionLost).toBe(0)
+    })
+
+    it('keeps the navigation for a provider it cannot recover', async () => {
+        attemptSilentReauth.mockResolvedValue('not-applicable')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href)
+            .toBe('/api/v1/auth/corp-gateway/login?next=%2Fdashboard&force=1')
+        expect(sessionLost).toBe(0)
+    })
+
+    it('lands a vanished provider on the login page, never its dead URL', async () => {
+        // The provider was disabled or deleted mid-session. Its
+        // login_url now answers raw 404 JSON — the one place the user
+        // must not end up. The login page reads the latched reason.
+        attemptSilentReauth.mockResolvedValue('gone')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href).toBe('/login?next=%2Fdashboard')
         expect(sessionLost).toBe(0)
     })
 })

@@ -1,14 +1,15 @@
 /**
  * useReparentNode — drag-to-reparent validation + staging:
  *   • self-drop is a no-op;
- *   • an ontology-illegal nesting is blocked with a toast (no staged change);
- *   • a valid reparent stages a containment create_edge (parent→child) + success toast;
+ *   • an ontology-illegal nesting is blocked with a notification (no staged change);
+ *   • a valid reparent stages ONE `move_entity` (the server resolves the node's current parent) and
+ *     shows it at once: every loaded parent link removed, the new one drawn as pending;
  *   • a cycle (dropping a node into its own descendant) is blocked.
  */
 import { renderHook } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-const showToast = vi.fn()
+const notify = vi.fn()
 
 // Ontology: a `system` may contain a `dataset` via CONTAINS (forward parent→child).
 // `dataset` may only contain `column` (non-empty → restricted, so it canNOT contain a system).
@@ -23,7 +24,7 @@ const REL_TYPES = [
   { id: 'HOLDS', name: 'Holds', sourceTypes: ['system'], targetTypes: ['dataset'], isContainment: true },
 ]
 
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/store/schema', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/store/schema')>()
   return {
@@ -46,10 +47,12 @@ const setCanvas = (nodes: unknown[], edges: unknown[] = []) =>
   useCanvasStore.setState({ nodes, edges, _nodeIndex: new Set(nodes.map((n: any) => n.id)), _edgeIndex: new Set(edges.map((e: any) => e.id)) } as never)
 const resetStaged = () => useStagedChangesStore.setState({ changes: [], redoStack: [], _scopeKey: null, _byScope: {} })
 const staged = () => useStagedChangesStore.getState().changes
+const moves = () => staged().filter((c) => c.type === 'move_entity')
+const parentLinks = (child: string) => useCanvasStore.getState().edges.filter((e) => e.target === child)
 
 describe('useReparentNode', () => {
   beforeEach(() => {
-    showToast.mockClear(); resetStaged()
+    notify.mockClear(); resetStaged()
     useBranchStore.setState({ currentBranchId: 'br_1' } as never)   // default: on a draft
   })
 
@@ -60,16 +63,26 @@ describe('useReparentNode', () => {
     expect(staged()).toHaveLength(0)
   })
 
-  it('stages a containment create_edge for a valid nesting', () => {
+  it('stages ONE move for a valid nesting and shows the new parent link', () => {
     setCanvas([node('S', 'system'), node('D', 'dataset')])
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')   // nest dataset D under system S
-    const ce = staged().find((c) => c.type === 'create_edge')
-    expect(ce).toBeTruthy()
-    expect((ce!.after as any).source).toBe('S')
-    expect((ce!.after as any).target).toBe('D')
-    expect((ce!.after as any).edgeType).toBe('CONTAINS')
-    expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
+    expect(moves()).toHaveLength(1)
+    expect(staged()).toHaveLength(1)
+    const m = moves()[0].after as any
+    expect([m.childId, m.parentId, m.edgeType]).toEqual(['D', 'S', 'CONTAINS'])
+    expect(parentLinks('D').map((e) => [e.source, e.data?.isPending])).toEqual([['S', 'create']])
+    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
+  })
+
+  it('moves a node whose current parent link the canvas never loaded — the server resolves it', () => {
+    // D sits under S2 on the server, but that link is not on this canvas. A move is still exactly
+    // one `move`; the backend deletes whatever parent link D actually has (the double-parent bug).
+    setCanvas([node('S', 'system'), node('D', 'dataset')])
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S')
+    expect(moves()).toHaveLength(1)
+    expect(staged().some((c) => c.type === 'delete_edge' || c.type === 'create_edge')).toBe(false)
   })
 
   it('stages a valid nesting when the dragged node is a differently-cased (discovered graph) type', () => {
@@ -79,20 +92,19 @@ describe('useReparentNode', () => {
     setCanvas([node('S', 'system'), node('D', 'DATASET')])
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')
-    const ce = staged().find((c) => c.type === 'create_edge')
-    expect(ce).toBeTruthy()
-    expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
+    expect(moves()).toHaveLength(1)
+    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
   })
 
-  it('blocks an ontology-illegal nesting with a toast', () => {
+  it('blocks an ontology-illegal nesting with a notification', () => {
     setCanvas([node('S', 'system'), node('D', 'dataset')])
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('S', 'D')   // a dataset can't contain a system
     expect(staged()).toHaveLength(0)
-    expect(showToast).toHaveBeenCalledWith('error', expect.stringContaining("can't contain"))
+    expect(notify).toHaveBeenCalledWith('error', expect.stringContaining("can't contain"))
   })
 
-  it('blocks un-nesting (moving from an existing parent) outside a draft', () => {
+  it('blocks a move outside a draft (a move is a draft-save op)', () => {
     useBranchStore.setState({ currentBranchId: null } as never)   // on main
     setCanvas(
       [node('S', 'system'), node('S2', 'system'), node('D', 'dataset')],
@@ -100,19 +112,19 @@ describe('useReparentNode', () => {
     )
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')   // move D from S2 → S
-    expect(staged().some((c) => c.type === 'create_edge')).toBe(false)
-    expect(showToast).toHaveBeenCalledWith('info', expect.stringContaining('draft'))
+    expect(staged()).toHaveLength(0)
+    expect(notify).toHaveBeenCalledWith('info', expect.stringContaining('draft'))
   })
 
-  it('allows un-nesting in a draft (stages delete of old + create of new)', () => {
-    setCanvas(
-      [node('S', 'system'), node('S2', 'system'), node('D', 'dataset')],
-      [{ id: 'S2-D', source: 'S2', target: 'D', data: { edgeType: 'CONTAINS' } }],
-    )
+  it('moves in a draft: the old link leaves the canvas, and discard brings it back', () => {
+    const old = { id: 'S2-D', source: 'S2', target: 'D', data: { edgeType: 'CONTAINS' } }
+    setCanvas([node('S', 'system'), node('S2', 'system'), node('D', 'dataset')], [old])
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')
-    expect(staged().some((c) => c.type === 'delete_edge')).toBe(true)
-    expect(staged().some((c) => c.type === 'create_edge')).toBe(true)
+    expect(moves()).toHaveLength(1)
+    expect(parentLinks('D').map((e) => e.source)).toEqual(['S'])          // never two parents
+    useStagedChangesStore.getState().discard(moves()[0].id)
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S2-D'])           // back where it was
   })
 
   it('blocks a cycle (dropping a node into its own descendant)', () => {
@@ -123,8 +135,8 @@ describe('useReparentNode', () => {
     )
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('S', 'D')
-    expect(staged().some((c) => c.type === 'create_edge')).toBe(false)
-    expect(showToast).toHaveBeenCalledWith('error', expect.stringMatching(/descendant|contain/i))
+    expect(staged()).toHaveLength(0)
+    expect(notify).toHaveBeenCalledWith('error', expect.stringMatching(/descendant|contain/i))
   })
 
   it('retypeContainment switches the relationship (delete real old + create new, same parent)', () => {
@@ -134,11 +146,10 @@ describe('useReparentNode', () => {
     )
     const { result } = renderHook(() => useReparentNode())
     result.current.retypeContainment('D', 'HOLDS')
-    const del = staged().find((c) => c.type === 'delete_edge')
-    const create = staged().find((c) => c.type === 'create_edge')
-    expect(del?.targetId).toBe('E0')                       // deletes the REAL old edge
-    expect((create!.after as any).edgeType).toBe('HOLDS')
-    expect((create!.after as any).source).toBe('S')        // same parent
+    expect(moves()).toHaveLength(1)
+    const m = moves()[0].after as any
+    expect([m.parentId, m.edgeType]).toEqual(['S', 'HOLDS'])           // same parent, new type
+    expect(parentLinks('D').map((e) => e.data?.edgeType)).toEqual(['HOLDS'])
   })
 
   it('collapses repeated retypes — never a temp-id delete, never a double parent', () => {
@@ -150,11 +161,55 @@ describe('useReparentNode', () => {
     result.current.retypeContainment('D', 'HOLDS')     // E0(real) deleted + temp create(HOLDS)
     result.current.retypeContainment('D', 'CONTAINS')  // must collapse the temp create, not delete a temp id
 
-    const deletes = staged().filter((c) => c.type === 'delete_edge')
-    const creates = staged().filter((c) => c.type === 'create_edge')
-    expect(deletes).toHaveLength(1)                     // only the ONE real edge delete
-    expect(deletes[0].targetId).toBe('E0')             // a REAL id, never a temp 'staged-edge-…'
-    expect(creates).toHaveLength(1)                     // exactly one surviving parent edge (no double parent)
-    expect((creates[0].after as any).edgeType).toBe('CONTAINS')
+    expect(staged()).toHaveLength(1)                    // one move, the latest intent
+    expect((moves()[0].after as any).edgeType).toBe('CONTAINS')
+    expect(parentLinks('D')).toHaveLength(1)            // exactly one parent link on the canvas
+    useStagedChangesStore.getState().discard(moves()[0].id)
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['E0'])   // discard restores the ORIGINAL
+  })
+})
+
+describe('useReparentNode — returning a PLACED entity to its parent (view only)', () => {
+  // D sits inside S in the data; the view places it in another column (a layout pin).
+  let layout: any
+  let unregister: () => void
+  beforeEach(async () => {
+    notify.mockClear(); resetStaged()
+    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
+    layout = { layers: [{ id: 'L1', name: 'L1' }, { id: 'L3', name: 'Layer 3' }], assignments: { D: { layerId: 'L3' } } }
+    const { registerLayoutWriter } = await import('@/store/canvasLayoutBridge')
+    unregister = registerLayoutWriter({ current: () => layout, persist: (next) => { layout = next } })
+    setCanvas([node('S', 'system'), node('D', 'dataset')],
+      [{ id: 'S-D', source: 'S', target: 'D', data: { edgeType: 'CONTAINS' } }])
+  })
+  afterEach(() => unregister())
+
+  it('dropping it onto its own parent removes the placement — a layout change, undoable', () => {
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S')
+    expect(layout.assignments.D).toBeUndefined()                  // back under its parent
+    expect(staged().map((c) => c.type)).toEqual(['assign_layer'])  // listed for review, no data op
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S-D'])     // the data link is untouched
+    useStagedChangesStore.getState().discard(staged()[0].id)
+    expect(layout.assignments.D).toEqual({ layerId: 'L3' })        // undo restores the placement
+  })
+
+  it('a placement made in this session is simply cancelled', () => {
+    const before = layout
+    useStagedChangesStore.getState().stage({
+      type: 'assign_layer', targetId: 'D', after: { layerId: 'L3' }, summary: 'place',
+      discard: () => { layout = { ...before, assignments: {} } },
+    })
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.returnToParent('D', 'S')).toBe(true)
+    expect(staged()).toHaveLength(0)
+    expect(layout.assignments.D).toBeUndefined()
+  })
+
+  it('does nothing for an entity that is not placed', () => {
+    layout = { ...layout, assignments: {} }
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.returnToParent('D', 'S')).toBe(false)
+    expect(staged()).toHaveLength(0)
   })
 })

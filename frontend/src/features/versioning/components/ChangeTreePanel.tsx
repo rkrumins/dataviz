@@ -253,6 +253,18 @@ export function ChangeTreePanel({
       </div>
     )
   }
+  if (summary?.tooLarge) {
+    // Counted, but too many to lay out as a tree here: each change is in the draft's commits.
+    return (
+      <div className={cn('space-y-2.5', className)}>
+        <ImpactHeader summary={summary} />
+        <p className="text-[12px] text-ink-muted px-1">
+          This draft changes {summary.tooLarge.changed.toLocaleString()} entities — too many to list here.
+          Each change is listed under Commits.
+        </p>
+      </div>
+    )
+  }
   if (!summary || summary.groups.length === 0) {
     return <div className="py-10 text-center"><p className="text-sm text-ink-muted">{emptyHint}</p></div>
   }

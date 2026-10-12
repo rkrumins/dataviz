@@ -25,16 +25,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple)
 
-from sqlalchemy import select, func, delete, update, or_, tuple_
+from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
+                        text, update, or_, tuple_)
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db
-from .changeset import Delta, materialize, net_delta, diff_states
+from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
+from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
@@ -76,6 +81,149 @@ _NODE_DENORM = {
 # content_hash of the empty/absent state — exactly what a tombstone (deleted) head row stores, and
 # the pre-image a "create" logically reads (the entity was absent). Used by the head CAS below.
 _HASH_NONE = content_hash(None)
+# ...and of an empty payload, which diffs read as absent (no urn, no type: not a live entity).
+_HASH_EMPTY = content_hash({})
+
+
+class _Stored(NamedTuple):
+    """An entity's stored value on a branch at a seq, without its payload (:meth:`_hashes_at`)."""
+    kind: str                       # "node" | "edge"
+    content_hash: str
+    urn: Optional[str]              # nodes only
+    type: Optional[str]             # a node's entityType, an edge's edgeType
+    src: Optional[str] = None       # an edge's ends, from its version row
+    tgt: Optional[str] = None
+
+
+class _Head(NamedTuple):
+    """An entity a branch changed, without its payload (:meth:`_head_index`)."""
+    kind: str
+    version_id: str
+    content_hash: str
+    live: bool                      # not deleted, and not an empty or null payload
+    urn: Optional[str]              # a node head's urn, from its version row
+    type: Optional[str]             # a live head's entityType / edgeType, from its version row
+    # The rest of what a version row says without its payload: a node's displayName and
+    # qualifiedName; an edge's ends. The table it is in (``node_versions``) says ``table``.
+    name: Optional[str] = None
+    qname: Optional[str] = None
+    src: Optional[str] = None
+    tgt: Optional[str] = None
+    table: Optional[str] = None
+
+
+def _heads_of(heads, rows: Dict[str, tuple]) -> Dict[str, _Head]:
+    """:meth:`GraphVersioningService._head_index`'s index from its heads and their version rows —
+    pure CPU, run in a thread. A kind and a type repeat on every row: one string each, not one per
+    head (a large draft holds hundreds of thousands)."""
+    out: Dict[str, _Head] = {}
+    for eid, kind, vid, chash, tomb in heads:
+        table, urn, typ, name, qname, src, tgt = rows.get(vid) or (None,) * 7
+        out[eid] = _Head(sys.intern(kind), vid, chash,
+                         not tomb and chash not in (_HASH_EMPTY, _HASH_NONE), urn,
+                         sys.intern(typ) if typ else typ, name, qname, src, tgt, table)
+    return out
+
+
+def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, before) -> tuple:
+    """The draft's own part of :meth:`GraphVersioningService.branch_overlay_delta`, from hashes and
+    version-row columns: ``(nodesUpsert, nodesModified, nodesRemove, edgesUpsert, edgesRemove,
+    nodesNew)`` — pure CPU, run in a thread."""
+    nodes_upsert: List[dict] = []
+    nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
+    nodes_remove: List[dict] = []
+    edges_upsert: List[dict] = []
+    edges_remove: List[dict] = []
+    nodes_new: List[str] = []          # urns the draft CREATED (absent in main@base) vs merely modified
+    # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) — it reads
+    # as absent (``_Head.live``, ``_hashes_at``), so as a deletion, never as a node that fails
+    # GraphNode validation downstream (the reported 500) or shows as an empty diff row.
+    for eid in node_ids:
+        h, b = heads[eid], base_nodes.get(eid)
+        if not h.live:
+            if b is not None:                          # removed on the draft
+                nodes_remove.append({"entityId": eid, "urn": b.urn or f"gv:{eid}"})
+        elif b is None:                                # created in the draft — not present in main
+            urn = h.urn or f"gv:{eid}"                 # a skeleton; loaded when a read serves it
+            nodes_upsert.append({"urn": urn, "entityId": eid, "entityType": h.type or "unknown",
+                                 "displayName": h.name or "", "qualifiedName": h.qname, "lazy": True})
+            nodes_new.append(urn)
+        else:                                          # modified → loaded when a read serves it
+            nodes_modified.append({"entityId": eid, "urn": h.urn or b.urn or f"gv:{eid}"})
+    for eid in edge_ids:
+        h, b = heads[eid], before.get(eid)
+        if not h.live and b is None:
+            continue
+        # Edge endpoints are entity ids, read as urns, as _graphedge_dict gives them.
+        if not h.live:                                 # removed on the draft → its type and ends
+            edges_remove.append({"id": eid, "sourceUrn": b.src or "", "targetUrn": b.tgt or "",
+                                 "edgeType": b.type or "unknown"})
+        else:                                          # added/modified → loaded when a read serves it
+            edges_upsert.append({"id": eid, "sourceUrn": h.src or "", "targetUrn": h.tgt or "",
+                                 "edgeType": h.type or "unknown", "lazy": True})
+    return nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new
+
+
+class _SquashRow(NamedTuple):
+    """One entity's change in a narrow squash (:func:`_plan_squash`), told without its payload."""
+    entity_id: str
+    kind: str                           # the version table it is written to
+    op: str                             # create | update | delete
+    version_id: Optional[str]           # the draft's version a create/update copies
+    prev_content_hash: Optional[str]
+    content_hash: str
+# Entity heads written per statement. Each column goes as one array parameter (unnest), so the
+# statements' text never changes: compiled and prepared once, whatever the batch.
+_HEAD_BATCH = 5000
+
+
+def _head_arrays():
+    return [bindparam(name, type_=ARRAY(Boolean if name == "tombs" else Text))
+            for name in ("eids", "vids", "hashes", "tombs", "kinds")]
+
+
+_INSERT_HEADS = (
+    f"INSERT INTO {EntityHeadORM.__table__.fullname} (graph_id, branch_id, entity_id, entity_kind, "
+    "head_version_id, content_hash, is_tombstone, updated_at) "
+    "SELECT :graph_id, :branch_id, v.entity_id, v.kind, v.vid, v.hash, v.tomb, :now "
+    "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds) AS v(entity_id, vid, hash, tomb, kind) "
+    "ON CONFLICT (graph_id, branch_id, entity_id) ")
+# Point every head at its new version, whatever it was.
+_UPSERT_HEADS = text(
+    _INSERT_HEADS + "DO UPDATE SET head_version_id = EXCLUDED.head_version_id, "
+    "content_hash = EXCLUDED.content_hash, is_tombstone = EXCLUDED.is_tombstone, "
+    "entity_kind = EXCLUDED.entity_kind, updated_at = EXCLUDED.updated_at").bindparams(*_head_arrays())
+# Add the heads of entities that have none on the branch yet; returns the ones added.
+_ADD_HEADS = text(_INSERT_HEADS + "DO NOTHING RETURNING entity_id").bindparams(*_head_arrays())
+# Advance the heads still at their pre-image (the CAS); returns the ones advanced.
+_ADVANCE_HEADS = text(
+    f"UPDATE {EntityHeadORM.__table__.fullname} AS h SET head_version_id = v.vid, "
+    "content_hash = v.hash, is_tombstone = v.tomb, entity_kind = v.kind, updated_at = :now "
+    "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds, :pres) AS v(entity_id, vid, hash, tomb, kind, pre) "
+    "WHERE h.graph_id = :graph_id AND h.branch_id = :branch_id AND h.entity_id = v.entity_id "
+    "AND h.content_hash = v.pre RETURNING h.entity_id",
+).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
+
+
+def _copy_versions_sql(model, columns: str) -> "TextClause":
+    """``INSERT … SELECT``: version rows of ``model`` written onto a branch as copies of the rows
+    ``:src`` names — their payloads, identity ``columns`` and content hashes taken in Postgres,
+    never read out — under the new ids ``:ids`` with ``:ops`` and ``:prevs`` (the narrow squash)."""
+    table = model.__table__.fullname
+    return text(
+        f"INSERT INTO {table} (graph_id, id, entity_id, commit_id, commit_seq, branch_id, op, "
+        f"content_hash, prev_content_hash, payload, actor, change_reason, created_at, {columns}) "
+        "SELECT :graph_id, v.id, s.entity_id, :commit_id, :commit_seq, :branch_id, v.op, "
+        f"s.content_hash, v.prev, s.payload, :actor, NULL, :now, "
+        f"{', '.join('s.' + c.strip() for c in columns.split(','))} "
+        "FROM unnest(:src, :ids, :ops, :prevs) AS v(src, id, op, prev) "
+        f"JOIN {table} AS s ON s.graph_id = :graph_id AND s.id = v.src",
+    ).bindparams(*(bindparam(name, type_=ARRAY(Text)) for name in ("src", "ids", "ops", "prevs")))
+
+
+_COPY_NODE_VERSIONS = _copy_versions_sql(NodeVersionORM, "urn, entity_type, display_name, qualified_name")
+_COPY_EDGE_VERSIONS = _copy_versions_sql(
+    EdgeVersionORM, "source_entity_id, target_entity_id, edge_type, confidence, discriminator")
 
 
 class _StaleHead(Exception):
@@ -100,9 +248,26 @@ class MergeConflict(RuntimeError):
     the chosen payloads to land the merge.
     """
 
-    def __init__(self, conflicts):
+    def __init__(self, conflicts, current: Optional[Mapping[str, Tuple[str, Optional[dict]]]] = None):
         super().__init__(f"{len(conflicts)} unresolved merge conflict(s)")
         self.conflicts = conflicts
+        #: entity_id → (kind, the value the edit conflicts WITH) — what a client rebases onto.
+        #: Filled by ``apply_ops``'s optimistic-concurrency check; empty for a merge/publish.
+        self.current = dict(current or {})
+
+
+@dataclass
+class ApplyResult:
+    """What one ``apply_ops`` batch wrote."""
+
+    commit_id: Optional[str]
+    #: entity_id → (kind, the value after this batch — ``None`` once deleted) for every entity the
+    #: batch addressed or cascaded, changed or not: what a client refreshes its copies (and their
+    #: optimistic-concurrency tokens) from, so the next edit of the same entity is not a conflict
+    #: with its own last save.
+    written: Dict[str, Tuple[str, Optional[dict]]]
+    #: node entity_id → urn for every node the batch read or wrote (edge endpoints included).
+    urns: Dict[str, str] = field(default_factory=dict)
 
 
 class OntologyViolation(RuntimeError):
@@ -165,6 +330,16 @@ class GraphTooLargeToSync(RuntimeError):
         self.entities = entities
         self.limit = limit
         self.estimated_bytes = int(entities * _SYNC_BYTES_PER_ENTITY)
+
+
+class DiffTooLarge(RuntimeError):
+    """A draft changes more entities than its Changes tree lays out (``DIFF_TREE_MAX_CHANGES``):
+    its summary is counts only, and the tree has no children to page through."""
+
+    def __init__(self, changed: int, limit: int):
+        super().__init__(f"this draft changes {changed} entities; the tree lists up to {limit}")
+        self.changed = changed
+        self.limit = limit
 
 
 class NotUpToDate(RuntimeError):
@@ -540,11 +715,17 @@ class GraphVersioningService:
             ).scalar_one()
             seq = int(start)
             for op in ops:
+                if op.get("op") not in ("create", "update", "delete"):
+                    # Staged changes are folded op by op at checkpoint; anything else (a `move` is
+                    # resolved against stored state only by apply_ops) would be misread there.
+                    raise ValueError(f"unsupported staged op {op.get('op')!r}: create | update | delete")
                 seq += 1
                 entity_id = op.get("entity_id") or prefixed_id("ent")
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
                 payload = op.get("payload")
+                if op["op"] == "create":
+                    payload = strip_deletes(payload)     # a new entity has nothing to remove
                 if op["entity_kind"] == "node":
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
@@ -690,11 +871,16 @@ class GraphVersioningService:
             # Cascade containment deletes (ontology-driven): expand a deleted node to its
             # subtree + all incident edges so a checkpoint can't orphan descendants or dangle
             # edges — parity with apply_ops, via the same shared helper.
-            del_nodes = {c.entity_id for c in changes
-                         if c.op == "delete" and c.entity_kind == "node"}
+            # Nodes this checkpoint leaves deleted (a delete later undone by a re-create is not one).
+            del_nodes = {eid for eid, k in kind_by_entity.items()
+                         if k == "node" and head_state.get(eid) is None}
             if del_nodes:
                 subtree, inc_edges = await self._cascade_deletes(
-                    s, graph_id, branch_id, del_nodes, containment_edge_types)
+                    s, graph_id, branch_id, del_nodes, containment_edge_types, overlay=head_state)
+                for e in subtree | set(inc_edges):             # touched in this checkpoint: prior known
+                    if e in base_state:
+                        head_state[e] = None
+                        kind_by_entity[e] = "edge" if e in inc_edges else "node"
                 extra = [e for e in (subtree | set(inc_edges)) if e not in base_state]
                 extra_cur = await self._current_values(s, graph_id, branch_id, extra) if extra else {}
                 for e in extra:
@@ -712,30 +898,21 @@ class GraphVersioningService:
                     canonicalize_payload_types(v, ontology_rules)
             deltas = net_delta(base_state, head_state)
 
-            # Rich ontology gate — the authoritative check for staged edits (stage_changes
-            # can't type endpoints that exist only as uncommitted working changes; here the
-            # composed head state can). Strictness is decided by the graph row.
-            if ontology_rules is not None and deltas:
+            # The gate every write path shares, on what this checkpoint WRITES: no untyped
+            # creation, hierarchy integrity for new / re-pointed edges, and — strict graphs — the
+            # ontology (the authoritative check for staged edits: stage_changes can't type endpoints
+            # that exist only as uncommitted working changes; the composed head state can).
+            if deltas:
                 graph = await s.get(GraphORM, graph_id)
-                if graph is not None and graph.ontology_enforcement == "strict":
-                    rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
-                             d.payload, d.op) for d in deltas]
-                    endpoint_types: Dict[str, str] = {}
-                    eps = {ep for _e, k, p, o in rich if k == "edge" and o == "create" and p
-                           for ep in _edge_src_tgt(p) if ep}
-                    for ep in eps:
-                        v = head_state.get(ep) or base_state.get(ep) or composed.get(ep)
-                        if v and v.get("entityType"):
-                            endpoint_types[ep] = v["entityType"]
-                    unknown = [ep for ep in eps if ep not in endpoint_types]
-                    if unknown:
-                        cur = await self._current_values(s, graph_id, branch_id, unknown)
-                        for ep, v in cur.items():
-                            if v and v.get("entityType"):
-                                endpoint_types[ep] = v["entityType"]
-                    rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-                    if rich_viol:
-                        raise OntologyViolation(rich_viol)   # rolls back — nothing committed
+                await self._enforce_written(
+                    s, graph_id, branch_id, {d.entity_id: d.payload for d in deltas},
+                    base_state, kind_by_entity,
+                    containment_edge_types=containment_edge_types or [],
+                    ontology_rules=ontology_rules,
+                    strict=graph is not None and graph.ontology_enforcement == "strict",
+                    known=head_state,
+                    edited={c.entity_id for c in changes if c.op == "update"}
+                    - {c.entity_id for c in changes if c.op == "create"})
 
             commit_seq = await self._next_seq(s, graph_id, branch_id)
             commit = CommitORM(
@@ -755,8 +932,10 @@ class GraphVersioningService:
                 s, graph_id, branch_id, commit, deltas, kind_by_entity, actor
             )
 
-            # Merkle root over the branch's full effective live state.
-            commit.merkle_root = await self._merkle_root(s, graph_id, branch_id)
+            # Merkle root over the branch's full effective live state — for main only: nothing
+            # reads a draft's fingerprint, and building it composes the whole graph again.
+            commit.merkle_root = (await self._merkle_root(s, graph_id, branch_id)
+                                  if branch.kind == "main" else None)
             commit.stats = _delta_stats(deltas)
 
             for c in changes:
@@ -846,6 +1025,11 @@ class GraphVersioningService:
                 # _lock_graph so the head can't advance between this check and the squash below.
                 if draft.base_commit_seq < graph.main_head_commit_seq:
                     raise NotUpToDate(branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
+                if self._narrow_squash(graph, draft, resolutions):
+                    return await self._squash_up_to_date(
+                        s, graph, draft, main_id, actor, message,
+                        containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+                        merged_via="direct_publish")
                 # Up-to-date (base == current head) → base == theirs, so the merge reduces to the draft's
                 # own delta; a genuine same-field clash still raises MergeConflict (the only hard stop).
                 merged_state, conflicts, theirs = await self._compute_merge_bounded(
@@ -898,31 +1082,10 @@ class GraphVersioningService:
                 canonicalize_payload_types(v, ontology_rules)
 
         deltas = net_delta(theirs, merged_state)   # what publish adds to main
-        new_seq = graph.main_head_commit_seq + 1
         if not deltas:
-            draft.status = "merged"
-            draft.base_commit_seq = graph.main_head_commit_seq
-            return draft.head_commit_id or ""
+            return await self._merged_unchanged(s, graph, draft, actor, merged_via)
 
-        contributors = await self._branch_contributors(s, graph.id, draft.id)
-        source_commits = await self._branch_commit_ids(s, graph.id, draft.id)
-        main = await s.get(BranchORM, main_id)
-        squash = CommitORM(
-            graph_id=graph.id,
-            branch_id=main_id,
-            commit_seq=new_seq,
-            parent_commit_id=main.head_commit_id,
-            kind="squash_publish",
-            message=message,
-            actor=actor,
-            contributors=contributors,
-            source_branch_id=draft.id,
-            source_commit_ids=source_commits,
-            source_commit_count=len(source_commits),
-            originating_view_id=draft.originating_view_id,
-        )
-        s.add(squash)
-        await s.flush()
+        squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
 
         kind_by_entity = await self._kind_map_multi(
             s, [(graph.id, draft.id), (graph.id, main_id)],
@@ -936,36 +1099,59 @@ class GraphVersioningService:
                  for d in deltas if d.op != "delete"], ontology)
             if viol:
                 raise OntologyViolation(viol)
-        # Rich re-gate at merge time: rules are resolved from the CURRENT published
-        # ontology by the caller, so a draft opened before an ontology tightening
-        # cannot merge violating creates onto main (violations 422 back with
-        # per-entity reasons). Endpoint types come from merged_state — already
-        # hydrated with added edges' endpoints by _hydrate_merge_neighborhood.
-        if ontology_rules is not None and graph.ontology_enforcement == "strict":
-            rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
-                     d.payload, d.op) for d in deltas]
-            endpoint_types = {
-                eid: v["entityType"] for eid, v in merged_state.items()
-                if v and v.get("entityType")
-            }
-            rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-            if rich_viol:
-                raise OntologyViolation(rich_viol)
-        # Same authoritative duplicate/single-parent/cycle integrity the write path enforces,
-        # re-checked against CURRENT main at merge time — two drafts that are each clean in
-        # isolation must not compose into a two-parent or cyclic hierarchy on main.
-        merge_edge_creates = [(d.entity_id, d.payload) for d in deltas
-                              if d.op == "create" and d.payload is not None
-                              and kind_by_entity.get(d.entity_id) == "edge"]
-        if merge_edge_creates:
-            viol = await self._validate_edge_integrity(
-                s, graph.id, main_id, merge_edge_creates,
-                {d.entity_id for d in deltas if d.op == "delete"},
-                containment_edge_types or [])
-            if viol:
-                raise OntologyViolation(viol)
+        # Re-gated at merge time against CURRENT main, with rules resolved from the CURRENT
+        # published ontology by the caller — the same gate as every other write path, on what the
+        # publish writes: a draft opened before an ontology tightening cannot merge violating
+        # entities onto main, and two drafts that are each clean in isolation cannot compose into
+        # a two-parent or cyclic hierarchy. Edge ends are typed from ``merged_state`` (already
+        # hydrated with added edges' endpoints by _hydrate_merge_neighborhood).
+        await self._enforce_written(
+            s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, theirs,
+            kind_by_entity, containment_edge_types=containment_edge_types or [],
+            ontology_rules=ontology_rules, strict=graph.ontology_enforcement == "strict",
+            known=merged_state)
         await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor)
+        return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
 
+    async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str) -> str:
+        """A squash that changes nothing on ``main``: the draft is merged all the same."""
+        draft.status = "merged"
+        draft.base_commit_seq = graph.main_head_commit_seq
+        # Nothing reaches main, yet the branch is merged all the same (what it holds in views
+        # goes live with it), so no review raised from it may be left live either.
+        await self._resolve_live_prs(s, draft.id, None, actor, merged_via)
+        return draft.head_commit_id or ""
+
+    async def _squash_commit(self, s, graph, draft, main_id, actor, message) -> "CommitORM":
+        """The ``squash_publish`` commit a squash of ``draft`` writes onto ``main``, at the next seq."""
+        contributors = await self._branch_contributors(s, graph.id, draft.id)
+        source_commits = await self._branch_commit_ids(s, graph.id, draft.id)
+        main = await s.get(BranchORM, main_id)
+        squash = CommitORM(
+            graph_id=graph.id,
+            branch_id=main_id,
+            commit_seq=graph.main_head_commit_seq + 1,
+            parent_commit_id=main.head_commit_id,
+            kind="squash_publish",
+            message=message,
+            actor=actor,
+            contributors=contributors,
+            source_branch_id=draft.id,
+            source_commit_ids=source_commits,
+            source_commit_count=len(source_commits),
+            originating_view_id=draft.originating_view_id,
+        )
+        s.add(squash)
+        await s.flush()
+        return squash
+
+    async def _finish_squash(self, s, graph, draft, main_id, squash, deltas: List[Delta], actor,
+                             merged_via: str) -> str:
+        """What every squash does once its rows are written: ``main``'s head and Merkle root
+        advance, the draft is merged, and the projection is pointed at the new head. ``deltas``
+        need only their ids, ops and hashes."""
+        new_seq = squash.commit_seq
+        main = await s.get(BranchORM, main_id)
         main.head_commit_id = squash.id
         graph.main_head_commit_seq = new_seq       # advance head before merkle
         squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
@@ -978,18 +1164,166 @@ class GraphVersioningService:
         # Leaving them live (what `publish` used to do) stranded a PR pointing at a dead branch:
         # unmergeable (`_require_open` rejects it) yet still rendered as actionable, with an empty
         # diff. Resolve them all here, in the shared body, so no squash path can skip it.
-        for pr in await self._live_prs_for_branch(s, draft.id):
-            pr.status = "merged"
-            pr.resulting_commit_id = squash.id
-            pr.merged_at = _now()
-            pr.merged_by = actor
-            pr.merged_via = merged_via
-            pr.updated_at = _now()
+        await self._resolve_live_prs(s, draft.id, squash.id, actor, merged_via)
 
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
             ps.target_commit_seq = new_seq
         return squash.id
+
+    @staticmethod
+    def _narrow_squash(graph, draft, resolutions) -> bool:
+        """Whether a squash of ``draft`` may take :meth:`_squash_up_to_date`: it is up to date with
+        ``main``, the graph is not a fork, and no conflict is being resolved."""
+        return (config.NARROW_SQUASH and not graph.fork_parent_graph_id and not resolutions
+                and (draft.base_commit_seq or 0) == graph.main_head_commit_seq)
+
+    async def _squash_up_to_date(
+        self, s, graph, draft, main_id, actor, message, *,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+        merged_via: str = "review",
+    ) -> str:
+        """:meth:`_apply_draft_squash` for the common publish (:meth:`_narrow_squash`), at any size.
+
+        ``main`` has not moved since the draft branched, so the 3-way merge of every entity the
+        draft changed is the draft's own value (``three_way_merge(base, ours, base) == ours``):
+        nothing has to be merged, and what changed can be told from content hashes — the draft's
+        heads against ``main``'s. The full path loads every changed payload (twice: main's and the
+        draft's), merges and re-hashes each one in this process under the graph's lock, and at 200k
+        changes that was over a gigabyte. Here the plan is built from hashes, the gates judge the
+        version rows' identity columns (the only fields they read), and the rows are copied from
+        the draft's inside Postgres, keeping their stored hashes. The one exception is a row whose
+        type the ontology spells differently: its payload is canonicalized and re-hashed in Python,
+        as the full path does. The outcome is the full path's: the same rows, heads, stats, Merkle
+        root, cascade and violations, in one transaction under ``_lock_graph``."""
+        gid, head_seq = graph.id, graph.main_head_commit_seq
+        heads = await self._head_index(s, gid, draft.id)
+        main = await self._hashes_at(s, gid, main_id, list(heads), head_seq)
+        live = {eid for eid, h in heads.items() if h.live and h.table}
+        dead = {eid for eid in heads if eid not in live}          # the merged state's tombstones
+
+        # A deleted node takes the edges on it — the draft's own and main's (the full path's
+        # _hydrate_merge_neighborhood + _cascade_incident_edges).
+        hydrated = {eid: v for eid, v in (await self._incident_live_edge_skeletons(
+            s, gid, main_id, sorted(dead)) if dead else {}).items() if eid not in heads}
+        gone = {eid for eid in live
+                if heads[eid].src and (heads[eid].src in dead or heads[eid].tgt in dead)}
+        cascaded = sorted(eid for eid, v in hydrated.items() if v.get("sourceEntityId")
+                          and (v["sourceEntityId"] in dead or v.get("targetEntityId") in dead))
+
+        # Every edge left standing needs both ends standing (_assert_referential_integrity).
+        standing = [(eid, heads[eid].src or None, heads[eid].tgt or None)
+                    for eid in sorted(live - gone) if heads[eid].table == "edge"]
+        standing += [(eid, v.get("sourceEntityId"), v.get("targetEntityId"))
+                     for eid, v in sorted(hydrated.items()) if eid not in cascaded]
+        outside = sorted({e for _eid, a, b in standing for e in (a, b) if e and e not in heads})
+        ends = await self._skeletons_at(s, gid, main_id, outside, head_seq) if outside else {}
+
+        for eid, a, b in standing:
+            if not (a or b):
+                continue
+            for e in (a, b):
+                if not (e and ((e in live and e not in gone) if e in heads
+                               else ends.get(e) is not None)):
+                    raise ConcurrencyError(f"edge {eid} would dangle (endpoint tombstoned): {a}->{b}")
+
+        def reread(h: _Head) -> bool:
+            if h.table == "edge" and not h.type:
+                return True                   # its type may be spelled in the payload alone
+            if ontology_rules is None or not h.type:
+                return False
+            canon = (ontology_rules.canonical_entity_type(h.type) if h.table == "node"
+                     else ontology_rules.canonical_edge_type(h.type))
+            return bool(canon) and canon != h.type
+
+        # Pure CPU over every entity the draft changed (200k at a large publish): off the loop.
+        rows, lane = await asyncio.to_thread(_plan_squash, heads, main, gone, reread)
+        # The Python lane: the payload, canonicalized and hashed as the full path does.
+        deltas: List[Delta] = []
+        if lane:
+            payload_of = await self._payloads_by_version(
+                s, [(heads[eid].table, gid, heads[eid].version_id) for eid in lane])
+            for eid in lane:
+                p = payload_of.get(heads[eid].version_id)
+                if p:
+                    canonicalize_payload_types(p, ontology_rules)
+                b = main.get(eid)
+                if p and b is None:
+                    deltas.append(Delta(eid, "create", p, None, content_hash(p)))
+                elif not p and b is not None:
+                    deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+                elif p and content_hash(p) != b.content_hash:
+                    deltas.append(Delta(eid, "update", p, b.content_hash, content_hash(p)))
+        if cascaded:
+            for eid, b in (await self._hashes_at(s, gid, main_id, cascaded, head_seq)).items():
+                deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+        deltas += [Delta(r.entity_id, "delete", None, r.prev_content_hash, r.content_hash)
+                   for r in rows if r.op == "delete"]
+        copies = [r for r in rows if r.op != "delete"]
+        if not deltas and not copies:
+            return await self._merged_unchanged(s, graph, draft, actor, merged_via)
+
+        squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
+
+        # The gates, on what the squash writes, in entity order as the full path judges it.
+        kind_by_entity = {r.entity_id: r.kind for r in rows}
+        kind_by_entity.update({eid: heads[eid].table for eid in lane})
+        kind_by_entity.update({eid: "edge" for eid in cascaded})
+        written = await asyncio.to_thread(_written_values, copies, heads, deltas)
+        prior = await self._skeletons_at(s, gid, main_id, list(written), head_seq)
+        strict = graph.ontology_enforcement == "strict"
+        known: Optional[Dict[str, Optional[dict]]] = None
+        if strict and ontology_rules is not None:     # the only gate that types the edges' ends
+            # What the written edges' ends are, as the full path's merged state holds them (canonical).
+            known = {eid: dict(v) if v else v for eid, v in ends.items()}
+            known.update({eid: (_head_skeleton(h) if eid in live and eid not in gone else None)
+                          for eid, h in heads.items()})
+            for v in known.values():
+                canonicalize_payload_types(v, ontology_rules)
+        ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
+        if ontology is not None and strict:
+            viol = validate_entities(
+                [(eid, kind_by_entity.get(eid, "node"), v) for eid, v in written.items() if v is not None],
+                ontology)
+            if viol:
+                raise OntologyViolation(viol)
+        await self._enforce_written(
+            s, gid, main_id, written, prior, kind_by_entity,
+            containment_edge_types=containment_edge_types or [],
+            ontology_rules=ontology_rules, strict=strict, known=known)
+        del written, prior, known, heads, main, live, ends, standing   # per change: not into the writes
+
+        await self._copy_versions(s, gid, main_id, squash, copies, actor)
+        await self._write_deltas(s, gid, main_id, squash, deltas, kind_by_entity, actor)
+        deltas += [Delta(r.entity_id, r.op, None, r.prev_content_hash, r.content_hash) for r in copies]
+        del rows, copies, kind_by_entity
+        return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
+
+    async def _copy_versions(self, s, graph_id, branch_id, commit, rows: Sequence["_SquashRow"],
+                             actor) -> None:
+        """Write ``rows`` onto ``branch_id`` as copies of the version rows they name — payload,
+        identity columns and content hash taken inside Postgres (``INSERT … SELECT``), a chunk of
+        ``_IN_LIST_MAX`` per statement — and point their heads at the copies."""
+        now = _now()
+        for kind, stmt in (("node", _COPY_NODE_VERSIONS), ("edge", _COPY_EDGE_VERSIONS)):
+            todo = [r for r in rows if r.kind == kind]
+            for chunk in _chunks(todo, _IN_LIST_MAX):
+                new_ids = [prefixed_id("nv" if kind == "node" else "ev") for _ in chunk]
+                done = (await s.execute(stmt, {
+                    "graph_id": graph_id, "branch_id": branch_id, "commit_id": commit.id,
+                    "commit_seq": commit.commit_seq, "actor": actor, "now": now,
+                    "src": [r.version_id for r in chunk], "ids": new_ids,
+                    "ops": [r.op for r in chunk], "prevs": [r.prev_content_hash for r in chunk],
+                })).rowcount
+                if done != len(chunk):
+                    raise RuntimeError(f"squash copied {done} of {len(chunk)} {kind} versions: a "
+                                       "draft version row is missing")
+                heads = [{"entity_id": r.entity_id, "entity_kind": kind, "head_version_id": vid,
+                          "content_hash": r.content_hash, "is_tombstone": False}
+                         for r, vid in zip(chunk, new_ids)]
+                for i in range(0, len(heads), _HEAD_BATCH):
+                    await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], False)
 
     async def rebase_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
@@ -1057,7 +1391,10 @@ class GraphVersioningService:
                 s, graph_id, graph, draft, main_id, dict(resolutions or {})
             )
             if conflicts:
-                return {"clean": False, "conflicts": conflicts}
+                # The draft's own value of each conflicting entity, to resolve from — just those.
+                seeds = await self._current_values(
+                    s, graph_id, branch_id, sorted({c["entity_id"] for c in conflicts}))
+                return {"clean": False, "conflicts": conflicts, "seeds": seeds}
 
             # What arrived from main in (from_seq, to_seq] — the record of what this pull brought in.
             incoming = await self._incoming_from_main(s, graph_id, main_id, from_seq, to_seq)
@@ -1092,7 +1429,7 @@ class GraphVersioningService:
             s.add(commit)
             await s.flush()
             await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
-            commit.merkle_root = await self._merkle_root(s, graph_id, draft.id)
+            commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             # `stats` describes what CAME IN, not the rewrite to your own edits — it's what the user
             # means by "what did I just pull". The rebase of your edits is reported separately as
             # `changes`, and its version rows are the commit's actual data.
@@ -1705,6 +2042,8 @@ class GraphVersioningService:
         actor: str,
         message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
         """Squash-merge a fork PR into the parent's ``main`` — the same 3-way
         semantics as draft publish, across graphs (plan §8, §12.5).
@@ -1756,6 +2095,12 @@ class GraphVersioningService:
                 pr.checks_status = checks
                 if not checks["ontology"]["ok"]:
                     raise OntologyViolation(checks["ontology"]["violations"])
+                # The gate every write path shares, against the PARENT's main and ontology.
+                await self._enforce_written(
+                    s, parent.id, parent_main, {d.entity_id: d.payload for d in deltas}, theirs,
+                    kind_by_entity, containment_edge_types=containment_edge_types or [],
+                    ontology_rules=ontology_rules,
+                    strict=parent.ontology_enforcement == "strict", known=merged)
                 reviewers = set(pr.reviewers or [])
                 if reviewers and pr.approval_status != "approved":
                     raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
@@ -1794,6 +2139,49 @@ class GraphVersioningService:
         return await self._retry_seq(f"merge_pr {pr_id}", _once)
 
     # ---- the one-live-PR-per-branch invariant ----------------------------- #
+    async def _resolve_live_prs(self, s, branch_id: str, commit_id: Optional[str], actor: str,
+                                merged_via: str) -> None:
+        """Mark every live PR raised from a branch that has just merged as merged too."""
+        for pr in await self._live_prs_for_branch(s, branch_id):
+            pr.status = "merged"
+            pr.resulting_commit_id = commit_id
+            pr.merged_at = _now()
+            pr.merged_by = actor
+            pr.merged_via = merged_via
+            pr.updated_at = _now()
+
+    async def claim_draft(
+        self, *, graph_id: str, branch_id: str, actor: str, view_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """A draft an import writes into: open, on ``graph_id``, and ``actor``'s own. With
+        ``view_id``, a draft that names no view yet becomes that view's (a draft opened for a
+        package's data, then given the new view that came with it), so the view opens on it.
+
+        Raises ``ValueError`` for an unknown or closed draft and :class:`AccessDenied` for someone
+        else's."""
+        async with self._session() as s:
+            draft = await self._get_branch(s, graph_id, branch_id)
+            if draft.kind != "draft":
+                raise ValueError("not a draft")
+            self._require_open(draft)
+            if draft.owner != actor:
+                raise AccessDenied("this draft belongs to someone else")
+            if view_id and draft.originating_view_id is None:
+                draft.originating_view_id = view_id
+            return {"branch_id": draft.id, "name": draft.name, "originating_view_id": draft.originating_view_id}
+
+    async def branch_statuses(self, branch_ids: Sequence[str]) -> Dict[str, str]:
+        """The status (open, publishing, merged, abandoned) of each branch named that exists."""
+        ids = sorted(set(branch_ids))
+        out: Dict[str, str] = {}
+        async with self._session() as s:
+            for i in range(0, len(ids), 500):
+                rows = (await s.execute(
+                    select(BranchORM.id, BranchORM.status).where(BranchORM.id.in_(ids[i:i + 500]))
+                )).all()
+                out.update({bid: status for bid, status in rows})
+        return out
+
     async def _live_prs_for_branch(self, s, branch_id: str) -> List[MergeRequestORM]:
         """Every non-terminal PR raised from ``branch_id``, newest first.
 
@@ -2001,19 +2389,26 @@ class GraphVersioningService:
                 # here and the squash.
                 if draft.base_commit_seq < graph.main_head_commit_seq:
                     raise NotUpToDate(pr.source_branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
-                merged_state, conflicts, theirs = await self._compute_merge_bounded(
-                    s, graph.id, graph, draft, main_id, dict(resolutions or {})
-                )
-                if conflicts:
-                    raise MergeConflict(conflicts)
+                narrow = self._narrow_squash(graph, draft, resolutions)
+                if not narrow:                                # the narrow squash has no conflicts
+                    merged_state, conflicts, theirs = await self._compute_merge_bounded(
+                        s, graph.id, graph, draft, main_id, dict(resolutions or {})
+                    )
+                    if conflicts:
+                        raise MergeConflict(conflicts)
                 reviewers = set(pr.reviewers or [])          # approval gate (plan §17 #5)
                 if reviewers and pr.approval_status != "approved":
                     raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
-                commit_id = await self._apply_draft_squash(
-                    s, graph, draft, main_id, merged_state, theirs, actor, message,
-                    containment_edge_types=containment_edge_types,
-                    ontology_rules=ontology_rules,
-                )
+                if narrow:
+                    commit_id = await self._squash_up_to_date(
+                        s, graph, draft, main_id, actor, message,
+                        containment_edge_types=containment_edge_types, ontology_rules=ontology_rules)
+                else:
+                    commit_id = await self._apply_draft_squash(
+                        s, graph, draft, main_id, merged_state, theirs, actor, message,
+                        containment_edge_types=containment_edge_types,
+                        ontology_rules=ontology_rules,
+                    )
                 pr.status = "merged"
                 pr.resulting_commit_id = commit_id
                 pr.merged_at = _now()
@@ -2116,7 +2511,28 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, graph_id)
             committed = graph.main_head_commit_seq if graph else 0
             projected = ps.projected_commit_seq if ps else 0
+            # The revision each side is at — the main commit with that seq (one indexed read). The
+            # sync indicators show it, so "version #12" can be matched to a commit in History.
+            revisions: Dict[int, CommitORM] = {}
+            if graph and (committed or projected):
+                main_id = await self._main_branch_id(s, graph_id)
+                rows = (await s.execute(
+                    select(CommitORM).where(
+                        CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                        CommitORM.commit_seq.in_({committed, projected}),
+                    )
+                )).scalars().all()
+                revisions = {int(c.commit_seq): c for c in rows}
+
+            def _rev(seq: int) -> Optional[Dict[str, object]]:
+                c = revisions.get(int(seq))
+                return None if c is None else {
+                    "commit_id": c.id, "created_at": c.created_at,
+                    "actor": c.actor, "message": c.message,
+                }
             return {
+                "committed_revision": _rev(committed),
+                "projected_revision": _rev(projected),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
@@ -2167,9 +2583,14 @@ class GraphVersioningService:
         rebuild is already in flight (``status in {projecting, rebuilding}`` and still behind its
         target), so a double-click or a poll-loop overlap can't rewind an in-progress apply. Takes
         the same per-graph advisory lock the main-advancing writes take, so two concurrent rebuild
-        requests serialise on the watermark reset."""
+        requests serialise on the watermark reset.
+
+        Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
+        unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
+        main parked at genesis."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None:
@@ -2264,12 +2685,15 @@ class GraphVersioningService:
     async def _latest_live_ids(
         self, s, model, graph_id: str, branch_id: str, seq: int,
         *, where: Optional[Callable] = None, limit: Optional[int] = None,
+        by_name: bool = False,
     ) -> List[str]:
         """Entity ids whose latest version on ``branch_id`` at ``commit_seq <= seq`` is live
         (not a tombstone), optionally narrowed by ``where`` (predicates over the denormalised
         version columns). DISTINCT ON picks the latest row per entity *before* the live/where
         filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
-        ordered by entity_id for a stable window."""
+        ordered by entity_id for a stable window — or, ``by_name``, by (display name, entity_id)
+        in BYTE order with a missing name as "": exactly the order a caller then sorts in
+        Python, so a window of the first N ids holds the first N rows a page can need."""
         latest = (
             select(model)
             .where(model.graph_id == graph_id, model.branch_id == branch_id,
@@ -2283,7 +2707,11 @@ class GraphVersioningService:
             preds = where(latest.c)
             if preds:
                 stmt = stmt.where(*preds)
-        stmt = stmt.order_by(latest.c.entity_id)
+        if by_name:
+            stmt = stmt.order_by(func.coalesce(latest.c.display_name, "").collate("C"),
+                                 latest.c.entity_id.collate("C"))
+        else:
+            stmt = stmt.order_by(latest.c.entity_id)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await s.execute(stmt)).scalars().all())
@@ -2298,6 +2726,60 @@ class GraphVersioningService:
             if eid is not None:
                 out.add(eid)
         return out
+
+    async def ancestor_chains(
+        self, *, graph_id: str, branch_id: str, urns: Sequence[str],
+        containment_edge_types: Sequence[str], as_of_seq: Optional[int] = None,
+    ) -> Dict[str, List[str]]:
+        """Each urn's containment chain on a branch — ``{urn: [parent, …, root]}``, ``[]`` for a root —
+        read from the branch's own state (a draft's moves included). An urn that is not a live node
+        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not urns or not cset:
+            return {}
+        async with self._session() as s:
+            # urn → live entity id, in batches (a node's id is usually its urn; imported ones may not be).
+            cand: Dict[str, set] = {}
+            for u in urns:
+                if u.startswith("gv:"):
+                    cand.setdefault(u[3:], set()).add(u)
+                cand.setdefault(u, set()).add(u)
+            for chunk in _chunks(list(urns), _IN_LIST_MAX):
+                for eid, urn in (await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk),
+                    ).distinct()
+                )).all():
+                    cand.setdefault(eid, set()).add(urn)
+            vals = await self._current_values(s, graph_id, branch_id, list(cand), as_of_seq)
+            eid_of: Dict[str, str] = {}
+            for eid, asked in cand.items():
+                v = vals.get(eid)
+                if v is None or _is_edge_payload(v):
+                    continue
+                for u in asked:
+                    if v.get("urn") == u or f"gv:{eid}" == u or eid == u:
+                        eid_of.setdefault(u, eid)
+            if not eid_of:
+                return {}
+            seen, edges = await self._containment_parents_climb(
+                s, graph_id, branch_id, set(eid_of.values()), cset, as_of_seq)
+            parent: Dict[str, str] = {}
+            for p in edges.values():
+                a, b = _edge_src_tgt(p)
+                if a and b:
+                    parent.setdefault(b, a)
+            node_vals = await self._current_values(s, graph_id, branch_id, list(seen), as_of_seq)
+            urn_of = {e: ((v or {}).get("urn") or f"gv:{e}") for e, v in node_vals.items()}
+            out: Dict[str, List[str]] = {}
+            for u, eid in eid_of.items():
+                chain, at, guard = [], parent.get(eid), set()
+                while at and at not in guard:
+                    guard.add(at)
+                    chain.append(urn_of.get(at, at))
+                    at = parent.get(at)
+                out[u] = chain
+            return out
 
     async def get_node_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
@@ -2403,9 +2885,13 @@ class GraphVersioningService:
                         NodeVersionORM.commit_seq <= overlay_seq,
                     ).distinct()
                 )).scalars().all())
+            # The window must be the first rows in the order the page is cut from
+            # (name, then id) — in entity_id order it was an arbitrary slice, and a
+            # deep page skipped rows and repeated others.
             window = offset + limit + len(overlay_ids) + 1
             cand = set(await self._latest_live_ids(
-                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window,
+                by_name=True))
             cand.update(overlay_ids)
             vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
             rows = [
@@ -2519,17 +3005,20 @@ class GraphVersioningService:
         lineage_edge_types: Optional[Sequence[str]] = None, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, include_lineage_edges: bool = True,
         include_child_count: bool = True, limit: int = 100, offset: int = 0,
+        lineage_scope: str = "page",
     ) -> Dict[str, object]:
         """Branch/as-of-aware children-with-edges — the draft/as-of counterpart of the
         provider's ``get_children_with_edges``. One bounded round trip: the parent's OUT
         containment edges give the children (in = ancestors), then the page children's
         cross-edges give the lineage edges within {parent} ∪ children. Bounded by the
         parent's and the page's degree (ix_ev_source/target); mirrors ChildrenWithEdgesResult.
-        Edge-type classification is the graph's ontology sets, matched case-insensitively."""
+        Edge-type classification is the graph's ontology sets, matched case-insensitively.
+        ``lineage_scope="siblings"`` widens the far end from this page to EVERY child
+        of the parent (the incident scan is still over the page only)."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
         empty = {"children": [], "containmentEdges": [], "lineageEdges": [],
-                 "totalChildren": 0, "hasMore": False, "nextCursor": None}
+                 "totalChildren": 0, "hasMore": False, "nextCursor": None, "nextOffset": offset}
         async with self._session() as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
@@ -2557,6 +3046,8 @@ class GraphVersioningService:
             child_cc: Dict[str, int] = {}
             if page_ids and (include_lineage_edges or include_child_count):
                 scope = page_ids | {parent}
+                if lineage_scope == "siblings":
+                    scope = scope | set(cont_edge)
                 # One incident scan over the page serves both the lineage edges and each child's
                 # OUT-containment count (so an expanded child shows its own chevron) — no extra query.
                 for eid, p in (await self._incident_live_edges(s, graph_id, branch_id, page_ids, as_of_seq)).items():
@@ -2593,6 +3084,7 @@ class GraphVersioningService:
             "totalChildren": total,
             "hasMore": has_more,
             "nextCursor": (children_out[-1]["displayName"] if (children_out and has_more) else None),
+            "nextOffset": offset + len(page),
         }
 
     async def top_level_from_state(
@@ -2707,7 +3199,9 @@ class GraphVersioningService:
                 orphan_count += 1
         return {
             "nodes": out_nodes,
-            "totalCount": total,
+            # A window that stopped early saw only part of the set: no total
+            # rather than a too-low one.
+            "totalCount": total if exhausted else None,
             "hasMore": has_more,
             "nextCursor": (out_nodes[-1]["displayName"] if (out_nodes and has_more) else None),
             "rootTypeCount": root_count,
@@ -2730,6 +3224,40 @@ class GraphVersioningService:
             nxt: set = set()
             for eid, p in inc.items():
                 if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)   # a = parent (source), b = child (target)
+                if b in frontier and a:
+                    edges[eid] = p
+                    if a not in seen:
+                        seen.add(a)
+                        nxt.add(a)
+            frontier = nxt
+        return seen, edges
+
+    async def _containment_parents_climb(
+        self, s, graph_id: str, branch_id: str, node_ids: set,
+        cset: set, as_of_seq: Optional[int], max_climb: int = 64, *, skeleton: bool = False,
+    ) -> Tuple[set, Dict[str, dict]]:
+        """:meth:`_containment_ancestors`, reading only what a climb needs: per level, the
+        edges whose TARGET is on the frontier and whose type is containment
+        (``ix_ev_target``), then their values as-of. The general helper reads every edge
+        touching the frontier in both directions, lineage included — for a batch of
+        endpoints under wide containers that is millions of rows to find a few parents.
+        ``skeleton`` returns the edges as :meth:`_skeletons_at` (no payload read)."""
+        seen = set(node_ids)
+        edges: Dict[str, dict] = {}
+        frontier = set(node_ids)
+        cupper = {c.upper() for c in cset}
+        read = self._current_skeletons if skeleton else self._current_values
+        for _ in range(max_climb):
+            if not frontier:
+                break
+            cand = await self._incident_edge_ids(s, graph_id, branch_id, frontier,
+                                                 sides=("target",), edge_types=cupper)
+            vals = await read(s, graph_id, branch_id, cand, as_of_seq)
+            nxt: set = set()
+            for eid, p in vals.items():
+                if p is None or (p.get("edgeType") or "").upper() not in cset:
                     continue
                 a, b = _edge_src_tgt(p)   # a = parent (source), b = child (target)
                 if b in frontier and a:
@@ -2764,6 +3292,140 @@ class GraphVersioningService:
             frontier = nxt
         return seen
 
+    async def _enforce_written(
+        self, s, graph_id: str, branch_id: str,
+        written: Mapping[str, Optional[dict]], prior: Mapping[str, Optional[dict]],
+        kind_by_entity: Mapping[str, str], *,
+        containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
+        strict: bool, known: Optional[Mapping[str, Optional[dict]]] = None,
+        edited: Collection[str] = (),
+    ) -> None:
+        """The ONE gate every write path shares (canvas save, checkpoint, publish): it judges the
+        state being WRITTEN (``written``: entity → new value, ``None`` = delete) against what it
+        replaces (``prior``), never the ops that expressed it. Raises :class:`OntologyViolation`.
+
+        * Nothing is created untyped — every enforcement mode.
+        * Hierarchy integrity for every NEW or RE-POINTED edge (no duplicate, no second
+          containment parent, no loop) — every enforcement mode.
+        * Under strict enforcement with the graph's ontology: a node's type must be declared, an
+          edge's type declared and its ends of the allowed types, a containment allowed by the
+          parent's ``can_contain``. Judged as a create for anything new AND for anything whose
+          type-defining fields change (a retype, a re-pointed or re-typed edge) — only an edit
+          that leaves them alone is exempt, so legacy data stays editable. Retyping a node
+          re-judges its existing edges against its NEW type, so a retype cannot leave the graph
+          holding relationships the ontology forbids.
+        ``known`` adds values the caller already holds (e.g. a merge's composed state) for typing
+        edge ends; anything else is read from the branch."""
+        live = {eid: v for eid, v in written.items() if v is not None}
+
+        untyped = _untyped_creations(
+            {eid: v for eid, v in live.items() if prior.get(eid) is None}, kind_by_entity, edited)
+        if untyped:
+            raise OntologyViolation(untyped)
+
+        judged: Dict[str, str] = {
+            eid: ("create" if _redefines(prior.get(eid), v, kind_by_entity.get(eid, "node"))
+                  else "update")
+            for eid, v in live.items()}
+        edge_writes = [(eid, v) for eid, v in live.items()
+                       if kind_by_entity.get(eid) == "edge" and judged[eid] == "create"]
+        deleted_edges = {eid for eid, v in written.items()
+                         if v is None and kind_by_entity.get(eid) == "edge"}
+        if edge_writes:
+            viol = await self._validate_edge_integrity(
+                s, graph_id, branch_id, edge_writes, deleted_edges, containment_edge_types or [])
+            if viol:
+                raise OntologyViolation(viol)
+
+        if ontology_rules is None or not strict:
+            return
+        rich = [(eid, kind_by_entity.get(eid, "node"), v, judged[eid]) for eid, v in live.items()]
+        retyped = [eid for eid, v in live.items()
+                   if kind_by_entity.get(eid, "node") == "node" and judged[eid] == "create"
+                   and prior.get(eid) is not None]
+        if retyped:
+            for eid, v in (await self._incident_live_edges(s, graph_id, branch_id, retyped)).items():
+                if eid not in written:                  # edges written in this batch are judged already
+                    rich.append((eid, "edge", v, "create"))
+        endpoint_types: Dict[str, str] = {}
+        unknown: set = set()
+        for _eid, kind, v, op in rich:
+            if kind != "edge" or op != "create":
+                continue
+            for ep in _edge_src_tgt(v):
+                if not ep or ep in endpoint_types:
+                    continue
+                ev = written.get(ep) if ep in written else (known or {}).get(ep) or prior.get(ep)
+                if ev and ev.get("entityType"):
+                    endpoint_types[ep] = ev["entityType"]
+                elif ep not in written:
+                    unknown.add(ep)
+        if unknown:
+            for ep, ev in (await self._current_skeletons(s, graph_id, branch_id, list(unknown))).items():
+                if ev and ev.get("entityType"):
+                    endpoint_types[ep] = ev["entityType"]
+        viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
+        if viol:
+            raise OntologyViolation(viol)
+        viol = await self._parentless_violations(
+            s, graph_id, branch_id, written, prior, kind_by_entity, ontology_rules)
+        if viol:
+            raise OntologyViolation(viol)
+
+    async def _parentless_violations(
+        self, s, graph_id: str, branch_id: str,
+        written: Mapping[str, Optional[dict]], prior: Mapping[str, Optional[dict]],
+        kind_by_entity: Mapping[str, str], rules: OntologyRules,
+    ) -> List[dict]:
+        """An entity whose type the ontology does not allow at the top level must sit inside a
+        parent. Judged only for what this write can leave parentless — a node it creates, and the
+        child of every containment link it deletes or re-points (an un-nest, a move to the top
+        level) — so legacy data that predates the rule stays editable."""
+        if not rules.root_entity_types:
+            return []
+        cset = set(rules.containment_edge_types) | {k for k, r in rules.edge_types.items() if r.is_containment}
+        if not cset:
+            return []
+
+        def _cont(v: Optional[Mapping]) -> bool:
+            return bool(v) and str(v.get("edgeType") or v.get("edge_type") or "").upper() in cset
+
+        candidates: set = set()
+        for eid, v in written.items():
+            kind = kind_by_entity.get(eid, "node")
+            if kind == "node" and v is not None and prior.get(eid) is None:
+                candidates.add(eid)
+            elif kind == "edge" and _cont(prior.get(eid)):
+                old_child = _edge_src_tgt(prior[eid])[1]
+                if v is None or _edge_src_tgt(v)[1] != old_child:
+                    candidates.add(old_child)
+        candidates = {c for c in candidates if c and written.get(c, True) is not None}
+        if not candidates:
+            return []
+        unknown = [c for c in candidates if c not in written]
+        values = dict(await self._current_skeletons(s, graph_id, branch_id, unknown)) if unknown else {}
+        values.update({c: written[c] for c in candidates if c in written})
+        stored = await self._incident_live_edge_skeletons(s, graph_id, branch_id, list(candidates),
+                                                          sides=("target",))
+        has_parent: set = set()
+        for eid, v in stored.items():
+            if eid not in written and _cont(v) and _edge_src_tgt(v)[1] in candidates:
+                has_parent.add(_edge_src_tgt(v)[1])      # an untouched stored parent link
+        for eid, v in written.items():
+            if v is not None and kind_by_entity.get(eid) == "edge" and _cont(v):
+                has_parent.add(_edge_src_tgt(v)[1])      # a parent link this write keeps / adds
+        out: List[dict] = []
+        for c in sorted(candidates - has_parent):
+            v = values.get(c)
+            if not v or _is_edge_payload(v):
+                continue
+            et = v.get("entityType")
+            if not rules.is_root_type(et):
+                out.append({"entity_id": c, "kind": "node", "rule": "parent_required",
+                            "reason": f"A {et} can't be at the top level — it must sit inside a parent "
+                                      f"(top-level types: {', '.join(sorted(rules.root_entity_types))})."})
+        return out
+
     async def _validate_edge_integrity(
         self, s, graph_id: str, branch_id: str,
         edge_creates: Sequence[Tuple[str, Mapping]], deleted_edge_ids: set,
@@ -2775,15 +3437,32 @@ class GraphVersioningService:
         containment parent, or (c) form a containment cycle. Shared by the write path
         (:meth:`_apply_ops_once`) and the merge/squash path (:meth:`_apply_draft_squash`),
         so an invariant no single commit can violate can't be composed onto ``main`` by
-        merging two individually-clean drafts either. Returns ``[{entity_id, kind, reason}]``."""
+        merging two individually-clean drafts either. Returns ``[{entity_id, kind, reason}]``.
+
+        Linear in the batch and the live edges it touches: the live edges into the batch's
+        targets are read once (without payloads) and indexed, and cycles are found with one
+        batched ancestor climb and one strongly-connected-components pass — never a scan of
+        every live edge per created edge, which held an import window's CPU for minutes."""
         cset = {t.upper() for t in (containment_edge_types or [])}
 
         def _etype(p: Mapping) -> str:
             return str(p.get("edgeType") or p.get("edge_type") or "").upper()
 
         create_targets = {t for _e, v in edge_creates for _s2, t in [_edge_src_tgt(v)] if t}
-        existing_incident = (await self._incident_live_edges(s, graph_id, branch_id, create_targets)
-                             if create_targets else {})
+        existing_incident = (await self._incident_live_edge_skeletons(
+            s, graph_id, branch_id, create_targets, sides=("target",)) if create_targets else {})
+        # Index the live edges into the batch's targets once: (source, target, type) → their ids,
+        # and child → {containment edge id: parent}.
+        by_triple: Dict[Tuple[str, str, str], set] = {}
+        parents_of: Dict[str, Dict[str, str]] = {}
+        for oeid, op_ in existing_incident.items():
+            if oeid in deleted_edge_ids:
+                continue
+            osrc, otgt = _edge_src_tgt(op_)
+            oet = _etype(op_)
+            by_triple.setdefault((osrc, otgt, oet), set()).add(oeid)
+            if oet in cset and osrc:
+                parents_of.setdefault(otgt, {})[oeid] = osrc
         viol: List[dict] = []
         batch_parent: Dict[str, set] = {}     # target → containment sources added in THIS batch
         batch_seen: set = set()               # (src,tgt,type) created in THIS batch
@@ -2793,20 +3472,14 @@ class GraphVersioningService:
                 continue
             etype = _etype(v)
             # (a) duplicate — against existing live edges + earlier creates in this batch.
-            dup = (src, tgt, etype) in batch_seen or any(
-                oeid != eid and oeid not in deleted_edge_ids
-                and _edge_src_tgt(op_) == (src, tgt) and _etype(op_) == etype
-                for oeid, op_ in existing_incident.items())
-            if dup:
+            key = (src, tgt, etype)
+            if key in batch_seen or any(oeid != eid for oeid in by_triple.get(key, ())):
                 viol.append({"entity_id": eid, "kind": "edge",
                              "reason": "These entities are already connected by this relationship."})
-            batch_seen.add((src, tgt, etype))
+            batch_seen.add(key)
             # (b) second containment parent.
             if etype in cset:
-                parents = {osrc for oeid, op_ in existing_incident.items()
-                           if oeid != eid and oeid not in deleted_edge_ids
-                           and _etype(op_) in cset
-                           for osrc, otgt in [_edge_src_tgt(op_)] if otgt == tgt and osrc}
+                parents = {osrc for oeid, osrc in parents_of.get(tgt, {}).items() if oeid != eid}
                 parents |= batch_parent.get(tgt, set())
                 if parents - {src}:
                     viol.append({"entity_id": eid, "kind": "edge",
@@ -2820,36 +3493,27 @@ class GraphVersioningService:
         #     entirely inside one batch (create A→B + create B→A).
         if cset:
             batch_cont = {eid: v for eid, v in edge_creates if _etype(v) in cset}
-
-            async def _ancestors_effective(start: str, skip: str) -> set:
-                seen_a, frontier = {start}, {start}
-                for _ in range(64):                    # bounded by hierarchy depth
-                    if not frontier:
-                        break
-                    inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, None)
-                    cand = [(oeid, p) for oeid, p in inc.items()
-                            if oeid != skip and oeid not in deleted_edge_ids]
-                    cand += [(beid, bp) for beid, bp in batch_cont.items() if beid != skip]
-                    nxt: set = set()
-                    for _oeid, p in cand:
-                        if _etype(p) not in cset:
-                            continue
-                        a, b = _edge_src_tgt(p)        # a = parent, b = child
-                        if b in frontier and a and a not in seen_a:
-                            seen_a.add(a)
-                            nxt.add(a)
-                    frontier = nxt
-                return seen_a
-
-            for eid, v in batch_cont.items():
-                src, tgt = _edge_src_tgt(v)
-                if not src or not tgt:
-                    continue
+            checks = [(eid, *_edge_src_tgt(v)) for eid, v in batch_cont.items()]
+            checks = [(eid, a, b) for eid, a, b in checks if a and b]
+            looped: set = set()
+            if any(a != b for _e, a, b in checks):
+                # Every live containment edge on a path up from any batch endpoint: one climb
+                # for the whole batch, a query per hierarchy LEVEL.
+                ends = {x for _e, a, b in checks for x in (a, b)}
+                _seen, live = await self._containment_parents_climb(
+                    s, graph_id, branch_id, ends, cset, None, skeleton=True)
+                graph_edges = [(oeid, *_edge_src_tgt(p)) for oeid, p in live.items()
+                               if oeid not in deleted_edge_ids]
+                graph_edges += checks
+                if len(graph_edges) > _CYCLE_THREAD_MIN:
+                    looped = await asyncio.to_thread(_containment_cycle_edges, graph_edges, checks)
+                else:
+                    looped = _containment_cycle_edges(graph_edges, checks)
+            for eid, src, tgt in checks:
                 if src == tgt:
                     viol.append({"entity_id": eid, "kind": "edge",
                                  "reason": "An entity can’t contain itself."})
-                    continue
-                if tgt in await _ancestors_effective(src, eid):
+                elif eid in looped:
                     viol.append({"entity_id": eid, "kind": "edge",
                                  "reason": "This move would create a containment loop."})
         return viol
@@ -3171,7 +3835,10 @@ class GraphVersioningService:
                     a.update({eid: v for eid, v in base_a.items() if v is not None})
             return diff_states(a, b)
 
-    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
+    async def diff_branch_vs_base(
+        self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None,
+        payloads: str = "all",
+    ) -> Dict[str, object]:
         """UI-shaped net diff of a draft against its base (``main`` at the branch
         point): full node/edge payloads with before/after, classified
         added/removed/modified. This is the shape the canvas diff overlay needs —
@@ -3182,12 +3849,19 @@ class GraphVersioningService:
         diff: a draft numbers its commits in its own seq space, so the change set is
         the entities the draft wrote rows for (bounded by draft size). ``before`` is
         each entity's value on ``main`` at the branch point; ``after`` its effective
-        value on the draft (base overlaid with the draft's edits)."""
+        value on the draft (base overlaid with the draft's edits).
+
+        ``payloads="changes"`` classifies the same way from content hashes, without loading a
+        modified entity's payloads: a modified entry is its ``entityId`` and ``kind`` alone, while
+        added and removed entries keep the payload the canvas draws them from. It is what the
+        draft bar needs — counts and which nodes to ring — at any draft size."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
             main_id = await self._main_branch_id(s, graph_id)
             base_seq = branch.base_commit_seq or 0
+            if payloads == "changes":
+                return await self._diff_changes_vs_base(s, graph_id, branch_id, main_id, base_seq)
             changed: set = set()
             for model in (NodeVersionORM, EdgeVersionORM):
                 rows = (await s.execute(
@@ -3220,6 +3894,32 @@ class GraphVersioningService:
                 modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
         return {"added": added, "removed": removed, "modified": modified}
 
+    async def _diff_changes_vs_base(self, s, graph_id, branch_id, main_id, base_seq) -> Dict[str, object]:
+        """:meth:`diff_branch_vs_base` with ``payloads="changes"``: the draft's heads against
+        main's content hashes at the branch point. An empty payload counts as absent, as there."""
+        heads = await self._head_index(s, graph_id, branch_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), base_seq)
+        added_refs: Dict[str, tuple] = {}
+        removed_ids: List[str] = []
+        modified: List[dict] = []
+        for eid, h in heads.items():
+            b = before.get(eid)                              # live at the branch point
+            if b is None and h.live:
+                added_refs[eid] = (h.kind, graph_id, h.version_id)
+            elif b is not None and not h.live:
+                removed_ids.append(eid)
+            elif b is not None and b.content_hash != h.content_hash:
+                modified.append({"entityId": eid, "kind": b.kind})
+        after = await self._payloads_by_version(s, added_refs.values())
+        gone = await self._values_at(s, graph_id, main_id, removed_ids, base_seq)
+        return {
+            "added": [{"entityId": eid, "kind": kind, "after": after[vid]}
+                      for eid, (kind, _, vid) in added_refs.items() if after.get(vid)],
+            "removed": [{"entityId": eid, "kind": before[eid].kind, "before": gone[eid]}
+                        for eid in removed_ids if gone.get(eid)],
+            "modified": modified,
+        }
+
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
         read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
@@ -3234,23 +3934,34 @@ class GraphVersioningService:
         entities are removed, main-modified/deleted ones restored to their fork-point value — for
         every entity the draft did not itself touch. Without this a draft silently reflects changes
         it never merged (a commit-less "pull"). Edge endpoints are urns (node ``entity_id`` == urn),
-        so no extra resolution is needed by the caller."""
+        so no extra resolution is needed by the caller.
+
+        A node the draft MODIFIED comes as ``nodesModified`` — its urn and entity id, never its
+        payload: a reader loads the payloads of just the nodes it is about to serve
+        (:meth:`overlay_payloads`), so a draft that changed 100k nodes costs each read a page of
+        payloads, not 100k of them. A node the draft created comes as a skeleton in
+        ``nodesUpsert`` — what its version row says (urn, entityId, entityType, displayName,
+        qualifiedName; ``lazy``), all a reader lists, matches and searches it by — and an edge the
+        draft added or changed likewise (id, edgeType, its ends; ``lazy``): a reader loads their
+        payloads too for what it serves (``overlay_payloads``, ``kind='edge'``). One it removed
+        comes as its urn or, for an edge, its type and ends. So building the patch set reads no
+        payload, whatever the draft's size; only the rewind of main's post-fork advance (below)
+        carries whole values."""
+        empty = {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
+                 "edgesRemove": [], "nodesNew": []}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
+            if getattr(branch, "status", None) == "merged":
+                # Everything the draft changed is IN main now: reading it as main ⊕ its edits
+                # applied them twice — each added child counted again in its parent's count (a
+                # "Load 2 more" that loads nothing in a tab still showing the published draft).
+                return empty
             main_id = await self._main_branch_id(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             base_seq = branch.base_commit_seq or 0
             head_seq = graph.main_head_commit_seq if graph is not None else base_seq
-            changed: set = set()
-            for model in (NodeVersionORM, EdgeVersionORM):
-                rows = (await s.execute(
-                    select(model.entity_id).where(
-                        model.graph_id == graph_id, model.branch_id == branch_id,
-                    ).distinct()
-                )).scalars().all()
-                changed.update(rows)
-            empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
-                     "nodesNew": []}
+            heads = await self._head_index(s, graph_id, branch_id)
+            changed: set = set(heads)
             # Fork-point isolation: entities MAIN advanced in (base_seq, head] since this draft forked,
             # minus the draft's own touched set (its edits already win via the delta below). The overlay
             # applies on a LIVE main (head) read, so without this a draft silently reflects any change
@@ -3261,8 +3972,12 @@ class GraphVersioningService:
                     s, graph_id, main_id, base_seq, head_seq)) - changed
             if not changed and not advanced:
                 return empty                       # no draft edits AND up to date → pure pass-through
-            before = await self._values_at(s, graph_id, main_id, changed, base_seq) if changed else {}
-            after = await self._current_values(s, graph_id, branch_id, list(changed)) if changed else {}
+            node_ids = [eid for eid, h in heads.items() if h.kind == "node"]
+            edge_ids = [eid for eid, h in heads.items() if h.kind != "node"]
+            # Which the draft created, modified or removed, from hashes; what each is, from version
+            # rows — no payload (a draft's own edges are what it holds now: its heads).
+            base_nodes = await self._hashes_at(s, graph_id, main_id, node_ids, base_seq)
+            before = await self._hashes_at(s, graph_id, main_id, edge_ids, base_seq) if edge_ids else {}
             # For the rewind: each advanced entity's value at the fork point (base) vs main head.
             rewind_base: Dict[str, Optional[dict]] = {}
             rewind_head: Dict[str, Optional[dict]] = {}
@@ -3279,36 +3994,10 @@ class GraphVersioningService:
                 else:
                     rewind_base = await self._values_at(s, graph_id, main_id, advanced, base_seq)
                     rewind_head = await self._values_at(s, graph_id, main_id, advanced, head_seq)
-        nodes_upsert: List[dict] = []
-        nodes_remove: List[dict] = []
-        edges_upsert: List[dict] = []
-        edges_remove: List[dict] = []
-        nodes_new: List[str] = []          # urns the draft CREATED (absent in main@base) vs merely modified
-        for eid in changed:
-            # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) —
-            # normalize it to absent so it reads as a deletion, never as a node that fails GraphNode
-            # validation downstream (the reported 500) or shows as an empty diff row. Guards against
-            # any pre-existing malformed row as well as a freshly-corrupt one.
-            b, a = before.get(eid) or None, after.get(eid) or None
-            if b is None and a is None:
-                continue
-            eff = a if a is not None else b
-            is_edge = _is_edge_payload(eff or {})
-            if a is None:                                  # removed on the draft → carry its before value
-                if is_edge:
-                    src, tgt = _edge_src_tgt(b)
-                    edges_remove.append(_graphedge_dict(eid, b, {src: src, tgt: tgt}))
-                else:
-                    nodes_remove.append(_graphnode_dict(eid, (b or {}).get("urn") or f"gv:{eid}", b))
-            else:                                          # added/modified → the draft's effective value
-                if is_edge:
-                    src, tgt = _edge_src_tgt(a)
-                    edges_upsert.append(_graphedge_dict(eid, a, {src: src, tgt: tgt}))
-                else:
-                    urn = a.get("urn") or f"gv:{eid}"
-                    nodes_upsert.append(_graphnode_dict(eid, urn, a))
-                    if b is None:                          # created in the draft — not present in main
-                        nodes_new.append(urn)
+        # One dict per entity the draft changed: built in a thread, as its head index was — on a
+        # draft's first read this runs in the web process, and 200k of them are a stall of their own.
+        nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new = (
+            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, before))
         # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
         # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
         # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent
@@ -3337,8 +4026,30 @@ class GraphVersioningService:
                     nodes_new.append(urn)                  # as "new" so the provider surfaces the restore
             else:                                          # node absent at fork, present on head → main added → hide
                 nodes_remove.append(_graphnode_dict(eid, (hv or {}).get("urn") or f"gv:{eid}", hv))
-        return {"nodesUpsert": nodes_upsert, "nodesRemove": nodes_remove,
+        return {"nodesUpsert": nodes_upsert, "nodesModified": nodes_modified, "nodesRemove": nodes_remove,
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
+
+    async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
+        """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
+        main's head, and the draft's status. Equal versions give equal deltas, so a reader may
+        reuse one across requests instead of recomputing it for each."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            graph = await s.get(GraphORM, graph_id)
+            return (branch.head_commit_id, branch.base_commit_seq,
+                    getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
+
+    async def overlay_payloads(self, *, graph_id: str, branch_id: str, entity_ids: Sequence[str],
+                               kind: str = "node") -> List[dict]:
+        """The draft's current value of each of ``entity_ids``, reader-shaped — the nodes
+        (:meth:`branch_overlay_delta`'s ``nodesModified`` and created skeletons) or, with
+        ``kind='edge'``, the edges a read loads for the page it serves."""
+        async with self._session() as s:
+            values = await self._current_values(s, graph_id, branch_id, list(entity_ids))
+        if kind == "edge":
+            return [_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
+                    for eid, v in values.items() if v]
+        return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
 
     async def aggregated_overlay_adjust(
         self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
@@ -3351,25 +4062,36 @@ class GraphVersioningService:
         Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
         ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
         ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
-        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size."""
+        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size.
+
+        One side may be left open, as the base read allows: no targets means every ancestor-or-self of
+        ``targetUrn`` (every cell out of the sources), no sources every ancestor-or-self of
+        ``sourceUrn``. The named side is walked first, and a delta edge that misses it costs no walk
+        of the other."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         src_set = set(source_urns or [])
-        tgt_set = set(target_urns or source_urns or [])
+        tgt_set = set(target_urns or [])
         out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        if not (src_set or tgt_set):
+            return out
         async with self._session() as s:
-            async def _visible_ancestors(urn: str, visible: set) -> set:
-                if not visible:
-                    return set()
+            async def _visible_ancestors(urn: str, visible: Optional[set]) -> set:
+                """``urn``'s ancestors-or-self among ``visible``; all of them when it is None."""
                 eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
-                hit = {urn} & visible                      # the node itself, if it is a visible container
+                hit = {urn} if visible is None else {urn} & visible  # the node itself, if it is a visible container
                 if eid is not None and cset:
                     anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
                     vals = await self._current_values(s, graph_id, branch_id, anc_eids)
-                    hit |= {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids} & visible
+                    urns = {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids}
+                    hit |= urns if visible is None else urns & visible
                 return hit
             for su, tu, et, sign in lineage_delta:
-                sxs = await _visible_ancestors(su, src_set)
-                txs = await _visible_ancestors(tu, tgt_set)
+                if src_set:
+                    sxs = await _visible_ancestors(su, src_set)
+                    txs = await _visible_ancestors(tu, tgt_set or None) if sxs else set()
+                else:
+                    txs = await _visible_ancestors(tu, tgt_set)
+                    sxs = await _visible_ancestors(su, None) if txs else set()
                 for sx in sxs:
                     for tx in txs:
                         if sx == tx:
@@ -3387,8 +4109,15 @@ class GraphVersioningService:
         """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
         containment tree for the canvas Changes panel. Built on the same O(draft) change set,
         augmented with the *unchanged* containment ancestors of the changed nodes so edits nest
-        under their real container (a column under its table) without composing full state."""
+        under their real container (a column under its table) without composing full state.
+
+        A draft past ``DIFF_TREE_MAX_CHANGES`` is counted, not laid out: the same counts and a
+        per-type rollup of the changed entities, from the narrow change index, with no groups and
+        ``tooLarge`` saying so."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                return counted
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
@@ -3398,12 +4127,80 @@ class GraphVersioningService:
         self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
         limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
-        """One container's direct children in a draft's hierarchical diff (lazy-load step)."""
+        """One container's direct children in a draft's hierarchical diff (lazy-load step).
+        :class:`DiffTooLarge` for a draft the tree doesn't lay out."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                raise DiffTooLarge(counted["tooLarge"]["changed"], counted["tooLarge"]["limit"])
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def branch_change_count(self, *, graph_id: str, branch_id: str) -> int:
+        """How many entities a draft has changed (its own heads) — one indexed count, to decide
+        whether it publishes inside a request or as a job."""
+        async with self._session() as s:
+            return await self._change_count(s, graph_id, branch_id)
+
+    async def merged_commit_id(self, *, graph_id: str, branch_id: str) -> Optional[str]:
+        """The ``main`` commit a MERGED draft landed as, or ``None`` while the draft is not merged.
+
+        How a publish job knows its publish already happened: its worker may have died (or been
+        superseded) after the squash committed and before the job finished, and publishing again
+        only fails on a merged draft. The squash commit names the draft (``source_branch_id``); a
+        draft whose squash changed nothing is merged with no commit of its own, and then the answer
+        is what the publish returned, the draft's head (``""`` when it has none)."""
+        async with self._session() as s:
+            draft = await s.get(BranchORM, branch_id)
+            if draft is None or draft.graph_id != graph_id or draft.status != "merged":
+                return None
+            squash = await s.scalar(select(CommitORM.id).where(
+                CommitORM.graph_id == graph_id, CommitORM.kind == "squash_publish",
+                CommitORM.source_branch_id == branch_id,
+            ).order_by(CommitORM.commit_seq.desc()).limit(1))
+            return squash or draft.head_commit_id or ""
+
+    @staticmethod
+    async def _change_count(s, graph_id: str, branch_id: str) -> int:
+        return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
+
+    async def _count_if_too_large(self, s, graph_id, branch_id, containment_edge_types, viewer):
+        """The Changes summary of a draft past ``DIFF_TREE_MAX_CHANGES`` — or ``None`` for one the
+        tree can lay out. Classified like :meth:`diff_branch_vs_base` from hashes; the impact
+        rollup counts the changed entities by type (the tree's also counts their containers)."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
+        changed = await self._change_count(s, graph_id, branch_id)
+        if changed <= config.DIFF_TREE_MAX_CHANGES:
+            return None
+        heads = await self._head_index(s, graph_id, branch_id)
+        main_id = await self._main_branch_id(s, graph_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), branch.base_commit_seq or 0)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        counts = {"added": 0, "modified": 0, "removed": 0}
+        entity_counts = {"added": 0, "modified": 0, "removed": 0}
+        edge_counts = {"added": 0, "modified": 0, "removed": 0}
+        impact: Dict[str, int] = {}
+        for eid, h in heads.items():
+            b = before.get(eid)
+            status = ("added" if b is None and h.live else
+                      "removed" if b is not None and not h.live else
+                      "modified" if b is not None and b.content_hash != h.content_hash else None)
+            if status is None:
+                continue
+            counts[status] += 1
+            typ = h.type if h.live else b.type
+            if h.kind == "node":
+                entity_counts[status] += 1
+                impact[typ or "Other"] = impact.get(typ or "Other", 0) + 1
+            elif (typ or "").upper() not in cset:            # a relationship, not structure
+                edge_counts[status] += 1
+        return {"groups": [], "groupTotal": 0, "counts": counts, "entityCounts": entity_counts,
+                "edgeCounts": edge_counts, "impact": impact,
+                "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
 
     async def diff_commit_summary(
         self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
@@ -3570,14 +4367,12 @@ class GraphVersioningService:
         if not ids:
             return {}
         cand: set = set()
+        stmt = select(EdgeVersionORM.entity_id).where(
+            EdgeVersionORM.graph_id == graph_id,
+            EdgeVersionORM.target_entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+        ).distinct()
         for chunk in _chunks(ids, _IN_LIST_MAX):
-            rows = (await s.execute(
-                select(EdgeVersionORM.entity_id).where(
-                    EdgeVersionORM.graph_id == graph_id,
-                    EdgeVersionORM.target_entity_id.in_(chunk),
-                ).distinct()
-            )).scalars().all()
-            cand.update(rows)
+            cand.update((await s.execute(stmt, {"ids": list(chunk)})).scalars().all())
         vals = await self._current_values(s, graph_id, branch_id, cand)
         out: Dict[str, Tuple[str, str, dict]] = {}
         child_set = set(child_ids)
@@ -3940,6 +4735,12 @@ class GraphVersioningService:
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
             raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
 
+    async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
+        """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
+        ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
+        async with self._session() as s:
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
         (view-scoped commit logs, entity history). Bounded by the distinct branches involved."""
@@ -4058,24 +4859,16 @@ class GraphVersioningService:
         tombstone → None.  Used as the 'ours' side of a rebase merge."""
         heads = await self._heads(s, graph_id, branch_id)
         out: Dict[str, Optional[dict]] = {}
-        node_ids, edge_ids, kindvid = [], [], {}
+        refs, kindvid = [], {}
         for eid, h in heads.items():
             if h.is_tombstone:
                 out[eid] = None
             else:
                 kindvid[eid] = h.head_version_id
-                (node_ids if h.entity_kind == "node" else edge_ids).append(h.head_version_id)
-        payload_by_vid: Dict[str, dict] = {}
-        if node_ids:
-            for r in (await s.execute(select(NodeVersionORM).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
-        if edge_ids:
-            for r in (await s.execute(select(EdgeVersionORM).where(
-                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
+                refs.append((h.entity_kind, graph_id, h.head_version_id))
+        # Chunked: a draft can change more entities than one statement may name (asyncpg caps a
+        # statement at 32,767 parameters) — a large import or a bulk property change.
+        payload_by_vid = await self._payloads_by_version(s, refs)
         for eid, vid in kindvid.items():
             out[eid] = payload_by_vid.get(vid)
         return out
@@ -4135,7 +4928,9 @@ class GraphVersioningService:
         changed = set(own) | set(resolutions)
         changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
         base = await self._values_at(s, graph_id, main_id, changed, base_seq)
-        theirs = await self._values_at(s, graph_id, main_id, changed, head_seq)
+        # Up to date (always so at publish and merge, whose gates demand it): main's side IS the
+        # base — one copy of every changed payload fewer to hold.
+        theirs = base if head_seq == base_seq else await self._values_at(s, graph_id, main_id, changed, head_seq)
         ours = {eid: base.get(eid) for eid in changed}
         ours.update(own)
 
@@ -4255,10 +5050,16 @@ class GraphVersioningService:
         live = {eid: content_hash(p) for eid, p in state.items() if p is not None}
         return MerkleTree.build(live).root
 
-    async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit, deltas: List[Delta]) -> str:
+    async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit,
+                             deltas: List[Delta]) -> Optional[str]:
         """Merkle root for a commit. For a **non-fork `main`** (linear, long-lived)
         this is the incremental persisted CoW build — O(changed·depth), writing
-        only changed-path rows. Forks fall back to the full build."""
+        only changed-path rows. Forks fall back to the full build. A draft commit gets
+        none: only ``main``'s roots are ever read (the projector's diff), and an import
+        window would otherwise write tens of thousands of tree rows nobody reads."""
+        branch = await s.get(BranchORM, branch_id)
+        if branch is not None and branch.kind != "main":
+            return None
         graph = await s.get(GraphORM, graph_id)
         if graph is not None and graph.fork_parent_graph_id:
             return await self._merkle_root(s, graph_id, branch_id)
@@ -4839,7 +5640,13 @@ class GraphVersioningService:
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await fn()
-            except (IntegrityError, _StaleHead):
+            except (IntegrityError, _StaleHead) as exc:
+                # Only a unique-key race is "the branch moved": any other integrity error (a
+                # check or a not-null) fails the same way every time, and re-running a large
+                # import window or publish for it only multiplies the work.
+                state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+                if isinstance(exc, IntegrityError) and state not in (None, "23505"):
+                    raise
                 # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss. Both
                 # mean "the branch moved under us" — re-run the thunk, which re-reads current state
                 # and recomputes (auto-rebase / 3-way merge) against the new head.
@@ -4861,6 +5668,7 @@ class GraphVersioningService:
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -4877,13 +5685,33 @@ class GraphVersioningService:
         unique-constraint collision this retries (bounded backoff) before giving up with
         :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
+
+        ``on_commit(session)``, when given, is awaited at the end of the batch's transaction, in
+        its session — after the commit is written, or when the ops turn out to change nothing —
+        so what the caller records with it lands or rolls back WITH the batch: an import window's
+        row resolutions and its job checkpoint. A retry re-runs it with the batch; anything it
+        raises rolls the batch back and propagates.
         """
+        result = await self.apply_ops_detailed(
+            graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
+            containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+            on_commit=on_commit)
+        return result.commit_id
+
+    async def apply_ops_detailed(
+        self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
+        message: str = "edit", branch_id: Optional[str] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> ApplyResult:
+        """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, on_commit=on_commit),
         )
 
     async def _apply_ops_once(
@@ -4891,7 +5719,8 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
-    ) -> Optional[str]:
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
@@ -4910,23 +5739,20 @@ class GraphVersioningService:
             if branch.kind == "main":
                 await self._lock_graph(s, graph_id)
 
-            # Resolve ops → new payloads for the AFFECTED entities only.
-            new_vals: Dict[str, Optional[dict]] = {}
-            kind_by_entity: Dict[str, str] = {}
-            update_ids: set = set()
-            base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
-            for op in ops:
-                eid = op["entity_id"]
-                payload = op.get("payload") or {}
-                kind_by_entity[eid] = (op.get("entity_kind")
-                                       or ("edge" if _is_edge_payload(payload) else "node"))
-                new_vals[eid] = None if op["op"] == "delete" else dict(payload)
-                if new_vals[eid] is not None and kind_by_entity[eid] == "node":
-                    new_vals[eid] = _sanitize_node_properties(new_vals[eid])
-                if op["op"] == "update":
-                    update_ids.add(eid)
-                    if op.get("base_version"):
-                        base_versions[eid] = op["base_version"]
+            ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
+
+            # Resolve ops → new payloads for the AFFECTED entities only. Several ops on ONE
+            # entity in one batch COMPOSE, in order: an update after a create (a node renamed
+            # before its first save) patches the create's payload, and two updates become one
+            # patch that keeps BOTH updates' property removals (applying the first onto the
+            # second dropped the first's removal). Replacing instead stored a renamed new node
+            # as {displayName} alone — no type, no urn — which then failed every read of the draft.
+            fold = fold_batch_ops(
+                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties)
+            new_vals: Dict[str, Optional[dict]] = fold.new_vals
+            kind_by_entity: Dict[str, str] = fold.kind_by_entity
+            update_ids: set = fold.update_ids
+            base_versions: Dict[str, str] = fold.base_versions   # entity_id → client's OCC token
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
@@ -4953,12 +5779,17 @@ class GraphVersioningService:
                     new_vals[eid] = out.merged
                     for cf in out.conflicts:
                         occ_conflicts.append({
-                            "entity_id": eid, "path": list(cf.path), "base": cf.base,
+                            "entity_id": eid, "entity_kind": kind_by_entity.get(eid, "node"),
+                            "path": list(cf.path), "base": cf.base,
                             "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
                 else:
                     new_vals[eid] = self._patch_payload(cur, patch)
             if occ_conflicts:
-                raise MergeConflict(occ_conflicts)
+                # Each conflicting entity's CURRENT value rides along, so the client can rebase the
+                # user's edit onto it without another read.
+                raise MergeConflict(occ_conflicts, current={
+                    c["entity_id"]: (c["entity_kind"], cur_vals.get(c["entity_id"]))
+                    for c in occ_conflicts})
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no
@@ -4967,7 +5798,7 @@ class GraphVersioningService:
                              if v is None and kind_by_entity.get(eid) == "node"}
             if deleted_nodes:
                 subtree, inc_edges = await self._cascade_deletes(
-                    s, graph_id, bid, deleted_nodes, containment_edge_types)
+                    s, graph_id, bid, deleted_nodes, containment_edge_types, overlay=new_vals)
                 new_desc = [d for d in subtree if d not in new_vals]
                 if new_desc:
                     desc_vals = await self._current_values(s, graph_id, bid, new_desc)
@@ -4976,11 +5807,12 @@ class GraphVersioningService:
                             new_vals[d] = None
                             cur_vals[d] = desc_vals[d]
                             kind_by_entity[d] = "node"
+                for d in subtree:                                # a descendant edited in this save
+                    new_vals[d] = None                           # goes too (its prior is known)
                 for eid, payload in inc_edges.items():           # all incident edges, any type
-                    if eid in new_vals:
-                        continue
-                    new_vals[eid] = None
-                    cur_vals.setdefault(eid, payload)
+                    if eid not in new_vals:                      # stored, untouched: prior = stored
+                        cur_vals.setdefault(eid, payload)
+                    new_vals[eid] = None                         # incl. ones drawn in this save
                     kind_by_entity[eid] = "edge"
 
             # Referential integrity (bounded): every edge written here must have live
@@ -4996,7 +5828,9 @@ class GraphVersioningService:
             endpoints.discard(None)
             unknown = [e for e in endpoints if e not in new_vals and e not in cur_vals]
             if unknown:
-                cur_vals.update(await self._current_values(s, graph_id, bid, unknown))
+                # Liveness, urn and type are all the endpoints are read for — never their payloads
+                # (an import edge window's endpoints are ~100k nodes).
+                cur_vals.update(await self._current_skeletons(s, graph_id, bid, unknown))
 
             def _live(eid) -> bool:
                 return (new_vals[eid] if eid in new_vals else cur_vals.get(eid)) is not None
@@ -5011,22 +5845,14 @@ class GraphVersioningService:
                 if not _live(src) or not _live(tgt):
                     raise ConcurrencyError(f"edge {eid} would dangle: {src}->{tgt}")
 
-            # ── Containment/edge integrity (authoritative, always on) ────────────────────────────
-            # Duplicate-edge / second-containment-parent / containment-cycle guards, shared with
-            # the merge path via _validate_edge_integrity. Creates only — an update can't add an
-            # edge, and legacy-dirty data must not block property edits. Same-batch deletes are
-            # subtracted (a reparent stages delete(old parent)+create(new)).
-            edge_creates = [(eid, v) for eid, v in new_vals.items()
-                            if v is not None and kind_by_entity.get(eid) == "edge"
-                            and eid not in update_ids]
-            if edge_creates:
-                deleted_edge_ids = {eid for eid, v in new_vals.items()
-                                    if v is None and kind_by_entity.get(eid) == "edge"}
-                viol = await self._validate_edge_integrity(
-                    s, graph_id, bid, edge_creates, deleted_edge_ids,
-                    containment_edge_types or [])
-                if viol:
-                    raise OntologyViolation(viol)
+            # Untyped creations, hierarchy integrity and the ontology — judged on what is WRITTEN
+            # (a patch of nothing is a creation; a retype or a re-pointed edge is judged in full).
+            await self._enforce_written(
+                s, graph_id, bid, new_vals, cur_vals, kind_by_entity,
+                containment_edge_types=containment_edge_types or [],
+                ontology_rules=ontology_rules,
+                strict=graph.ontology_enforcement == "strict",
+                edited=update_ids)
 
             ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
             if ontology is not None and graph.ontology_enforcement == "strict":
@@ -5035,26 +5861,6 @@ class GraphVersioningService:
                      for eid, v in new_vals.items() if v is not None], ontology)
                 if viol:
                     raise OntologyViolation(viol)
-
-            # Rich ontology gate (injected rules; creates only). Endpoint types are free:
-            # new_vals holds the batch, cur_vals was hydrated with unknown endpoints by the
-            # referential-integrity block above. Only GENUINE creates are gated — a `create`
-            # op on an already-live entity (the write-through provider re-records edge
-            # endpoints as idempotent upserts) nets to an update and must not re-litigate a
-            # legacy entity's type.
-            if ontology_rules is not None and graph.ontology_enforcement == "strict":
-                rich = [(eid, kind_by_entity.get(eid, "node"), v,
-                         "update" if (eid in update_ids or cur_vals.get(eid) is not None)
-                         else "create")
-                        for eid, v in new_vals.items() if v is not None]
-                endpoint_types = {}
-                for eid in set(new_vals) | set(cur_vals):
-                    v = new_vals.get(eid) if new_vals.get(eid) is not None else cur_vals.get(eid)
-                    if v and v.get("entityType"):
-                        endpoint_types[eid] = v["entityType"]
-                rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-                if rich_viol:
-                    raise OntologyViolation(rich_viol)
 
             # Canonicalize entity/edge-type casing to the ontology's declared spelling before
             # the delta is content-hashed and written, so a write-through (or the repair script)
@@ -5065,9 +5871,14 @@ class GraphVersioningService:
                 for v in new_vals.values():
                     canonicalize_payload_types(v, ontology_rules)
 
+            written = {eid: (kind_by_entity.get(eid, "node"), v) for eid, v in new_vals.items()}
+            urns = {eid: (v.get("urn") or eid) for eid, v in {**cur_vals, **new_vals}.items()
+                    if v is not None and not _is_edge_payload(v)}
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
-                return None
+                if on_commit is not None:
+                    await on_commit(s)
+                return ApplyResult(None, written, urns)
             for d in deltas:
                 kind_by_entity.setdefault(
                     d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
@@ -5097,7 +5908,12 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
-            return commit.id
+            if on_commit is not None:
+                # The commit's pending ORM writes first, so the hook's (a job-row checkpoint) is
+                # the last statement and holds that row's lock only until the commit.
+                await s.flush()
+                await on_commit(s)
+            return ApplyResult(commit.id, written, urns)
 
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert
@@ -5152,18 +5968,17 @@ class GraphVersioningService:
 
     @staticmethod
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
-        """Apply a partial update `patch` onto `base`: top-level fields override, and the
-        nested ``properties`` dict is DEEP-merged (a partial properties patch must not drop
-        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do."""
-        base = base or {}
-        out = {**base, **patch}
-        if patch.get("properties") is not None or base.get("properties") is not None:
-            merged = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
-            # A bulk import can explicitly REMOVE a property by patching it with this sentinel
-            # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
-            # literal never occurs in real data, so this is inert for every other write path.
-            out["properties"] = {k: v for k, v in merged.items() if v != "__nx_prop_delete__"}
-        return out
+        """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
+        top-level fields override, ``properties`` is merged key by key, and a property marked
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
+        return apply_patch(base, patch)
+
+    @staticmethod
+    def _compose_patches(first: dict, second: dict) -> dict:
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order
+        (see ``backend.common.property_patch.compose_patches``): a removal stays a removal until
+        it meets the stored value."""
+        return compose_patches(first, second)
 
     async def _payloads_by_content_hash(
         self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]
@@ -5196,56 +6011,78 @@ class GraphVersioningService:
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
         *, occ_guard: bool = False,
     ) -> None:
+        now = _now()
+        node_rows: List[dict] = []
+        edge_rows: List[dict] = []
+        heads: List[dict] = []
         for d in deltas:
             kind = kind_by_entity.get(d.entity_id, "node")
+            p = d.payload or {}
             if kind == "node":
                 vid = prefixed_id("nv")
-                p = d.payload or {}
-                s.add(NodeVersionORM(
+                node_rows.append(dict(
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor,
+                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
                     urn=p.get("urn"), entity_type=p.get("entityType"),
                     display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
                 ))
             else:
                 vid = prefixed_id("ev")
-                p = d.payload or {}
-                s.add(EdgeVersionORM(
+                edge_rows.append(dict(
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor,
+                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
                     source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
                     target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
                     edge_type=p.get("edgeType"), confidence=p.get("confidence"),
                     discriminator=p.get("discriminator"),
                 ))
-            # Upsert the head pointer (keeps version tables append-only).
-            stmt = pg_insert(EntityHeadORM).values(
-                graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
-                entity_kind=kind, head_version_id=vid, content_hash=d.content_hash,
-                is_tombstone=(d.op == "delete"), updated_at=_now(),
-            ).on_conflict_do_update(
-                index_elements=["graph_id", "branch_id", "entity_id"],
-                set_={"head_version_id": vid, "content_hash": d.content_hash,
-                      "is_tombstone": (d.op == "delete"), "entity_kind": kind,
-                      "updated_at": _now()},
-                # Per-entity compare-and-swap (when occ_guard): advance the head ONLY if it is still
-                # the pre-image this commit read. Under concurrent same-branch writes a
-                # stale-read-then-write becomes a no-op we detect below and retry — closing the
-                # lost-update window without a coarse lock. Versions are append-only; the mutable
-                # head pointer is the only contended resource, and this is its CAS. A create reads the
-                # entity as absent, so its pre-image is the empty-state hash (content_hash(None)) —
-                # which is exactly what a tombstone head stores, so a legit delete→re-create
-                # (resurrect) MATCHES, while a concurrent LIVE create (different hash) correctly misses.
-                where=(EntityHeadORM.content_hash == (d.prev_content_hash or _HASH_NONE)
-                       if occ_guard else None),
-            )
-            res = await s.execute(stmt)
-            if occ_guard and res.rowcount == 0:
-                raise _StaleHead(d.entity_id)
+            heads.append({"entity_id": d.entity_id, "entity_kind": kind, "head_version_id": vid,
+                          "content_hash": d.content_hash, "is_tombstone": d.op == "delete",
+                          "pre_image": d.prev_content_hash or _HASH_NONE})
+        # The version rows, as batched multi-row INSERTs (executemany) rather than an ORM object
+        # each: a large commit (an import window) spent most of its time building them.
+        if node_rows:
+            await s.execute(insert(NodeVersionORM.__table__), node_rows)
+        if edge_rows:
+            await s.execute(insert(EdgeVersionORM.__table__), edge_rows)
+        # Upsert the head pointers (keeps version tables append-only), a batch per statement.
+        for i in range(0, len(heads), _HEAD_BATCH):
+            await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], occ_guard)
+
+    async def _upsert_heads(self, s, graph_id, branch_id, heads: List[dict], occ_guard: bool) -> None:
+        """Point each entity's head at its new version. ``deltas`` hold one change per entity
+        (``net_delta``), so no statement names an entity twice.
+
+        With ``occ_guard`` it is a per-entity compare-and-swap: a head advances ONLY if it is still
+        the pre-image this commit read. Under concurrent same-branch writes a stale-read-then-write
+        becomes a no-op we detect and retry (``_StaleHead``) — closing the lost-update window
+        without a coarse lock. Versions are append-only; the mutable head pointer is the only
+        contended resource, and this is its CAS. A create reads the entity as absent, so its
+        pre-image is the empty-state hash (content_hash(None)) — which is exactly what a tombstone
+        head stores, so a legit delete→re-create (resurrect) MATCHES, while a concurrent LIVE
+        create (different hash) correctly misses. Two statements a batch, not one per entity: an
+        UPDATE advances the heads still at their pre-image, then an INSERT adds the entities with
+        no head yet. An entity advanced by neither lost the race."""
+        arrays = {"eids": [h["entity_id"] for h in heads], "vids": [h["head_version_id"] for h in heads],
+                  "hashes": [h["content_hash"] for h in heads], "tombs": [h["is_tombstone"] for h in heads],
+                  "kinds": [h["entity_kind"] for h in heads]}
+        scalars = {"graph_id": graph_id, "branch_id": branch_id, "now": _now()}
+        if not occ_guard:
+            await s.execute(_UPSERT_HEADS, {**arrays, **scalars})
+            return
+        advanced = set((await s.execute(
+            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads]})).scalars())
+        fresh = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
+        if fresh:
+            rest = {k: [v[i] for i in fresh] for k, v in arrays.items()}
+            advanced.update((await s.execute(_ADD_HEADS, {**rest, **scalars})).scalars())
+        for h in heads:
+            if h["entity_id"] not in advanced:
+                raise _StaleHead(h["entity_id"])
 
     async def _branch_contributors(self, s, graph_id, branch_id) -> List[str]:
         rows = (await s.execute(
@@ -5311,6 +6148,56 @@ class GraphVersioningService:
                 state[eid] = None if op == "delete" else payload_by_vid.get(vid)
         return state
 
+    async def _heads_as_of(self, s, graph_id, branch_id, seq) -> Dict[str, Optional[tuple]]:
+        """The NARROW form of :meth:`_state_as_of` — the same winners (fork-aware, the same
+        ordering), but no payloads: ``entity_id -> None`` (deleted) or a tuple
+
+        * node: ``("node", graph_id, version_id, content_hash, urn, entity_type)``
+        * edge: ``("edge", graph_id, version_id, content_hash, edge_type, source_id, target_id)``
+
+        ``graph_id`` is the graph whose rows hold the version (a fork's base lives in its
+        parent), for :meth:`_payloads_by_version`. What a reconcile diffs on: a few dozen bytes
+        per entity instead of its whole payload, and no JSON to hash."""
+        heads: Dict[str, Optional[tuple]] = {}
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id == main_id:
+                parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                heads.update(await self._heads_as_of(
+                    s, graph.fork_parent_graph_id, parent_main, graph.fork_base_commit_seq or 0))
+        for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
+            cols = ((model.entity_id, model.id, model.op, model.content_hash,
+                     model.urn, model.entity_type) if kind == "node" else
+                    (model.entity_id, model.id, model.op, model.content_hash,
+                     model.edge_type, model.source_entity_id, model.target_entity_id))
+            rows = (await s.execute(
+                select(*cols)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )).all()
+            for eid, vid, op, chash, *rest in rows:
+                heads[eid] = None if op == "delete" else (kind, graph_id, vid, chash, *rest)
+        return heads
+
+    async def _payloads_by_version(self, s, refs) -> Dict[str, dict]:
+        """``version_id -> payload`` for ``refs`` = iterable of ``(kind, graph_id, version_id)``
+        — the second phase: only for what a reconcile must actually write."""
+        grouped: Dict[Tuple[str, str], List[str]] = {}
+        for kind, gid, vid in refs:
+            grouped.setdefault((kind, gid), []).append(vid)
+        out: Dict[str, dict] = {}
+        for (kind, gid), vids in grouped.items():
+            model = NodeVersionORM if kind == "node" else EdgeVersionORM
+            for chunk in _chunks(vids, _IN_LIST_MAX):
+                for vid, payload in (await s.execute(
+                    select(model.id, model.payload).where(model.graph_id == gid, model.id.in_(chunk))
+                )).all():
+                    out[vid] = payload
+        return out
+
     async def _changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> set:
         """Entity ids touched by commits in ``(from_seq, to_seq]`` — O(changed),
         index-backed by ``ix_*_branch_changeset`` (a commit writes rows only for
@@ -5334,19 +6221,135 @@ class GraphVersioningService:
         if not id_list:
             return out
         for model in (NodeVersionORM, EdgeVersionORM):
-            # Chunk the IN-list — asyncpg caps bind params at 32767 and a cascade delete
-            # can touch tens of thousands of entities in one pass.
+            # The ids go as one array (``= ANY``), a chunk at a time: an IN list of thousands is
+            # compiled one bind at a time, and a cascade delete can touch tens of thousands.
+            stmt = (
+                select(model.entity_id, model.op, model.payload)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
             for chunk in _chunks(id_list, _IN_LIST_MAX):
-                stmt = (
-                    select(model.entity_id, model.op, model.payload)
-                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                           model.entity_id.in_(chunk), model.commit_seq <= seq)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
-                for eid, op, payload in (await s.execute(stmt)).all():
+                for eid, op, payload in (await s.execute(stmt, {"ids": list(chunk)})).all():
                     out[eid] = None if op == "delete" else payload
         return out
+
+    async def _hashes_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, "_Stored"]:
+        """:meth:`_values_at` without the payloads: a :class:`_Stored` per id live at ``seq``
+        (deleted, absent, empty- and null-payload ids omitted) — whether a value changed, what it
+        is called and where an edge points, told without loading it."""
+        out: Dict[str, _Stored] = {}
+        id_list = list(ids)
+        # A draft's first read runs this over every id the draft changed, on the web process's
+        # loop: the ids go as one array (``= ANY``), not an IN list compiled one bind at a time,
+        # and the rows come back plain, without the ORM's loading.
+        conn = await s.connection()
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            named = ((model.urn, model.entity_type, null(), null()) if kind == "node"
+                     else (null().label("urn"), model.edge_type, model.source_entity_id,
+                           model.target_entity_id))
+            stmt = (
+                select(model.entity_id, model.op, model.content_hash, *named)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                for eid, op, chash, urn, typ, src, tgt in (
+                        await conn.execute(stmt, {"ids": list(chunk)})).all():
+                    if op != "delete" and chash not in (_HASH_EMPTY, _HASH_NONE):
+                        out[eid] = _Stored(kind, chash, urn, typ, src, tgt)
+        return out
+
+    async def _skeletons_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, Optional[dict]]:
+        """:meth:`_values_at` built from the version row's identity columns instead of its payload:
+        a node as ``{urn, entityType}``, an edge as ``{edgeType, sourceEntityId, targetEntityId}``,
+        an empty payload as ``{}``. Deleted → ``None``; absent ids omitted — the same liveness as
+        :meth:`_values_at`, for the checks that only need to know what an entity is and where an
+        edge points (integrity, typing an edge's ends) and not what it holds."""
+        out: Dict[str, Optional[dict]] = {}
+        id_list = list(ids)
+        if not id_list:
+            return out
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
+                     (null(), func.coalesce(model.edge_type, model.payload["edge_type"].astext),
+                      model.source_entity_id, model.target_entity_id))
+            stmt = (
+                select(model.entity_id, model.op, model.content_hash, *named)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                for eid, op, chash, urn, typ, src, tgt in (
+                        await s.execute(stmt, {"ids": list(chunk)})).all():
+                    if op == "delete" or chash == _HASH_NONE:    # a null payload reads as None too
+                        out[eid] = None
+                    elif chash == _HASH_EMPTY:
+                        out[eid] = {}
+                    elif kind == "node":
+                        out[eid] = {k: v for k, v in (("urn", urn), ("entityType", typ)) if v is not None}
+                    else:
+                        out[eid] = {k: v for k, v in (("edgeType", typ), ("sourceEntityId", src),
+                                                      ("targetEntityId", tgt)) if v}
+        return out
+
+    async def _head_index(self, s, graph_id: str, branch_id: str) -> Dict[str, "_Head"]:
+        """A branch's own heads without their payloads: a :class:`_Head` per entity it changed —
+        what its version row says (a node's urn, type and names; an edge's type and ends). What a
+        draft changed, at any draft size.
+
+        The heads first, then their version rows by id, ``_IN_LIST_MAX`` at a time — never one
+        join of the two: on a partition a large import has just filled and nothing has analyzed
+        yet, the planner reads its estimate of one row literally and joins in a nested loop that
+        scans the graph's versions once per head (four minutes for a 20k+20k draft).
+
+        This runs in the web process on a draft's first read, so nothing in it holds the event
+        loop for long: the heads come in ``_HEAD_PAGE`` pages (a keyset on the primary key), their
+        version rows by ``= ANY(<one array>)`` (an IN list of thousands is compiled one bind at a
+        time), as plain rows (no ORM loading), and the index is built in a thread. One 200k-row
+        result plus 200k ``_Head`` built in one go was half a second the loop served nothing else."""
+        conn = await s.connection()
+        heads: List[tuple] = []
+        after = ""
+        while True:
+            page = (await conn.execute(
+                select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind,
+                       EntityHeadORM.head_version_id, EntityHeadORM.content_hash,
+                       EntityHeadORM.is_tombstone)
+                .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                       EntityHeadORM.entity_id > after)
+                .order_by(EntityHeadORM.entity_id).limit(_HEAD_PAGE)
+            )).all()
+            heads.extend(page)
+            if len(page) < _HEAD_PAGE:
+                break
+            after = page[-1][0]
+        # vid -> (table, urn, type, displayName, qualifiedName, source, target). A head is looked
+        # for in its kind's table first, then the other one (a head whose kind went stale).
+        rows: Dict[str, tuple] = {}
+        for first in ("node", "edge"):
+            for table in (first, "edge" if first == "node" else "node"):
+                vids = [vid for _e, kind, vid, _h, _t in heads if kind == first and vid not in rows]
+                model = NodeVersionORM if table == "node" else EdgeVersionORM
+                named = ((model.urn, model.entity_type, model.display_name, model.qualified_name,
+                          null(), null()) if table == "node" else
+                         (null(), model.edge_type, null(), null(), model.source_entity_id,
+                          model.target_entity_id))
+                stmt = select(model.id, *named).where(
+                    model.graph_id == graph_id,
+                    model.id == any_(bindparam("vids", type_=ARRAY(Text))))
+                for chunk in _chunks(vids, _HEAD_PAGE):
+                    for vid, *cols in (await conn.execute(stmt, {"vids": list(chunk)})).all():
+                        rows[vid] = (table, *cols)
+        return await asyncio.to_thread(_heads_of, heads, rows)
 
     async def _current_values(
         self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,
@@ -5372,29 +6375,146 @@ class GraphVersioningService:
         out.update(await self._values_at(s, graph_id, branch_id, ids, overlay_seq))
         return out
 
+    async def _current_skeletons(
+        self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,
+    ) -> Dict[str, Optional[dict]]:
+        """:meth:`_current_values` as :meth:`_skeletons_at` — the same layering (``main`` at the
+        seq, or a draft over ``main`` at its branch point) and liveness, without a payload."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        main_id = await self._main_branch_id(s, graph_id)
+        if branch_id == main_id:
+            graph = await s.get(GraphORM, graph_id)
+            seq = graph.main_head_commit_seq if as_of_seq is None else as_of_seq
+            return await self._skeletons_at(s, graph_id, main_id, ids, seq)
+        branch = await s.get(BranchORM, branch_id)
+        base_seq = branch.base_commit_seq or 0
+        if as_of_seq is not None:
+            base_seq = min(base_seq, as_of_seq)
+        out = await self._skeletons_at(s, graph_id, main_id, ids, base_seq)
+        overlay_seq = (1 << 62) if as_of_seq is None else as_of_seq
+        out.update(await self._skeletons_at(s, graph_id, branch_id, ids, overlay_seq))
+        return out
+
+    async def _incident_edge_ids(
+        self, s, graph_id: str, branch_id: str, node_ids, *, sides=("source", "target"),
+        edge_types: Optional[Collection[str]] = None,
+    ) -> set:
+        """Ids of every edge that ever touched *node_ids* on the branch's own layers — ``main`` and,
+        for a draft, the draft (the only rows :meth:`_current_values` composes) — via
+        ix_ev_source/ix_ev_target. ``edge_types`` (upper-case) narrows to those types, keeping
+        rows whose type column is unset so a payload-only spelling is still judged."""
+        ids = list(node_ids)
+        if not ids:
+            return set()
+        main_id = await self._main_branch_id(s, graph_id)
+        layers = [main_id] if branch_id == main_id else [main_id, branch_id]
+        cols = {"source": EdgeVersionORM.source_entity_id, "target": EdgeVersionORM.target_entity_id}
+        cand: set = set()
+        for side in sides:
+            stmt = select(EdgeVersionORM.entity_id).where(
+                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(layers),
+                cols[side] == any_(bindparam("ids", type_=ARRAY(Text))))
+            if edge_types is not None:
+                stmt = stmt.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
+                                      EdgeVersionORM.edge_type.is_(None)))
+            for chunk in _chunks(ids, _IN_LIST_MAX):   # one array a chunk (see _values_at)
+                cand.update((await s.execute(stmt.distinct(), {"ids": list(chunk)})).scalars().all())
+        return cand
+
     async def _incident_live_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int] = None,
     ) -> Dict[str, dict]:
         """Currently-live edges on a branch incident to any of *node_ids* — bounded by
         node degree via ix_ev_source/ix_ev_target. Returns {edge_entity_id: payload}."""
-        ids = list(node_ids)
-        if not ids:
-            return {}
-        cand: set = set()
-        for col in (EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id):
-            for chunk in _chunks(ids, _IN_LIST_MAX):   # bind-param-safe IN-list (see _values_at)
-                rows = (await s.execute(
-                    select(EdgeVersionORM.entity_id).where(
-                        EdgeVersionORM.graph_id == graph_id, col.in_(chunk),
-                    ).distinct()
-                )).scalars().all()
-                cand.update(rows)
+        cand = await self._incident_edge_ids(s, graph_id, branch_id, node_ids)
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _incident_live_edge_skeletons(
+        self, s, graph_id: str, branch_id: str, node_ids, *, sides=("source", "target"),
+        edge_types: Optional[Collection[str]] = None,
+    ) -> Dict[str, dict]:
+        """:meth:`_incident_live_edges` at head as skeletons (:meth:`_skeletons_at`) — where each
+        live edge points and its type, never its payload."""
+        cand = await self._incident_edge_ids(s, graph_id, branch_id, node_ids, sides=sides,
+                                             edge_types=edge_types)
+        vals = await self._current_skeletons(s, graph_id, branch_id, cand)
+        return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _expand_moves(
+        self, s, graph_id: str, branch_id: str, ops: Sequence[Mapping],
+        containment_edge_types: Optional[Sequence[str]],
+    ) -> List[Mapping]:
+        """Expand each ``move`` op — ``{op: "move", entity_id: child, payload: {parentEntityId,
+        edgeType, edgeId}}`` — into the edits it means, resolved against what is STORED: delete
+        every containment link the child has (on this branch, plus any this batch created before
+        the move), then, unless the move is to the top level (no parent), create the new one.
+
+        A move used to be expressed by the client as "delete the old link I can see + create the
+        new one"; a link the canvas had not loaded was never deleted, and the node kept two
+        parents. Here the server finds the links, so a move is exact whatever the client loaded."""
+        if not any(o.get("op") == "move" for o in ops):
+            return list(ops)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not cset:
+            raise ValueError("a move needs the ontology's containment relationship types")
+
+        def _is_cont(p: Optional[Mapping]) -> bool:
+            return bool(p) and str(p.get("edgeType") or p.get("edge_type") or "").upper() in cset
+
+        children = [o["entity_id"] for o in ops if o.get("op") == "move"]
+        stored = await self._incident_live_edges(s, graph_id, branch_id, children)
+        out: List[Mapping] = []
+        for o in ops:
+            if o.get("op") != "move":
+                out.append(o)
+                continue
+            child = o["entity_id"]
+            p = o.get("payload") or {}
+            links = {eid for eid, v in stored.items()
+                     if _is_cont(v) and _edge_src_tgt(v)[1] == child}
+            links |= {x["entity_id"] for x in out            # created earlier in this batch
+                      if x.get("op") == "create" and x.get("entity_kind") == "edge"
+                      and _is_cont(x.get("payload")) and _edge_src_tgt(x["payload"])[1] == child}
+            for eid in sorted(links):
+                out.append({"op": "delete", "entity_kind": "edge", "entity_id": eid, "payload": None})
+            parent = p.get("parentEntityId")
+            if parent:
+                if not p.get("edgeType") or not p.get("edgeId"):
+                    raise ValueError("a move under a parent needs edgeType and edgeId")
+                out.append({"op": "create", "entity_kind": "edge", "entity_id": p["edgeId"],
+                            "payload": {"sourceEntityId": parent, "targetEntityId": child,
+                                        "edgeType": p["edgeType"]}})
+        return out
+
+    async def _effective_incident_edges(
+        self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int],
+        overlay: Optional[Mapping[str, Optional[dict]]],
+    ) -> Dict[str, dict]:
+        """Live edges incident to *node_ids*: the branch's stored ones with *overlay* (the write
+        in progress — entity → new value, ``None`` = deleted) laid over them, plus the overlay's
+        own edges touching *node_ids*. Without the overlay this is :meth:`_incident_live_edges`."""
+        inc = await self._incident_live_edges(s, graph_id, branch_id, node_ids, as_of_seq)
+        if not overlay:
+            return inc
+        ids = set(node_ids)
+        out: Dict[str, dict] = {}
+        for eid, p in inc.items():
+            v = overlay[eid] if eid in overlay else p
+            if v is not None and (set(_edge_src_tgt(v)) & ids):
+                out[eid] = v
+        for eid, v in overlay.items():
+            if eid not in out and v is not None and _is_edge_payload(v) \
+                    and (set(_edge_src_tgt(v)) & ids):
+                out[eid] = v
+        return out
 
     async def _cascade_subtree(
         self, s, graph_id: str, branch_id: str, root_ids: set,
         cset: set, as_of_seq: Optional[int], cap: int, max_depth: int = 64,
+        overlay: Optional[Mapping[str, Optional[dict]]] = None,
     ) -> set:
         """Containment subtree to delete when *root_ids* are deleted, respecting SHARED
         children: a descendant is included only when ALL of its containment parents are in
@@ -5407,7 +6527,8 @@ class GraphVersioningService:
             if not frontier or len(deleted) >= cap:
                 break
             # Children reachable via containment OUT-edges from the newly-deleted frontier.
-            inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+            inc = await self._effective_incident_edges(
+                s, graph_id, branch_id, frontier, as_of_seq, overlay)
             candidates: set = set()
             for p in inc.values():
                 if (p.get("edgeType") or "").upper() not in cset:
@@ -5419,7 +6540,8 @@ class GraphVersioningService:
                 break
             # Gather EVERY containment parent of each candidate; delete it only when they're
             # all already in the delete set (otherwise a surviving parent keeps it alive).
-            cand_inc = await self._incident_live_edges(s, graph_id, branch_id, candidates, as_of_seq)
+            cand_inc = await self._effective_incident_edges(
+                s, graph_id, branch_id, candidates, as_of_seq, overlay)
             parents_of: Dict[str, set] = {}
             for p in cand_inc.values():
                 if (p.get("edgeType") or "").upper() not in cset:
@@ -5439,6 +6561,7 @@ class GraphVersioningService:
     async def _cascade_deletes(
         self, s, graph_id: str, branch_id: str, root_node_ids,
         containment_edge_types, as_of_seq: Optional[int] = None,
+        overlay: Optional[Mapping[str, Optional[dict]]] = None,
     ) -> Tuple[set, Dict[str, dict]]:
         """The full tombstone set for deleting *root_node_ids* on a branch:
 
@@ -5450,16 +6573,21 @@ class GraphVersioningService:
 
         Lineage-connected nodes are NOT added to the node set; only their edges are cleaned.
         Returns ``(subtree_node_ids, {edge_entity_id: payload})``. The same helper backs the
-        read-only delete-impact preview AND the commit-time cascade, so they always agree."""
+        read-only delete-impact preview AND the commit-time cascade, so they always agree.
+
+        A write passes itself as *overlay* so the cascade follows the hierarchy AS WRITTEN: a
+        child linked under the node in the same save goes with it, a relationship drawn to it in
+        the same save goes too, and a child moved away from it in the same save stays."""
         roots = {r for r in root_node_ids if r}
         if not roots:
             return set(), {}
         cset = {t.upper() for t in (containment_edge_types or [])}
         subtree = await self._cascade_subtree(
-            s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES,
+            s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES, overlay=overlay,
         ) if cset else set(roots)
         subtree |= roots
-        edges = await self._incident_live_edges(s, graph_id, branch_id, subtree, as_of_seq)
+        edges = await self._effective_incident_edges(
+            s, graph_id, branch_id, subtree, as_of_seq, overlay)
         return subtree, edges
 
     async def delete_impact(
@@ -5610,6 +6738,51 @@ class GraphVersioningService:
                 )
 
 
+def _redefines(before: Optional[dict], after: Mapping, kind: str) -> bool:
+    """Whether writing *after* over *before* defines a (partly) NEW entity for the ontology: it
+    did not exist, or a type-defining field changed — a node's type; an edge's type or either
+    end. Such a write faces the full ontology gate; any other edit is exempt."""
+    if not before:
+        return True
+    if kind == "node":
+        return (before.get("entityType") or "") != (after.get("entityType") or "")
+    return (str(before.get("edgeType") or before.get("edge_type") or "").upper()
+            != str(after.get("edgeType") or after.get("edge_type") or "").upper()
+            or _edge_src_tgt(before) != _edge_src_tgt(after))
+
+
+def _untyped_creations(
+    created: Mapping[str, Optional[dict]], kind_by_entity: Mapping[str, str],
+    edited: Collection[str] = (),
+) -> List[dict]:
+    """Violations for entities about to be CREATED without a type (a node's ``entityType``, an
+    edge's ``edgeType``). Every reader needs one, so this holds in every enforcement mode — one
+    untyped node made every read of its draft fail. Callers pass only entities that do not exist
+    yet: ones already stored untyped (legacy data) stay editable, so they can be fixed."""
+    out: List[dict] = []
+    for eid, v in created.items():
+        if v is None:
+            continue
+        kind = kind_by_entity.get(eid, "node")
+        name = v.get("displayName") or eid
+        typed = v.get("entityType") if kind == "node" else (v.get("edgeType") or v.get("edge_type"))
+        if typed:
+            continue
+        if eid in edited:
+            # An EDIT of something this branch does not have — never a creation the user meant.
+            out.append({"entity_id": eid, "kind": kind, "rule": "entity_not_found", "name": name,
+                        "reason": f"'{name}' isn't on this draft — the change edits "
+                                  f"{'an entity' if kind == 'node' else 'a relationship'} that does not "
+                                  "exist here (it may have been deleted). Refresh the view and try again."})
+        elif kind == "node":
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_entity_type", "name": name,
+                        "reason": f"'{name}' has no entity type. Choose a type from the ontology."})
+        else:
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_edge_type", "name": name,
+                        "reason": "A relationship needs a relationship type from the ontology."})
+    return out
+
+
 def _fold_shared(
     base_state: Mapping[str, Optional[dict]],
     changes: Sequence["WorkingChangeORM"],
@@ -5646,11 +6819,17 @@ def _fold_shared(
         order: List[str] = []                            # actors, first-seen order
         net: Dict[str, Optional[dict]] = {}
         for c in chs:
+            # Each collaborator's ops COMPOSE onto the staged ancestor exactly as ``materialize``
+            # folds a private draft: an update is a PATCH. Taking the last payload as the whole
+            # value dropped every field a partial update did not mention — a new node renamed
+            # before checkpoint lost its type, and the 3-way merge read the missing fields as
+            # deletions.
             if c.actor not in net:
                 order.append(c.actor)
-            net[c.actor] = None if c.op == "delete" else (
-                dict(c.payload) if c.payload is not None else None
-            )
+                net[c.actor] = ancestor
+            net[c.actor] = materialize(
+                {eid: net[c.actor]},
+                [{"entity_id": eid, "op": c.op, "payload": c.payload}])[eid]
         merged = net[order[0]]
         for a in order[1:]:                              # iterative 3-way over the staged ancestor
             out = three_way_merge(ancestor, merged, net[a], set_fields)
@@ -5764,7 +6943,10 @@ def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
     return {
         "urn": urn,
         "entityId": entity_id,
-        "entityType": payload.get("entityType"),
+        # "unknown" like main's reader (``_node_from_props``): writes refuse an untyped creation,
+        # but one stored before that rule must still read — shown so it can be retyped, never a
+        # 500 that takes the whole draft down with it.
+        "entityType": payload.get("entityType") or "unknown",
         "displayName": payload.get("displayName") or "",
         "qualifiedName": payload.get("qualifiedName"),
         "description": payload.get("description"),
@@ -5793,7 +6975,7 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
         "id": entity_id,
         "sourceUrn": urn_of.get(src, f"gv:{src}"),
         "targetUrn": urn_of.get(tgt, f"gv:{tgt}"),
-        "edgeType": payload.get("edgeType"),
+        "edgeType": payload.get("edgeType") or payload.get("edge_type") or "unknown",   # never a 500 (see above)
         "confidence": payload.get("confidence"),
         "properties": payload.get("properties") or {},
         "version": content_hash(payload),       # OCC token (see _graphnode_dict)
@@ -5805,6 +6987,96 @@ def _chunks(seq, n):
         yield seq[i:i + max(1, n)]
 
 
+# Above this many edges the containment-loop pass runs in a thread, off the event loop.
+_CYCLE_THREAD_MIN = 5000
+
+
+def _containment_cycle_edges(edges: Sequence[Tuple[str, str, str]],
+                             checks: Sequence[Tuple[str, str, str]]) -> set:
+    """The ids in *checks* — ``(edge_id, parent, child)`` — whose edge closes a containment
+    loop in *edges* (the same shape, the checked edges included): the child is an ancestor of
+    the parent once every version of the edge itself is set aside. O(V+E).
+
+    An edge whose ends sit in different strongly connected components is on no loop. Inside
+    one, an edge with no other version in *edges* always is: a shortest way back from its child
+    to its parent never runs along the edge itself. Only a re-pointed edge — its stored version
+    still listed beside the new one — needs a search that sets both aside."""
+    adj: Dict[str, List[Tuple[str, str]]] = {}
+    versions: Dict[str, int] = {}
+    for eid, a, b in edges:
+        if a and b:
+            adj.setdefault(a, []).append((eid, b))
+            adj.setdefault(b, [])
+            versions[eid] = versions.get(eid, 0) + 1
+    comp = _strongly_connected(adj)
+    out: set = set()
+    for eid, a, b in checks:
+        ca = comp.get(a)
+        if a == b or ca is None or ca != comp.get(b):
+            continue
+        if versions.get(eid, 0) <= 1:
+            out.add(eid)
+            continue
+        seen, stack = {b}, [b]
+        while stack and eid not in out:
+            for oeid, m in adj[stack.pop()]:
+                if oeid == eid or m in seen or comp.get(m) != ca:
+                    continue
+                if m == a:
+                    out.add(eid)
+                    break
+                seen.add(m)
+                stack.append(m)
+    return out
+
+
+def _strongly_connected(adj: Mapping[str, Sequence[Tuple[str, str]]]) -> Dict[str, int]:
+    """Tarjan's strongly connected components, iteratively (a hierarchy can be deeper than
+    Python's recursion limit): node → component number."""
+    index: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    on_stack: set = set()
+    stack: List[str] = []
+    comp: Dict[str, int] = {}
+    counter = ncomp = 0
+    for root in adj:
+        if root in index:
+            continue
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        work = [(root, 0)]
+        while work:
+            v, i = work[-1]
+            nbrs = adj[v]
+            if i < len(nbrs):
+                work[-1] = (v, i + 1)
+                w = nbrs[i][1]
+                if w not in index:
+                    index[w] = low[w] = counter
+                    counter += 1
+                    stack.append(w)
+                    on_stack.add(w)
+                    work.append((w, 0))
+                elif w in on_stack:
+                    low[v] = min(low[v], index[w])
+                continue
+            work.pop()
+            if work:
+                u = work[-1][0]
+                low[u] = min(low[u], low[v])
+            if low[v] == index[v]:
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    comp[w] = ncomp
+                    if w == v:
+                        break
+                ncomp += 1
+    return comp
+
+
 # asyncpg caps bind parameters at 32767 (signed int16) per statement — stricter than
 # PostgreSQL's own 65535. Stay under it with headroom. A multi-row INSERT costs
 # rows × columns params.
@@ -5813,6 +7085,11 @@ _PG_MAX_BIND_PARAMS = 32000
 # Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
 # a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
 _IN_LIST_MAX = 20000
+
+# Rows per statement where a draft's first read builds its overlay (``_head_index``): the read runs
+# on the web process's event loop, and each statement's rows are turned into Python objects there
+# in one uninterrupted step — 20k at a time was a few hundred milliseconds of nothing else served.
+_HEAD_PAGE = 5000
 
 # Upper bound on a single cascade-delete's containment subtree, so a pathological graph
 # can't run unbounded. Generous; the chunked writes handle the volume.
@@ -5831,6 +7108,53 @@ def _delta_stats(deltas: List[Delta]) -> dict:
     for d in deltas:
         out[d.op] += 1
     return out
+
+
+def _plan_squash(
+    heads: Mapping[str, "_Head"], main: Mapping[str, "_Stored"], gone: Collection[str],
+    reread: Callable[["_Head"], bool],
+) -> Tuple[List["_SquashRow"], List[str]]:
+    """The narrow squash's plan: ``net_delta(main, draft)`` over the entities a draft changed, told
+    from content hashes alone. ``heads`` are the draft's (:meth:`_head_index`), ``main`` its
+    live values at the same seq (:meth:`_hashes_at`), ``gone`` the draft's live entities the
+    squash deletes all the same (edges on a node it deleted). Returns ``(rows, reread)``: the rows
+    to write, and the live entities ``reread`` picks whose payload must be read to decide (a type
+    the ontology spells differently) — in entity order."""
+    rows: List[_SquashRow] = []
+    lane: List[str] = []
+    for eid in sorted(heads):
+        h = heads[eid]
+        b = main.get(eid)
+        live = h.live and bool(h.table) and eid not in gone
+        if live and reread(h):
+            lane.append(eid)
+        elif live and b is None:
+            rows.append(_SquashRow(eid, h.table, "create", h.version_id, None, h.content_hash))
+        elif not live and b is not None:
+            rows.append(_SquashRow(eid, h.kind, "delete", None, b.content_hash, _HASH_NONE))
+        elif live and b.content_hash != h.content_hash:
+            rows.append(_SquashRow(eid, h.table, "update", h.version_id, b.content_hash, h.content_hash))
+    return rows, lane
+
+
+def _written_values(copies: Sequence["_SquashRow"], heads: Mapping[str, "_Head"],
+                    deltas: Sequence[Delta]) -> Dict[str, Optional[dict]]:
+    """What a narrow squash writes, in entity order as the gates judge it: a copied row's value as
+    its identity columns give it (:func:`_head_skeleton`), a delta's payload."""
+    written: Dict[str, Optional[dict]] = {r.entity_id: _head_skeleton(heads[r.entity_id])
+                                          for r in copies}
+    written.update({d.entity_id: d.payload for d in deltas})
+    return {eid: written[eid] for eid in sorted(written)}
+
+
+def _head_skeleton(h: "_Head") -> dict:
+    """A head's value as its version row's identity columns give it — :meth:`_skeletons_at`'s
+    shape, plus a node's displayName, which the gate's messages name it by."""
+    if h.table == "edge":
+        return {k: v for k, v in (("edgeType", h.type), ("sourceEntityId", h.src),
+                                  ("targetEntityId", h.tgt)) if v}
+    return {k: v for k, v in (("urn", h.urn), ("entityType", h.type), ("displayName", h.name))
+            if v is not None}
 
 
 def _deltas_to_diff_vs_main(

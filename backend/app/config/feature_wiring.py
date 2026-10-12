@@ -120,6 +120,101 @@ class FeatureWiring:
 
 
 FEATURE_WIRING: dict[str, FeatureWiring] = {
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    "analyticsWorkspaceVisibility": FeatureWiring(
+        key="analyticsWorkspaceVisibility",
+        # SECURITY: it widens what Analytics reports past what workspace
+        # permissions allow, so an unreadable value must mean the narrower
+        # world — follow RBAC.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — when on, workspace names and figures are "
+            "reported for every workspace rather than only the reader's own. "
+            "Does NOT grant access to the workspace itself.",
+        ),
+        ui_surfaces=(
+            "Locked rows in the Workspaces table",
+            "Redacted names in the workspace and view leaderboards",
+        ),
+        still_allowed=(
+            "Platform-wide totals always count every workspace",
+            "Opening a workspace still requires the usual permissions",
+        ),
+    ),
+    "analyticsPrivacyMode": FeatureWiring(
+        key="analyticsPrivacyMode",
+        # SECURITY, and it is a LADDER rather than a switch — "strict" is the
+        # narrow end, so an unreadable value resolves there. Failing to the
+        # permissive end would publish per-person activity because a database
+        # hiccup, and a disclosure cannot be taken back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — decides whether a non-privileged reader "
+            "is shown individual activity (internal, full) and operational "
+            "health (full). Never affects workspace or view access, which "
+            "follow the app's own permissions.",
+        ),
+        ui_surfaces=(
+            "Leaderboards and per-person panels on Overview, Engagement and Content",
+            "The freshness and access-friction sections of the Health tab",
+        ),
+        still_allowed=(
+            "Platform-wide counts and trends at every level",
+            "Full detail for workspaces the reader can already open",
+            "Their own activity, at every level",
+        ),
+    ),
+    "analyticsShowEmailAddresses": FeatureWiring(
+        key="analyticsShowEmailAddresses",
+        # SECURITY, though the honest framing is narrower than the others here.
+        # It does not decide whether addresses are knowable — a view's creator
+        # has always been a `mailto:` link in the Explorer drawer, ungated, to
+        # anyone who can read the view. What it decides is whether a page that
+        # RANKS things also carries several addresses at once, which is a
+        # different artefact from a detail panel showing one. Unreadable
+        # resolves to off for the usual reason: a disclosure cannot be undone.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — adds a contact address to a view's "
+            "creator and to a workspace's contributors, only where the reader "
+            "could already see that person's name. Never reaches the "
+            "platform-wide activity ranking, whatever this is set to.",
+        ),
+        # No UI half, and deliberately. The client reads no flag: the address is
+        # simply present in the payload or it is not, and the row renders what
+        # arrived. The hostility this field usually guards against — a button
+        # the UI keeps offering that now 403s — cannot occur here, because
+        # nothing is offered. Contact off means no address and no link to
+        # click, not a link that fails.
+        ui_surfaces=(),
+        still_allowed=(
+            "Reaching a view's author from the view itself, which never needed this",
+            "Everything the privacy level already governs — this can only narrow it",
+        ),
+    ),
+    "analyticsPublicEnabled": FeatureWiring(
+        key="analyticsPublicEnabled",
+        # SECURITY, and for the same reason `semanticLayerNonAdminEditing` is:
+        # this WIDENS who may read. If the value cannot be resolved we must
+        # assume the operator wanted the narrower world — privileged only.
+        # Failing open here would publish platform headcount and workspace
+        # existence to everyone because a database hiccup, which is not a
+        # mistake you can take back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — a caller without system:audit:read, "
+            "system:org-admin or system:admin is refused outright when this is off, "
+            "and served a redacted document when it is on",
+        ),
+        ui_surfaces=(
+            "The Analytics item in the sidebar, for non-privileged people",
+            "The /analytics route guard",
+        ),
+        still_allowed=(
+            "Administrators, auditors and organisation admins keep the full "
+            "Analytics section regardless of this switch",
+        ),
+    ),
     # ── Lineage ────────────────────────────────────────────────────────────────
     "versioningEnabled": FeatureWiring(
         key="versioningEnabled",
@@ -244,14 +339,79 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="graphExportEnabled",
         posture="capability",
         server_gates=(
+            "GET /graphs/{id}/exports/plan and /stream — check, then download, a streamed export",
+            "GET /graph/export/plan and /stream — the same for a data source without version control",
             "POST /graphs/{id}/exports — start an export job",
             "GET /graphs/{id}/exports/{job}/download — take the file",
+            "POST /graph/search/exports and GET /graph/search/exports/{id}/download — write, then "
+            "take, every match of a search",
         ),
-        ui_surfaces=("Export controls on the canvas and the context-view menu",),
+        ui_surfaces=("Export controls on the canvas and the context-view menu",
+                     "Export on a search's matches"),
         still_allowed=(
             "Reading, filtering and tracing every graph in the product",
             "Exports already downloaded are not recalled — this stops NEW ones",
         ),
+    ),
+    # The preview switch for view versions and for moving views between environments: it gates
+    # every surface of both, router-wide on the server. Export views and Import views then decide
+    # which directions are allowed, and do nothing while this is off.
+    "viewPortabilityEnabled": FeatureWiring(
+        key="viewPortabilityEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Every /views/transfer route — export, inspect, reconcile, import, packages",
+            "Every /views/{id}/versions route — history, compare, save, restore",
+        ),
+        ui_surfaces=(
+            "Versions and Export on the view header, the view card menu and the Explorer bulk bar",
+            "The 'Import a view' journey in the View wizard, and 'Import view' in the Explorer "
+            "and the workspace Views manager",
+            "The 'This view' section of the canvas Import / Export menu",
+        ),
+        still_allowed=(
+            "Every view keeps working exactly as it is",
+            "Versions keep being recorded, so turning this on shows each view's whole history",
+            "Imports already waiting in a draft go live, or are discarded, with their draft",
+        ),
+    ),
+    "viewExportEnabled": FeatureWiring(
+        key="viewExportEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /views/transfer/export — build a view file",
+            "POST /views/transfer/export/preview — say what an export would write",
+            "POST /views/transfer/packages — build a view + data package",
+        ),
+        ui_surfaces=(
+            "Export on the view header, the view card menu and the Explorer bulk bar",
+            "'Export view' items in the canvas Import / Export menu",
+        ),
+        still_allowed=(
+            "Reading, editing and versioning every view",
+            "Files already downloaded are not recalled — this stops NEW ones",
+        ),
+        depends_on=("viewPortabilityEnabled",),
+    ),
+    "viewImportEnabled": FeatureWiring(
+        key="viewImportEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /views/transfer/inspect — read an uploaded view file",
+            "POST /views/transfer/reconcile — check it against a data source",
+            "POST /views/transfer/import — create or update a view from it",
+            "POST /views/transfer/packages/inspect and /packages/{id}/data — read a view + data "
+            "package, and bring its data into a draft",
+        ),
+        ui_surfaces=(
+            "The 'Import a view' journey in the View wizard",
+            "'Import view' buttons in the Explorer and the workspace Views manager, and a view "
+            "file dropped on the Explorer",
+            "'Update from file' on the view card menu and in the canvas Import / Export menu",
+        ),
+        still_allowed=("Building views in the wizard", "Exporting views"),
+        depends_on=("viewPortabilityEnabled",),
     ),
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",
@@ -387,6 +547,60 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         still_allowed=(
             "The Help panel and every guide stay available whether tours are on or off",
+        ),
+    ),
+    "canvasLayerFoldEnabled": FeatureWiring(
+        key="canvasLayerFoldEnabled",
+        posture="capability",
+        # Preview, and client-side only: folding decides how the columns are
+        # LAID OUT, so there is no request for a server to refuse — the same
+        # position as toursEnabled.
+        stage="experimental",
+        server_gates=(),
+        ui_surfaces=(
+            "Fold button in the Context View layer strip",
+            "Layers folded into spines to fit the canvas",
+        ),
+        still_allowed=(
+            "Every layer stays on the canvas at full width, and the canvas scrolls sideways",
+            "A line to a layer scrolled out of sight still shows, as a ghost at the canvas edge",
+            "Folding a single layer by hand from its header",
+        ),
+    ),
+    "canvasLineageRollupEnabled": FeatureWiring(
+        key="canvasLineageRollupEnabled",
+        posture="capability",
+        # Retired. Where an unloaded lineage end sits is how the canvas tells
+        # lineage inside the view from lineage that leaves it, so it is no
+        # longer optional: switched off, in-view partners read as outside.
+        # The definition goes in a later release.
+        stage="deprecated",
+    ),
+    "placementContractEnabled": FeatureWiring(
+        key="placementContractEnabled",
+        posture="capability",
+        # Preview: ships OFF. It changes HOW a view's layers are filled, not whether a
+        # feature is offered, so every read passes default=False rather than
+        # fail_safe_default: a flag that cannot be found means today's placement, never
+        # the preview — the same answer the browser's seed gives.
+        stage="experimental",
+        server_gates=(
+            "POST /graph/assignments/compute — places with the shared placement contract",
+            "View-scoped import — a new top-level entity is pinned to a layer only where the "
+            "contract would place it elsewhere",
+            "POST /views and PUT /views/{id}/layout — a new or changed layer rule that can "
+            "never match is refused",
+        ),
+        ui_surfaces=(
+            "Context View columns, trace overlay lanes and search-hit layer badges",
+            "The View wizard's preview and assignment tree, and Layer Studio",
+            "Build Mode and rail create pin a layer only where the contract would place the "
+            "entity elsewhere",
+        ),
+        still_allowed=(
+            "Saved views are not rewritten — turning this off restores today's placement",
+            "Layer rules already saved keep loading, even ones that can never match",
+            "Search's Layer filter, view-scoped export and scoped replace keep today's rules",
         ),
     ),
     "realtimeChangeFeedEnabled": FeatureWiring(

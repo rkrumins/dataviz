@@ -71,6 +71,15 @@ def _build_app(backend=None) -> FastAPI:
     async def _claim_admin(user: User = Depends(requires("system:admin"))):
         return {"who": user.id}
 
+    # An ordinary global permission — deliberately NOT one of
+    # ``_FAIL_CLOSED_PERMISSIONS``, so the outage test below has a route
+    # on which the fail-OPEN tier is observable.
+    @app.get("/analytics")
+    async def _analytics(
+        user: User = Depends(requires("system:analytics:read")),
+    ):
+        return {"who": user.id}
+
     return app
 
 
@@ -145,29 +154,71 @@ async def test_require_admin_allows_claim_present():
         assert r.json() == {"who": _ALICE.id}
 
 
-@pytest.mark.asyncio
-async def test_get_current_user_fail_open_on_redis_outage():
-    """A Redis outage doesn't lock every authenticated user out
-    of the platform. ``get_current_user`` logs + honours the JWT;
-    the JWT TTL is the staleness floor in that scenario."""
+def _broken_backend():
+    """A revocation backend that cannot answer."""
     from backend.app.services.revocation_service import RevocationBackendError
 
     class _BrokenBackend(InMemoryBackend):
         async def exists(self, key):
             raise RevocationBackendError("redis is down")
 
-    claims = PermissionClaims(sid="sess_outage", global_perms=("system:admin",))
+    return _BrokenBackend()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_routes_stay_open_during_a_redis_outage():
+    """A Redis blip must not sign the whole platform out.
+
+    ``get_current_user`` checks the tombstone on every authenticated
+    request and does it FAIL-OPEN: when the backend cannot answer it
+    logs and honours the JWT, whose TTL is the staleness floor. This is
+    the tier that keeps an outage from becoming a total auth outage, and
+    it is asserted on an ordinary permission because the privileged ones
+    deliberately behave the other way — see the test below.
+    """
+    claims = PermissionClaims(
+        sid="sess_outage", global_perms=("system:analytics:read",),
+    )
     token = _make_token(claims)
 
-    app = _build_app(backend=_BrokenBackend())
+    app = _build_app(backend=_broken_backend())
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(
         transport=transport, base_url="http://testserver",
         cookies={ACCESS_COOKIE_NAME: token},
     ) as c:
-        r = await c.get("/legacy-admin")
-        # Fail-open: request goes through despite Redis being down.
+        r = await c.get("/analytics")
         assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/legacy-admin", "/claim-admin"])
+async def test_admin_routes_refuse_when_redis_cannot_confirm_session(route):
+    """...and the privileged tier refuses instead.
+
+    "I cannot confirm this session is still alive" must not read as
+    "carry on" when the thing being authorised is platform
+    administration, so a ``_FAIL_CLOSED_PERMISSIONS`` route answers 503
+    rather than honouring the JWT.
+
+    Both routes are asserted because they reached that guarantee by
+    different paths and only one of them used to hold it:
+    ``requires("system:admin")`` ran the second revocation probe from
+    the start, while ``require_admin`` — which gates the admin users,
+    announcements, ontologies, groups and stats-admin surfaces — never
+    did, and was fail-OPEN on the most sensitive routes in the product.
+    """
+    claims = PermissionClaims(sid="sess_outage", global_perms=("system:admin",))
+    token = _make_token(claims)
+
+    app = _build_app(backend=_broken_backend())
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver",
+        cookies={ACCESS_COOKIE_NAME: token},
+    ) as c:
+        r = await c.get(route)
+        assert r.status_code == 503, r.text
 
 
 # ── End-to-end via the full app: promote → 401 → re-login flow ──────

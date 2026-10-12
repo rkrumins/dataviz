@@ -82,6 +82,12 @@ def cancel_flag_key(job_id: str) -> str:
     """Redis key for the durable cancel flag."""
     return f"agg:cancel:{job_id}"
 
+
+def redispatch_key(job_id: str) -> str:
+    """Redis key for the per-job automatic re-dispatch counter shared by
+    the stuck-job reconciler and crash recovery (cleared by a hand Resume)."""
+    return f"agg:redispatch:{job_id}"
+
 # ── Singleton client ────────────────────────────────────────────────
 
 _client: Optional[aioredis.Redis] = None

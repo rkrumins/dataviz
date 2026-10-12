@@ -41,6 +41,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ViewActivityAction, ViewActivityEntry } from '@/services/viewApiService'
 
 interface ActionMeta {
@@ -196,12 +197,19 @@ function ActivityRow({ row, index }: { row: Row; index: number }) {
             >
                 {/* Avatar + the action badge that sits on it */}
                 <span className="relative shrink-0">
-                    <span className={cn(
-                        'w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-bold',
-                        avatarTint(entry.actor ?? who),
-                    )}>
-                        {initials(who)}
-                    </span>
+                    <UserAvatar
+                        userId={entry.actor !== 'anonymous' ? entry.actor : undefined}
+                        name={who}
+                        className="w-9 h-9 text-[11px] font-bold"
+                        fallback={(
+                            <span className={cn(
+                                'flex h-full w-full items-center justify-center rounded-full',
+                                avatarTint(entry.actor ?? who),
+                            )}>
+                                {initials(who)}
+                            </span>
+                        )}
+                    />
                     <span className={cn(
                         'absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center ring-2 ring-canvas-elevated',
                         meta.tint,
@@ -283,7 +291,7 @@ export function ActivityFeedList({ entries, isLoading, emptyText, skeletonRows =
         <div className="py-1">
             {groups.map(group => (
                 <section key={group.key} className="relative">
-                    <h3 className="sticky top-0 z-10 bg-canvas-elevated/95 backdrop-blur-sm py-2 text-[10px] font-bold uppercase tracking-wider text-ink-muted/70">
+                    <h3 className="sticky top-0 z-10 bg-canvas-elevated py-2 text-[10px] font-bold uppercase tracking-wider text-ink-muted/70">
                         {group.label}
                     </h3>
 

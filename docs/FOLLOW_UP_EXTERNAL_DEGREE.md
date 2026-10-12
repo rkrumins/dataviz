@@ -1,5 +1,23 @@
 # Follow-up: external-degree signal for curated Views
 
+> **Status (2026-10-09): shipped, in a different shape.** What exists is
+> `POST /api/v1/{ws_id}/graph/nodes/degree`, not the endpoint proposed below.
+> It returns each URN's *total* lineage degree, in and out, whether or not the
+> partner is in the view; a URN missing from the answer means unknown, not
+> zero. It takes an optional `includeRollups`, sits behind the response cache,
+> and answers `501` for a reader that cannot count (a versioned branch, or a
+> draft on one). The client asks for 400 URNs at a time, after an 800 ms
+> settle.
+>
+> On the canvas those totals drive each card's lineage ports. The "N↑ M↓
+> outside this view" chip, the per-card cue and the Preview action count
+> something else: the partners the canvas places outside the view. They show
+> on curated views with `showMissingConnectionIndicators` on, and Preview also
+> needs the `externalLineagePreview` display preference. The proposed "add the
+> partners to the view" action was not built. Of the known limits at the end,
+> the 200 top-level cap is gone (roots now page) and `searchChildren` no longer
+> exists; the parallel-edge dedup still holds.
+
 ## Problem
 
 Views are subsets of a Data Source. A curated view hydrates edges only

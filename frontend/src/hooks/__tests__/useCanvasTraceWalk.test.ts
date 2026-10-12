@@ -12,10 +12,13 @@
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { useCanvasTraceWalk } from '../useCanvasTraceWalk'
+import { useCanvasTraceWalk, MAX_TRACE_SEEDS } from '../useCanvasTraceWalk'
+import { recordEvent } from '@/services/telemetryService'
 import { useCanvasStore } from '@/store/canvas'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
+
+vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
 const gn = (urn: string, entityType = 'column'): GraphNode =>
   ({ urn, displayName: `label-${urn}`, entityType, properties: {} }) as GraphNode
@@ -64,6 +67,7 @@ const seedNode = (id: string) =>
   ({ id, type: 'default' as const, position: { x: 0, y: 0 }, data: { label: id, urn: id, type: 'dataset' } })
 
 beforeEach(() => {
+  vi.mocked(recordEvent).mockClear()
   // setGraph, not setState: the store maintains internal _nodeIndex/_edgeIndex
   // dedup sets, and replacing the arrays alone leaves stale indexes that
   // silently swallow later addNodes/addEdges calls.
@@ -212,5 +216,171 @@ describe('useCanvasTraceWalk', () => {
     expect(storeNodeIds()).toEqual(['F', 'PLAT'])
     expect(writes.count).toBe(0)
     release()
+  })
+
+  // ── Telemetry ─────────────────────────────────────────────────────
+  // Tracing lineage is the product's value moment, and this is the path every
+  // Context View trace takes — including the one a shared trace link opens
+  // into. It went uninstrumented while the other trace path was counted, so
+  // the activation funnel's "traced lineage" stage was measuring one surface
+  // and reporting on both.
+
+  it('records the trace once the walk settles, not when it starts', async () => {
+    const { provider } = providerByUrn({ F: estate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+
+    act(() => result.current.start('F'))
+    // At `start` there is no answer yet — recording here could not tell a
+    // trace that found lineage from one that came back empty.
+    expect(recordEvent).not.toHaveBeenCalled()
+
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+
+    const [type, payload] = vi.mocked(recordEvent).mock.calls[0]
+    expect(type).toBe('lineage.trace')
+    expect(payload).toMatchObject({ upstream: 1, downstream: 0, surface: 'context-view' })
+  })
+
+  it('a trace that finds no lineage is its own event type', async () => {
+    // Not a flag on the payload: "how often does someone ask for lineage and
+    // get nothing?" stays a GROUP BY on event_type rather than a payload scan.
+    const barren = () => closureResult({ focus: f('F'), nodes: [gn('F', 'dataset')] })
+    const { provider } = providerByUrn({ F: barren })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+
+    expect(vi.mocked(recordEvent).mock.calls[0][0]).toBe('lineage.trace_empty')
+  })
+
+  it('one trace is one event, however many waves it lands in', async () => {
+    const { provider } = providerByUrn({
+      F: () => ({ ...estate(), frontierUp: [{ urn: 'colA', totalCount: 1, nextCursor: null }] }),
+      colA: () => closureResult({
+        focus: f('colA'),
+        nodes: [gn('colB')],
+        edges: [hop('colB', 'colA', 'e2')],
+        upstreamUrns: new Set(['colB']),
+      }),
+    })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+
+    // The model kept growing after the first wave; the event did not.
+    expect(recordEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-tracing the focal already on screen counts as asking again', async () => {
+    // The walk is cached, so `tracedUrn` never changes and nothing refetches.
+    // The reader still asked for lineage twice, and the OTHER trace path
+    // records every press — two surfaces counting the same action differently
+    // would make the metric mean whichever canvas someone happened to be on.
+    const { provider } = providerByUrn({ F: estate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+
+    act(() => result.current.start('F'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(2))
+  })
+})
+
+/**
+ * A COMBINED trace: a multi-selection traced as one. Each seed is its own
+ * walk and the picture is their union — which is re-derived only when a walk
+ * actually moves, never merely because the canvas re-rendered.
+ */
+describe('useCanvasTraceWalk — several seeds', () => {
+  const gEstate = () => closureResult({
+    focus: f('G'),
+    nodes: [gn('G', 'dataset'), gn('colG')],
+    edges: [hop('G', 'colG', 'eg')],
+    downstreamUrns: new Set(['colG']),
+  })
+
+  it('walks every seed and hands back ONE model: their union', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    expect(result.current.tracedUrns).toEqual(['F', 'G'])
+    expect(result.current.tracedUrn).toBe('F')
+
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'G', 'PLAT', 'T1', 'colA', 'colG'])
+    expect(result.current.walkEntry?.model.upstreamUrns).toEqual(new Set(['colA']))
+    expect(result.current.walkEntry?.model.downstreamUrns).toEqual(new Set(['colG']))
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+  })
+
+  it('a re-render with nothing new keeps the union — and the progress — by identity', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result, rerender } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+
+    const first = result.current
+    rerender()
+    rerender()
+    expect(result.current.walkEntry).toBe(first.walkEntry)
+    expect(result.current.progress).toBe(first.progress)
+    expect(result.current).toBe(first)
+  })
+
+  it('removeSeed narrows the trace without a single new request', async () => {
+    const { provider, traceClosure } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+    const calls = traceClosure.mock.calls.length
+
+    act(() => result.current.removeSeed('G'))
+    expect(result.current.tracedUrns).toEqual(['F'])
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA'])
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    expect(traceClosure).toHaveBeenCalledTimes(calls)
+    // Narrowing is not asking again.
+    expect(recordEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('removing the primary promotes the next seed; removing the last leaves the trace', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+
+    act(() => result.current.removeSeed('F'))
+    expect(result.current.tracedUrn).toBe('G')
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['G', 'colG'])
+
+    act(() => result.current.removeSeed('nobody'))      // not a seed: nothing moves
+    expect(result.current.tracedUrns).toEqual(['G'])
+
+    act(() => result.current.removeSeed('G'))
+    expect(result.current.isTracing).toBe(false)
+    expect(result.current.tracedUrn).toBeNull()
+    expect(result.current.walkEntry).toBeNull()
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+  })
+
+  it(`traces the first ${MAX_TRACE_SEEDS} of a larger selection and never walks the rest`, async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) =>
+      closureResult({ focus: f(req.urn as string), nodes: [gn(req.urn as string, 'dataset')] }))
+    const provider = { scopeKey: 'ws1', traceClosure } as unknown as GraphDataProvider
+    const selection = Array.from({ length: MAX_TRACE_SEEDS + 5 }, (_, i) => `s${i}`)
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(selection))
+
+    expect(result.current.tracedUrns).toEqual(selection.slice(0, MAX_TRACE_SEEDS))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    const walked = new Set(traceClosure.mock.calls.map(([req]) => req.urn))
+    expect(walked).toEqual(new Set(selection.slice(0, MAX_TRACE_SEEDS)))
   })
 })

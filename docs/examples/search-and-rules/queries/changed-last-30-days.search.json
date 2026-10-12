@@ -1,0 +1,17 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      { "kind": "property", "key": "updatedAt", "op": "withinLast", "value": "P30D", "valueType": "date" }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": {
+    "results": "hits",
+    "pageSize": 100,
+    "sortProperty": "updatedAt",
+    "sortDir": "desc"
+  }
+}

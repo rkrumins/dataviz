@@ -22,7 +22,7 @@ write-back, and an OpenMetadata connector are **not yet wired**.
 ## 1. Two source models: managed vs federated
 
 Every versioned graph is 1:1 with a **data source**, and a data source has a `source_mode`
-(`backend/app/db/models.py:502`):
+(`backend/app/db/models.py:708`):
 
 ```python
 source_mode = Column(Text, nullable=True)   # "managed" | "federated"   (NULL ⇒ derive from provider capability)
@@ -68,7 +68,7 @@ graph LR
 ### 2.1 Provider capability kernel
 
 The shared kernel classifies every provider type by what the system may do with its store
-(`backend/common/interfaces/provider.py:50`):
+(`backend/common/interfaces/provider.py:51`):
 
 ```python
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ class ProviderCapability:
     supports_copy: bool  # a fast server-side graph copy is available
 ```
 
-The registry (`provider.py:69`) already places DataHub on the federated side, and defaults anything
+The registry (`provider.py:70`) already places DataHub on the federated side, and defaults anything
 unknown to read-only/external:
 
 | provider_type | writable | full_crud | is_external | supports_copy | Implication |
@@ -91,14 +91,15 @@ unknown to read-only/external:
 | `mock` | ✓ | ✓ | ✗ | ✗ | test |
 | *(unknown)* | ✗ | ✗ | ✓ | ✗ | `_DEFAULT_CAPABILITY` — safe: treat as federated view |
 
-`capability_for(provider_type)` (`provider.py:82`) returns the row or the read-only/external default —
+`capability_for(provider_type)` (`provider.py:83`) returns the row or the read-only/external default —
 so a not-yet-registered catalog (e.g. **OpenMetadata**) is automatically treated as a federated,
 never-written store until a connector says otherwise.
 
 > **Design default.** Unknown providers resolve to `writable=False, is_external=True` — the *intended*
 > default is to treat an unrecognized store as a read-only federated view. **Caveat:** `capability_for`
 > is currently **defined and unit-tested** (`test_provider_capability.py`) but **not yet consulted by
-> production write-routing** — no code path calls it to gate writes, and `source_mode` /
+> production write-routing** — its one caller decides only whether enable-version-control can copy a
+> source (`supports_copy`), no code path calls it to gate writes, and `source_mode` /
 > `write_back_enabled` are likewise defined-but-unread. Today, write-safety for a federated source
 > comes from its connector being read-only (e.g. the DataHub GraphQL provider), not from a capability
 > gate. Wiring capability / `source_mode` into write-routing is part of the federation work (§4).
@@ -106,7 +107,7 @@ never-written store until a connector says otherwise.
 ### 2.2 A DataHub read connector already exists
 
 DataHub is not hypothetical: `DataHubGraphQLProvider` is registered in the provider factory
-(`backend/app/providers/manager.py:786`, also `backend/app/registry/provider_registry.py:331`):
+(`backend/app/providers/manager.py:1784`, also `backend/app/registry/provider_registry.py:389`):
 
 ```python
 elif ptype == "datahub":
@@ -114,9 +115,12 @@ elif ptype == "datahub":
     return DataHubGraphQLProvider(base_url=host or "", token=creds.get("token"))
 ```
 
-It is a **read-only GraphQL** connector. Because the versioning re-sync path pages *any*
-`GraphDataProvider` generically (§3), a DataHub-backed data source can already be fed through it —
-the connector is the read half; the versioning half is provider-agnostic.
+It is a **read-only GraphQL** connector, and a partial one: ping, stats and basic lineage work, and
+its other reads raise `NotImplementedError` (`backend/graph/adapters/datahub_provider.py`). In
+principle the versioning re-sync path pages *any* `GraphDataProvider` generically (§3), so the
+connector is the read half and the versioning half is provider-agnostic; in practice the adapter
+answers too little of that interface today, and enabling version control on a DataHub-backed source
+is refused with a `422`, because only FalkorDB supports the copy (`graph.py:356`).
 
 > **Not yet built.** **OpenMetadata** has no `provider_type` branch and no adapter. Integrating it
 > means (a) implementing an OpenMetadata `GraphDataProvider` and (b) registering a `provider_type`
@@ -223,10 +227,10 @@ The re-sync engine is generic; a full authoritative integration adds the pieces 
 
 | Piece | Status | Notes |
 |---|---|---|
-| Read connector (`GraphDataProvider`) | **Built for DataHub** (`manager.py:786`), **absent for OpenMetadata** | OpenMetadata needs an adapter + a `provider_type` branch. |
-| Provider capability classification | **Defined + unit-tested; not yet consulted by write-routing** (`provider.py:69`) | DataHub already `is_external=True, writable=False`; no production code calls `capability_for` yet. |
-| Federated `source_mode` on the data source | **Built (column + CHECK)** (`models.py:502`) | Set it to `federated` for a catalog-backed source. |
-| Seed + re-sync as commits | **Built** (`bulk_ingest` / `sync_ingest`, endpoints `/bootstrap` `/resync`) | Works over any provider. |
+| Read connector (`GraphDataProvider`) | **Connectivity-level for DataHub** (`manager.py:1784`): ping, stats and basic lineage, with its other reads raising `NotImplementedError`; **absent for OpenMetadata** | OpenMetadata needs an adapter + a `provider_type` branch; DataHub needs its remaining reads. |
+| Provider capability classification | **Defined + unit-tested; consulted only for `supports_copy`** (`provider.py:70`; the one caller is the enable-version-control check, `graph.py:356`) | DataHub already `is_external=True, writable=False`; `writable`, `is_external` and `full_crud` are still read by nothing, so write-routing does not consult them. |
+| Federated `source_mode` on the data source | **Built (column + CHECK)** (`models.py:708`) | Set it to `federated` for a catalog-backed source. |
+| Seed + re-sync as commits | **Built** (`bulk_ingest` / `sync_ingest`, endpoints `/bootstrap` `/resync`) | Re-sync works over any provider. Enabling version control (the copy) is FalkorDB-only and refuses other providers with a `422` (`graph.py:356`). The bounded re-sync is not yet proven on a bootstrapped graph ([11](11-resync-at-any-scale.md)). |
 | Curation-as-overlay (drafts on top, preserved across syncs) | **Built** (draft/merge machinery + no-clobber 3-way) | The whole [03](03-branching-commits-merge.md) lifecycle applies unchanged. |
 | External type → ontology type mapping + drift | **Built** (`OntologySourceMappingORM`, §5) | Purpose-built for DataHub (see its docstring). |
 | **Scheduled** periodic re-sync | **Proposed** | `/resync` is **on-demand** today. A scheduler would reuse the existing `jobs` table + projection worker cadence (the data source already carries `aggregation_schedule` / `polling_config` for adjacent concerns). |
@@ -242,7 +246,7 @@ The re-sync engine is generic; a full authoritative integration adds the pieces 
 > the connector is write-capable.
 
 > **Limitation (`source_mode` not yet enforced).** `source_mode` is recorded (blank-model creation
-> sets it to `"managed"`, `endpoints/versioning.py:1117`) but **no write-path code currently reads it
+> sets it to `"managed"`, `endpoints/versioning.py:1496`) but **no write-path code currently reads it
 > to gate routing** — the managed/federated distinction is descriptive today. Enforcing "federated
 > base is read-only except via sync; human writes only as overlay" is the wiring a real federation
 > milestone must add.
@@ -252,7 +256,7 @@ The re-sync engine is generic; a full authoritative integration adds the pieces 
 ## 5. Ontology mapping & schema drift
 
 External catalogs speak their own type vocabulary; the graph speaks the assigned **ontology**'s.
-`OntologySourceMappingORM` (`backend/app/db/models.py:383`) bridges them — and its docstring names
+`OntologySourceMappingORM` (`backend/app/db/models.py:546`) bridges them — and its docstring names
 DataHub explicitly:
 
 > *"When a DataHub asset arrives with type `DATASET` from platform `snowflake`, the mapping profile
@@ -262,13 +266,13 @@ DataHub explicitly:
 It stores, per data source:
 
 - `entity_type_mappings` / `relationship_type_mappings` — JSON `{ external_label → ontology_type_id }`
-  (`models.py:401-403`).
+  (`models.py:564-566`).
 - **Drift detection** — `last_seen_schema_hash`, `last_seen_at`, `has_drift`, `drift_details`
-  (`models.py:407-411`): when the external schema grows a type with no mapping, drift is flagged so an
+  (`models.py:570-574`): when the external schema grows a type with no mapping, drift is flagged so an
   operator can extend the profile before it silently drops or mis-types assets.
 - An **extension point** noted in-code for *"conditional aliasing/ignore rules when
   DataHub/OpenMetadata ingestion needs source-context-aware mappings beyond simple label→type maps"*
-  (`models.py:404-405`).
+  (`models.py:567-568`).
 
 This matters because the versioned write path enforces the ontology at the commit boundary
 ([05 — Ontology Governance](05-ontology-governance.md)). A federated sync must map external types

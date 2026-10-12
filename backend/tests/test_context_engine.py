@@ -322,3 +322,58 @@ class TestContextEngineStaticHelpers:
         filtered = engine._filter_containment_edges(result, {"CONTAINS"})
         assert len(filtered.edges) == 1
         assert filtered.edges[0].edge_type == "TRANSFORMS"
+
+
+class TestContextEngineOrphanEntityTypes:
+    """orphan_entity_types: the declared types whose top-level instances are orphans."""
+
+    @staticmethod
+    def _engine(monkeypatch, resolved) -> ContextEngine:
+        engine = ContextEngine(provider=_StubProvider())
+
+        async def _resolved():
+            return resolved
+        monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+        return engine
+
+    @staticmethod
+    def _ontology(types, roots) -> ResolvedOntology:
+        return ResolvedOntology(entity_type_definitions={t: {} for t in types}, root_entity_types=roots)
+
+    async def test_lists_declared_non_root_types(self, monkeypatch):
+        engine = self._engine(monkeypatch, self._ontology(
+            ["Domain", "Schema", "Table", "Mystery"], ["Domain", "Mystery"]))
+        assert await engine.orphan_entity_types() == ["Schema", "Table"]
+
+    async def test_requested_types_narrow_case_insensitively(self, monkeypatch):
+        engine = self._engine(monkeypatch, self._ontology(["Domain", "Schema", "Table"], ["domain"]))
+        assert await engine.orphan_entity_types(["table", "DOMAIN"]) == ["Table"]
+
+    async def test_no_resolved_ontology_lists_none(self, monkeypatch):
+        assert await self._engine(monkeypatch, None).orphan_entity_types() == []
+
+    async def test_every_type_a_root_lists_none(self, monkeypatch):
+        engine = self._engine(monkeypatch, self._ontology(["Domain", "Platform"], ["Domain", "Platform"]))
+        assert await engine.orphan_entity_types() == []
+
+    async def test_degraded_fallback_lists_none(self):
+        """Ontology service down: the fallback carries introspected roots but
+        declares no types, so there are no orphans to list."""
+
+        class _IntrospectingProvider(_StubProvider):
+            async def get_ontology_metadata(self) -> OntologyMetadata:
+                return OntologyMetadata(
+                    containmentEdgeTypes=["CONTAINS"], edgeTypeMetadata={},
+                    entityTypeHierarchy={"Domain": {}, "Table": {"canBeContainedBy": ["Domain"]}},
+                    rootEntityTypes=["Domain"],
+                )
+
+        class _FailingOntologyService:
+            async def resolve(self, **kw):
+                raise RuntimeError("ontology service unavailable")
+
+        engine = ContextEngine(provider=_IntrospectingProvider(), ontology_service=_FailingOntologyService())
+        engine._workspace_id = "ws_test"
+        resolved = await engine._resolve_ontology()
+        assert resolved.root_entity_types == ["Domain"] and not resolved.entity_type_definitions
+        assert await engine.orphan_entity_types() == []

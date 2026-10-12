@@ -24,6 +24,7 @@
 import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import type { EntityView } from '@/services/versioningApiService'
 
 export type StagedChangeType =
   | 'create_entity'
@@ -36,6 +37,9 @@ export type StagedChangeType =
   | 'edit_edge'
   | 'delete_edge'
   | 'reverse_edge'
+  // Re-parent a node: ONE server-resolved `move` op (the backend replaces whatever containment the
+  // node has — the canvas need not have loaded the old link). `after` is a `MoveAfter`.
+  | 'move_entity'
   // View-layout change (add/rename/delete/reorder a layer). Decoupled from the data source: it has
   // NO apply hook, so applyAll drops it (local-only) and saveStagedChangesToDraft/stagedChangesToOps
   // never turn it into a /graph/changes op. It persists to the VIEW via saveToBackend, and is
@@ -70,6 +74,25 @@ export interface StagedChange {
   timestamp: number
   /** Set on apply failure so retry can target only failing changes. */
   error?: string
+  /** The last save found someone else changed fields this change edits (see `mapConflicts`). */
+  conflict?: StagedConflict
+}
+
+/** One field both this change and someone else changed since it was read. */
+export interface ConflictField {
+  /** `path.join('.')` — the key a resolution choice is given under. */
+  key: string
+  /** `[field]` or `['properties', name, …]`, as the server reports it. */
+  path: string[]
+  base: unknown
+  mine: unknown
+  theirs: unknown
+}
+
+export interface StagedConflict {
+  fields: ConflictField[]
+  /** The entity as it is now — what the change is rebased onto. */
+  current: EntityView
 }
 
 export interface ApplyContext {
@@ -121,7 +144,13 @@ interface StagedChangesState {
   patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   discardAll: () => void
-  applyAll: (provider: GraphDataProvider, wsId: string) => Promise<{ ok: number; failed: number }>
+  /** `graphWrites: false` — the published graph: every graph-data change fails with
+   *  {@link PUBLISHED_READ_ONLY} (kept, for the user to move to a draft) instead of being dropped. */
+  applyAll: (
+    provider: GraphDataProvider,
+    wsId: string,
+    opts?: { graphWrites?: boolean },
+  ) => Promise<{ ok: number; failed: number }>
   openReviewPanel: () => void
   closeReviewPanel: () => void
 
@@ -151,7 +180,17 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   reorder_nodes: 3,
   create_entity: 4,
   create_edge: 5,
+  move_entity: 5,          // after creates: the new parent may be created in the same save
 }
+
+/** Change types that edit graph DATA. They are saved only to a draft, as one `/graph/changes`
+ *  commit; the rest edit the view's layout and persist with the view. */
+export const GRAPH_DATA_CHANGE_TYPES: ReadonlySet<StagedChangeType> = new Set<StagedChangeType>([
+  'create_entity', 'rename_entity', 'update_entity', 'delete_entity', 'move_entity',
+  'create_edge', 'edit_edge', 'delete_edge', 'reverse_edge',
+])
+
+export const PUBLISHED_READ_ONLY = 'The published graph is read-only — open a draft to save this change.'
 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
 
@@ -361,7 +400,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   canUndo: () => get().changes.length > 0,
   canRedo: () => get().redoStack.length > 0,
 
-  applyAll: async (provider, wsId) => {
+  applyAll: async (provider, wsId, opts) => {
     const { changes } = get()
     if (changes.length === 0) return { ok: 0, failed: 0 }
 
@@ -387,6 +426,12 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const remaining: StagedChange[] = []
 
     for (const change of sorted) {
+      if (opts?.graphWrites === false && GRAPH_DATA_CHANGE_TYPES.has(change.type)) {
+        // Never "applied" by dropping it: a graph edit without a draft has nowhere to go.
+        failed++
+        remaining.push({ ...change, error: PUBLISHED_READ_ONLY })
+        continue
+      }
       if (!change.apply) {
         // No backend apply hook — treat as a local-only change that's already
         // committed to its owning store. Drop it from the staging list.
@@ -428,6 +473,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       delete_entity: 0,
       assign_layer: 0,
       move_to_layer: 0,
+      move_entity: 0,
       create_edge: 0,
       edit_edge: 0,
       delete_edge: 0,

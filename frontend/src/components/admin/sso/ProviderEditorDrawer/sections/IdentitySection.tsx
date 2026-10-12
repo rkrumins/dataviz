@@ -18,14 +18,17 @@ const KIND_LABELS: Record<string, string> = {
     oidc: 'OpenID Connect',
     saml2: 'SAML 2.0',
     custom_profile: 'Corporate portal (cookie / browser storage / header)',
+    backchannel: 'Enterprise gateway (we call it for the user)',
     custom: 'Custom (dev)',
 }
 
 const LINKING: { value: LinkingPolicy; label: string; blurb: string }[] = [
     { value: 'strict', label: 'Strict',
-      blurb: 'Link to an existing account only when the IdP says the email is verified.' },
+      blurb: 'Link only when the email is verified AND the account has no '
+          + 'other SSO identity — a second connection will not auto-link.' },
     { value: 'allow_verified', label: 'Allow verified',
-      blurb: 'Link on a matching email even without a verified flag.' },
+      blurb: 'Like Strict, but tolerates an account that already has other '
+          + 'SSO identities. The email must still be verified.' },
     { value: 'manual_only', label: 'Manual only',
       blurb: 'Never link automatically — a person links their own account from /me/identities.' },
     { value: 'disabled', label: 'Disabled',
@@ -48,7 +51,7 @@ export function IdentitySection({
             <Field
                 label="Display name"
                 required
-                hint="Shown on the connection card and, unless overridden, on the sign-in button."
+                hint="Shown on the connection card — and on the sign-in button, unless a Button label is set under Login page, in which case that label wins until it is cleared."
             >
                 <TextField
                     mono={false}

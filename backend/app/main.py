@@ -1,13 +1,18 @@
 import asyncio
+import gc
 import logging
 import os
+import re
 import socket
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
@@ -41,6 +46,7 @@ from backend.auth_service.cookies import (
 # assertion and the fingerprint log.
 from backend.auth_service.core import config as _auth_config
 from backend.auth_service.core.config import (
+    ALLOWED_HOSTS,
     AUTH_ENVIRONMENT_ID as _AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN as _COOKIE_DOMAIN,
     COOKIE_SAMESITE as _COOKIE_SAMESITE,
@@ -54,10 +60,12 @@ logger = logging.getLogger(__name__)
 
 try:
     from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import ResponseError as _RedisResponseError
     from redis.exceptions import TimeoutError as _RedisTimeoutError
 except Exception:  # pragma: no cover - redis is part of runtime deps
     _RedisConnectionError = ConnectionError
     _RedisTimeoutError = TimeoutError
+    _RedisResponseError = None
 
 
 # ------------------------------------------------------------------ #
@@ -160,6 +168,16 @@ async def _db_health_loop(_app: FastAPI, interval: float = 15.0) -> None:
             logger.debug("DB health loop iteration failed unexpectedly: %s", exc)
 
 
+#: Ceiling on the access-token TTL. Overridable, because a deployment
+#: that has weighed the revocation-latency tradeoff may want a different
+#: number — but not silently, and not by drifting a compose default.
+_MAX_ACCESS_TTL_MINUTES = int(os.getenv("MAX_ACCESS_TTL_MINUTES", "15"))
+
+
+def _is_production() -> bool:
+    return os.getenv("ENV", "dev").strip().lower() in ("prod", "production")
+
+
 def _assert_session_config_coherent() -> None:
     """Fail fast when the access TTL outlives its revocation tombstone.
 
@@ -180,7 +198,10 @@ def _assert_session_config_coherent() -> None:
         JWT_EXPIRY_MINUTES,
         JWT_REFRESH_EXPIRY_DAYS,
         REFRESH_ROTATION_GRACE_SECONDS,
+        SESSION_ABSOLUTE_MAX_SECONDS,
+        SESSION_IDLE_MAX_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
+        SSO_SESSION_MAX_AGE_SECONDS,
     )
 
     access_ttl = JWT_EXPIRY_MINUTES * 60
@@ -199,20 +220,92 @@ def _assert_session_config_coherent() -> None:
             "token stops being honoured. Raise the revocation TTL or "
             "lower the access TTL."
         )
-    if JWT_EXPIRY_MINUTES > 15:
-        logger.warning(
-            "JWT_EXPIRY_MINUTES=%s is long for claims-in-token auth: a "
-            "permission or role change does not reach a live session until "
-            "its next rotation, and every revocation has to be held in "
-            "Redis for the whole window. 15 or less is the intended range.",
-            JWT_EXPIRY_MINUTES,
+    # A session ceiling shorter than the tokens it bounds is a
+    # configuration that cannot do what it says. Caught at boot for the
+    # same reason the revocation TTL is: the symptom otherwise is a
+    # sign-out nobody can attribute to a setting.
+    if 0 < SESSION_IDLE_MAX_SECONDS < access_ttl:
+        raise RuntimeError(
+            f"SESSION_IDLE_MAX_HOURS gives {SESSION_IDLE_MAX_SECONDS}s, "
+            f"shorter than one access-token lifetime "
+            f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
+            "Every session would be refused at its first rotation. "
+            "Raise the idle ceiling or lower the access TTL."
         )
+    # The SSO re-authentication ceiling has no "off" — unlike the two
+    # above, 0 is not a way to disable it. A ceiling no longer than one
+    # access-token lifetime refuses every SSO session at its first
+    # renewal, and every sign-in is judged stale before it starts.
+    if SSO_SESSION_MAX_AGE_SECONDS <= access_ttl:
+        raise RuntimeError(
+            f"SSO_SESSION_MAX_AGE_HOURS={SSO_SESSION_MAX_AGE_HOURS} gives "
+            f"{SSO_SESSION_MAX_AGE_SECONDS}s, not longer than one "
+            f"access-token lifetime (JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} "
+            f"= {access_ttl}s). Every SSO session would be refused at its "
+            "first renewal. Raise the ceiling (the default is 24) or lower "
+            "the access TTL."
+        )
+    # The absolute ceiling is measured from the oldest refresh record the
+    # session still has, and records are purged once they expire — one
+    # refresh lifetime after they were minted. A ceiling longer than that
+    # lifetime is measured from a start that keeps moving, so it never
+    # fires: a stolen cookie on an active session stays good indefinitely.
+    refresh_ttl = JWT_REFRESH_EXPIRY_DAYS * 24 * 3600
+    if SESSION_ABSOLUTE_MAX_SECONDS > refresh_ttl:
+        msg = (
+            f"SESSION_ABSOLUTE_MAX_HOURS gives {SESSION_ABSOLUTE_MAX_SECONDS}s, "
+            f"longer than the refresh-token lifetime "
+            f"(JWT_REFRESH_EXPIRY_DAYS={JWT_REFRESH_EXPIRY_DAYS} = "
+            f"{refresh_ttl}s). The session's start is purged before the "
+            "ceiling is reached, so it never ends a session. Lower the "
+            "ceiling or raise the refresh lifetime."
+        )
+        if _is_production():
+            raise RuntimeError(msg)
+        logger.warning("%s", msg)
+    if (
+        0 < SESSION_ABSOLUTE_MAX_SECONDS
+        and SESSION_IDLE_MAX_SECONDS > SESSION_ABSOLUTE_MAX_SECONDS
+    ):
+        logger.warning(
+            "SESSION_IDLE_MAX_HOURS (%ss) exceeds SESSION_ABSOLUTE_MAX_HOURS "
+            "(%ss), so the idle ceiling can never be reached — the absolute "
+            "one always fires first.",
+            SESSION_IDLE_MAX_SECONDS, SESSION_ABSOLUTE_MAX_SECONDS,
+        )
+
+    if JWT_EXPIRY_MINUTES > _MAX_ACCESS_TTL_MINUTES:
+        # Permissions ride in the access token, so this number IS the
+        # revocation latency: a role change, a suspension or a forced
+        # sign-out does not reach a live session until its next rotation,
+        # and every tombstone has to be held in Redis for the whole
+        # window. It is also the exposure window for the fail-open
+        # revocation tier (see _FAIL_CLOSED_PERMISSIONS).
+        #
+        # Warning was not enough. Three of the four shipped configs said
+        # 60 while the release notes said 15, and nobody read the log
+        # line. In prod the value is a security control, so refuse.
+        msg = (
+            f"JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} exceeds the "
+            f"{_MAX_ACCESS_TTL_MINUTES}-minute ceiling. With claims in the "
+            "token this is the revocation latency: a role change or a "
+            "forced sign-out does not reach a live session until its next "
+            "rotation."
+        )
+        if _is_production():
+            raise RuntimeError(
+                msg + " Lower it, or raise the ceiling deliberately via "
+                "MAX_ACCESS_TTL_MINUTES."
+            )
+        logger.warning("%s", msg)
     logger.info(
         "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
-        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh",
+        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh "
+        "idle_ceiling=%ds absolute_ceiling=%ds",
         access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
         REFRESH_ROTATION_GRACE_SECONDS, CLOCK_SKEW_LEEWAY_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
+        SESSION_IDLE_MAX_SECONDS, SESSION_ABSOLUTE_MAX_SECONDS,
     )
 def _log_auth_fingerprint() -> None:
     """Log how this instance identifies and verifies sessions.
@@ -256,6 +349,113 @@ def _log_auth_fingerprint() -> None:
         )
 
 
+
+def profile_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
+    """Wrap the custom_profile builder so it binds the shared replay cache.
+
+    Same shape and same reasoning as the SAML wrapper below. A signed
+    portal payload proves the portal minted it and says nothing about who
+    is presenting it, so without single-use enforcement a copied payload
+    is a working credential for its whole lifetime — and it produces a
+    legitimately minted session of the attacker's own, with nothing to
+    revoke and no signal that it happened.
+
+    Refused per provider rather than at boot, so a deployment that runs
+    no custom_profile provider is unaffected. Unsigned rows are exempt:
+    they have no ``jti`` to burn, they are already an explicit
+    operator-acknowledged escape hatch, and refusing them here would be
+    refusing them on a technicality rather than on their own merits.
+    """
+
+    def _build(snap):
+        signed = str(
+            (snap.settings or {}).get("payload_format") or "jwt"
+        ) == "jwt"
+        if replay_cache is None and is_prod and signed:
+            raise RuntimeError(
+                f"custom_profile provider {snap.slug!r} cannot be served: "
+                "the revocation store is unavailable, so a payload cannot "
+                "be enforced single-use and a copied one would be "
+                "replayable for its whole lifetime. Fix Redis/Memorystore "
+                "connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache)
+
+    return _build
+
+
+def backchannel_builder_with_replay_cache(
+    base_builder, replay_cache, is_prod: bool,
+):
+    """Wrap the back-channel builder so it binds the shared replay cache.
+
+    Only browser-exchange rows need it: their assertion is delivered by
+    the browser and enforced single-use, and without a shared store that
+    enforcement is a process-local dict the registry throws away every
+    60 seconds. Server-mode rows never touch the cache — their tokens
+    are redeemed against the gateway, which is its own replay defence —
+    so they are served regardless, same as unsigned custom_profile rows.
+    """
+
+    def _build(snap, **kw):
+        browser = str(
+            (snap.settings or {}).get("exchange_mode") or "server"
+        ).strip().lower() == "browser"
+        if replay_cache is None and is_prod and browser:
+            raise RuntimeError(
+                f"backchannel provider {snap.slug!r} cannot be served: "
+                "the revocation store is unavailable, so a browser-"
+                "delivered assertion cannot be enforced single-use and a "
+                "copied one would be replayable for its whole lifetime. "
+                "Fix Redis/Memorystore connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache, **kw)
+
+    return _build
+
+
+def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
+    """Wrap the SAML provider builder so it binds the shared replay cache.
+
+    Refuses at BUILD time rather than at startup, and that placement is
+    the point. Without a shared store every worker forgets every
+    assertion independently, so a captured ``SAMLResponse`` is replayable
+    for its whole validity window — an absent control, not a degraded
+    one, and the same fail-closed stance
+    ``require_encryption_or_plaintext_ok`` takes for credential
+    encryption. But refusing at boot would stop a deployment that merely
+    HAS python3-saml installed and configures no SAML provider at all.
+    Raising in the builder means only an actual SAML provider fails —
+    its routes 503 — while everything else keeps serving.
+    """
+
+    def _build(snap):
+        if replay_cache is None and is_prod:
+            raise RuntimeError(
+                f"SAML provider {snap.slug!r} cannot be served: the "
+                "revocation store is unavailable, so assertion-replay "
+                "protection cannot be enforced across workers. Fix "
+                "Redis/Memorystore connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache)
+
+    return _build
+
+
+def _avatar_tls_override(settings: dict) -> bool | None:
+    """The per-connection half of the avatar fetch's TLS choice.
+
+    ``None`` defers to the deployment default (the CA bundle, else the
+    system trust store); ``False`` is the row's explicit ``tls_verify``
+    opt-out — the same wiring its own gateway legs use in
+    ``backchannel.py``. Module-level so it is testable; the closure that
+    calls it cannot be.
+    """
+    from backend.auth_service.providers.backchannel import _as_bool
+
+    return None if _as_bool(settings.get("tls_verify", True)) else False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -270,6 +470,31 @@ async def lifespan(_app: FastAPI):
     """
     configure_json_logging()
     _log_auth_fingerprint()
+
+    # Metrics backend FIRST, so anything that counts during startup counts.
+    # Installing it is free and unconditional; the /metrics route that reads
+    # it is opt-in (METRICS_ENABLED). Until this call existed the façade was
+    # no-op in every process, which is why none of the governor, admission or
+    # pacing signals could be seen anywhere but one job's own record.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
+    # Interactive reads first: when the breaker proxy sees FalkorDB starve a
+    # read (queue full, server-side or client deadline), stamp the shared
+    # read-pressure key so aggregation writers in other pods yield their
+    # write duty cycle. Best-effort, and never on a request's critical path.
+    try:
+        from backend.app.services.aggregation.read_pressure import ReadPressureSignal
+        from backend.app.services.aggregation.redis_client import get_redis
+        from backend.common.adapters.circuit import register_capacity_listener
+
+        register_capacity_listener(ReadPressureSignal(get_redis).on_capacity)
+    except Exception as exc:  # noqa: BLE001 — a missing signal is not a failed start
+        logger.warning("read-pressure signal not registered: %s", exc)
 
     _app.state.degraded = False
     _app.state.degraded_reason = None
@@ -364,8 +589,11 @@ async def lifespan(_app: FastAPI):
         logger.warning("System default ontology seed warning: %s", exc)
 
     # 2c. Bootstrap system admin (idempotent — skips if any user exists)
-    # Always ensures at least one admin account is present.
-    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    # Always ensures at least one admin account is present, from
+    # ADMIN_EMAIL / ADMIN_PASSWORD. Whatever its starting password is,
+    # somebody else chose it, so the account must replace it at its first
+    # sign-in; an existing system account still on its starting password,
+    # or on one this repository publishes, is held the same way.
     #
     # N-worker safety: the (count==0 → create) check is not atomic. With
     # multiple workers/replicas booting against a fresh DB, several can pass
@@ -373,60 +601,31 @@ async def lifespan(_app: FastAPI):
     # users.email funnels them to a single winner; the rest hit
     # IntegrityError, which we treat as "another worker won the race".
     try:
-        import os
         from sqlalchemy.exc import IntegrityError
-        from .db.repositories import user_repo
-        from .auth.password import hash_password
-        admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
-        admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
-        # Passwords that ship in this repo — in .env.example, the
-        # quickstart compose file, the README, and every setup doc. An
-        # account holding one of these is holding a credential that is
-        # public knowledge, so it is made to rotate on first sign-in.
-        # An operator who supplied their own is not nagged.
-        must_rotate = admin_password in {"changeme", "admin123", "REPLACE_ME"}
+        from .auth.bootstrap import (
+            hold_unchanged_system_accounts,
+            seed_system_admin,
+        )
         async with get_async_session() as session:
-            user_count = await user_repo.count_users(session)
-            if user_count == 0:
-                try:
-                    user = await user_repo.create_user(
-                        session,
-                        email=admin_email,
-                        password_hash=hash_password(admin_password),
-                        first_name="System",
-                        last_name="Admin",
-                        status="active",
-                    )
-                    if must_rotate:
-                        await user_repo.set_must_change_password(
-                            session, user.id, True,
-                        )
-                    # Phase 6: ``set_global_role`` writes both
-                    # ``user_roles`` (legacy display) and
-                    # ``role_bindings`` (canonical claims) so the
-                    # bootstrap admin actually has system:admin in
-                    # their JWT, not just on the User DTO.
-                    await user_repo.set_global_role(
-                        session, user.id, "super_admin",
-                        granted_by="system",
-                    )
-                    await user_repo.create_approval(
-                        session, user.id, status="approved", approved_by="system",
-                    )
+            try:
+                created = await seed_system_admin(session)
+                if created:
                     logger.info(
-                        "System admin created: %s%s",
-                        admin_email,
-                        (
-                            " (default password — a change is required at "
-                            "first sign-in)"
-                            if must_rotate else ""
-                        ),
+                        "System admin created: %s (it must choose a new "
+                        "password at first sign-in)", created,
                     )
-                except IntegrityError:
-                    await session.rollback()
-                    logger.info(
-                        "Admin bootstrap: another worker won the race (expected at N>1)"
-                    )
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Admin bootstrap: another worker won the race (expected at N>1)"
+                )
+        async with get_async_session() as session:
+            for user_id in await hold_unchanged_system_accounts(session):
+                logger.warning(
+                    "System account %s still signs in with its starting "
+                    "password or a published one; it must choose a new "
+                    "password at its next sign-in.", user_id,
+                )
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
@@ -500,6 +699,10 @@ async def lifespan(_app: FastAPI):
                 linking_policy=row.linking_policy,
                 button_label=row.button_label,
                 button_icon=row.button_icon,
+                # Carried so the registry can refuse an unpublished row.
+                # The repo defaults new rows to 'live' for the env
+                # boot-seeder; the admin create path sets 'draft'.
+                lifecycle=getattr(row, "lifecycle", None) or "live",
             )
 
     async def _resolve_email_domain(domain: str):
@@ -512,14 +715,111 @@ async def lifespan(_app: FastAPI):
                 if row is not None else None
             )
 
+    from backend.app.db.repositories import backchannel_host_repo
+
+    async def _allowed_backchannel_hosts() -> frozenset[str]:
+        """Which internal ``host:port`` destinations SSO may reach.
+
+        Read per call, not per provider build: the registry caches
+        provider instances for 60s, and an operator removing a host
+        expects that to take effect on the next login rather than a
+        minute later. One small indexed query on a path that is already
+        about to make two outbound HTTP calls.
+
+        Fails CLOSED. If the DB read fails we return the empty set,
+        which refuses every private destination — the same state as a
+        deployment that has allowlisted nothing. The alternative,
+        raising, would take out the whole login route; the alternative
+        of retaining a previous answer would mean a removed host kept
+        working precisely when we could not confirm it had been removed.
+        """
+        try:
+            async with get_async_session() as session:
+                return await backchannel_host_repo.allowed_host_keys(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Back-channel host allowlist unreadable (%s); refusing "
+                "every internal destination until it can be read.", exc,
+            )
+            return frozenset()
+
+    _builders = dict(PROVIDER_BUILDERS)
+    if "backchannel" in _builders:
+        from backend.app.services.revocation_service import (
+            get_backchannel_replay_cache,
+        )
+        _base_backchannel = _builders["backchannel"]
+
+        def _backchannel_builder(snap, _base=_base_backchannel, **kw):
+            return _base(
+                snap, allowed_hosts=_allowed_backchannel_hosts, **kw,
+            )
+
+        _bc_replay = get_backchannel_replay_cache()
+        _bc_prod = _is_production()
+        if _bc_replay is None and not _bc_prod:
+            logger.warning(
+                "Back-channel assertion replay cache is process-local (no "
+                "shared revocation store). A browser-delivered assertion "
+                "could be replayed by any worker that has not seen it. "
+                "Never deploy this.",
+            )
+        _builders["backchannel"] = backchannel_builder_with_replay_cache(
+            _backchannel_builder, _bc_replay, _bc_prod,
+        )
+    # SAML assertion replay defence. ``SamlProvider`` has always called a
+    # replay cache; until now nothing ever handed it one, so it fell back
+    # to a process-local dict that the registry then threw away every 60
+    # seconds along with the provider. Bind the shared store here, where
+    # the revocation backend is already resolved.
+    if SAML_AVAILABLE and "saml2" in _builders:
+        from backend.app.services.revocation_service import (
+            get_saml_replay_cache,
+        )
+        _saml_replay = get_saml_replay_cache()
+        _prod = _is_production()
+
+        if _saml_replay is None and not _prod:
+            logger.warning(
+                "SAML replay cache is process-local (no shared revocation "
+                "store). A replayed assertion will be accepted by any "
+                "worker that has not seen it. Never deploy this.",
+            )
+
+        _builders["saml2"] = saml_builder_with_replay_cache(
+            _builders["saml2"], _saml_replay, _prod,
+        )
+
+    # Same treatment for portal-asserted identities. A signed payload was
+    # verified and then trusted for its whole lifetime — no jti, no
+    # nonce, no cache anywhere — so a copied one signed the copier in as
+    # the victim.
+    if "custom_profile" in _builders:
+        from backend.app.services.revocation_service import (
+            get_profile_replay_cache,
+        )
+        _profile_replay = get_profile_replay_cache()
+        _prod_profile = _is_production()
+
+        if _profile_replay is None and not _prod_profile:
+            logger.warning(
+                "custom_profile replay cache is unavailable (no shared "
+                "revocation store), so a signed portal payload cannot be "
+                "enforced single-use. Never deploy this.",
+            )
+
+        _builders["custom_profile"] = profile_builder_with_replay_cache(
+            _builders["custom_profile"], _profile_replay, _prod_profile,
+        )
+
     _registry = ProviderRegistry(
         loader=_DbProviderConfigLoader(),
-        builders=PROVIDER_BUILDERS,
+        builders=_builders,
     )
     configure_registry(_registry)
     logger.info(
         "Provider registry configured (builders=%s)",
-        sorted(PROVIDER_BUILDERS.keys()),
+        sorted(_builders.keys()),
     )
 
     # Boot-seed: write a default OIDC / SAML / custom row from env
@@ -693,10 +993,26 @@ async def lifespan(_app: FastAPI):
         }
 
     # Phase 2.E: inject the session-killer (RevocationService). Called
-    # by the auth service when the SSO daily ceiling forces re-auth so
-    # every live access token across all tabs bounces to the IdP.
+    # by the auth service when an enterprise IdP withdraws a session on a
+    # liveness check — the corporate side ended it, so every live access
+    # token the user holds, in every browser, bounces to the IdP. A
+    # session reaching its OWN time limit (the daily re-auth ceiling, a
+    # corporate token's expiry) ends only that session.
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
+
+    # Sign-out's narrow counterpart: tombstone ONE session. Logout must
+    # end the access token the caller is holding — ``get_current_user``
+    # gates on the ``sid``, not on the refresh family — without touching
+    # the same user's sessions in other browsers.
+    async def _revoke_one_session(sid: str) -> None:
+        await get_revocation_service().revoke_session(sid)
+
+    # And the question both of those answer: is this sid tombstoned? Read
+    # by /auth/me and /auth/csrf, so the page is never told it is signed
+    # in by a session every other request refuses.
+    async def _is_session_revoked(sid: str) -> bool:
+        return await get_revocation_service().is_revoked(sid)
 
     # Phase 4: inject the platform SSO posture provider. The
     # ``auth_service`` stays free of ``backend.app.*`` imports —
@@ -718,11 +1034,75 @@ async def lifespan(_app: FastAPI):
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
             allow_jit_provisioning=snap.allow_jit_provisioning,
+            # Every field the admin can toggle has to cross this seam by
+            # name. This one was forgotten, and the dataclass default
+            # (False) silently won at runtime — the admin page showed
+            # email-first ON while the login page never led with email.
+            email_first_login=snap.email_first_login,
             version=snap.version,
             updated_at=snap.updated_at,
         )
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
+    async def _fetch_avatar_image(
+        url: str, *, provider_id: str | None = None,
+    ) -> tuple[bytes, str]:
+        """Download a provider-asserted profile picture, guarded.
+
+        The destination must be listed: an external image host needs an
+        entry on the avatar image hosts list (Settings tab), a private
+        one an entry on the internal-gateways list — either list admits
+        it, and with both silent on a host the fetch is refused by name.
+        The outbound module supplies the bounded, re-checked redirect
+        follow, the streaming size cap and the raster-type check.
+
+        ``provider_id`` names the connection whose sign-in asked for the
+        image, so its own TLS posture applies: a row whose
+        ``tls_verify`` opt-out is on has its avatar fetched the same way
+        its gateway legs are called. Everything else — no id, an
+        unresolvable row, the flag absent — verifies as the deployment
+        does (the CA bundle, else the system store).
+        """
+        from backend.auth_service.providers.outbound import fetch_image
+
+        verify: bool | None = None
+        if provider_id:
+            try:
+                snap = await _registry.get_snapshot(
+                    provider_id, allow_draft=True,
+                )
+                verify = _avatar_tls_override(snap.settings)
+            except Exception as exc:  # noqa: BLE001
+                # Fails to VERIFYING: an unresolvable row must not turn
+                # verification off.
+                logger.debug(
+                    "Avatar fetch could not resolve provider %s (%s); "
+                    "verifying TLS as the deployment does.",
+                    provider_id, exc,
+                )
+
+        gateway_keys = await _allowed_backchannel_hosts()
+        try:
+            async with get_async_session() as session:
+                avatar_keys = await backchannel_host_repo.allowed_host_keys(
+                    session, purpose="avatar",
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Fails closed, like the gateway list: an unreadable list
+            # refuses external hosts rather than opening the door.
+            logger.warning(
+                "Avatar host allowlist unreadable (%s); refusing external "
+                "avatar hosts until it can be read.", exc,
+            )
+            avatar_keys = frozenset()
+        permitted = gateway_keys | avatar_keys
+        return await fetch_image(
+            url, timeout=5.0,
+            allow_hosts=permitted,
+            require_hosts=permitted,
+            verify=verify,
+        )
 
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
@@ -736,7 +1116,10 @@ async def lifespan(_app: FastAPI):
         sso_role_reconciler=_reconcile_sso_targets,
         sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
+        session_revoker=_revoke_one_session,
+        revocation_checker=_is_session_revoked,
         auth_config_provider=_auth_config_provider,
+        avatar_fetcher=_fetch_avatar_image,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a
@@ -747,6 +1130,12 @@ async def lifespan(_app: FastAPI):
     # by every module in the import graph.
     _auth_config.assert_signing_secret()
     _assert_session_config_coherent()
+    # Imported here, like the checks above it: this module must stay
+    # importable by processes that hold no keys and enforce nothing.
+    from backend.app.auth.dependencies import (
+        assert_rbac_enforcement_intact,
+    )
+    assert_rbac_enforcement_intact()
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 
     # 5. Wire up the aggregation service (role-gated)
@@ -1098,28 +1487,38 @@ async def lifespan(_app: FastAPI):
         _app.state._event_loop_shutdown.is_set,
     )
 
-    # Versioning projection worker (in-process; dev / single-node). In
-    # production the standalone `python -m backend.app.services.versioning`
-    # runs instead. Gated by GRAPHVER_PROJECTION_INPROCESS; never blocks boot.
+    # Versioning worker lanes (in-process; dev only). Everywhere else the
+    # standalone `python -m backend.app.services.versioning` runs them: a web
+    # process never runs jobs. Gated by GRAPHVER_PROJECTION_INPROCESS AND
+    # SYNODIC_ROLE=dev; never blocks boot.
     _app.state._versioning_worker = None
     _app.state._versioning_worker_task = None
     try:
         from .services.versioning import config as _vcfg
-        if _vcfg.PROJECTION_INPROCESS:
-            from .services.versioning.bootstrap_worker import BootstrapRunner
-            from .services.versioning.purge_worker import PurgeRunner, Reaper
+        from .runtime.role import SynodicRole, current_role
+        if _vcfg.PROJECTION_INPROCESS and current_role() != SynodicRole.DEV:
+            # A web pod running jobs shares its CPU, memory and event loop with every
+            # interactive request, and loses the job to its next restart.
+            logger.error(
+                "GRAPHVER_PROJECTION_INPROCESS=1 is ignored: versioning worker lanes run "
+                "in the web process only when SYNODIC_ROLE=dev (this is %s). Deploy the "
+                "versioning worker, or nothing projects and no job runs.",
+                current_role().value,
+            )
+        elif _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.job_lease import LeaseKeeper, running_keeper
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
-            from .services.versioning.worker import ProjectionWorker
-            from .services.versioning.service import GraphVersioningService
+            from .services.versioning.worker import build_worker
             from .services.projection_target import (
                 make_rollup_rebuild_hook,
-                nudge_stats_after_projection,
+                after_projection,
                 repair_projection_target,
                 resolve_aggregation_edge_types,
             )
             from .providers.eviction_budget import make_registry_budget_resolver
-            _vw = ProjectionWorker(
+            from .api.v1.endpoints.versioning import get_import_export_service
+            _vw = build_worker(
                 # Self-heal the projection target on every worker-driven projection, the same way the
                 # interactive project_now path does — else a worker-only graph projects into an orphan
                 # gv_<id> the canvas never reads and merged main never surfaces.
@@ -1135,24 +1534,26 @@ async def lifespan(_app: FastAPI):
                     edge_types_resolver=resolve_aggregation_edge_types,
                     on_rollups_stale=make_rollup_rebuild_hook(
                         lambda: getattr(_app.state, "aggregation_service", None)),
-                    on_projected=nudge_stats_after_projection,
+                    on_projected=after_projection,
                 ),
-                versioning=GraphVersioningService(),
+                make_registry_graph_factory(),
+                lanes=_vcfg.worker_lanes(),
+                # Import, export and publish jobs the API queues run here too, in dev.
+                import_export=get_import_export_service,
                 # Per-provider eviction budgets come from the provider registry
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
                 # provider's falkorMaxResident is set.
                 evict_budget=make_registry_budget_resolver(),
-                # "Enable version control" jobs (dev / single-node: the standalone
-                # versioning-worker hosts them when INPROCESS=0).
-                bootstrap=BootstrapRunner(make_registry_graph_factory()),
-                purge=PurgeRunner(make_registry_graph_factory()),
-                reaper=Reaper(),
             )
+            # Job leases renewed off the event loop. A dev server is never exited on a
+            # wedged loop (exit_on_wedge=False): its leases just stop being renewed.
+            if running_keeper() is None:
+                LeaseKeeper(exit_on_wedge=False).start()
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
                 _vw.run(), name="versioning-projection-worker",
             )
-            logger.info("In-process versioning projection worker started")
+            logger.info("In-process versioning worker lanes started")
         else:
             # R-M4: make the delegated-projection topology observable — with
             # INPROCESS=0 the reconciling poll-loop backstop runs ONLY in the
@@ -1181,9 +1582,12 @@ async def lifespan(_app: FastAPI):
         # documented degraded mode rather than an outage.
         logger.warning("Change-feed hub not started: %s", exc)
 
-    # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
-    # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
-    # so multiple WEB replicas don't all drain the same outbox.
+    # Phase 0 — outbox relay → append-only auth_audit_log. In a split
+    # deployment the aggregation control plane runs it, with the retention
+    # sweeps and the analytics warmer below (see
+    # ``services/aggregation/controlplane.py``); this process starts them
+    # only as a dev monolith, so web replicas don't each run them. Every
+    # pass claims an advisory lock either way.
     _app.state._outbox_relay_shutdown = asyncio.Event()
     _app.state._outbox_relay_task = None
     if runs_scheduler():
@@ -1196,9 +1600,9 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
-    # Refresh-token revocation sweep. Same owner role as the relay: the
-    # table is shared, so three web replicas sweeping it would only
-    # contend for the same rows.
+    # Refresh-token revocation sweep. Same owner as the relay: the table
+    # is shared, so three web replicas sweeping it would only contend for
+    # the same rows.
     _app.state._refresh_gc_shutdown = asyncio.Event()
     _app.state._refresh_gc_task = None
     if runs_scheduler():
@@ -1211,24 +1615,65 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # Product-event retention sweep. ``product_events`` now takes a row per
+    # view open, lineage trace and graph search, so it grows with usage and
+    # needs a horizon. Same owner role, same reason.
+    _app.state._product_event_gc_shutdown = asyncio.Event()
+    _app.state._product_event_gc_task = None
+    if runs_scheduler():
+        from .services.product_event_gc import run_sweeper as _run_product_event_gc
+        _app.state._product_event_gc_task = asyncio.create_task(
+            _run_product_event_gc(
+                get_jobs_session,
+                _app.state._product_event_gc_shutdown,
+            ),
+            name="product-event-gc",
+        )
+
+    # Analytics warmer — precomputes the standard windows so no reader ever
+    # pays for an aggregation. Same owner role: one replica warming the shared
+    # Redis copy, not three racing to warm it. Purely an optimisation; the
+    # endpoints fall back to read-through if this never runs.
+    _app.state._analytics_warmer_shutdown = asyncio.Event()
+    _app.state._analytics_warmer_task = None
+    if runs_scheduler():
+        from .services.analytics_warmer import run_warmer as _run_analytics_warmer
+        _app.state._analytics_warmer_task = asyncio.create_task(
+            _run_analytics_warmer(
+                get_jobs_session,
+                _app.state._analytics_warmer_shutdown,
+            ),
+            name="analytics-warmer",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
-    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
-    # relay so replicas don't each probe every IdP. The cache is initialised
-    # unconditionally: a WEB replica serves an empty status rather than
-    # AttributeError-ing on a missing attribute.
+    # GET /admin/idp-providers/status. Runs in every process that serves the
+    # API, because the cache lives in this process: gated on the scheduler
+    # role, as it was, web replicas — every container deployment — always
+    # answered with an empty status. One discovery or metadata fetch per
+    # provider every fifteen minutes; back-channel providers are not
+    # contacted at all (see ``services/idp_health.py``).
     _app.state.idp_health_cache = {}
     _app.state._idp_health_shutdown = asyncio.Event()
-    _app.state._idp_health_task = None
-    if runs_scheduler():
-        from .services.idp_health import run_idp_health_loop
-        _app.state._idp_health_task = asyncio.create_task(
-            run_idp_health_loop(
-                get_jobs_session,
-                _app.state._idp_health_shutdown,
-                _app.state.idp_health_cache,
-            ),
-            name="idp-health",
-        )
+    from .services.idp_health import run_idp_health_loop
+    _app.state._idp_health_task = asyncio.create_task(
+        run_idp_health_loop(
+            get_jobs_session,
+            _app.state._idp_health_shutdown,
+            _app.state.idp_health_cache,
+        ),
+        name="idp-health",
+    )
+
+    # Everything startup built lives as long as the process: take it out of
+    # the garbage collector's reach. A full collection otherwise walks this
+    # whole heap (~300k objects, 140-180ms on the event loop), and a request
+    # that allocates freely (a streamed export, a large graph read) set one
+    # off about once a second, stalling every other request on the worker.
+    # Frozen, the same collections take a few ms. Collect first, so nothing
+    # already garbage is kept.
+    gc.collect()
+    gc.freeze()
 
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
@@ -1315,6 +1760,36 @@ async def lifespan(_app: FastAPI):
             _refresh_gc_task.cancel()
             try:
                 await _refresh_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the product-event sweeper before DB pool teardown, same shape.
+    _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
+    _pe_gc_task = getattr(_app.state, "_product_event_gc_task", None)
+    if _pe_gc_shutdown is not None:
+        _pe_gc_shutdown.set()
+    if _pe_gc_task is not None and not _pe_gc_task.done():
+        try:
+            await asyncio.wait_for(_pe_gc_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _pe_gc_task.cancel()
+            try:
+                await _pe_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the analytics warmer before DB pool teardown, same shape.
+    _warm_shutdown = getattr(_app.state, "_analytics_warmer_shutdown", None)
+    _warm_task = getattr(_app.state, "_analytics_warmer_task", None)
+    if _warm_shutdown is not None:
+        _warm_shutdown.set()
+    if _warm_task is not None and not _warm_task.done():
+        try:
+            await asyncio.wait_for(_warm_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _warm_task.cancel()
+            try:
+                await _warm_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1441,6 +1916,23 @@ async def lifespan(_app: FastAPI):
 # App                                                                  #
 # ------------------------------------------------------------------ #
 
+#: Whether the interactive API docs and the OpenAPI schema are served.
+#:
+#: They were unconditional, and ``frontend/nginx.conf`` publishes
+#: ``/openapi.json``, ``/viz-docs`` and ``/viz-redoc`` at the edge — so
+#: an anonymous caller could pull the complete route inventory, every
+#: request and response schema, and every parameter name for ~426
+#: endpoints, admin routes included. That is the single most useful
+#: thing an attacker can be handed for free.
+#:
+#: Off in production, on everywhere else, and ``API_DOCS_ENABLED``
+#: overrides either way for an operator who wants them behind their own
+#: ingress auth. Reachable through a port-forward regardless.
+_DOCS_ENABLED = (
+    os.getenv("API_DOCS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    or os.getenv("ENV", "dev").strip().lower() not in ("prod", "production")
+)
+
 app = FastAPI(
     title="Synodic Visualization Service",
     description=(
@@ -1449,6 +1941,9 @@ app = FastAPI(
     ),
     version="0.2.0",
     lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 # Rate-limit 429 handler.
@@ -1603,7 +2098,9 @@ async def _provider_error_handler(request, exc):
 # the breaker is open, this handler fires in <1ms with no network I/O.
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
+    ProviderFailingOver as _ProviderFailingOver,
     ProviderLoading as _ProviderLoading,
+    ProviderTimeout as _ProviderTimeout,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -1660,6 +2157,67 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
     )
 
 
+# ProviderFailingOver and ProviderTimeout are SIBLING subclasses of
+# ProviderUnavailable and both handlers are load-bearing — they came from two
+# different changes and mean different things. Keeping only one silently
+# reinstates the outage the other removed, so both stay, and both must precede
+# the ProviderUnavailable handler below (FastAPI matches by MRO).
+#
+# ProviderFailingOver is semantically a PAUSE: the cluster node holding this
+# graph is restarting or being replaced, which takes seconds. Distinct code +
+# a 3s Retry-After so the frontend keeps the data on screen, says
+# "reconnecting" and comes back — instead of the 30s error wall every user of
+# that graph used to get while the breaker sat open.
+@app.exception_handler(_ProviderFailingOver)
+async def _provider_failing_over_handler(request, exc: _ProviderFailingOver):
+    logger.info(
+        "Provider failing over on %s: provider=%s endpoint=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.endpoint, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_FAILING_OVER",
+                "providerName": exc.provider_name,
+                "endpoint": exc.endpoint,
+                "reason": (
+                    "the graph store node holding this graph is restarting or "
+                    "failing over — retrying automatically"
+                ),
+                "technical": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderTimeout is semantically "one operation was too slow for its
+# deadline" — the provider is reachable and the breaker did NOT count it. Map
+# to 504 + Retry-After with a distinct PROVIDER_TIMEOUT code so the frontend
+# retries the request (the stale-fallback cache or a warm cache often answers
+# the retry) instead of declaring the graph provider offline.
+@app.exception_handler(_ProviderTimeout)
+async def _provider_timeout_handler(request, exc: _ProviderTimeout):
+    logger.info(
+        "Provider timeout on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=504,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_TIMEOUT",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
 @app.exception_handler(_ProviderUnavailable)
 async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
     logger.warning(
@@ -1673,8 +2231,44 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
             "detail": {
                 "code": "PROVIDER_UNAVAILABLE",
                 "providerName": exc.provider_name,
-                "reason": exc.reason,
+                # The breaker's own words ("Circuit open; will probe
+                # downstream again in ~28s") are for an operator, not for
+                # whoever opened a canvas: they read as a defect in the app.
+                # Kept verbatim under ``technical``, which the UI discloses.
+                "reason": (
+                    "the graph store for this provider is not answering; "
+                    "retrying automatically"
+                ),
+                "technical": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# A search stopped on a read it could not recover from (a walk unit that ran
+# out of budget cannot be split). It is a breaker logical exception, not an
+# outage, so it no longer arrives as PROVIDER_UNAVAILABLE — and the catch-all
+# above would log it as an ERROR with a traceback and answer a reason-less
+# 500. Still a 500: the client treats that as a rejected query, neither
+# counted by its breaker nor retried (a retry replans the same search and
+# fails the same way).
+from backend.app.services.deep_search import SearchFailed as _SearchFailed  # noqa: E402
+
+
+@app.exception_handler(_SearchFailed)
+async def _search_failed_handler(request, exc: _SearchFailed):
+    logger.warning("Search failed on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "SEARCH_FAILED",
+                "reason": (
+                    "the search could not finish on part of the graph; "
+                    "narrow the scope or the conditions and run it again"
+                ),
+                "technical": str(exc),
             }
         },
     )
@@ -1756,22 +2350,211 @@ app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
 app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
 app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 
+
+# A graph server error REPLY (bad Cypher, a query over the per-query memory
+# ceiling, an ACL refusal). The breaker proxy no longer relabels these as
+# ProviderUnavailable — the server answered, so the provider is reachable —
+# which means they would otherwise fall to the generic 500 with no code. Keep
+# the 500 (the request failed) but say what happened so the frontend can tell
+# a rejected query apart from an outage and never feeds it to its breaker.
+async def _graph_response_error_handler(request, exc):
+    path = request.url.path
+    # Only a graph-bound path can attribute the reply to the graph store;
+    # elsewhere (the revocation store, the job bus) the same exception class
+    # means a Redis command was refused, and naming the graph would mislead.
+    code = "GRAPH_QUERY_ERROR" if _is_provider_bound_path(path) else "REDIS_COMMAND_ERROR"
+    logger.warning("%s on %s: %s", code, path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": code,
+                "reason": str(exc)[:200],
+            }
+        },
+    )
+
+
+if _RedisResponseError is not None:
+    app.add_exception_handler(_RedisResponseError, _graph_response_error_handler)
+
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
 # issues). Wraps every HTTP request in asyncio.wait_for so a hung     #
 # provider can never block a request indefinitely.                     #
 # ------------------------------------------------------------------ #
 
+class _TrustedHostMiddleware(BaseHTTPMiddleware):
+    """Refuse a request whose ``Host`` is not one this deployment answers to.
+
+    Starlette ships a ``TrustedHostMiddleware`` and this is not it, for one
+    reason: k8s probes connect to the pod IP, so their ``Host`` is a dynamic
+    address no operator can put in an allowlist. Starlette's version has no
+    path exemption, so adding it would have made every pod fail its own
+    readiness probe. The probe paths are exempt here instead.
+
+    The concrete threat this closes is narrow and worth stating, because the
+    usual one does not apply: the app sends no email and builds no reset or
+    invite links, so there is no Host-poisoning-to-account-takeover chain.
+    What does depend on the claimed host is SAML. python3-saml derives
+    ``current_url`` from it to validate an assertion's ``Destination`` and
+    ``Recipient``, so an attacker replaying an assertion minted for a
+    different SP can set the header to match. ``_request_https_host``
+    already honours ``ALLOWED_HOSTS`` for exactly that; this refuses the
+    forged host at the perimeter instead of per-consumer.
+
+    Off when ``ALLOWED_HOSTS`` is unset — the same posture the SAML check
+    takes, and it keeps every local and CI stack working unchanged.
+    """
+
+    #: Reached by kubelet on the pod IP, where Host is a dynamic address
+    #: no operator can allowlist. The viz-service manifest probes
+    #: ``/health`` and ``/api/v1/health/ready``; Compose probes
+    #: ``/api/v1/health``. Matched by prefix rather than enumerated so a
+    #: new probe route cannot silently start failing — every health
+    #: endpoint is unauthenticated already and none of them reads Host,
+    #: so exempting the whole family costs nothing.
+    #: ``test_trusted_host`` asserts this covers every health route the
+    #: app actually mounts.
+    _EXEMPT_PREFIXES = ("/health", "/api/v1/health")
+
+    def __init__(self, app, *, allowed_hosts: tuple[str, ...]):
+        super().__init__(app)
+        # Ports stripped on both sides: one deployment answers on :80,
+        # :443 and :8000 and they are the same host, and an operator who
+        # writes "example.com:8443" means the host.
+        self._allowed = frozenset(
+            h.split(":")[0].strip().lower() for h in allowed_hosts if h.strip()
+        )
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(
+            path == p or path.startswith(p + "/") for p in self._EXEMPT_PREFIXES
+        ):
+            return await call_next(request)
+        host = request.headers.get("host", "").split(":")[0].strip().lower()
+        if host and host not in self._allowed:
+            logger.warning(
+                "Refused request claiming Host=%r (not in ALLOWED_HOSTS)", host,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Host header not recognised for this deployment."
+                },
+            )
+        return await call_next(request)
+
+
+def _route_candidates(path: str) -> list[str]:
+    """``path``, and ``path`` with its workspace segment collapsed. Workspace-scoped routes are
+    mounted under /api/v{1,2}/{ws_id}/..., so the literal prefixes the middlewares below match
+    on (``/api/v1/versioning/``, ``/api/v1/graph/``) can still find them."""
+    candidates = [path]
+    for api_prefix in ("/api/v1/", "/api/v2/"):
+        if path.startswith(api_prefix):
+            tail = path[len(api_prefix):]
+            sep = tail.find("/")
+            if sep > 0:
+                candidates.append(api_prefix.rstrip("/") + tail[sep:])
+            break
+    return candidates
+
+
+class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Refuse a request body larger than the cap, before parsing it.
+
+    There was no application-level limit at all. The only bound was
+    nginx's ``client_max_body_size 100m``, which (a) is an edge setting
+    that a caller reaching the container directly never meets, and (b)
+    is deliberately generous because bulk import/export needs it. So
+    every JSON endpoint would accept 100 MB and hand it to Pydantic,
+    which parses it into memory before any handler sees it. The
+    unbounded-array bodies are the sharp edge — ``graph/save`` takes
+    ``nodes`` and ``edges`` lists with no ``max_length``.
+
+    Enforced on ``Content-Length`` rather than by counting the stream:
+    a chunked request has no declared length, and the streaming case is
+    what the tiered timeout above already bounds. This closes the
+    "declare 100 MB and send it" shape, which is the cheap one.
+
+    The generous per-route needs are met by ``_LARGE_BODY_PREFIXES``
+    rather than by raising the global cap, so a route that has not asked
+    for a big body cannot receive one.
+    """
+
+    #: Routes that legitimately take large payloads (bulk import, graph
+    #: save, a view file or package and the designs checked and imported
+    #: from it). Everything else gets the ordinary cap; these routes still
+    #: hold a body to their own, smaller limits (a view file is 64 MB).
+    #: Matched with the workspace segment collapsed too, so the bulk
+    #: import at /api/v1/{ws_id}/versioning/graphs/{gid}/imports counts.
+    _LARGE_BODY_PREFIXES = (
+        "/api/v1/import",
+        "/api/v1/versioning",
+        "/api/v1/views/transfer/inspect",
+        "/api/v1/views/transfer/reconcile",
+        "/api/v1/views/transfer/import",
+        "/api/v1/views/transfer/packages/inspect",
+        "/api/v1/views/transfer/packages/uploads",
+    )
+
+    def __init__(self, app, *, default_bytes: int, large_bytes: int):
+        super().__init__(app)
+        self._default = default_bytes
+        self._large = large_bytes
+
+    def _cap_for(self, path: str) -> int:
+        if path.endswith("/graph/save") or any(
+            candidate.startswith(p)
+            for candidate in _route_candidates(path)
+            for p in self._LARGE_BODY_PREFIXES
+        ):
+            return self._large
+        return self._default
+
+    async def dispatch(self, request: Request, call_next):
+        raw = request.headers.get("content-length")
+        if raw:
+            try:
+                declared = int(raw)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Malformed Content-Length."},
+                )
+            cap = self._cap_for(request.url.path)
+            if declared > cap:
+                logger.warning(
+                    "Rejecting %s %s: body %d bytes exceeds the %d cap",
+                    request.method, request.url.path, declared, cap,
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"Request body is {declared} bytes; the limit for "
+                            f"this endpoint is {cap}."
+                        )
+                    },
+                )
+        return await call_next(request)
+
+
 class _TimeoutMiddleware:
     """ASGI middleware: tiered per-path timeout for HTTP requests.
 
     Tiers (P1.8 — anchored prefix match, ordered most-specific first):
         ANY path in SSE_PATHS                exempt entirely (long-lived)
-        prefix /api/v1/health        ->  5s  (probes must be fast)
-        prefix /api/v1/graph         -> 60s  (read queries inc. advanced search;
-                                              per-query bounded by soft deadline)
-        prefix /api/v1/aggregation/  -> 45s  (write-heavy operations)
-        everything else              -> 30s  (default)
+        prefix /api/v1/health        ->   5s  (probes must be fast)
+        prefix /api/v1/graph/edges/{aggregated,between}
+                                     ->  90s  (edge scans; 72s / 80s budgets inside)
+        prefix /api/v1/graph/trace   -> 120s  (the trace engine stops 20s under it)
+        prefix /api/v1/graph         -> 120s  (read queries inc. advanced search;
+                                               per-query bounded by soft deadline)
+        prefix /api/v1/aggregation/  ->  90s  (write-heavy operations)
+        everything else              ->  30s  (default)
 
     Why anchored prefixes (vs. substring): substring matching meant
     ``"/health" in path`` matched ``/api/v1/internal/health-metrics``,
@@ -1816,7 +2599,24 @@ class _TimeoutMiddleware:
     # naming rather than a statement about behaviour, and it guessed
     # wrong: ``POST /api/v1/telemetry/events`` is an ordinary JSON write
     # that happens to end in the same word, and it was running with no
-    # timeout and no readiness gate as a result.
+    # timeout and no readiness gate as a result. Both real streams now
+    # register themselves (``changes.py``, ``aggregation.py``), so the
+    # suffix list is gone rather than kept alongside.
+    #
+    # ``_STREAM_PATHS`` below is a SEPARATE concern and is kept as main
+    # wrote it: those are not event streams, they are long downloads.
+    # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
+    # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
+    # short, and T-2 would end it cleanly, so a truncated file would look complete. They pace
+    # themselves: bounded per process, and each page is a short query or a read of the file.
+    _STREAM_PATHS: tuple[re.Pattern, ...] = (
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/stream$"),
+        re.compile(r"^/api/v1/[^/]+/graph/export/stream$"),
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/[^/]+/download$"),
+        # A search export's file, streamed from the object store: it holds nothing else while
+        # it streams (graph.search_export_download).
+        re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+    )
 
     def __init__(self, app):
         self.app = app
@@ -1836,13 +2636,13 @@ class _TimeoutMiddleware:
         self._tiers: list[tuple[str, float]] = [
             ("/api/v1/health",        float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
             ("/health",               float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
-            ("/api/v1/graph/edges/aggregated", float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
-            ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
-            ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
-            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
-            ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+            ("/api/v1/graph/edges/aggregated", float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
+            ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
+            ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "120"))),
+            ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "120"))),
+            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "120"))),
+            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "120"))),
+            ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
             # Versioning carries request-scoped full-graph work (projection
             # reconcile drift reports, rebuild catch-up) that legitimately
             # runs past the 30s default on large graphs; the ws-segment
@@ -1850,21 +2650,15 @@ class _TimeoutMiddleware:
             # Keep below nginx's proxy_read_timeout (180s) so the proxy
             # never wins the race against this tier.
             ("/api/v1/versioning/",   float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))),
+            # Moving views between environments: checking every entity a large view places
+            # against the target graph legitimately outlasts the 30s default. Below nginx's
+            # proxy_read_timeout (180s) for the same reason as versioning.
+            ("/api/v1/views/transfer/", float(os.getenv("HTTP_TIMEOUT_VIEW_TRANSFER_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
     def _resolve_timeout(self, path: str) -> float:
-        # Workspace-scoped routes are mounted under
-        # /api/v{1,2}/{ws_id}/graph/... — collapse the dynamic segment
-        # so the literal-prefix tiers above can still match.
-        candidates = [path]
-        for api_prefix in ("/api/v1/", "/api/v2/"):
-            if path.startswith(api_prefix):
-                tail = path[len(api_prefix):]
-                sep = tail.find("/")
-                if sep > 0:
-                    candidates.append(api_prefix.rstrip("/") + tail[sep:])
-                break
+        candidates = _route_candidates(path)
         for pattern, timeout in self._tiers:
             for candidate in candidates:
                 if candidate.startswith(pattern):
@@ -1872,7 +2666,9 @@ class _TimeoutMiddleware:
         return self._default_timeout
 
     def _is_sse_path(self, path: str) -> bool:
-        return is_sse_path(path)
+        return is_sse_path(path) or any(
+            p.match(path) for p in self._STREAM_PATHS
+        )
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
@@ -1965,10 +2761,29 @@ class _TimeoutMiddleware:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
             if not state["started"]:
-                # T-2 (clean case): we own the wire. Send a fresh 504.
+                # T-2 (clean case): we own the wire. Send a fresh 504. The
+                # body carries a code + Retry-After so the frontend treats
+                # it as "this request was too slow, retry" — a per-request
+                # signal — rather than as evidence the graph provider is
+                # down (reachability is reported by the 503 handlers).
+                logger.warning(
+                    "Request timed out before a response: %s %s (tier=%.0fs); "
+                    "the handler was cancelled and nothing was served",
+                    scope.get("method", "-"), path, timeout,
+                )
                 response = JSONResponse(
-                    {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
+                    {
+                        "detail": {
+                            "code": "REQUEST_TIMEOUT",
+                            "reason": (
+                                f"Request timed out after {timeout:.0f}s. "
+                                "The graph service is still available — retry shortly."
+                            ),
+                            "retryAfterSeconds": 2,
+                        }
+                    },
                     status_code=504,
+                    headers={"Retry-After": "2"},
                 )
                 await response(scope, receive, original_send)
                 state["terminal"] = True
@@ -1994,12 +2809,32 @@ class _TimeoutMiddleware:
                 path, timeout,
             )
 
-# Must be added FIRST so it wraps all other middleware.
-app.add_middleware(_TimeoutMiddleware)
+# ------------------------------------------------------------------ #
+# Middleware                                                           #
+# ------------------------------------------------------------------ #
+#
+# REGISTRATION ORDER IS THE REVERSE OF EXECUTION ORDER. Starlette's
+# ``add_middleware`` does ``user_middleware.insert(0, ...)`` and builds
+# the stack by wrapping in ``reversed()``, so the LAST one added ends up
+# OUTERMOST.
+#
+# The block below used to be labelled "outermost → innermost" and was
+# the exact opposite. Two things followed from that, neither visible:
+# ``_TimeoutMiddleware``, commented "must be added FIRST so it wraps all
+# other middleware", was innermost and therefore did not cover the gzip
+# pass it was most needed for — the multi-MB graph payloads whose
+# on-loop compression the comment forty lines down calls out as the
+# thing that stalls a worker. And ``CSRFMiddleware``, commented
+# "innermost", was outermost, so its early 403 returned without the
+# security headers or CORS the middleware below it would have added.
+#
+# Registered innermost-first, which reads backwards but is what the
+# framework does. ``test_middleware_order`` asserts the resulting stack
+# so the comment cannot drift from it again.
 
-# ------------------------------------------------------------------ #
-# Middleware (outermost → innermost order)                             #
-# ------------------------------------------------------------------ #
+# Innermost — closest to the route, so a CSRF 403 is still decorated by
+# everything registered after this point on the way out.
+app.add_middleware(CSRFMiddleware)
 
 _cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 _cors_origins = (
@@ -2016,7 +2851,17 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
-    expose_headers=["X-Provider-Health", "X-Cache-Status"],
+    #
+    # ``Retry-After`` is on this list even though it is a standard header:
+    # it is NOT one of the seven CORS-safelisted response headers, so
+    # without it ``parseRetryAfterMs`` reads null on every cross-origin
+    # answer and the client falls back to its own backoff — losing the
+    # server's pacing hint on exactly the 429/503/504 that carry one.
+    #
+    # The view-file export (``/views/transfer/export``) names its download and proves its
+    # content in headers: the filename, and the hashes the Export dialog shows.
+    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was
@@ -2029,6 +2874,9 @@ app.add_middleware(
     GZipMiddleware,
     minimum_size=1024,
     compresslevel=int(os.getenv("GZIP_COMPRESSLEVEL", "1")),
+    # A stored export's file downloads as it is: compressing it would drop its size, and a
+    # compressed download can't be resumed where it stopped.
+    exclude_content_types=DEFAULT_EXCLUDED_CONTENT_TYPES + ("application/octet-stream",),
 )
 
 # Structured JSON access log + X-Process-Time header
@@ -2037,13 +2885,32 @@ app.add_middleware(StructuredLoggingMiddleware)
 # X-Request-ID generation / propagation
 app.add_middleware(RequestIdMiddleware)
 
+# Host allowlist, when one is configured. Registered here so it sits
+# INSIDE SecurityHeadersMiddleware — a refusal still carries the headers
+# — and OUTSIDE CSRFMiddleware, which derives its same-origin allowance
+# from the very Host header this validates.
+if ALLOWED_HOSTS:
+    app.add_middleware(_TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
 # Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CSRF double-submit. Innermost so it runs closest to the route — the
-# preceding middleware (CORS, security headers) must complete first so
-# that browser preflight checks succeed before we enforce the CSRF rule.
-app.add_middleware(CSRFMiddleware)
+# Just inside the timeout: an oversized body is refused before anything
+# reads or parses it, while the deadline still bounds the check itself.
+app.add_middleware(
+    _BodySizeLimitMiddleware,
+    default_bytes=int(os.getenv("MAX_REQUEST_BODY_BYTES", str(8 * 1024 * 1024))),
+    large_bytes=int(
+        os.getenv("MAX_IMPORT_BODY_BYTES", str(100 * 1024 * 1024))
+    ),
+)
+
+# Outermost, so the deadline actually covers everything inside it —
+# including the gzip pass above, whose on-loop CPU cost on multi-MB
+# graph payloads is the case the timeout exists for. Registered LAST
+# because registration order is reversed; the previous "add first"
+# placement put it innermost and left gzip outside the deadline.
+app.add_middleware(_TimeoutMiddleware)
 
 # Request counters. Added LAST, which makes it the OUTERMOST layer —
 # ``add_middleware`` inserts at position 0 and the stack is built in
@@ -2132,7 +2999,7 @@ async def health_alias():
 
 @app.get("/health/deps", tags=["health"])
 @app.get("/api/v1/health/deps", tags=["health"], include_in_schema=False)
-async def dependency_health():
+async def dependency_health(request: Request):
     """Deep dependency report — for dashboards and on-call.
 
     Includes:
@@ -2168,11 +3035,85 @@ async def dependency_health():
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
         result["status"] = "unhealthy"
 
+    # Revocation store. Not a ping — the question is whether the
+    # backend is SHARED, because an in-process fallback means revoking a
+    # session lands on 1 worker in 4N and a signed-out user keeps
+    # working everywhere else until their token expires. The fallback is
+    # deliberate (raising on the hot auth path would turn a config typo
+    # into a total outage), but until now the only signal was a startup
+    # log line that nothing watches.
+    try:
+        from backend.app.services.revocation_service import revocation_is_shared
+
+        if revocation_is_shared():
+            result["dependencies"]["revocation_store"] = "shared"
+        elif os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+            result["dependencies"]["revocation_store"] = (
+                "DEGRADED: in-process only — session revocation does not "
+                "reach other workers or replicas"
+            )
+            if result["status"] == "healthy":
+                result["status"] = "degraded"
+                result.setdefault("reason", "revocation_not_shared")
+        else:
+            # Normal for a local stack with no Redis. Reported, but not
+            # escalated: a dev environment that always reads "degraded"
+            # teaches everyone to ignore the field, which costs more
+            # than the case it would have caught.
+            result["dependencies"]["revocation_store"] = (
+                "in-process (expected outside production)"
+            )
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["dependencies"]["revocation_store"] = f"unknown: {exc}"
+
     # Provider breaker state (O(1), in-memory only — no provider I/O).
     try:
         result["providers"] = provider_manager.report_provider_states()
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
+
+    # Graph store shape, from the reading already in hand. Zero I/O and it
+    # never triggers a sweep: this is where on-call looks during an incident,
+    # and dialling a store that IS the incident is the last thing wanted. A
+    # breaker state says a provider is unhappy; this says which nodes of which
+    # cluster are answering, and what the sweep already found wrong.
+    #
+    # Behind the metrics gate, though: this endpoint is unauthenticated, and
+    # which nodes of which cluster are answering is the same class of internal
+    # state the scrape endpoint is opt-in for. Everything else here is about
+    # THIS process; this block is about the fleet.
+    from backend.app.api.v1.endpoints.metrics import metrics_authorized
+
+    if not metrics_authorized(request):
+        result["graph_store"] = {"status": "restricted"}
+    else:
+        try:
+            from backend.app.services.graph_store import topology as _gs_topology
+
+            summary = _gs_topology.cached_summary()
+            result["graph_store"] = summary if summary is not None else {
+                "status": "no reading yet in this process",
+            }
+        except Exception as exc:  # noqa: BLE001 — a report must not 500
+            result["graph_store"] = {"_error": str(exc)[:200]}
+
+    # Resilience counters (per process, monotonic since boot). How often the
+    # breaker was asked to judge a slow or rejected query and correctly did
+    # NOT count it, how often it counted a real connection failure and
+    # opened, and how the request-path preflight and the provider slot
+    # queue decided. Read these to verify a release ("timeouts are rising
+    # but breaker_opens is flat" is the healthy shape), not to page on.
+    try:
+        from backend.app.services.aggregation.read_pressure import read_pressure_stats
+        from backend.common.adapters.circuit import breaker_stats
+
+        result["resilience"] = {
+            "breaker": breaker_stats(),
+            "provider_manager": dict(provider_manager.stats),
+            "read_pressure": read_pressure_stats(),
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["resilience"] = {"_error": str(exc)[:200]}
 
     # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
     # is wedged; > 50ms implies coroutines are queueing.
@@ -2285,6 +3226,49 @@ async def readiness_check():
                 "schema_applied": schema_state["applied"],
                 "schema_expected": schema_state["expected"],
                 "reason": "schema_mismatch — run synodic-upgrade",
+                "providers": {},
+            },
+        )
+
+    # Session revocation must be SHARED across workers to mean anything.
+    #
+    # ``get_revocation_service`` catches broadly and installs an
+    # in-process backend when Redis cannot be reached, whose own
+    # docstring says not to use it in production. With 4 gunicorn
+    # workers per container across N replicas, that turns every
+    # revocation into a no-op for 4N-1 of them: the admin UI shows the
+    # session killed and the browser keeps working. It logged at ERROR
+    # and nothing failed readiness, so a Redis misconfiguration was
+    # invisible.
+    #
+    # Reported everywhere, but only decisive in prod: a dev stack has
+    # one worker, so the in-process backend is genuinely equivalent
+    # there, and failing readiness would just stop ./dev.sh working.
+    #
+    # What this catches is a MISCONFIGURATION — the backend that got
+    # built at boot — not a live outage. A Redis that was reachable at
+    # startup and dies later leaves a RedisBackend installed and this
+    # still reports "shared". Deliberate: a Redis round trip does not
+    # belong on a probe hot path (that is what /health/deps is for), and
+    # dropping every replica out of rotation on a transient blip is a
+    # worse failure than the fail-open it would be protecting against.
+    from backend.app.services.revocation_service import revocation_is_shared
+
+    shared = revocation_is_shared()
+    result["revocation"] = "shared" if shared else "in_process"
+    if not shared and _is_production():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "postgres": "healthy",
+                "schema_at_head": True,
+                "revocation": "in_process",
+                "reason": (
+                    "session revocation has no shared store, so a revoked "
+                    "session stays live on every other worker — fix Redis "
+                    "connectivity"
+                ),
                 "providers": {},
             },
         )

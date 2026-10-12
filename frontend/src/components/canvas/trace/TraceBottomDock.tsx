@@ -14,6 +14,7 @@ import { shouldShowTruncationNotice } from './TraceDockNoticeStrip'
 import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
 import type { TraceShareSummary } from './TraceSharePopover'
+import type { TraceSeed } from './TraceSeedsPopover'
 
 export interface TraceBottomDockProps {
   trace: UseUnifiedTraceResult
@@ -43,6 +44,9 @@ export interface TraceBottomDockProps {
   share?: TraceShareSummary
   /** The traced entity's name, resolved by the host (see the title bar). */
   focusLabel?: string
+  /** A combined trace's seeds, and dropping one (see the title bar). */
+  seeds?: readonly TraceSeed[]
+  onRemoveSeed?: (urn: string) => void
 }
 
 const COMPACT_HEIGHT = 64
@@ -94,6 +98,8 @@ export function TraceBottomDock({
   outsideView = 0,
   share,
   focusLabel,
+  seeds,
+  onRemoveSeed,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -269,6 +275,8 @@ export function TraceBottomDock({
           canHistoryForward={canHistoryForward}
           share={share}
           focusLabel={focusLabel}
+          seeds={seeds}
+          onRemoveSeed={onRemoveSeed}
           nativeMode={nativeMode}
         />
 

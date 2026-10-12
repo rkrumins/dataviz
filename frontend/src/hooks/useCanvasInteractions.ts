@@ -9,11 +9,21 @@ import { useState, useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
 import { useBranchStore } from '@/store/branchStore'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
+import { judgePairs, type LinkPair, type PairVerdict } from '@/lib/bulkLinks'
+import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+
+/** The ontology a batch of links is judged by. */
+export interface LinkOntology {
+    relationshipTypes: RelationshipTypeSchema[]
+    containmentEdgeTypes: string[]
+    entityTypes: EntityTypeSchema[]
+}
 import { generateId } from '@/lib/utils'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
@@ -107,6 +117,10 @@ export interface UseCanvasInteractionsResult {
     /** Stage a new RAW edge between two nodes (optimistic + create_edge change). Returns the temp
      *  edge id, or `null` when the ontology gate rejects it (invalid type/endpoints or duplicate). */
     stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
+    /** Stage many RAW edges of one type at once — each pair through the same gate as
+     *  `stageEdgeCreate`, then one canvas update and one staged batch. Pairs the gate
+     *  rejects come back with their reasons; nothing is notified. */
+    stageEdgeCreateMany: (pairs: readonly LinkPair[], edgeType: string, ontology?: LinkOntology) => { staged: number; rejected: PairVerdict[] }
     
     // Canvas Actions
     selectAll: () => void
@@ -133,6 +147,41 @@ export interface UseCanvasInteractionsResult {
 // Hook Implementation
 // ============================================
 
+/** A RAW lineage edge as staged: the optimistic canvas edge, and its
+ *  `create_edge` change (without the id and timestamp the store assigns).
+ *  Shared by the single and the bulk staging paths so both stage exactly the
+ *  same thing. */
+function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string) {
+    const tempId = generateId('staged-edge')
+    const optimistic = {
+        id: tempId,
+        source: sourceUrn,
+        target: targetUrn,
+        type: 'lineage' as const,
+        data: { edgeType, relationship: edgeType.toLowerCase() },
+    }
+    const change: Omit<StagedChange, 'id' | 'timestamp'> = {
+        type: 'create_edge',
+        targetId: tempId,
+        // `source`/`target` are canvas node ids (== urns == backend entity_ids).
+        after: { edgeType, source: sourceUrn, target: targetUrn },
+        summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
+        // Main-mode parity: applyAll runs this to persist the edge via the
+        // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
+        // routes create_edge through /graph/changes (stagedChangesToOps). Either way
+        // a temp endpoint (edge between two new nodes) resolves to its real id.
+        apply: async ({ provider, resolveTempId }) => {
+            if (!provider) return // local-only (no backend) — accept optimistically
+            const src = resolveTempId(sourceUrn) ?? sourceUrn
+            const tgt = resolveTempId(targetUrn) ?? targetUrn
+            const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
+            if (!res.success) throw new Error(res.error || 'Failed to create edge')
+        },
+        discard: () => useCanvasStore.getState().removeEdge(tempId),
+    }
+    return { optimistic, change }
+}
+
 export function useCanvasInteractions(
     options: UseCanvasInteractionsOptions = {}
 ): UseCanvasInteractionsResult {
@@ -151,15 +200,11 @@ export function useCanvasInteractions(
     } = options
     
     const provider = useGraphProvider()
-    const { showToast } = useToast()
-    const {
-        nodes,
-        selectedNodeIds,
-        selectedEdgeIds,
-        selectNode,
-        clearSelection,
-        updateNode,
-    } = useCanvasStore()
+    const { notify } = useAppNotifications()
+    // Actions only — the nodes and the selection are read when a handler runs, so the canvas
+    // hosting this hook is not re-rendered by every store write.
+    const selectNode = useCanvasStore((s) => s.selectNode)
+    const clearSelection = useCanvasStore((s) => s.clearSelection)
     
     // State
     const [contextMenu, setContextMenu] = useState<CanvasInteractionState['contextMenu']>({
@@ -212,32 +257,13 @@ export function useCanvasInteractions(
     const saveInlineEdit = useCallback((nodeId: string, newValue: string) => {
         const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
         const previousLabel = (node?.data?.label as string) ?? ''
-        if (previousLabel === newValue) {
-            setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-            return
-        }
-        updateNode(nodeId, { label: newValue })
-        onInlineEditSave?.(nodeId, newValue)
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-
-        const stagedChanges = useStagedChangesStore.getState()
-        // Replace any existing rename for this node so the user's net rename
-        // shows up as a single entry, but preserve the original `before` value.
-        stagedChanges.stageOrReplace(
-            (c) => c.type === 'rename_entity' && c.targetId === nodeId,
-            {
-                type: 'rename_entity',
-                targetId: nodeId,
-                targetUrn: (node?.data?.urn as string) ?? nodeId,
-                before: { label: previousLabel },
-                after: { label: newValue },
-                summary: `Rename '${previousLabel}' → '${newValue}'`,
-                discard: () => {
-                    useCanvasStore.getState().updateNode(nodeId, { label: previousLabel })
-                },
-            },
-        )
-    }, [updateNode, onInlineEditSave])
+        if (!node || previousLabel === newValue) return
+        // One staged edit per node: a rename after a drawer edit (or before one) joins it,
+        // keeping the node as first read as the diff base and the discard target.
+        stageNodeEdit(nodeId, node.data, { ...node.data, label: newValue })
+        onInlineEditSave?.(nodeId, newValue)
+    }, [onInlineEditSave])
     
     const cancelInlineEdit = useCallback(() => {
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
@@ -357,19 +383,19 @@ export function useCanvasInteractions(
     }, [onNodeDeleted])
     
     const createChild = useCallback((parentId: string) => {
-        const parentNode = nodes.find(n => n.id === parentId)
+        const parentNode = useCanvasStore.getState().nodes.find(n => n.id === parentId)
         if (parentNode) {
             useHierarchyBuilderStore.getState().open({ parentUrn: (parentNode.data.urn as string) ?? parentNode.id })
         }
-    }, [nodes])
+    }, [])
     
     const copyUrn = useCallback(async (nodeId: string) => {
-        const node = nodes.find(n => n.id === nodeId)
+        const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
         if (node?.data.urn) {
             await navigator.clipboard.writeText(node.data.urn)
-            // Could show a toast here
+            // Could show a notification here
         }
-    }, [nodes])
+    }, [])
     
     // ===================
     // Edge CRUD
@@ -422,7 +448,7 @@ export function useCanvasInteractions(
         const containmentEdgeTypes = useSchemaStore.getState().schema?.containmentEdgeTypes ?? []
         const edgeTypeUpper = (edge.data?.edgeType ?? edge.data?.relationship ?? '').toUpperCase()
         if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
-            showToast('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
+            notify('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
             return
         }
 
@@ -447,7 +473,7 @@ export function useCanvasInteractions(
                 useCanvasStore.getState().addEdges([{ ...edge }])
             },
         })
-    }, [showToast])
+    }, [notify])
 
     const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
         // Ontology gate before we stage anything: lineage-only (no hand-drawn containment), valid
@@ -468,62 +494,76 @@ export function useCanvasInteractions(
             entityTypes: schema?.entityTypes ?? [],
         })
         if (!verdict.allowed) {
-            showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+            notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
             return null
         }
 
-        const tempId = generateId('staged-edge')
-        const optimistic = {
-            id: tempId,
-            source: sourceUrn,
-            target: targetUrn,
-            type: 'lineage' as const,
-            data: { edgeType, relationship: edgeType.toLowerCase() },
-        }
+        const { optimistic, change } = edgeCreateChange(sourceUrn, targetUrn, edgeType)
         useCanvasStore.getState().addEdges([optimistic])
-        useStagedChangesStore.getState().stage({
-            type: 'create_edge',
-            targetId: tempId,
-            // `source`/`target` are canvas node ids (== urns == backend entity_ids).
-            after: { edgeType, source: sourceUrn, target: targetUrn },
-            summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
-            // Main-mode parity: applyAll runs this to persist the edge via the
-            // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
-            // routes create_edge through /graph/changes (stagedChangesToOps). Either way
-            // a temp endpoint (edge between two new nodes) resolves to its real id.
-            apply: async ({ provider, resolveTempId }) => {
-                if (!provider) return // local-only (no backend) — accept optimistically
-                const src = resolveTempId(sourceUrn) ?? sourceUrn
-                const tgt = resolveTempId(targetUrn) ?? targetUrn
-                const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
-                if (!res.success) throw new Error(res.error || 'Failed to create edge')
-            },
-            discard: () => useCanvasStore.getState().removeEdge(tempId),
+        useStagedChangesStore.getState().stage(change)
+        return optimistic.id
+    }, [notify])
+
+    const stageEdgeCreateMany = useCallback((pairs: readonly LinkPair[], edgeType: string, ontology?: LinkOntology) => {
+        // The same gate as one drawn link, pair by pair (bulkLinks.judgePairs
+        // runs validateDrawnEdge with the canvas's links indexed by pair) —
+        // then ONE canvas update and ONE staged batch, however many links:
+        // the canvas re-renders on every store update, and 500 of them would
+        // freeze it.
+        const canvas = useCanvasStore.getState()
+        const schema = useSchemaStore.getState().schema
+        const typeById = new Map<string, string>()
+        for (const n of canvas.nodes) {
+            const type = n.data?.type as string | undefined
+            if (!type) continue
+            typeById.set(n.id, type)
+            const urn = n.data?.urn as string | undefined
+            if (urn) typeById.set(urn, type)
+        }
+        // The ontology the caller previewed the batch with (a view's own data
+        // source), so what the preview promised is exactly what is staged;
+        // the workspace schema when none is given.
+        const verdicts = judgePairs(pairs, edgeType, {
+            typeOf: (urn) => typeById.get(urn) ?? null,
+            relationshipTypes: ontology?.relationshipTypes ?? schema?.relationshipTypes ?? [],
+            containmentEdgeTypes: ontology?.containmentEdgeTypes ?? schema?.containmentEdgeTypes ?? [],
+            entityTypes: ontology?.entityTypes ?? schema?.entityTypes ?? [],
+            existingEdges: canvas.edges,
         })
-        return tempId
-    }, [showToast])
+        const built = verdicts.filter(v => v.ok).map(v => edgeCreateChange(v.source, v.target, edgeType))
+        if (built.length > 0) {
+            useCanvasStore.getState().addEdges(built.map(b => b.optimistic))
+            const now = Date.now()
+            useStagedChangesStore.getState().stageMany(
+                built.map(b => ({ ...b.change, id: generateId('staged'), timestamp: now })),
+            )
+        }
+        return { staged: built.length, rejected: verdicts.filter(v => !v.ok) }
+    }, [])
 
     // ===================
     // Canvas Actions
     // ===================
     
     const selectAll = useCallback(() => {
-        nodes.forEach(n => selectNode(n.id, true))
-    }, [nodes, selectNode])
+        useCanvasStore.getState().nodes.forEach(n => selectNode(n.id, true))
+    }, [selectNode])
     
     const deleteSelected = useCallback(() => {
         // Route through the staged-delete helpers so keyboard Delete shows up
         // in the staged-changes panel just like context-menu Delete does.
+        const { selectedNodeIds, selectedEdgeIds } = useCanvasStore.getState()
         selectedNodeIds.forEach(id => deleteNode(id))
         selectedEdgeIds.forEach(id => deleteEdge(id))
         clearSelection()
-    }, [selectedNodeIds, selectedEdgeIds, deleteNode, deleteEdge, clearSelection])
+    }, [deleteNode, deleteEdge, clearSelection])
     
     const duplicateSelected = useCallback(() => {
-        selectedNodeIds.forEach(id => duplicateNode(id))
-    }, [selectedNodeIds, duplicateNode])
+        useCanvasStore.getState().selectedNodeIds.forEach(id => duplicateNode(id))
+    }, [duplicateNode])
     
     const copySelectedUrns = useCallback(async () => {
+        const { selectedNodeIds, nodes } = useCanvasStore.getState()
         const urns = selectedNodeIds
             .map(id => nodes.find(n => n.id === id)?.data.urn)
             .filter(Boolean)
@@ -532,7 +572,7 @@ export function useCanvasInteractions(
         if (urns) {
             await navigator.clipboard.writeText(urns)
         }
-    }, [selectedNodeIds, nodes])
+    }, [])
     
     // ===================
     // Keyboard Handlers
@@ -544,6 +584,7 @@ export function useCanvasInteractions(
         onSelectAll: selectAll,
         onCopy: copySelectedUrns,
         onEdit: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) {
                 editNode(selectedNodeIds[0])
             }
@@ -570,6 +611,7 @@ export function useCanvasInteractions(
             }
         },
         onTrace: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1 && onTraceNode) {
                 onTraceNode(selectedNodeIds[0])
             }
@@ -578,6 +620,7 @@ export function useCanvasInteractions(
             useHierarchyBuilderStore.getState().open()
         },
         onConnectMode: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
         },
         onCommandPalette: openCommandPalette,
@@ -614,6 +657,7 @@ export function useCanvasInteractions(
         // Edge CRUD
         editEdge,
         stageEdgeCreate,
+        stageEdgeCreateMany,
         deleteEdge,
         reverseEdge,
         

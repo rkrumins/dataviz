@@ -1,5 +1,7 @@
 # Platform Services
 
+*For engineers and platform operators who need to know which process does what.*
+
 > **At a glance:** The catalog of backend services that make up {brandShort} — what each is responsible for, the process role it runs under, and how they fit together at runtime. Start here, then follow the links into each service page.
 
 **This page covers:**
@@ -28,7 +30,7 @@ The services documented in this section:
 |---------|------|----------------|
 | Insights service | [Insights](/docs/services-insights) | Background collection of per–data-source stats, schema profiling, and pre-registration asset discovery. |
 | Search | [Search](/docs/services-search) | Deep Search (provider-agnostic contract) and Advanced Search (structured, view-scoped predicate queries) over the graph. |
-| Context Engine | [Context Engine](/docs/services-context-engine) | Query orchestration that binds a workspace's provider and ontology; the layer behind reads, lineage, and context lenses. |
+| Context Engine | [Context Engine](/docs/services-context-engine) | Query orchestration that binds a workspace's provider and ontology; the layer behind reads, lineage, and the Lineage Lens. |
 | Assignment Engine | [Assignments](/docs/services-assignments) | Computes per-view layer assignments for rendered entities, plus foreign-schema (ontology) mapping. |
 
 ## Where it runs
@@ -36,13 +38,13 @@ The services documented in this section:
 The process role is selected by the `SYNODIC_ROLE` environment variable. It
 controls which subsystems the FastAPI lifespan starts.
 
-> **Important:** The same image runs as every role — `SYNODIC_ROLE` alone decides which subsystems boot. A misconfigured value falls back to `dev` (all-in-one), so verify the role in each deployed process; the `controlplane` role is a singleton and must not be run twice.
+> **Important:** The same image runs as every role — `SYNODIC_ROLE` alone decides which subsystems boot. A misconfigured value falls back to `dev` (all-in-one), so verify the role in each deployed process. The `controlplane` role may run as more than one replica — production runs two — because each of its loops is single-flight on its own.
 
 | Role (`SYNODIC_ROLE`) | Starts | Notes |
 |-----------------------|--------|-------|
 | `web` | HTTP API, auth, reads, lightweight writes | Fully stateless; scale horizontally. |
 | `worker` | Aggregation execution, heavy provider I/O | Consumes the aggregation job stream. |
-| `controlplane` | Scheduler, outbox relay, crash recovery | Singleton. Applies Alembic migrations on deploy. |
+| `controlplane` | Scheduler, outbox relay, crash recovery | HA-safe: each loop is single-flight, so production runs two replicas. Schema migrations belong to the separate `synodic-upgrade` job. |
 | `dev` | All-in-one | Default; runs every subsystem in one process for local development. |
 
 Two subsystems run outside the FastAPI process entirely:
@@ -50,15 +52,24 @@ Two subsystems run outside the FastAPI process entirely:
 - **Insights service** — a headless container started with
   `python -m backend.insights_service` (see `Dockerfile.insights`). It hosts its
   own scheduler + worker + health endpoint and does not serve the HTTP API.
-- **Versioning projection worker** — started with
-  `python -m backend.app.services.versioning` (or in-process in dev via
-  `GRAPHVER_PROJECTION_INPROCESS=1`).
+- **Versioning worker** — started with
+  `python -m backend.app.services.versioning`. It runs the lanes
+  `GRAPHVER_WORKER_LANES` names: `projection` (FalkorDB projection and
+  sweeps), `transfer` (the import, export and publish jobs the API queues)
+  and `bootstrap` ("Enable version control" jobs and purges). Production
+  runs each lane as its own Deployment (`versioning-worker`,
+  `versioning-transfer`, `versioning-bootstrap`); compose runs projection
+  in `versioning-worker` and the other two in `versioning-jobs`. The API
+  only queues these jobs, so they run only where a lane runs. With
+  `SYNODIC_ROLE=dev` and `GRAPHVER_PROJECTION_INPROCESS=1`, the dev process
+  runs the lanes itself. The quickstart (`docker-compose.quickstart.yml`) runs no versioning worker
+  (`docs/versioning/08-import-export.md` §2a).
 
 Backing stores are shared across roles:
 
 - **Graph providers:** FalkorDB (default, Redis-protocol), Neo4j, DataHub,
   Google Cloud Spanner Graph.
-- **Management DB:** PostgreSQL in production, SQLite for the local quickstart.
+- **Management DB:** PostgreSQL, in every environment.
 - **Cache / session / streams:** Redis.
 
 ## Runtime topology
@@ -74,9 +85,9 @@ flowchart TD
     end
 
     INS[Insights service<br/>python -m backend.insights_service]
-    VER[Versioning projection worker]
+    VER[Versioning worker<br/>projection / transfer / bootstrap lanes]
 
-    PG[(PostgreSQL /<br/>SQLite)]
+    PG[(PostgreSQL)]
     RD[(Redis<br/>cache + streams)]
     GP[(Graph providers<br/>FalkorDB / Neo4j /<br/>DataHub / Spanner)]
 
@@ -94,6 +105,7 @@ flowchart TD
     INS --> GP
     VER --> PG
     VER --> RD
+    VER --> GP
 ```
 
 ## Key endpoints
@@ -110,13 +122,14 @@ Each service page lists its own real endpoint paths. As orientation:
 Role selection and infrastructure wiring are environment-driven:
 
 - `SYNODIC_ROLE` — process role (`web` / `worker` / `controlplane` / `dev`).
-- `MANAGEMENT_DB_URL` — PostgreSQL/SQLite connection for the management DB.
+- `MANAGEMENT_DB_URL` — the PostgreSQL connection for the management DB (`postgresql+asyncpg://…`; SQLite is not supported).
 - `REDIS_URL` — Redis connection for cache, sessions, and job streams.
 - `AGGREGATION_DISPATCH_MODE` — how aggregation jobs are dispatched
   (`redis` / `postgres` / `dual` / `inprocess` / `auto`).
 
 Service-specific knobs (`STATS_*`, `DEEP_SEARCH_*`, `INSIGHTS_*`, `GRAPHVER_*`)
-are documented on the individual service pages.
+are documented on the individual service pages, and every variable is in the
+[Configuration Reference](/docs/configuration).
 
 ## How it appears in the product
 
@@ -128,10 +141,16 @@ the health of these services to platform administrators.
 ## Limitations
 
 - Role separation is cooperative, not enforced: a misconfigured `SYNODIC_ROLE`
-  falls back to `dev`, which starts every subsystem. Running two `controlplane`
-  processes is unsupported (the control plane is a singleton).
-- The insights service and versioning projection worker are separate processes;
+  falls back to `dev`, which starts every subsystem.
+- The insights service and the versioning worker lanes are separate processes;
   status endpoints served by the web tier reflect only what that process can see
   locally (see the Insights page for the split-process caveat).
 - The topology diagram is deliberately simplified; it omits the auth service,
   the outbox relay's delivery targets, and per-pool database session routing.
+
+## See also
+
+- [Architecture](/docs/architecture) — every process and store as deployed, and how a request reaches the data
+- [Insights](/docs/services-insights) — the stats service in detail
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — the control plane and the aggregation workers
+- [Configuration Reference](/docs/configuration) — every environment variable, with its default

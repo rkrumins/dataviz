@@ -42,7 +42,11 @@ from typing import Any, Iterable, Optional
 #: ``email`` is absent for a different reason — it is the identity key,
 #: already immutable through every write path, and re-syncing it would
 #: change what the account *is*, not just what it is called.
-MANAGEABLE_FIELDS: tuple[str, ...] = ("first_name", "last_name")
+#:
+#: ``avatar`` is owned only while a connection maps one AND the picture
+#: was actually fetched and stored — an asserted URL nothing could
+#: download locks nobody out of picking their own.
+MANAGEABLE_FIELDS: tuple[str, ...] = ("first_name", "last_name", "avatar")
 
 _METADATA_KEY = "idp_managed"
 
@@ -52,6 +56,7 @@ def asserted_fields(
     first_name: Optional[str],
     last_name: Optional[str],
     derived: bool = False,
+    avatar_url: Optional[str] = None,
 ) -> list[str]:
     """Which of the manageable fields this login actually carried.
 
@@ -63,11 +68,18 @@ def asserted_fields(
     claim (``ProviderIdentity.names_derived_from``). They are populated,
     but by us rather than by the directory, so nothing is owned: the
     values seed the profile and remain editable. Both names come from one
-    split, which is why this is one flag rather than two.
+    split, which is why this is one flag rather than two — and why it
+    zeroes only the names: an avatar is never split out of anything.
+
+    *avatar_url* is passed only when the picture was actually stored —
+    the caller's responsibility, because a URL that failed to download
+    must not lock anyone out of picking their own.
     """
-    if derived:
-        return []
-    present = {"first_name": first_name, "last_name": last_name}
+    present = {
+        "first_name": "" if derived else first_name,
+        "last_name": "" if derived else last_name,
+        "avatar": avatar_url,
+    }
     return [f for f in MANAGEABLE_FIELDS if (present.get(f) or "").strip()]
 
 

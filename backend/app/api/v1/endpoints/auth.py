@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.password import hash_password
+from backend.auth_service.core.password import is_password_set
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.display_name import resolve_display_name
@@ -39,6 +40,9 @@ from backend.common.models.auth import (
 from backend.app.auth.dependencies import get_current_user
 from backend.app.api.v1.feature_gate import feature_disabled
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.revocation_service import (
+    revoke_every_session_for_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,7 @@ router = APIRouter()
 # goes this way.
 from backend.auth_service.api.router import limiter
 from backend.auth_service.core.config import (
+    AUTH_ENVIRONMENT_ID,
     RATELIMIT_PASSWORD_RESET_PER_ACCOUNT,
     RATELIMIT_SENSITIVE_PER_IP,
 )
@@ -427,6 +432,27 @@ async def signup(
 ):
     from backend.app.db.repositories import invite_repo
 
+    # 0. Passwords off ⇒ password signup off. When the platform
+    # enforces SSO (``allow_local_login=false``), an account created
+    # here would hold a credential the login endpoint refuses — a dead
+    # end discovered at first sign-in. Refused for invited signups too:
+    # under enforcement an invite is redeemed by signing in through the
+    # IdP, not by choosing a password. Same error token as the login
+    # refusal so the page can say the same thing.
+    from backend.app.db.repositories import app_auth_config_repo
+    _posture = await app_auth_config_repo.get_snapshot(session)
+    if not _posture.allow_local_login:
+        logger.info("signup blocked: local login is disabled (SSO enforced)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "local_login_disabled",
+                "message": "Password sign-up is off — this deployment uses "
+                           "single sign-on. Sign in with your identity "
+                           "provider instead.",
+            },
+        )
+
     # 1. Password strength
     _check_password_strength(body.password)
 
@@ -640,6 +666,7 @@ async def signup(
                 autoSignedIn=True,
                 user=user_dto,
                 redirectTo=_invite_landing(invite_workspace_id),
+                environmentId=AUTH_ENVIRONMENT_ID or None,
             )
         return SignUpResponse(message="Account created and activated. You can now sign in.")
     else:
@@ -735,17 +762,77 @@ async def reset_password(
             detail="Invalid or expired reset token.",
         )
 
-    # 2. Validate password strength
+    # 2. An SSO-only account stays SSO-only — unless an administrator
+    # granted this exact token.
+    #
+    # Such an account carries the disabled-password sentinel, and that
+    # sentinel is the only thing keeping the user on the IdP path — where
+    # the organisation's conditional access and MFA are. Redeeming an
+    # ordinary reset token here would remove it permanently and silently,
+    # turning a federated identity into one that signs in around the IdP.
+    # The person redeeming a token is not the person who should be making
+    # that call.
+    #
+    # An admin-minted token (the ``admin_ok:`` hash prefix) is the
+    # deliberate exception: "give this person a password" is decided on
+    # the admin Users screen — the JIT-provisioned account whose SSO
+    # connection is being turned off — and both the mint and the
+    # conversion are audited. Ordinary forgot-password never mints a
+    # token at all, so this gate is defence in depth, not the main door.
+    converting_sso_only = not is_password_set(user.password_hash)
+    if converting_sso_only and not user_repo.reset_token_admin_granted(user):
+        logger.warning(
+            "Refused password reset for SSO-only user %s", user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "sso_only_account",
+                "message": (
+                    "This account signs in through your identity provider "
+                    "and has no password to reset."
+                ),
+            },
+        )
+
+    # 3. Validate password strength
     _check_password_strength(body.new_password)
 
-    # 3. Update password (also clears the reset token)
+    # 4. Update password (also clears the reset token)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user.id, hashed)
+
+    # 5. End every session the account already had.
+    #
+    # This is the whole point of the flow. A password reset is what
+    # somebody performs *because* they believe their account is
+    # compromised, and until this call the attacker's session survived
+    # it untouched — the new password locked nobody out. The
+    # self-service change-password path always did this; the two reset
+    # paths did not.
+    await revoke_every_session_for_user(
+        user.id, session=session, reason="password_reset",
+    )
+
+    if converting_sso_only:
+        # The account just gained a way in that bypasses the IdP. That
+        # is exactly what the admin granted, and exactly the kind of
+        # change an auditor asks about later.
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.local_login_enabled",
+            payload={
+                "user_id": user.id,
+                "reason": "admin_reset_token_redeemed",
+            },
+        )
 
     await user_repo.create_outbox_event(
         session,
         event_type="user.password_reset_completed",
         payload={"user_id": user.id},
+        aggregate_type="user",
+        aggregate_id=user.id,
     )
 
     logger.info("Password reset completed for user %s", user.id)

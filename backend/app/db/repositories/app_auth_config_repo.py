@@ -96,14 +96,16 @@ async def update_config(
     Returns the freshly-updated row."""
     row = await get_row(session)
     if row is None:
-        # Seeder didn't run; create the singleton inline.
+        # Seeder didn't run; create the singleton inline at version 0,
+        # the version get_snapshot reports for a missing row, so the
+        # client's expected_version matches and this write lands at 1.
         row = AppAuthConfigORM(
             id=_SINGLETON_ID,
             sso_enabled=True,
             allow_local_login=True,
             allow_jit_provisioning=True,
             email_first_login=False,
-            version=1,
+            version=0,
             updated_at=_now(),
             updated_by=updated_by,
         )
@@ -112,7 +114,7 @@ async def update_config(
 
     if (
         expected_version is not None
-        and int(row.version or 1) != expected_version
+        and int(row.version or 0) != expected_version
     ):
         raise ConflictingVersion(
             f"version mismatch: expected {expected_version}, got {row.version}"
@@ -126,7 +128,7 @@ async def update_config(
         row.allow_jit_provisioning = bool(allow_jit_provisioning)
     if email_first_login is not None:
         row.email_first_login = bool(email_first_login)
-    row.version = int(row.version or 1) + 1
+    row.version = int(row.version or 0) + 1
     row.updated_at = _now()
     row.updated_by = updated_by
     await session.flush()

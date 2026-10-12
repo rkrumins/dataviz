@@ -5,20 +5,26 @@
  */
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass, Save, RotateCcw,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
+
+/** Tab ids, in the order they appear. Hoisted so the URL parser and the
+ *  buttons cannot drift apart. */
+const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'versioning'] as const
+type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
@@ -27,6 +33,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { FinishImportingViewsBanner } from '@/features/view-transfer/FinishImportingViewsBanner'
 import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
@@ -128,6 +135,7 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
+    stats,
     providerInfo,
     ontologyName,
     ontologyId,
@@ -142,7 +150,28 @@ export function DataSourceDetailPanel({
     onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
+    /**
+     * Tab state lives in the URL, not in `useState`.
+     *
+     * A notification about a source's profile has to be able to land ON the
+     * profile, and a link someone pastes to a colleague has to open what they
+     * were looking at. Local state made both impossible, and it is why the
+     * profiling surface needed a separate routable page in the first place —
+     * a page whose back button could then only ever guess where you came from.
+     */
+    const [searchParams, setSearchParams] = useSearchParams()
+    const rawTab = searchParams.get('dstab')
+    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab)
+        ? (rawTab as DataSourceTab)
+        : 'insights'
+    const setActiveTab = (next: DataSourceTab) => {
+        const merged = new URLSearchParams(searchParams)
+        // 'insights' is the default and writes no param, so the common URL
+        // stays clean and a stale param cannot outlive the drawer.
+        if (next === 'insights') merged.delete('dstab')
+        else merged.set('dstab', next)
+        setSearchParams(merged, { replace: true })
+    }
     const versioningEnabled = useFeature('versioningEnabled')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
@@ -360,12 +389,14 @@ export function DataSourceDetailPanel({
                         {/* Per-source vocabulary-alignment drift (Task E) — own component,
                             no overlap with the header chips. */}
                         {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
+                        {!editing && <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
+                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Profiling" onClick={() => setActiveTab('profiling')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
@@ -420,6 +451,14 @@ export function DataSourceDetailPanel({
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
                                 )
+                            )}
+
+                            {/* ─── Profiling Tab ────────────────────────── */}
+                            {activeTab === 'profiling' && (
+                                <SourceProfiling
+                                    dataSourceId={ds.id}
+                                    sourceName={ds.label || ds.graphName || undefined}
+                                />
                             )}
 
                             {/* ─── Aggregation Tab ──────────────────────── */}
@@ -639,7 +678,12 @@ export function DataSourceDetailPanel({
 
                             {/* ─── Versioning Tab ───────────────────────── */}
                             {versioningEnabled && activeTab === 'versioning' && (
-                                <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
+                                <DataSourceVersioningTab
+                                    wsId={wsId}
+                                    dataSourceId={ds.id}
+                                    // A cold stats cache reads 0 / stale: no size beats a wrong one.
+                                    itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
+                                />
                             )}
                             </>)}
                         </div>
@@ -672,7 +716,7 @@ export function DataSourceDetailPanel({
 // Permission-gated edit/delete buttons. Workspace data-source
 // mutations need ``workspace:datasource:manage`` on the specific
 // workspace; without it the buttons are hidden so a viewer doesn't
-// click into a 403 toast.
+// click into a 403 notification.
 function DataSourceActions({
     wsId, onEdit, onDelete, onDeletePermanent,
 }: {

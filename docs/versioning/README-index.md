@@ -29,15 +29,15 @@ GitHub itself.
 
 | Chapter | Covers |
 |---|---|
-| [02 · Data Model](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/02-data-model.md) | The `graphver` Postgres schema — every table, the append-only version rows plus a mutable head-pointer, HASH partitioning on `graph_id`, ULIDs, and blake2b content hashing. |
-| [03 · Branching, Commits & Merge](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md) | The versioning engine — draft branches, stage → checkpoint → publish, the 3-way field-level merge that also powers rebase/fork-PR/revert, and the per-graph advisory-lock concurrency model. |
-| [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md) | How committed `main` is projected into a rebuildable FalkorDB read cache — idempotent `MERGE`/`DELETE` writes, watermark-bounded staleness, self-healing, `:AGGREGATED` rollups, and read routing. |
-| [05 · Ontology Governance](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md) | How the assigned ontology is enforced at the commit boundary on every durable write path — the two validation tiers, structural edge/containment integrity, and the decoupled rule-injection seam. |
-| [07 · Frontend Integration](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/07-frontend-integration.md) | How the canvas UI drives versioning — "edit mode" as an open draft, branch-scoped reads via `?branchId=`, the three-phase Save pipeline, and the Zustand / React-Query split. |
-| [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md) | Bulk import/export as the manual draft flow at scale — the parse → resolve → apply pipeline, identity/idempotency, reconcile modes, format adapters, and view-scoped export. |
-| [09 · Scale, Limits & Roadmap](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/09-scale-limits-and-roadmap.md) | The candid, measured state of scale — the proven `O(change)` wins, the deliberately-deferred sharp edges, and the prioritized roadmap. |
-| [10 · Authoritative Sources (DataHub / OpenMetadata)](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/10-authoritative-sources-datahub-openmetadata.md) | Forward-looking design for federating external catalogs as an authoritative base layer that re-syncs as commits under human-edit-preserving 3-way merge. |
-| [11 · Re-sync at Any Scale](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/11-resync-at-any-scale.md) | A designed-not-built plan to make provider re-sync memory-bounded — removing the six whole-graph copies that cost ~2 GB to compute 808 changes — so the size guard can be lifted. |
+| [02 · Data Model](02-data-model.md) | The `graphver` Postgres schema — every table, the append-only version rows plus a mutable head-pointer, HASH partitioning on `graph_id`, ULIDs, and blake2b content hashing. |
+| [03 · Branching, Commits & Merge](03-branching-commits-merge.md) | The versioning engine — draft branches, stage → checkpoint → publish, the 3-way field-level merge that also powers rebase/fork-PR/revert, and the per-graph advisory-lock concurrency model. |
+| [04 · Projection & Cache](04-projection-and-cache.md) | How committed `main` is projected into a rebuildable FalkorDB read cache — idempotent `MERGE`/`DELETE` writes, watermark-bounded staleness, self-healing, `:AGGREGATED` rollups, and read routing. |
+| [05 · Ontology Governance](05-ontology-governance.md) | How the assigned ontology is enforced at the commit boundary on every durable write path — the two validation tiers, structural edge/containment integrity, and the decoupled rule-injection seam. |
+| [07 · Frontend Integration](07-frontend-integration.md) | How the canvas UI drives versioning — "edit mode" as an open draft, branch-scoped reads via `?branchId=`, the three-phase Save pipeline, and the Zustand / React-Query split. |
+| [08 · Import / Export](08-import-export.md) | Bulk import/export as the manual draft flow at scale — the parse → resolve → apply pipeline, identity/idempotency, reconcile modes, format adapters, and view-scoped export. |
+| [09 · Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) | The candid, measured state of scale — the proven `O(change)` wins, the deliberately-deferred sharp edges, and the prioritized roadmap. |
+| [10 · Authoritative Sources (DataHub / OpenMetadata)](10-authoritative-sources-datahub-openmetadata.md) | Forward-looking design for federating external catalogs as an authoritative base layer that re-syncs as commits under human-edit-preserving 3-way merge. |
+| [11 · Re-sync at Any Scale](11-resync-at-any-scale.md) | A designed-not-built plan to make provider re-sync memory-bounded — removing the six whole-graph copies that cost ~2 GB to compute 808 changes — so the size guard can be lifted. |
 
 > A longer prose overview of the whole suite, including the shared glossary, lives in
-> [`README.md`](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/README.md).
+> [`README.md`](README.md).

@@ -1,0 +1,19 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      {
+        "kind": "path",
+        "sourceUrns": ["urn:li:dataset:REPLACE_WITH_THE_SOURCE_URN"],
+        "targetUrns": ["urn:li:dataset:REPLACE_WITH_THE_TARGET_URN"],
+        "direction": "outgoing",
+        "edgeClass": "lineage",
+        "maxHops": 5,
+        "maxPaths": 16
+      }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "paths" }
+}

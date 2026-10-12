@@ -18,8 +18,8 @@
  * The CALLER decides what needs resolving (it knows what it can already
  * name), which keeps this hook free of any canvas coupling.
  */
-import { useEffect, useRef, useState } from 'react'
-import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
 
 /** Urns per request. The trace history is capped at 50, so one round trip is
  *  the normal case; the chunk only matters for a caller with more. */
@@ -29,7 +29,21 @@ export function useResolvedNames(
   urns: readonly string[],
   provider: GraphDataProvider | null,
 ): ReadonlyMap<string, string> {
-  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map())
+  const entities = useResolvedEntities(urns, provider)
+  return useMemo(() => {
+    const names = new Map<string, string>()
+    for (const [urn, n] of entities) if (n.displayName) names.set(urn, n.displayName)
+    return names
+  }, [entities])
+}
+
+/** The data source's own record for each urn it answered — for a caller that needs more than the
+ *  name (its type, to show it the way the canvas would). Same rules as `useResolvedNames`. */
+export function useResolvedEntities(
+  urns: readonly string[],
+  provider: GraphDataProvider | null,
+): ReadonlyMap<string, GraphNode> {
+  const [entities, setEntities] = useState<ReadonlyMap<string, GraphNode>>(() => new Map())
   /** Every urn already asked about — answered or not. A urn the data source
    *  does not return does not exist; asking again would not change that. */
   const asked = useRef(new Set<string>())
@@ -56,9 +70,9 @@ export function useResolvedNames(
         try {
           const fetched = await provider.getNodes({ urns: chunk, limit: chunk.length })
           if (fetched.length === 0) continue
-          setNames(prev => {
+          setEntities(prev => {
             const next = new Map(prev)
-            for (const n of fetched) if (n.urn && n.displayName) next.set(n.urn, n.displayName)
+            for (const n of fetched) if (n.urn) next.set(n.urn, n)
             return next
           })
         } catch {
@@ -70,5 +84,5 @@ export function useResolvedNames(
     })()
   }, [urns, provider])
 
-  return names
+  return entities
 }

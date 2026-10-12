@@ -31,6 +31,7 @@ import {
 } from '@/services/workspaceService'
 import { catalogService } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
+import { MOTION } from '@/lib/motion'
 
 const BASICS: WizardStepDef = { id: 'basics', label: 'Basics', icon: <Boxes className="w-6 h-6" /> }
 const DATA: WizardStepDef = { id: 'data', label: 'Data', icon: <Database className="w-6 h-6" /> }
@@ -249,7 +250,7 @@ export function CreateWorkspaceWizard({
                     <motion.div
                         initial={{ scale: 0 }}
                         animate={{ scale: 1 }}
-                        transition={{ type: 'spring', damping: 12, stiffness: 220 }}
+                        transition={MOTION.modalSpring}
                         className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25"
                     >
                         <Check className="w-8 h-8 text-white" />

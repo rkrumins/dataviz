@@ -6,78 +6,42 @@ the object store via the chosen format adapter. A whole-graph export doubles as 
 identity columns let a re-import restore/clone faithfully (round-trips to a zero diff when
 unchanged). ``as_of_seq`` gives point-in-time exports (E5).
 
-v1 materializes the state then streams the write; a keyset-streaming read (for 5M+) is a follow-up
-that swaps ``materialize_state`` for ``reconcile._stream_pg_nodes`` without changing the rest.
+The job reads and writes a page at a time through :mod:`.stream`, as the streamed download does,
+so an export of any size runs in flat memory; this module keeps the row shape both share.
+
+It runs on the job's lease (:mod:`..job_lease`), and each attempt at it — each epoch — writes a
+file of its own (:func:`epoch_key`): a worker taken over while still writing never writes into the
+file its successor writes (a local store writes a file in place). The fenced finish names the
+attempt's file as the job's result, so a superseded attempt's file is never the one downloaded. An
+export has no cursor: taken over, it starts again.
+
+A view package's export (``view_transfer.package.PackageExport``) writes the same data INTO the
+package as it streams: one file, written once, never read back.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List, Optional
-
-from sqlalchemy import select
+import contextlib
+import time
+from typing import Any, Dict, List, Optional
 
 from .. import db
-from ..merkle import content_hash
-from ..models import BranchORM, JobORM
-from .formats import get_adapter
-from .rowmodel import denormalize_edge, denormalize_node
+from ..job_lease import Lease, Superseded
+from ..models import JobORM
+from . import stream
+from .import_worker import lease_job
 
-_NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",
-                   "description", "sourceSystem", "layerAssignment", "tags", "baseVersion"]
-_EDGE_COL_ORDER = ["entity_id", "edgeType", "sourceQualifiedName", "targetQualifiedName",
-                   "source_entity_id", "target_entity_id", "confidence", "baseVersion"]
+# How often a running export says how far it has got (a fenced checkpoint between chunks).
+_PROGRESS_SECS = 5
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[Dict[str, Any]]:
-    """Denormalize a materialized ``{nodes, edges}`` state into template-shaped export records."""
-    eid_to_qname = {eid: p.get("qualifiedName") for eid, p in nodes.items()}
-    node_records = [
-        {"kind": "node", **denormalize_node(eid, content_hash(p), p)} for eid, p in nodes.items()
-    ]
-    edge_records = [
-        {"kind": "edge", **denormalize_edge(
-            eid, content_hash(p), p,
-            source_qname=eid_to_qname.get(p.get("sourceEntityId")),
-            target_qname=eid_to_qname.get(p.get("targetEntityId")))}
-        for eid, p in edges.items()
-    ]
-    return node_records + edge_records
-
-
-def column_order(records: List[Dict[str, Any]], schema_props: Optional[Dict[str, List[str]]] = None) -> List[str]:
-    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores).
-
-    Property management is TABULAR — **every property is its own ``prop.<name>`` column**, like a
-    spreadsheet/Airtable grid, so 10–50 properties are 10–50 columns you edit in place (never a
-    bulky JSON blob). The property columns are the union of: what entities actually have + what the
-    ontology defines for the types present (``schema_props`` = ``{"node": [...], "edge": [...]}``),
-    so a defined-but-empty property is still a column to fill. ``properties_json`` is demoted to a
-    pure OVERFLOW column for genuinely nested/complex values — emitted only when a record needs it.
-    The full editable node core (description/tags/layer/…) is always present; edge columns only when
-    the export has edges."""
-    has_edge = any(r.get("kind") == "edge" for r in records)
-    schema_props = schema_props or {}
-    cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
-    if has_edge:
-        cols += [c for c in _EDGE_COL_ORDER if c not in cols]
-    prop_cols = {k for r in records for k in r if k.startswith("prop.")}
-    prop_cols |= {f"prop.{n}" for n in (schema_props.get("node") or [])}
-    if has_edge:
-        prop_cols |= {f"prop.{n}" for n in (schema_props.get("edge") or [])}
-    cols += sorted(prop_cols)
-    if any("properties_json" in r for r in records):    # overflow only — nested values, when present
-        cols.append("properties_json")
-    cols.append("_op")
-    seen, out = set(), []                                # dedup, preserve order
-    for c in cols:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+def epoch_key(result_uri: str, epoch: int) -> str:
+    """Where attempt ``epoch`` of an export writes its file: the key the job was created with for
+    the first attempt, ``…/export-e<epoch>.<ext>`` beside it for each later one."""
+    if epoch <= 1:
+        return result_uri
+    head, sep, name = result_uri.rpartition("/")
+    stem, dot, ext = name.partition(".")
+    return f"{head}{sep}{stem}-e{epoch}{dot}{ext}"
 
 
 def example_template_records() -> List[Dict[str, Any]]:
@@ -95,99 +59,15 @@ def example_template_records() -> List[Dict[str, Any]]:
     ]
 
 
-def _containment_children(edges: Dict[str, dict], cont: set) -> Dict[str, List[str]]:
-    """Parent-entity-id -> child-entity-ids over the graph's containment edges."""
-    children: Dict[str, List[str]] = {}
-    for e in edges.values():
-        if str(e.get("edgeType") or "").upper() in cont:
-            children.setdefault(e.get("sourceEntityId"), []).append(e.get("targetEntityId"))
-    return children
-
-
-def _keep_from_assignments(nodes, edges, assigned_urns: set, inherit_urns: set, cont: set) -> set:
-    """The view's entities: each explicitly layer-assigned URN, plus (when the assignment inherits
-    children — the default for a Context View placing a subtree into a layer) all its containment
-    descendants. This is the AUTHORITATIVE 'what the view contains', taken straight from the view's
-    canonical reference-layout ``assignments`` map rather than a heuristic."""
-    urn_to_eid = {p.get("urn"): eid for eid, p in nodes.items() if p.get("urn")}
-    children = _containment_children(edges, cont)
-    keep, seen = set(), set()
-    stack = [(urn_to_eid[u], u in inherit_urns) for u in assigned_urns if u in urn_to_eid]
-    while stack:
-        eid, descend = stack.pop()
-        if eid in seen:
-            continue
-        seen.add(eid)
-        keep.add(eid)
-        if descend:
-            for child in children.get(eid, []):
-                stack.append((child, True))
-    return keep
-
-
-def _keep_from_filters(nodes, scope: Dict[str, Any]) -> set:
-    """Fallback scope for views defined by entity-type / layer allow-lists (empty = unrestricted)."""
-    types = {str(t).upper() for t in (scope.get("entity_types") or [])}
-    layers = set(scope.get("layers") or [])
-    if not types and not layers:
-        return set(nodes.keys())
-    keep = set()
-    for eid, p in nodes.items():
-        if types and str(p.get("entityType") or "").upper() not in types:
-            continue
-        if layers and p.get("layerAssignment") not in layers:
-            continue
-        keep.add(eid)
-    return keep
-
-
-def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[str, Any]):
-    """Restrict a materialized ``{nodes, edges}`` to a view's entity set (plan Phase 4).
-
-    Primary source: the view's explicit layer assignments (the view config's canonical
-    reference-layout ``assignments`` map) — the assigned URNs plus their containment descendants.
-    Fallback: entity-type/layer allow-lists. Edges are kept only when BOTH endpoints are in-scope."""
-    cont = {str(t).upper() for t in (scope.get("containment_types") or [])}
-    assigned = set(scope.get("assigned_urns") or [])
-    if assigned:
-        keep = _keep_from_assignments(nodes, edges, assigned, set(scope.get("inherit_urns") or []), cont)
-    else:
-        keep = _keep_from_filters(nodes, scope)
-    fnodes = {eid: p for eid, p in nodes.items() if eid in keep}
-    fedges = {eid: p for eid, p in edges.items()
-              if p.get("sourceEntityId") in keep and p.get("targetEntityId") in keep}
-    return fnodes, fedges
-
-
-def filter_to_selection(nodes, edges, ids=None, types=None):
-    """Row-scoped export: keep only nodes matching an explicit id/urn set and/or an entity-type set
-    (intersection when both given), plus edges whose endpoints are both kept. Lets a user pull just
-    'these 50 entities' or 'all Tables' to edit — never the whole graph. Composes after view scope."""
-    id_set = set(ids or [])
-    type_set = {str(t).strip().lower() for t in (types or []) if str(t).strip()}
-    if not id_set and not type_set:
-        return nodes, edges
-
-    def keep(p, eid):
-        if id_set and eid not in id_set and p.get("urn") not in id_set:
-            return False
-        if type_set and str(p.get("entityType") or "").strip().lower() not in type_set:
-            return False
-        return True
-
-    kept = {eid for eid, p in nodes.items() if keep(p, eid)}
-    fnodes = {eid: p for eid, p in nodes.items() if eid in kept}
-    fedges = {eid: p for eid, p in edges.items()
-              if p.get("sourceEntityId") in kept and p.get("targetEntityId") in kept}
-    return fnodes, fedges
-
-
 class ExportWorker:
     def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None,
-                 options: Optional[Dict[str, Any]] = None) -> None:
+                 options: Optional[Dict[str, Any]] = None, package=None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope
+        # A view package's export (view_transfer.package.PackageExport, its views already built):
+        # the data is written into the package as it streams, and the package is the job's result.
+        self._package = package
         options = options or {}
         # Property names to emit as (empty) columns — "add a new property".
         self._extra_props = [p for p in (options.get("props") or []) if str(p).strip()]
@@ -195,45 +75,81 @@ class ExportWorker:
         self._select_ids = options.get("ids") or []
         self._select_types = options.get("types") or []
 
-    async def run(self, job_id: str) -> Dict[str, int]:
+    async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
+        """Write the export on ``lease`` — the transfer lane's; called without one, the job is
+        taken here (:func:`lease_job`) — to this attempt's own file, and finish the job naming it.
+        Raises :class:`Superseded` once the job is no longer this worker's."""
+        from .snapshot import pinned_reads
+
+        lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             job = await s.get(JobORM, job_id)
-            job.status = "running"
-            job.started_at = _now()
             graph_id, fmt = job.graph_id, job.import_format or "ndjson"
-            as_of_seq, result_uri, branch_id = job.as_of_seq, job.result_uri, job.branch_id
-            if branch_id is None:                        # default: published main
-                branch_id = (await s.execute(
-                    select(BranchORM.id).where(
-                        BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
+            as_of_seq, branch_id = job.as_of_seq, job.branch_id
+            result_uri = job.result_uri if self._package is None else self._package.key(job.result_uri)
+            result_uri = epoch_key(result_uri, lease.epoch)
 
-        # A branch_id (a working draft) composes main + committed + draft ops — so a user can export
-        # their in-progress branch, edit in Excel, and re-import onto the same branch.
-        state = await self._svc.materialize_state(
-            graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
-        nodes, edges = state["nodes"], state["edges"]
-        if self._scope:                                   # view-scoped export (Phase 4)
-            nodes, edges = filter_to_scope(nodes, edges, self._scope)
-        nodes, edges = filter_to_selection(nodes, edges, self._select_ids, self._select_types)
-        records = records_from_state(nodes, edges)
-        # Every property is its own column: existing ones (unioned in column_order) + any the user
-        # asked to add, so a brand-new property is an empty column ready to fill.
-        schema_props = {"node": self._extra_props, "edge": self._extra_props} if self._extra_props else None
-        columns = column_order(records, schema_props)
+        # A draft as it stands now is pinned to no commit: every read of it comes from one
+        # REPEATABLE READ transaction instead, or edits landing during a long export could give it
+        # edges to nodes it never wrote, or nodes and edges from two different states.
+        async with (pinned_reads() if branch_id and as_of_seq is None
+                    else contextlib.nullcontext()):
+            return await self._write(job_id, lease, graph_id, fmt, as_of_seq, branch_id,
+                                     result_uri)
 
-        adapter = get_adapter(fmt)
+    async def _write(self, job_id: str, lease: Lease, graph_id: str, fmt: str,
+                     as_of_seq: Optional[int], branch_id: Optional[str],
+                     result_uri: str) -> Dict[str, int]:
+        """:meth:`run`'s body: stream the snapshot to ``result_uri`` and finish the job."""
+        from .snapshot import open_snapshot
 
-        async def _iter() -> AsyncIterator[Dict[str, Any]]:
-            for rec in records:
-                yield rec
+        # Read a page at a time from one pinned snapshot (stream.py), never the whole state. A
+        # branch_id (a working draft) composes main + committed + staged changes — so a user can
+        # export their in-progress branch, edit in Excel, and re-import onto the same branch.
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+        keep = (await stream.view_entities(snap, self._scope))["keep"] if self._scope else None
+        selection = stream.Selection.of(keep=keep, ids=self._select_ids, types=self._select_types)
+        # A spreadsheet makes every property its own column: existing ones + any the user asked to
+        # add, so a brand-new property is an empty column ready to fill.
+        tally = {"node": 0, "edge": 0}
+        stats = stream.TypeStats() if self._package is not None else None
+        written = 0
+        said = time.monotonic()
 
-        stat = await self._store.put_stream(result_uri, adapter.write(_iter(), columns=columns))
+        async def counted(chunks):
+            """The file's bytes, counted. At most every ``_PROGRESS_SECS``, as a chunk comes, the
+            job says how far it has got — this pass's records (a spreadsheet reads them all once
+            for its columns first) and the bytes so far — in a fenced checkpoint, which is also
+            where a superseded or stopping worker stops writing."""
+            nonlocal written, said
+            async for chunk in chunks:
+                written += len(chunk)
+                if time.monotonic() - said >= _PROGRESS_SECS:
+                    said = time.monotonic()
+                    lease.check()
+                    async with db.graphver_session() as s:
+                        # Merged into the row's summary, not replacing it: its ``takeovers`` is
+                        # the claim's poison count, and an export that cleared it with every
+                        # tick would be taken over forever by a worker it keeps killing.
+                        row = await s.get(JobORM, job_id)
+                        await lease.checkpoint(s, summary={
+                            **(row.summary or {}), "nodes": tally["node"], "edges": tally["edge"],
+                            "passes": tally.get("passes", 0), "bytes": written})
+                yield chunk
 
-        summary = {"nodes": len(nodes), "edges": len(edges), "bytes": stat.size}
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id)
-            row.status = "completed"
-            row.completed_at = _now()
-            row.updated_at = _now()
-            row.summary = summary
+        # It takes its turn with the streamed exports (the lease keeps the job alive while it waits).
+        body = stream.in_turn(stream.write_export(
+            lambda: stream.record_pages(snap, selection, tally=tally, stats=stats),
+            fmt=fmt, props=self._extra_props))
+        if self._package is not None:
+            body = self._package.write(body, tally, stats)
+        async with contextlib.aclosing(body):           # its turn goes back even if the store fails
+            stat = await self._store.put_stream(result_uri, counted(body))
+
+        summary = {"nodes": tally["node"], "edges": tally["edge"], "bytes": stat.size}
+        if self._package is not None:
+            summary["package"] = self._package.summary(stat.size)
+        if not await lease.finish("completed", summary=summary, result_uri=result_uri):
+            raise Superseded(f"export job {job_id} (epoch {lease.epoch}) was taken over before it "
+                             "could finish")
         return summary

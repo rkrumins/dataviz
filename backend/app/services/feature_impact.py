@@ -33,6 +33,8 @@ from backend.app.db.models import (
     OntologyORM,
     UserORM,
     ViewORM,
+    ViewVersionORM,
+    view_is_live,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,7 @@ class ImpactFact:
 
 async def _live_views(session: AsyncSession) -> int:
     r = await session.execute(
-        select(func.count()).select_from(ViewORM).where(ViewORM.deleted_at.is_(None))
+        select(func.count()).select_from(ViewORM).where(view_is_live())
     )
     return int(r.scalar() or 0)
 
@@ -93,7 +95,7 @@ async def _view_modes_probe(session: AsyncSession) -> list[ImpactFact]:
     """
     r = await session.execute(
         select(ViewORM.view_type, func.count())
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .group_by(ViewORM.view_type)
         .order_by(func.count().desc())
     )
@@ -161,6 +163,25 @@ async def _layer_history_probe(session: AsyncSession) -> list[ImpactFact]:
             count=layers,
             label="semantic layers" if layers != 1 else "semantic layer",
             consequence="Their history is hidden, not deleted. Every version is retained and returns the moment this is switched back on.",
+            tone="neutral",
+        )
+    ]
+
+
+async def _view_history_probe(session: AsyncSession) -> list[ImpactFact]:
+    r = await session.execute(
+        select(func.count(func.distinct(ViewVersionORM.view_id)))
+        .join(ViewORM, ViewORM.id == ViewVersionORM.view_id)
+        .where(view_is_live())
+    )
+    views = int(r.scalar() or 0)
+    if not views:
+        return []
+    return [
+        ImpactFact(
+            count=views,
+            label="views with a version history" if views != 1 else "view with a version history",
+            consequence="Their history is hidden, not deleted. Versions keep being recorded, and all of them return the moment this is switched back on.",
             tone="neutral",
         )
     ]
@@ -247,6 +268,7 @@ PROBES: dict[str, Callable[[AsyncSession], Awaitable[list[ImpactFact]]]] = {
     "semanticLayerImportEnabled": _semantic_layers_probe,
     "semanticLayerNonAdminEditing": _semantic_layers_probe,
     "semanticLayerVersionHistory": _layer_history_probe,
+    "viewPortabilityEnabled": _view_history_probe,
     "signupEnabled": _signup_probe,
     "inviteLinksEnabled": _invite_links_probe,
     "announcementsEnabled": _announcements_probe,

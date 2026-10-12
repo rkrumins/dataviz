@@ -63,9 +63,41 @@ async def _run() -> None:
     await db.dispose_engine()
 
 
+async def _run_total_exact_or_null() -> None:
+    """A window that stops early has seen only part of the set: its total is
+    null, never a too-low number, and paging still reaches every node."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    G = await svc.create_graph(
+        data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u")
+    gid, main = G["graph_id"], G["main_branch_id"]
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed", containment_edge_types=CONT,
+                        ops=[_n(f"n_{i:02d}", f"n_{i:02d}", "Node") for i in range(30)])
+
+    seen, cursor = [], None
+    for page_no in range(20):  # loop guard
+        tl = await svc.top_level_from_state(
+            graph_id=gid, branch_id=main, containment_edge_types=CONT,
+            root_entity_types=["Roots"], entity_types=["Node"], limit=5, cursor=cursor)
+        if page_no == 0:
+            assert tl["totalCount"] is None and tl["hasMore"] is True, tl["totalCount"]
+        assert tl["totalCount"] in (None, 30), tl["totalCount"]
+        seen += [n["displayName"] for n in tl["nodes"]]
+        if not tl["hasMore"]:
+            break
+        cursor = tl["nextCursor"]
+    assert seen == [f"n_{i:02d}" for i in range(30)]
+    await db.dispose_engine()
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_top_level_window_growth_e2e():
     asyncio.run(_run())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_top_level_total_is_exact_or_null_e2e():
+    asyncio.run(_run_total_exact_or_null())
 
 
 if __name__ == "__main__":

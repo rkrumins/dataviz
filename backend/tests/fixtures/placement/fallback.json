@@ -1,0 +1,203 @@
+{
+  "cases": [
+    {
+      "name": "fallback-first-show-unassigned-by-order",
+      "summary": "COMPILE fallbackLayerId: the first layer BY ORDER with showUnassigned true takes unplaced nodes (PLACE tier 8); placed nodes keep their rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "c", "name": "C", "order": 2, "entityTypes": [], "showUnassigned": true },
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [], "showUnassigned": true },
+              { "id": "d", "name": "D", "order": 3, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "unknown" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "b", "source": "fallback" },
+        "y": { "layerId": "d", "source": "rule", "ruleId": "_type_d_dataset" }
+      }
+    },
+    {
+      "name": "fallback-is-not-inherited",
+      "summary": "PLACE tier 8 cascade null: a fallback placement is display only and passes nothing, so an unclaimed child falls back itself (no inheritedFrom).",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [], "showUnassigned": true },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "c", "entityType": "container" },
+        { "urn": "d", "entityType": "dataset" },
+        { "urn": "e", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "c", "target": "d", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "e", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "c": { "layerId": "a", "source": "fallback" },
+        "d": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
+        "e": { "layerId": "a", "source": "fallback" }
+      }
+    },
+    {
+      "name": "fallback-never-in-curated-scope",
+      "summary": "PLACE tier 4 before tier 8: curated scope stops at none, so showUnassigned never applies.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [], "showUnassigned": true }],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "unknown" }, { "urn": "y" }],
+      "expect": { "x": { "source": "none" }, "y": { "layerId": "a", "source": "explicit" } }
+    },
+    {
+      "name": "fallback-after-inherits-from-parent-false",
+      "summary": "PLACE tier 8: a child cut off by its parent's inheritsFromParent false falls to the fallback layer.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "f", "name": "F", "order": 0, "entityTypes": [], "showUnassigned": true },
+              {
+                "id": "a",
+                "name": "A",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rp", "priority": 1, "entityTypes": ["domain"], "inheritsFromParent": false }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "domain" }, { "urn": "c", "entityType": "attribute" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "rp" },
+        "c": { "layerId": "f", "source": "fallback" }
+      }
+    },
+    {
+      "name": "soft-inheritance-beats-fallback",
+      "summary": "PLACE tier 7 before tier 8: an unclaimed child of a rule-placed parent inherits rather than falling back.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "f", "name": "F", "order": 0, "entityTypes": [], "showUnassigned": true },
+              { "id": "a", "name": "A", "order": 1, "entityTypes": ["domain"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "domain" }, { "urn": "c", "entityType": "attribute" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "show-unassigned-must-be-exactly-true",
+      "summary": "COMPILE fallbackLayerId: showUnassigned counts only when it is the boolean true; 'true' and 1 do not.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [], "showUnassigned": "true" },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [], "showUnassigned": 1 },
+              { "id": "c", "name": "C", "order": 2, "entityTypes": [], "showUnassigned": true }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "unknown" }],
+      "expect": { "x": { "layerId": "c", "source": "fallback" } }
+    },
+    {
+      "name": "stale-explicit-falls-through-to-fallback",
+      "summary": "PLACE stale: a stale entry with nothing else to place it lands on the fallback layer and carries staleExplicit.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [], "showUnassigned": true }],
+            "assignments": { "x": { "layerId": "gone", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "unknown" }],
+      "expect": { "x": { "layerId": "a", "source": "fallback", "staleExplicit": true } }
+    },
+    {
+      "name": "fallback-parent-passes-nothing-to-a-child-with-another-parent",
+      "summary": "PLACE_ALL ctx: a fallback parent offers no context, so a child with a second, rule-placed parent inherits from it without ambiguity.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "f", "name": "F", "order": 0, "entityTypes": [], "showUnassigned": true },
+              { "id": "a", "name": "A", "order": 1, "entityTypes": ["domain"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p1", "entityType": "folder" },
+        { "urn": "p2", "entityType": "domain" },
+        { "urn": "x", "entityType": "attribute" },
+        { "urn": "y", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "y", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "f", "source": "fallback" },
+        "p2": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "x": { "layerId": "a", "source": "inherited", "inheritedFrom": "p2" },
+        "y": { "layerId": "f", "source": "fallback" }
+      }
+    },
+    {
+      "name": "no-layers-places-nothing",
+      "summary": "PLACE tier 9: with no layers there is no rule and no fallback, so every node is none.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": { "referenceLayout": { "layers": [], "assignments": {} } }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "source": "none" } }
+    }
+  ]
+}

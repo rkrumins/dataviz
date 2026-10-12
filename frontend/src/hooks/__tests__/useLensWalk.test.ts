@@ -18,6 +18,7 @@ import {
   WALK_REQUEST_FAILSAFE,
   WALK_PAGE_NODES,
   WALK_FIRST_PAGE_NODES,
+  KEEP_WALKED_FOCALS,
 } from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -811,5 +812,124 @@ describe('useLensWalk — full flow flips on MID-SESSION', () => {
     await waitFor(() => expectFineCalls(traceClosure, 2))
     await waitFor(() => expect(result.current.walkProgressFor('F')?.phase).toBe('done'))
     expect(result.current.walkFor('F')!.model.nodes.map(n => n.urn).sort()).toEqual(['F', 'up1', 'up2'])
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Several focals at once — the canvas's bulk trace
+// ---------------------------------------------------------------------------
+
+/**
+ * A bulk trace walks every selected seed. The walks stay INDEPENDENT — each
+ * keeps its own model, so one seed's truncation, checkpoint or failure is
+ * never attributed to another — while the concurrency budget stays SHARED,
+ * because it bounds requests in flight and five seeds must not put five
+ * times the load on the server.
+ */
+describe('useLensWalk — several focals', () => {
+  it('walks every focal it is given', async () => {
+    const { provider, traceClosure } = makeProvider()
+    const { result } = renderHook(() => useLensWalk(['a', 'b', 'c'], provider, 1))
+
+    await waitFor(() => {
+      expect(result.current.walkFor('a')?.status).toBe('done')
+      expect(result.current.walkFor('b')?.status).toBe('done')
+      expect(result.current.walkFor('c')?.status).toBe('done')
+    })
+    expect(new Set(fineCalls(traceClosure).map(c => (c[0] as { urn: string }).urn)))
+      .toEqual(new Set(['a', 'b', 'c']))
+  })
+
+  it('a single urn still behaves exactly as before', async () => {
+    const { provider, traceClosure } = makeProvider()
+    const { result } = renderHook(() => useLensWalk('a', provider, 2))
+
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+    expectFineCalls(traceClosure, 1)
+    expect(fineCalls(traceClosure)[0]![0]).toMatchObject({ urn: 'a', direction: 'both' })
+  })
+
+  it('keeps each focal’s model separate', async () => {
+    const { provider } = makeProvider((req) => closureResult({
+      focus: { urn: req.urn as string, level: 0, entityType: 'table' },
+      nodes: [gn(`${req.urn}-partner`)],
+    }))
+    const { result } = renderHook(() => useLensWalk(['a', 'b'], provider, 1))
+
+    await waitFor(() => {
+      expect(result.current.walkFor('a')?.status).toBe('done')
+      expect(result.current.walkFor('b')?.status).toBe('done')
+    })
+    const urnsOf = (u: string) => result.current.walkFor(u)!.model.nodes.map(n => n.urn)
+    expect(urnsOf('a')).toContain('a-partner')
+    expect(urnsOf('a')).not.toContain('b-partner')
+    expect(urnsOf('b')).toContain('b-partner')
+  })
+
+  it('does not re-fetch a focal already walked when a seed is added', async () => {
+    const { provider, traceClosure } = makeProvider()
+    const { result, rerender } = renderHook(
+      ({ focals }: { focals: string[] }) => useLensWalk(focals, provider, 1),
+      { initialProps: { focals: ['a'] } },
+    )
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+    const afterFirst = fineCalls(traceClosure).length
+
+    rerender({ focals: ['a', 'b'] })
+    await waitFor(() => expect(result.current.walkFor('b')?.status).toBe('done'))
+
+    // Only 'b' cost a request; 'a' was a cache hit.
+    expect(fineCalls(traceClosure).length).toBe(afterFirst + 1)
+  })
+
+  it('walks the rest when one focal fails', async () => {
+    const { provider } = makeProvider((req) => {
+      if (req.urn === 'a') throw new Error('boom')
+      return closureResult({ focus: { urn: req.urn as string, level: 0, entityType: 'table' } })
+    })
+    const { result } = renderHook(() => useLensWalk(['a', 'b'], provider, 1))
+
+    await waitFor(() => {
+      expect(result.current.walkFor('a')?.status).toBe('error')
+      expect(result.current.walkFor('b')?.status).toBe('done')
+    })
+  })
+
+  it('clears the session when the selection empties', async () => {
+    const { provider } = makeProvider()
+    const { result, rerender } = renderHook(
+      ({ focals }: { focals: string[] }) => useLensWalk(focals, provider, 1),
+      { initialProps: { focals: ['a'] } },
+    )
+    await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))
+
+    rerender({ focals: [] })
+    await waitFor(() => expect(result.current.walkFor('a')).toBeNull())
+  })
+})
+
+describe('useLensWalk — walked focals are released, least recent first', () => {
+  it('keeps the focal being walked and the most recent ones; a released focal walks afresh', async () => {
+    const { provider, traceClosure } = makeProvider()
+    const focals = Array.from({ length: KEEP_WALKED_FOCALS + 3 }, (_, i) => `f${i}`)
+    const { result, rerender } = renderHook(({ focus }) => useLensWalk(focus, provider), { initialProps: { focus: focals[0] } })
+    for (const f of focals) {
+      rerender({ focus: f })
+      await waitFor(() => expect(result.current.walkFor(f)?.status).toBe('done'))
+    }
+    const last = focals[focals.length - 1]
+    // The current focal and the KEEP most recent before it are held…
+    expect(result.current.walkFor(last)).not.toBeNull()
+    for (const f of focals.slice(-1 - KEEP_WALKED_FOCALS, -1)) expect(result.current.walkFor(f)).not.toBeNull()
+    // …the oldest are released.
+    expect(result.current.walkFor(focals[0])).toBeNull()
+    expect(result.current.walkFor(focals[1])).toBeNull()
+
+    // Stepping back to a released focal walks it again.
+    const before = fineCalls(traceClosure).length
+    rerender({ focus: focals[0] })
+    await waitFor(() => expect(result.current.walkFor(focals[0])?.status).toBe('done'))
+    expect(fineCalls(traceClosure).length).toBe(before + 1)
   })
 })

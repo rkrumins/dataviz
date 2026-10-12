@@ -42,6 +42,9 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
+    viewPortabilityEnabled: false,        // experimental preview — ships OFF
+    viewExportEnabled: true,
+    viewImportEnabled: true,
     blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
     // Fail OPEN to "workspaces decide". Guessing the strictest value on a
@@ -55,6 +58,17 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     semanticLayerAutoSuggest: true,
     semanticLayerVersionHistory: true,
     semanticLayerNonAdminEditing: false,  // fail CLOSED — see above
+    // Fail CLOSED, same reasoning: this WIDENS who can read platform-wide
+    // growth and how many workspaces exist. Guessing "on" while the real value
+    // is still in flight would publish that to everyone for a few hundred
+    // milliseconds, and it is not a disclosure you can take back.
+    analyticsPublicEnabled: false,
+    // Both fail CLOSED, to the narrow end of their ladder. Guessing the
+    // permissive value while the real one is in flight would name colleagues,
+    // or name workspaces, for a few hundred milliseconds — and a disclosure
+    // cannot be taken back.
+    analyticsPrivacyMode: 'strict',
+    analyticsWorkspaceVisibility: false,
     signupEnabled: false,                 // fail CLOSED — this one is a door
     // Fail OPEN, unlike signupEnabled, and the asymmetry is the point: seeding
     // this `false` would re-create the bug it exists to control. A visitor
@@ -64,6 +78,8 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     // never be what stops someone.
     inviteLinksEnabled: true,
     toursEnabled: false,                  // experimental preview — ships OFF
+    canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
+    placementContractEnabled: false,      // experimental preview — ships OFF
     // Fail CLOSED, and for once that is the CHEAP direction rather than the
     // cautious one: off means every surface keeps its periodic check against
     // the change manifest, which is correct, just a minute slower. Guessing

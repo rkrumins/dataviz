@@ -29,7 +29,8 @@ export function accountedLineageEdges(
   const raw = model.lineageEdges.filter(e => e.kind !== 'rollup')
   const parentOf = modelParentOf(model)
   const cells: RollupCell[] = rollups.map(e => ({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 }))
-  const ledger = buildLedger(model, opts.vouchAll ? undefined : new Set<string>(), raw)
+  // The accounting asks the ledger about its cells' pairs and nothing else.
+  const ledger = buildLedger(model, opts.vouchAll ? undefined : new Set<string>(), raw, cells)
   const byId = new Map(rollups.map(e => [`${e.sourceUrn}>${e.targetUrn}`, e]))
   const out: LensEdgeLike[] = [...raw]
   for (const [key, w] of accountRollups(cells, ledger, parentOf, { floor: false })) {

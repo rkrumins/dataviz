@@ -98,6 +98,16 @@ export const POLLING_INTERVALS = {
    */
   notifications: 60_000,
   /**
+   * "Your connections are still catching up" — the canvas asks the projector
+   * whether a source really is behind, and it only arms once a read came back
+   * SHORT. So this is the one poll guaranteed to be running while the graph
+   * store is already hurting, on every affected viewer at once. 60s rather
+   * than the 15s it started at: the condition it watches clears in minutes,
+   * not seconds, and a minute of notice latency on a banner that says "this
+   * clears on its own" costs the reader nothing.
+   */
+  projectionCatchUp: 60_000,
+  /**
    * Canvas auto-retry cadence while the graph provider is warming up
    * (loading its dataset) or briefly unavailable. Deliberately NOT tight:
    * a graph that's reloading takes seconds-to-minutes, so hammering every
@@ -164,4 +174,29 @@ export function withJitter(baseMs: number, frac = 0.3): number {
   if (!(baseMs > 0)) return 0
   const spread = Number.isFinite(frac) ? Math.max(0, Math.min(1, frac)) : 0
   return Math.floor(baseMs + Math.random() * baseMs * spread)
+}
+
+/**
+ * How long a background lookup waits before asking again after its nth
+ * failure in a row (n ≥ 1): 2s, doubling, capped at a minute, and jittered
+ * so canvases that failed together do not come back together. For the
+ * lookups a card's lineage markers wait on (ancestor chains, degree totals):
+ * they retry on their own clock, not on the next canvas change, which may
+ * never come.
+ */
+export function lookupRetryDelayMs(failures: number): number {
+  return withJitter(Math.min(60_000, 2_000 * 2 ** Math.max(0, failures - 1)))
+}
+
+/**
+ * How long a job's progress poll (an import, an export, a publish, enabling
+ * version control) waits before asking again after its `tick`th answer
+ * (0-based): 1s for the first five, so a short job's result shows at once,
+ * then 2s, and 5s once thirty answers have shown the job to be a long one:
+ * each dialog watching a job that runs for an hour asks about 700 times,
+ * rather than 3,600 at a steady second. Jittered, so dialogs opened together
+ * don't keep asking together.
+ */
+export function jobPollDelayMs(tick: number): number {
+  return withJitter(tick < 5 ? 1_000 : tick < 30 ? 2_000 : 5_000)
 }

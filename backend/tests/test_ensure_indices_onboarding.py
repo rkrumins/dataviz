@@ -109,6 +109,10 @@ def _bare_provider(graph):
 
     p = object.__new__(FalkorDBProvider)
     p._graph = graph
+    # ``__init__`` never runs on an ``object.__new__`` double, so every
+    # attribute the method under test reads has to be set here. The
+    # one-sweep-per-pod guard (falkordb_provider.py:4943) reads this.
+    p._index_sweeping = False
     return p
 
 

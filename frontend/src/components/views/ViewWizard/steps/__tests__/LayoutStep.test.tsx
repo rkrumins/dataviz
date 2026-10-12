@@ -7,10 +7,14 @@
  * write path where placements live exclusively in formData.assignments.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// The data source's ontology, as useDataSourceSchema reports it — mutable so a
+// case can give the source an ontology, or hold it loading.
+const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], isLoading: false }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
-  useDataSourceSchema: () => ({ entityTypes: [], isLoading: false, isError: false }),
+  useDataSourceSchema: () => ({ entityTypes: ds.entityTypes, isLoading: ds.isLoading, isError: false }),
 }))
 
 vi.mock('@/services/contextModelService', () => ({
@@ -29,6 +33,7 @@ vi.mock('@/store/workspaces', () => {
   return { useWorkspacesStore }
 })
 
+import { listTemplates } from '@/services/contextModelService'
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
 
@@ -56,6 +61,11 @@ function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   }
 }
 
+afterEach(() => {
+  ds.entityTypes = []
+  ds.isLoading = false
+})
+
 describe('LayoutStep — template application', () => {
   it('applying a Quick Start template copies layer structure but never assignments', async () => {
     const updateFormData = vi.fn()
@@ -82,5 +92,58 @@ describe('LayoutStep — template application', () => {
     // the template (templates don't carry assignments in the first place).
     expect(call.assignments).toEqual({})
     expect(call.layers.every((l: { entityAssignments?: unknown }) => !l.entityAssignments)).toBe(true)
+  })
+
+  it("resolves a backend template's types against the data source ontology", async () => {
+    ds.entityTypes = [
+      { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 0, canContain: [] } },
+      { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 0, canContain: [] } },
+    ]
+    // A seeded template written for another ontology.
+    vi.mocked(listTemplates).mockResolvedValueOnce([{
+      id: 'cm1', name: 'Data Mesh', description: '', category: 'data-mesh', isTemplate: true, isActive: true,
+      instanceAssignments: {}, createdAt: '', updatedAt: '',
+      layersConfig: [
+        { name: 'Domain', entityTypes: ['domain', 'bounded-context'] },
+        { name: 'Data Product', entityTypes: ['data-product', 'dataset', 'DATASET', 'table'] },
+      ],
+    }] as never)
+    const updateFormData = vi.fn()
+    render(
+      <LayoutStep
+        formData={makeFormData()}
+        updateFormData={updateFormData}
+        layoutTypes={layoutTypes}
+        dataSourceId="ds1"
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('Data Mesh')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Data Mesh'))
+
+    const call = updateFormData.mock.calls[0][0]
+    // A layer whose types the ontology lacks survives, empty; a declared type
+    // takes the ontology's spelling, once.
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domain', 'Data Product'])
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['Dataset']])
+  })
+
+  it('waits for the ontology before a template can be applied', async () => {
+    ds.isLoading = true
+    render(
+      <LayoutStep
+        formData={makeFormData()}
+        updateFormData={vi.fn()}
+        layoutTypes={layoutTypes}
+        dataSourceId="ds1"
+      />
+    )
+
+    // The backend templates have settled; only the ontology is still loading.
+    await waitFor(() => {
+      expect(listTemplates).toHaveBeenCalled()
+      expect(screen.queryByText('Loading from backend…')).not.toBeInTheDocument()
+    })
+    expect(screen.queryByText('Simple')).not.toBeInTheDocument()
   })
 })

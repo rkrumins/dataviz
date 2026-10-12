@@ -13,6 +13,7 @@ import { ArrowRight, GitFork, Search } from 'lucide-react'
 import { type FC, useMemo } from 'react'
 
 import { cn } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { AncestorRef, PathHit } from '@/types/search'
 
 
@@ -64,10 +65,14 @@ export const PathResultPanel: FC<PathResultPanelProps> = ({
                     <span className="text-ink font-medium">
                         {sorted.length} {sorted.length === 1 ? 'path' : 'paths'}
                     </span>
-                    {' '}found{truncated ? ' (truncated — increase max paths to see more)' : ''}.
+                    {' '}found{truncated ? ' — the most one search returns, so there may be more' : ''}.
                     Shortest first.
                 </span>
             </div>
+            <p className="text-[11px] leading-relaxed text-ink-muted">
+                {truncated && 'Raise maxPaths (up to 128) in Code to see more. '}
+                Paths can't be exported — Export saves a search's matches, and these are routes.
+            </p>
 
             <div className="flex flex-col gap-2.5">
                 {sorted.map((path, i) => (
@@ -107,7 +112,7 @@ function PathCard({
                     <>
                         <span className="text-ink-muted/50">·</span>
                         <span className="font-mono truncate">
-                            {uniqueEdgeTypes(path).join(' → ')}
+                            {uniqueEdgeTypes(path).map(t => edgeTypeCopy(t)?.label ?? t).join(' → ')}
                         </span>
                     </>
                 )}
@@ -167,7 +172,7 @@ function EdgeArrow({ edgeType }: { edgeType: string }) {
     return (
         <div className="flex flex-col items-center px-0.5">
             <span className="text-[8px] font-mono text-ink-muted leading-none">
-                {edgeType}
+                {edgeTypeCopy(edgeType)?.label ?? edgeType}
             </span>
             <ArrowRight className="w-3 h-3 text-ink-muted" strokeWidth={2} />
         </div>

@@ -86,6 +86,16 @@ export function viewTypeColor(viewType: string): string {
 
 export interface ViewTypeMeta {
   label: string
+  /**
+   * One sentence saying what this KIND of view is, for a reader who has met
+   * the words "Context View" and does not know what makes one different from
+   * a Graph. Lives here beside the label because the label is useless without
+   * it and the two must never disagree; the wizard's layout cards say the same
+   * thing at length, this is the hover-sized version.
+   *
+   * Active voice, no trailing full stop — the tooltip copy rule.
+   */
+  what: string
   /** Icon-chip classes: background + border + icon colour, together. */
   iconBg: string
   hoverBorder: string
@@ -95,30 +105,35 @@ export interface ViewTypeMeta {
 const VIEW_TYPE_META: Record<string, ViewTypeMeta> = {
   graph: {
     label: 'Graph',
+    what: 'Entities and their relationships, positioned freely — for exploring how things connect',
     iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
     hoverBorder: 'group-hover:border-indigo-500/30',
     gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
   },
   hierarchy: {
     label: 'Hierarchy',
+    what: 'Entities nested inside their parents, as a tree you expand and collapse',
     iconBg: 'bg-violet-500/10 border-violet-500/20 text-violet-500',
     hoverBorder: 'group-hover:border-violet-500/30',
     gradient: 'bg-gradient-to-br from-violet-500/[0.04] via-transparent to-transparent',
   },
   table: {
     label: 'Table',
+    what: 'One row per entity, with its properties as columns',
     iconBg: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500',
     hoverBorder: 'group-hover:border-emerald-500/30',
     gradient: 'bg-gradient-to-br from-emerald-500/[0.04] via-transparent to-transparent',
   },
   'layered-lineage': {
     label: 'Lineage',
+    what: 'Data flowing left to right, one column per stage of its journey',
     iconBg: 'bg-amber-500/10 border-amber-500/20 text-amber-500',
     hoverBorder: 'group-hover:border-amber-500/30',
     gradient: 'bg-gradient-to-br from-amber-500/[0.04] via-transparent to-transparent',
   },
   reference: {
     label: 'Context View',
+    what: 'Entities sorted into columns you define, with lineage drawn between them — the layout built for reading a pipeline',
     iconBg: 'bg-rose-500/10 border-rose-500/20 text-rose-500',
     hoverBorder: 'group-hover:border-rose-500/30',
     gradient: 'bg-gradient-to-br from-rose-500/[0.04] via-transparent to-transparent',
@@ -127,6 +142,7 @@ const VIEW_TYPE_META: Record<string, ViewTypeMeta> = {
 
 const DEFAULT_VIEW_TYPE_META: ViewTypeMeta = {
   label: 'View',
+  what: 'A saved way of looking at this data',
   iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
   hoverBorder: 'group-hover:border-indigo-500/30',
   gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',

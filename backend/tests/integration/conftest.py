@@ -51,3 +51,19 @@ def pytest_sessionfinish(session, exitstatus):
         asyncio.run(_cleanup())
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _fresh_graphver_engine():
+    """Start every test on a fresh versioning engine.
+
+    Each e2e test runs its own event loop (``asyncio.run``), and the versioning engine is a
+    module-level cache whose pooled connections belong to the loop that opened them. A test
+    that fails before its own ``dispose_engine()`` would hand the next test connections on a
+    closed loop ("attached to a different loop"), failing it for no reason of its own.
+    """
+    from backend.app.services.versioning import db as gvdb
+
+    gvdb._engine = None
+    gvdb._session_factory = None
+    yield

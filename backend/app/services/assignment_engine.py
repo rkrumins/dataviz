@@ -8,6 +8,9 @@ from backend.app.models.assignment import (
     ViewLayerConfig, LayerAssignmentRuleConfig, LayerAssignmentStats,
     EntityAssignmentConfig
 )
+from backend.app.services.view_placement import (
+    PlacementSpec, containment_from_ontology, containment_parents, facts_from_graph_node, place_all,
+)
 
 if TYPE_CHECKING:
     from backend.app.services.context_engine import ContextEngine
@@ -22,6 +25,8 @@ class AssignmentEngine:
         self,
         request: LayerAssignmentRequest,
         engine: Optional["ContextEngine"] = None,
+        *,
+        contract: bool = False,
     ) -> LayerAssignmentResult:
         """Compute layer assignments using the provided workspace-scoped engine.
 
@@ -30,6 +35,9 @@ class AssignmentEngine:
         runs before any provider call that needs containment edge types, which
         eliminates the intermittent ProviderConfigurationError that occurred
         when the ontology cache was cold.
+
+        ``contract`` (``placementContractEnabled``) places the same nodes and
+        edges through the placement contract instead (``_contract_result``).
 
         """
         if engine is None:
@@ -91,6 +99,9 @@ class AssignmentEngine:
             "Computing assignments for %d nodes and %d edges (scope=%d urns, truncated=%s)",
             len(all_nodes), len(all_edges), len(scope_urns), truncated)
 
+        if contract:
+            return self._contract_result(request, ontology, all_nodes, all_edges, truncated, start_time)
+
         # 2. Build Indices
         rule_index = self._build_rule_index(request.layers, request.assignments)
         # Pass the resolved set directly — an empty set is valid (flat graph, no hierarchy).
@@ -131,6 +142,65 @@ class AssignmentEngine:
                 totalNodes=len(all_nodes),
                 assignedNodes=len(assignments),
                 computeTimeMs=compute_time_ms,
+                truncated=truncated,
+            )
+        )
+
+    def _contract_result(
+        self,
+        request: LayerAssignmentRequest,
+        ontology: Any,
+        nodes: List[GraphNode],
+        edges: List[GraphEdge],
+        truncated: bool,
+        start_time: float,
+    ) -> LayerAssignmentResult:
+        """``compute_assignments`` through the placement contract (``view_placement``): the same
+        nodes, parents taken from the same edges in the ontology's containment direction. The
+        response keeps its shape: members become assignments, fallback and none stay unassigned."""
+        spec = PlacementSpec.from_config(_request_config(request))
+        facts = {n.urn: facts_from_graph_node(n) for n in nodes}
+        parents = containment_parents(edges, containment_from_ontology(ontology))
+        placements = place_all(spec, facts, parents)
+
+        assignments: Dict[str, EntityAssignment] = {}
+        unassigned_ids: List[str] = []
+        for urn, placement in placements.items():  # parents first
+            if not placement.member:
+                unassigned_ids.append(urn)
+                continue
+            if placement.source == "explicit":
+                logical_node_id = spec.explicit[urn].logical_node_id
+            elif placement.inherited_from:
+                logical_node_id = assignments[placement.inherited_from].logical_node_id
+            else:
+                logical_node_id = None
+            assignments[urn] = EntityAssignment(
+                entityId=urn,
+                layerId=placement.layer_id,
+                logicalNodeId=logical_node_id,
+                ruleId=placement.rule_id,
+                isInherited=placement.source == "inherited",
+                inheritedFromId=placement.inherited_from,
+                confidence=1.0,
+            )
+
+        # One parent per child: the one it inherited from, else the smallest in-scope URN.
+        parent_map: Dict[str, str] = {}
+        for child, candidates in parents.items():
+            in_scope = [p for p in candidates if p in facts and p != child]
+            if child in facts and in_scope:
+                parent_map[child] = placements[child].inherited_from or min(in_scope)
+
+        return LayerAssignmentResult(
+            assignments=assignments,
+            parentMap=parent_map,
+            edges=request.include_edges and edges or [],
+            unassignedEntityIds=unassigned_ids,
+            stats=LayerAssignmentStats(
+                totalNodes=len(nodes),
+                assignedNodes=len(assignments),
+                computeTimeMs=(time.time() - start_time) * 1000,
                 truncated=truncated,
             )
         )
@@ -282,22 +352,23 @@ class AssignmentEngine:
         entity_scope: Optional[str] = None,
     ) -> Optional[EntityAssignment]:
         """Precedence (curated scope = explicit assignment + containment
-        inheritance ONLY; tiers 3-5 are open-scope-only and gated below):
+        inheritance ONLY; tiers 3-4 are open-scope-only and gated below):
 
         1. Explicit assignment (instances index: request-level `assignments`
            map, unioned with legacy per-layer `entity_assignments`) — all scopes.
         2. Containment inheritance from the parent's resolved layer — all
            scopes, UNLESS the parent's own winning entry was itself an explicit
            assignment with `inheritsChildren == False`, in which case this
-           entity falls through to 3-5 instead of inheriting.
+           entity falls through to 3-4 instead of inheriting.
         3. The node's own persisted `layerAssignment` property hint — open
            scope only (skipped entirely in curated scope).
         4. Generic rules (type/tag/pattern) — open scope only.
-        5. Default `layers[0]` — open scope only.
 
-        In curated scope, anything that falls through tiers 1-2 gets no
-        assignment (`None`) — the caller already treats a `None` result as
-        "unassigned" (see `unassignedEntityIds` in `compute_assignments`).
+        Anything that matches none of the tiers in force gets no assignment
+        (`None`) — in curated scope after tiers 1-2, in open scope after tiers
+        1-4. The caller treats `None` as "unassigned" (see `unassignedEntityIds`
+        in `compute_assignments`); the canvas renders such an entity only in a
+        layer that opts in with `showUnassigned`.
         """
         entity_id = node.urn
         entity_type = node.entity_type
@@ -331,8 +402,8 @@ class AssignmentEngine:
                 )
 
         # Curated scope: explicit assignment + containment inheritance only.
-        # Node hints, generic rules, and the layers[0] default do not place
-        # entities in curated scope — unassigned entities drop out.
+        # Node hints and generic rules do not place entities in curated
+        # scope — unassigned entities drop out.
         if entity_scope == "curated":
             return None
 
@@ -390,14 +461,21 @@ class AssignmentEngine:
                 confidence=1.0
             )
 
-        # 5. Default (open scope only)
-        if layers:
-            return EntityAssignment(
-                entityId=entity_id,
-                layerId=layers[0].id,
-                confidence=0.5 # Default fallback
-            )
-
         return None
+
+
+def _request_config(request: LayerAssignmentRequest) -> dict:
+    """The request as the FULL view config the placement contract compiles: its layers, its
+    assignments and its scope (``view_placement.PlacementSpec.from_config``)."""
+    return {
+        "content": {"entityScope": request.entity_scope},
+        "layout": {"referenceLayout": {
+            "layers": [layer.model_dump(mode="json", by_alias=True, exclude_none=True)
+                       for layer in request.layers],
+            "assignments": {urn: entry.model_dump(mode="json", by_alias=True, exclude_none=True)
+                            for urn, entry in request.assignments.items()},
+        }},
+    }
+
 
 assignment_engine = AssignmentEngine()

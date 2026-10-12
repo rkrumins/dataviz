@@ -20,7 +20,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
-    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle,
+    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -30,12 +30,13 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
+import { freshnessState, isDrifting, isPlatformMastered, isProjectionStalled, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState, StatusFacet } from './freshnessTriage'
 import {
     DRIFT_SPEC, DriftStateBadge,
 } from './DriftStateBadge'
 import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
+import { holdLabel, holdTitle, rowHold, timeUntil } from './holds'
 import { SelectionCheckbox } from './SelectionCheckbox'
 import { resolveLastActivity, type LastActivityKind } from './lastActivity'
 
@@ -55,42 +56,30 @@ export function deriveStaleSince(row: FreshnessRowData): string | null {
     return null
 }
 
-/** Minutes/hours/days until a future instant, or null if it's already past. */
-export function timeUntil(iso?: string | null): string | null {
-    if (!iso) return null
-    const ms = new Date(iso).getTime() - Date.now()
-    if (Number.isNaN(ms) || ms <= 0) return null
-    const mins = Math.round(ms / 60000)
-    if (mins < 60) return `${mins}m`
-    const hours = Math.round(mins / 60)
-    if (hours < 24) return `${hours}h`
-    return `${Math.round(hours / 24)}d`
-}
-
 /** The reconciliation fields `automationChip` reads off a fleet row — a
  *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
 type AutomationRow = Pick<
-    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'
+    FreshnessRowData,
+    'driftState' | 'autoReconcile' | 'pausedUntil' | 'projectorCurrent'
+    | 'heldBy' | 'heldKind' | 'heldUntil'
 >
 
 /**
  * The automation-state chip for a fleet row. Absence is the signal: a
- * healthy, automated source (in sync, not paused) returns null rather than
+ * healthy, automated source (in sync, not held) returns null rather than
  * repeating "everything is fine" on every row — a chip appears only for a
  * state worth interrupting the scan for.
  *
- * Precedence, most consequential first: the breaker (suspended) always
- * wins, even over an active snooze — a person is needed regardless of
- * whether the source is also paused. Next, a deliberate opt-out — it is
- * more permanent than a snooze (a snooze lapses on its own; automation
- * being off does not), so it wins over "Paused" too: a drifting, paused,
- * opted-out source resumes on nothing when the snooze lapses, and telling
- * the operator "Paused" there would imply otherwise. Only once neither of
- * those applies does a snooze get to surface, and only while it is
- * actually holding back a real drift verdict — pausing a source that never
- * drifts looks identical to automation working normally, so it stays as
- * quiet as any healthy row.
+ * Precedence, most consequential first: a stalled projection (automation
+ * is not merely stopped, the action it would take is the wrong one), then
+ * the breaker (suspended) — a person is needed regardless of whether the
+ * source is also held — then the hold. A hold shows whether or not the row
+ * is currently drifting: a paused source that happens to be fine right now
+ * is exactly the one an operator forgets, and it is the pause, not the
+ * drift, that they set and will need to release. The chip names the WIDEST
+ * scope holding the row (``rowHold``), so it points at the control that
+ * will actually release it.
  */
 export function automationChip(row: AutomationRow): {
     label: string
@@ -101,6 +90,18 @@ export function automationChip(row: AutomationRow): {
 } | null {
     const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
 
+    // Ranked above the breaker: automation is not merely stopped here, the
+    // action it would take is the wrong one. Saying nothing in this column
+    // would imply automation has the source covered.
+    if (isProjectionStalled(row)) {
+        return {
+            label: "Rebuild won't fix this", tone: DRIFT_SPEC.projectionStalled.tone,
+            facet: 'projectionStalled', Icon: Unplug,
+            title: 'Automatic reconciliation deliberately never rebuilds this '
+                + 'source, and a rebuild would not restore its rolled-up '
+                + 'connections. Someone has to look at version control for it.',
+        }
+    }
     if (row.driftState === 'suspended') {
         return {
             label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone,
@@ -108,24 +109,12 @@ export function automationChip(row: AutomationRow): {
             title: DRIFT_SPEC.suspended.title,
         }
     }
-    if (row.autoReconcile === false) {
-        // No StatusFacet filters to "automation off" sources specifically,
-        // so this resolves to '' (the existing "all" facet) — the render
-        // site treats an empty facet as non-interactive rather than wiring
-        // up a click that would silently just clear the status filter.
+    const hold = rowHold(row)
+    if (hold) {
         return {
-            label: 'Automation off', tone: neutralTone, facet: '', Icon: Minus,
-            title: 'Automatic reconciliation is turned off for this source. '
-                + 'Drift is still detected and shown, but nothing is rebuilt '
-                + 'automatically.',
-        }
-    }
-    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
-    if (drifting && timeUntil(row.pausedUntil)) {
-        return {
-            label: 'Paused', tone: neutralTone, facet: 'drifting',
-            Icon: PauseCircle,
-            title: 'An operator paused automatic reconciliation for this source.',
+            label: holdLabel(hold), tone: neutralTone, facet: 'held',
+            Icon: hold.kind === 'paused' ? PauseCircle : StopCircle,
+            title: holdTitle(hold),
         }
     }
     // No cooldown chip here on purpose: FreshnessBadges already renders
@@ -286,6 +275,9 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     const pct = phase && typeof job?.progress === 'number'
         ? Math.min(100, Math.max(0, Math.round(job.progress)))
         : null
+    // The pressure ladder's current scan width, when the running job had to
+    // narrow (recorded at every checkpoint, so at most seconds behind).
+    const narrowingWidth = job?.status === 'running' ? job.runStats?.adapted?.scan_width ?? null : null
 
     if (state === 'failed') {
         badges.push(
@@ -303,8 +295,10 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 <Badge
                     tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
                     Icon={Loader2} spin
-                    label={pct != null ? `Recomputing · ${phase} · ${pct}%` : 'Recomputing'}
-                    title="A lineage rebuild is running now. Open Job History for the full detail."
+                    label={(pct != null ? `Recomputing · ${phase} · ${pct}%` : 'Recomputing') + (narrowingWidth != null ? ' · narrowing' : '')}
+                    title={narrowingWidth != null
+                        ? `A lineage rebuild is running now, reading ${narrowingWidth.toLocaleString()} rows per scan to fit the graph store's per-query limits — slower, still progressing. Open Job History for the full detail.`
+                        : 'A lineage rebuild is running now. Open Job History for the full detail.'}
                 />
             </Link>,
         )
@@ -333,7 +327,13 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="Lineage has never been built for this source."
             />,
         )
-    } else if (state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)) {
+    } else if (
+        state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)
+        // A wedged source's last build succeeded and carries no marker, so
+        // every other signal here reads healthy while its rolled-up
+        // connections are not reaching the product at all.
+        && !isProjectionStalled(row)
+    ) {
         badges.push(
             <Badge key="upToDate"
                 tone="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
@@ -345,8 +345,16 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
 
     // Current overlay verdict — additive on failed/queued rows, and the
     // primary freshness label when a ready source is drifting.
-    if (isDrifting(row) || isReconcileSuspended(row)) {
-        badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
+    if (isDrifting(row) || isReconcileSuspended(row) || isProjectionStalled(row)) {
+        // The live watermark can outrun the sweep stamp, so the badge is
+        // rendered from the verdict the predicate actually reached — otherwise
+        // the row suppresses "Up to date" and then shows the sky "Version
+        // controlled" badge in its place, which reads as reassurance.
+        badges.push(
+            <DriftStateBadge key="driftState"
+                state={isProjectionStalled(row) ? 'projectionStalled' : row.driftState}
+            />,
+        )
     }
 
     if (row.drifted === true) {
@@ -551,10 +559,36 @@ export function FreshnessRow({
             {/* Cache */}
             <td className="px-3 py-2 align-top">
                 <div className="flex flex-col gap-1">
-                    <CacheStatusPill cached={row.cacheAsOf != null} />
-                    {row.cacheAsOf
-                        ? <TimeStamp at={row.cacheAsOf} prefix="updated" icon={Database} />
-                        : <EmptyCell />}
+                    {/* Three different facts, three different lines. The
+                        column used to show ONE — the last generation bump —
+                        under the word "updated", which reads as the opposite
+                        of what it is: that stamp moves when the cache is
+                        thrown AWAY. A month-old invalidation therefore
+                        rendered as a month-old refresh, on a source that may
+                        have been serving warm answers all month, or nothing
+                        at all. Neither could be told from the other. */}
+                    <CacheStatusPill cached={row.cacheBuiltAt != null} />
+                    {row.cacheBuiltAt
+                        ? <TimeStamp at={row.cacheBuiltAt} prefix="built" icon={Database} />
+                        : <span className="text-[11px] text-ink-muted">nothing warm stored</span>}
+                    {row.cacheAsOf && (
+                        <TimeStamp at={row.cacheAsOf} prefix="invalidated" icon={RotateCcw} />
+                    )}
+                    {row.cacheBuiltGeneration != null && (
+                        // The version the stored answer was built at, which
+                        // IS the version being served: the stamp is dropped
+                        // when the generation moves, so one that resolves
+                        // cannot be behind. There is deliberately no
+                        // comparison against `row.generation` — that is the
+                        // CONTENT counter alone, while this is the composite
+                        // "content.rollup" that rollup endpoints key on, so
+                        // comparing them warned permanently on every healthy
+                        // rollup source and never moved on the commonest
+                        // invalidation of all.
+                        <span className="text-[10px] text-ink-muted tabular-nums" data-testid="cache-version">
+                            serving v{row.cacheBuiltGeneration}
+                        </span>
+                    )}
                 </div>
             </td>
 
@@ -620,10 +654,10 @@ export function FreshnessRow({
                             chip.tone,
                         )
                         const content = <><Icon className="w-3 h-3 shrink-0" />{chip.label}</>
-                        // Only 'suspended'/'drifting' have a real facet to filter
-                        // to — 'Automation off' resolves to '' (see automationChip)
-                        // and stays a plain label rather than a click that would
-                        // just clear the status filter.
+                        // Every chip carries a real facet today (suspended,
+                        // projectionStalled, held); the empty-facet guard stays
+                        // so a future chip without one renders as a plain label
+                        // rather than a click that would just clear the filter.
                         return chip.facet && onFilterStatus ? (
                             <button
                                 type="button"
@@ -737,6 +771,12 @@ export function FreshnessRow({
                             runStats={job.runStats}
                             status={job.status}
                         />
+                        {job.status === 'running' && job.runStats?.adapted?.scan_width != null && (
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                                Going slower to fit the graph store: scans narrowed to {job.runStats.adapted.scan_width.toLocaleString()} rows
+                                {job.runStats.adapted.reconcile_strategy === 'keys_only' ? ', keys-only reconcile' : ''}. It keeps going.
+                            </p>
+                        )}
                         <div className="flex justify-end">
                             <Link
                                 to={jobHistoryPath({ dataSourceId: row.dataSourceId })}

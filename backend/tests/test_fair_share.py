@@ -129,3 +129,22 @@ async def test_enforce_passes_through_on_allow() -> None:
     redis = _make_redis([1, 0])
     bucket = WorkspaceTokenBucket(redis)
     await bucket.enforce(ENDPOINT_CHILDREN, "ws1")  # should not raise
+
+
+def test_a_batched_canvas_request_cannot_outrun_the_aggregated_budget():
+    """Every bootstrap CONTAINS an aggregated read. Sizing the two buckets
+    independently gave canvas-bootstrap 10 rps against a bucket sized for 5,
+    so the moment the client started using the batched endpoint a workspace
+    could push aggregation at twice the rate that budget was set for. The
+    derivation is the fix: raising one raises the other, and the relationship
+    cannot drift."""
+    from backend.app.services import fair_share as fs
+
+    agg = fs._CONFIGS[fs.ENDPOINT_AGGREGATED]
+    boot = fs._CONFIGS[fs.ENDPOINT_CANVAS_BOOTSTRAP]
+    assert (boot.rate_per_sec, boot.burst) == (agg.rate_per_sec, agg.burst)
+    # An expand's aggregated leg is a DELTA bounded by the new children —
+    # the cheaper half of the same read, so twice the budget and no more.
+    expand = fs._CONFIGS[fs.ENDPOINT_CANVAS_EXPAND]
+    assert expand.rate_per_sec == agg.rate_per_sec * 2
+    assert expand.burst == agg.burst * 2

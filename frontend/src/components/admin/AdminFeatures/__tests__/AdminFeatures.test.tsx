@@ -12,9 +12,10 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminFeatures } from '../index'
+import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import type { FeatureDefinition } from '@/services/featuresService'
 
-// jsdom has no matchMedia, and the page's Toast/ResetConfirmModal ask it whether the user prefers
+// jsdom has no matchMedia, and the page's ResetConfirmModal asks it whether the user prefers
 // reduced motion. A browser always answers; the test environment has to be told to.
 beforeAll(() => {
     window.matchMedia = window.matchMedia ?? (((query: string) => ({
@@ -29,10 +30,10 @@ beforeAll(() => {
     })) as unknown as typeof window.matchMedia)
 })
 
+/** Resolves TRUE — "the save landed" — which is what makes the page speak. */
 const handleChange = vi.fn()
 
-/** Mutable so a test can put the page into "just saved" and reach for Undo. */
-const hookState = { toastVisible: false, savingKey: null as string | null }
+const hookState = { savingKey: null as string | null }
 
 /** The impact probe is a network call; each test says what it should answer. */
 const impact = vi.fn()
@@ -91,11 +92,6 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
         load: vi.fn(),
         handleChange,
         savingKey: hookState.savingKey,
-        toastVisible: hookState.toastVisible,
-        setToastVisible: vi.fn(),
-        errorToastVisible: false,
-        setErrorToastVisible: vi.fn(),
-        errorToastMessage: '',
         resetConfirmOpen: false,
         setResetConfirmOpen: vi.fn(),
         handleReset: vi.fn(),
@@ -111,11 +107,15 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
 }))
 
 beforeEach(() => {
-    handleChange.mockClear()
-    hookState.toastVisible = false
+    handleChange.mockReset()
+    handleChange.mockResolvedValue(true)
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     impact.mockReset()
     impact.mockResolvedValue({ known: false, facts: [] })
 })
+
+/** What the app's ONE notification stack is currently holding. */
+const raised = () => useNotificationStore.getState().notifications
 
 /** The selected feature has a switch in the index AND in the spec pane. Both are real ways to take
  *  a capability away from every user, so both have to ask — a confirmation on one route only is a
@@ -146,7 +146,7 @@ describe('AdminFeatures — turning things off', () => {
         expect(within(dialog).getByText(/Browsing the graph by hand/i)).toBeInTheDocument()
     })
 
-    it('turns it off once confirmed', async () => {
+    it('turns it off once confirmed, and says so in the app’s own notification stack', async () => {
         const user = userEvent.setup()
         render(<AdminFeatures />)
 
@@ -154,6 +154,8 @@ describe('AdminFeatures — turning things off', () => {
         await user.click(await screen.findByRole('button', { name: /Turn off for everyone/i }))
 
         await waitFor(() => expect(handleChange).toHaveBeenCalledWith('traceEnabled', false))
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].message).toBe('Lineage trace — turned off')
     })
 
     it('backing out changes nothing', async () => {
@@ -264,20 +266,30 @@ describe('ConfirmTurnOff — the facts that decide the question', () => {
 describe('Undo', () => {
     it('offers to take the last change back, and puts it back exactly as it was', async () => {
         const user = userEvent.setup()
-        const { rerender } = render(<AdminFeatures />)
+        // The page has no pop-up of its own: it speaks through the one stack the
+        // whole app speaks through, which is the only reason two of them can no
+        // longer overlap in the bottom-right corner.
+        render(<><AdminFeatures /><NotificationStack /></>)
 
         // Turn Self-registration ON (instant — no confirmation for giving a capability back).
         await user.click(switchesFor(/Turn Self-registration on/i)[0])
         expect(handleChange).toHaveBeenCalledWith('signupEnabled', true)
 
-        // The hook reports "saved", so the toast appears — carrying the escape hatch.
-        handleChange.mockClear()
-        hookState.toastVisible = true
-        rerender(<AdminFeatures />)
+        // The save lands, so the page says what it changed — carrying the escape hatch.
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].message).toBe('Self-registration — updated')
+        expect(raised()[0].action?.label).toBe('Undo')
+        // ...and it lives longer than an ordinary remark: an Undo nobody can reach
+        // in time is worse than none, because it was visibly there and then gone.
+        expect(raised()[0].durationMs).toBe(8000)
 
+        handleChange.mockClear()
         await user.click(screen.getByRole('button', { name: /Undo/i }))
 
         // Back to FALSE — its value before the change, not its shipped default by luck.
         expect(handleChange).toHaveBeenCalledWith('signupEnabled', false)
+        // And the reversal is confirmed too, without offering to undo the undo.
+        await waitFor(() => expect(raised().map(n => n.message)).toEqual(['Saved']))
+        expect(raised()[0].action).toBeUndefined()
     })
 })

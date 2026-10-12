@@ -41,7 +41,7 @@ async def _run_flow() -> None:
     await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice", message="seed")
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="bob", ops=[
         {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "Alpha v2", "entityType": "Dataset"}},
-        {"op": "create", "entity_kind": "node", "entity_id": "C", "payload": {"displayName": "Gamma"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "C", "payload": {"entityType": "Dataset", "displayName": "Gamma"}},
     ])
     await svc.checkpoint(graph_id=gid, branch_id=d, actor="bob", message="rename A, add C")
 
@@ -73,10 +73,10 @@ async def _run_flow() -> None:
     gid2 = g2["graph_id"]
     da = await svc.open_draft(graph_id=gid2, owner="alice")
     dbob = await svc.open_draft(graph_id=gid2, owner="bob")  # both based on seq 1
-    await svc.stage_changes(graph_id=gid2, branch_id=da, actor="alice", ops=[{"op": "create", "entity_kind": "node", "entity_id": "X", "payload": {"displayName": "X"}}])
+    await svc.stage_changes(graph_id=gid2, branch_id=da, actor="alice", ops=[{"op": "create", "entity_kind": "node", "entity_id": "X", "payload": {"entityType": "Dataset", "displayName": "X"}}])
     await svc.checkpoint(graph_id=gid2, branch_id=da, actor="alice")
     await svc.publish(graph_id=gid2, branch_id=da, actor="alice", message="A adds X")   # main -> 2
-    await svc.stage_changes(graph_id=gid2, branch_id=dbob, actor="bob", ops=[{"op": "create", "entity_kind": "node", "entity_id": "Y", "payload": {"displayName": "Y"}}])
+    await svc.stage_changes(graph_id=gid2, branch_id=dbob, actor="bob", ops=[{"op": "create", "entity_kind": "node", "entity_id": "Y", "payload": {"entityType": "Dataset", "displayName": "Y"}}])
     await svc.checkpoint(graph_id=gid2, branch_id=dbob, actor="bob")
     with pytest.raises(NotUpToDate):                                        # behind main → must pull latest first
         await svc.publish(graph_id=gid2, branch_id=dbob, actor="bob", message="B adds Y")
@@ -90,8 +90,8 @@ async def _run_flow() -> None:
     gid3 = g3["graph_id"]
     d3 = await svc.open_draft(graph_id=gid3, owner="alice")
     await svc.stage_changes(graph_id=gid3, branch_id=d3, actor="alice", ops=[
-        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A"}},
-        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": {"displayName": "B"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"entityType": "Dataset", "displayName": "A"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": {"entityType": "Dataset", "displayName": "B"}},
         {"op": "create", "entity_kind": "edge", "entity_id": "E", "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "A", "targetEntityId": "B"}},
     ])
     await svc.checkpoint(graph_id=gid3, branch_id=d3, actor="alice")
@@ -109,7 +109,7 @@ async def _run_flow() -> None:
     main4 = await svc.main_branch_id(gid4)
     seed = await svc.open_draft(graph_id=gid4, owner="alice")
     await svc.stage_changes(graph_id=gid4, branch_id=seed, actor="alice", ops=[
-        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 1, "f2": 1}}])
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"entityType": "Dataset", "displayName": "A", "f1": 1, "f2": 1}}])
     await svc.checkpoint(graph_id=gid4, branch_id=seed, actor="alice")
     await svc.publish(graph_id=gid4, branch_id=seed, actor="alice", message="seed A")     # main 2
     d1 = await svc.open_draft(graph_id=gid4, owner="alice")

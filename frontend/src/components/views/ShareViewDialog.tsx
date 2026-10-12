@@ -58,10 +58,10 @@ import {
     type DirectoryGroup,
     type DirectoryUser,
 } from '@/services/userDirectoryService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
-import { avatarGradient, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { buildViewShareUrl } from '@/lib/viewShareLink'
 import {
     VISIBILITY_ACCENT,
@@ -124,7 +124,7 @@ export function ShareViewDialog({
     const [denialReason, setDenialReason] = useState('')
     const [requestBusy, setRequestBusy] = useState(false)
 
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const { appName } = useBrand()
     const queryClient = useQueryClient()
     const currentUserId = useAuthStore(s => s.user?.id ?? null)
@@ -224,12 +224,12 @@ export function ShareViewDialog({
         try {
             await updateViewVisibility(viewId, newVisibility)
             onVisibilityChange?.(newVisibility)
-            showToast('success', `Visibility set to ${newVisibility}`)
+            notify('success', `Visibility set to ${newVisibility}`)
         } catch (err) {
             // Revert on error
             setVisibility(prev)
             const message = err instanceof Error ? err.message : 'Failed to update visibility'
-            showToast(
+            notify(
                 'error',
                 message.includes('workspace:view:publish')
                     ? 'Publishing to everyone needs the "Publish views" permission — ask a workspace admin.'
@@ -238,7 +238,7 @@ export function ShareViewDialog({
         } finally {
             setSavingVisibility(false)
         }
-    }, [viewId, visibility, onVisibilityChange, showToast])
+    }, [viewId, visibility, onVisibilityChange, notify])
 
     // ── Publication requests ────────────────────────────────────────
 
@@ -262,17 +262,17 @@ export function ShareViewDialog({
         try {
             await action()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : fallbackError)
+            notify('error', err instanceof Error ? err.message : fallbackError)
         } finally {
             setRequestBusy(false)
         }
-    }, [showToast])
+    }, [notify])
 
     const handleSendRequest = () => runRequestAction(async () => {
         applyView(await requestViewPublication(viewId, requestNote))
         setComposingRequest(false)
         setRequestNote('')
-        showToast(
+        notify(
             'success',
             "Sent to your workspace admins — you'll see it here when it's approved",
         )
@@ -282,21 +282,21 @@ export function ShareViewDialog({
         await withdrawViewPublicationRequest(viewId)
         setAnswered(null)
         invalidateView()
-        showToast('success', 'Publication request withdrawn')
+        notify('success', 'Publication request withdrawn')
     }, 'Could not withdraw the request')
 
     const handleApproveRequest = () => runRequestAction(async () => {
         const updated = await approveViewPublication(viewId)
         applyView(updated)
         onVisibilityChange?.(updated.visibility)
-        showToast('success', `"${viewName}" is now visible to everyone`)
+        notify('success', `"${viewName}" is now visible to everyone`)
     }, 'Could not approve the request')
 
     const handleDenyRequest = () => runRequestAction(async () => {
         applyView(await denyViewPublication(viewId, denialReason))
         setComposingDenial(false)
         setDenialReason('')
-        showToast('success', 'Publication request declined')
+        notify('success', 'Publication request declined')
     }, 'Could not decline the request')
 
     const handleAddGrant = async (
@@ -311,9 +311,9 @@ export function ShareViewDialog({
                 subjectType, subjectId, role,
             })
             setGrants(prev => [...(prev ?? []), grant])
-            showToast('success', `Shared with ${label} as ${role}`)
+            notify('success', `Shared with ${label} as ${role}`)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to add grant')
+            notify('error', err instanceof Error ? err.message : 'Failed to add grant')
         } finally {
             setAdding(false)
         }
@@ -330,7 +330,7 @@ export function ShareViewDialog({
             setGrants(g => (g ?? []).map(x => x.grantId === grant.grantId ? updated : x))
         } catch (err) {
             setGrants(prev)
-            showToast('error', err instanceof Error ? err.message : 'Failed to change role')
+            notify('error', err instanceof Error ? err.message : 'Failed to change role')
         } finally {
             setBusyGrantId(null)
         }
@@ -341,9 +341,9 @@ export function ShareViewDialog({
         try {
             await viewGrantsService.delete(viewId, grant.grantId)
             setGrants(prev => (prev ?? []).filter(g => g.grantId !== grant.grantId))
-            showToast('success', `Removed ${grant.subject.displayName ?? grant.subject.id}`)
+            notify('success', `Removed ${grant.subject.displayName ?? grant.subject.id}`)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to remove grant')
+            notify('error', err instanceof Error ? err.message : 'Failed to remove grant')
         } finally {
             setBusyGrantId(null)
         }
@@ -693,12 +693,12 @@ export function ShareViewDialog({
                                                             className="flex items-center gap-2.5 px-3 py-2 group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                                         >
                                                             {isUser ? (
-                                                                <div className={cn(
-                                                                    'w-8 h-8 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                                                    avatarGradient(name),
-                                                                )}>
-                                                                    {initialsOf(name)}
-                                                                </div>
+                                                                <UserAvatar
+                                                                    userId={g.subject.id}
+                                                                    name={name}
+                                                                    shape="gradient"
+                                                                    className="w-8 h-8 text-[10px] font-bold"
+                                                                />
                                                             ) : (
                                                                 <div className="w-8 h-8 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-600 dark:text-violet-400 shrink-0">
                                                                     <Users2 className="w-3.5 h-3.5" />
@@ -801,7 +801,7 @@ function AddGrantPicker({
                 if (subjectType === 'user') setUsers(result.users)
                 else setGroups(result.groups)
             } catch {
-                /* errors surface via toast in onAdd */
+                /* errors surface via notification in onAdd */
             }
         }, 200)
         return () => { cancelled = true; clearTimeout(timer) }
@@ -901,12 +901,12 @@ function AddGrantPicker({
                                     className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50 border-b last:border-b-0 border-glass-border"
                                 >
                                     {isUser ? (
-                                        <div className={cn(
-                                            'w-7 h-7 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                            avatarGradient(label),
-                                        )}>
-                                            {initialsOf(label)}
-                                        </div>
+                                        <UserAvatar
+                                            userId={u!.id}
+                                            name={label}
+                                            shape="gradient"
+                                            className="w-7 h-7 text-[10px] font-bold"
+                                        />
                                     ) : (
                                         <div className="w-7 h-7 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-600 dark:text-violet-400 shrink-0">
                                             <Users2 className="w-3.5 h-3.5" />

@@ -5,8 +5,16 @@ earlier in the same import:
 
 * **nodes** match an existing entity by ``entity_id`` -> ``urn`` -> ``qualifiedName`` (else mint a
   new id and register it in the local indexes for later edges);
-* **edges** resolve endpoints via those node indexes and key by the ``(src_eid, tgt_eid, edge_type)``
-  triple (the same keying :meth:`sync_ingest` uses).
+* **edges** resolve endpoints the same way and key by the ``(src_eid, tgt_eid, EDGE_TYPE)`` triple
+  (the type upper-cased, as the edge-integrity gate compares it), keeping the stored spelling.
+
+``qualifiedName`` identifies only a row (or an edge end) that has no urn: it is not unique, so a row
+with a urn that matches nothing is a NEW entity, never folded into another urn's entity that
+happens to share its qualifiedName; and a qualifiedName that several entities carry (``None`` in
+``qname_to_eid``) names none of them — the row is quarantined rather than written to a guess. That
+holds inside one file too: a node this batch created answers to the file ``entity_id`` it was
+created from, and a later urn-less row carrying its qualifiedName under ANOTHER file entity_id is a
+second item, not an update of the first — it is quarantined, and the qualifiedName names neither.
 
 Emits ``{op, entity_kind, entity_id, payload}`` ops (nodes before edges) for
 :meth:`GraphVersioningService.apply_ops`, plus a per-row resolution record
@@ -158,8 +166,14 @@ def resolve_rows(
     ontology defines is quarantined (invalid) rather than written — partial acceptance, so a few bad
     rows don't fail the batch. Absent/empty type lists → the gate is skipped (best-effort)."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
-    qname_to_eid: Dict[str, str] = dict(indexes.get("qname_to_eid") or {})
-    edge_to_eid: Dict[tuple, str] = dict(indexes.get("edge_to_eid") or {})
+    qname_to_eid: Dict[str, Optional[str]] = dict(indexes.get("qname_to_eid") or {})   # None: several
+    edge_to_eid: Dict[tuple, str] = {(s, t, _etype_key(et)): eid
+                                     for (s, t, et), eid in (indexes.get("edge_to_eid") or {}).items()}
+    edge_type_of: Dict[str, str] = {}             # an edge created by this batch -> its spelling
+    # A node this batch created, by the file entity_id of the row that created it; and a
+    # qualifiedName such a node registered -> that file entity_id (None: its row carried none).
+    created_from: Dict[str, str] = {}
+    qname_from: Dict[str, Optional[str]] = {}
     node_eids: set = set(indexes.get("node_eids") or set())
     current: Dict[str, dict] = dict(indexes.get("current") or {})   # eid -> current payload
     node_types = _lc(ontology.get("node_types")) if ontology else None   # lowercased valid sets | None
@@ -178,7 +192,13 @@ def resolve_rows(
         if row.get("op") == "invalid":
             resolutions.append(_resolution(row, "invalid", None, reasons=[row.get("op_error") or "invalid row"]))
             continue
-        matched_eid = _match_node(row, urn_to_eid, qname_to_eid, node_eids)
+        matched_eid, ambiguous = _match_node(row, urn_to_eid, qname_to_eid, node_eids,
+                                             created_from, qname_from)
+        if ambiguous:
+            if row.get("qualifiedName") and not row.get("urn"):
+                qname_to_eid[row["qualifiedName"]] = None   # two items carry it: it names neither
+            resolutions.append(_resolution(row, "invalid", None, reasons=[ambiguous]))
+            continue
         if row.get("op") == "delete":
             if matched_eid:
                 ops.append({"op": "delete", "entity_kind": "node", "entity_id": matched_eid, "payload": None})
@@ -206,10 +226,14 @@ def resolve_rows(
             continue
         eid = mint_id()
         node_eids.add(eid)
+        if row.get("entity_id"):
+            created_from[row["entity_id"]] = eid
         if row.get("urn"):
             urn_to_eid[row["urn"]] = eid
-        if row.get("qualifiedName"):
-            qname_to_eid[row["qualifiedName"]] = eid
+        if row.get("qualifiedName"):                      # another entity's too: it names neither
+            qn = row["qualifiedName"]
+            qname_to_eid[qn] = None if qname_to_eid.get(qn, eid) != eid else eid
+            qname_from.setdefault(qn, row.get("entity_id") or None)
         p = _no_deletes(_node_payload(row))
         if "entityType" in p:
             p["entityType"] = _canon(p["entityType"], node_type_canon)
@@ -225,14 +249,17 @@ def resolve_rows(
             resolutions.append(_resolution(row, "invalid", None,
                 reasons=[f"'{row['edgeType']}' is not a valid edge type in this ontology"]))
             continue
-        seid = _resolve_endpoint(row, "source", node_eids, qname_to_eid, urn_to_eid)
-        teid = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid)
+        seid, s_ambiguous = _resolve_endpoint(row, "source", node_eids, qname_to_eid, urn_to_eid,
+                                              created_from, qname_from)
+        teid, t_ambiguous = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid,
+                                              created_from, qname_from)
         if not (row.get("edgeType") and seid and teid):
-            reason = "edge missing edgeType" if not row.get("edgeType") else "edge endpoint not found"
+            reason = ("edge missing edgeType" if not row.get("edgeType")
+                      else s_ambiguous or t_ambiguous or "edge endpoint not found")
             resolutions.append(_resolution(row, "invalid", None, reasons=[reason]))
             continue
-        etype = _canon(row["edgeType"], edge_type_canon)   # declared casing for key + payload
-        key = (seid, teid, etype)
+        etype = _canon(row["edgeType"], edge_type_canon)   # declared casing for a new edge
+        key = (seid, teid, _etype_key(etype))
         matched_eid = edge_to_eid.get(key)
         if row.get("op") == "delete":
             if matched_eid:
@@ -243,7 +270,9 @@ def resolve_rows(
             continue
         if matched_eid:
             ep = _edge_payload(row, seid, teid)
-            ep["edgeType"] = etype
+            # The matched edge keeps its spelling: a case variant is the same edge, not a retype.
+            ep["edgeType"] = (edge_type_of.get(matched_eid)
+                              or (current.get(matched_eid) or {}).get("edgeType") or etype)
             changed = _changed_fields(ep, current.get(matched_eid) or {})
             if not changed:
                 resolutions.append(_resolution(row, "unchanged", matched_eid))
@@ -253,6 +282,7 @@ def resolve_rows(
         else:
             eid = mint_id()
             edge_to_eid[key] = eid
+            edge_type_of[eid] = etype
             ep = _no_deletes(_edge_payload(row, seid, teid))
             ep["edgeType"] = etype
             ops.append({"op": "create", "entity_kind": "edge", "entity_id": eid, "payload": ep})
@@ -261,25 +291,42 @@ def resolve_rows(
     return ops, resolutions
 
 
-def _match_node(row, urn_to_eid, qname_to_eid, node_eids) -> str | None:
-    eid = row.get("entity_id")
-    if eid and eid in node_eids:
-        return eid
-    if row.get("urn") and row["urn"] in urn_to_eid:
-        return urn_to_eid[row["urn"]]
-    if row.get("qualifiedName") and row["qualifiedName"] in qname_to_eid:
-        return qname_to_eid[row["qualifiedName"]]
-    return None
+def _etype_key(edge_type) -> str:
+    """An edge type as edge identity compares it: case-insensitively (as the integrity gate does)."""
+    return str(edge_type or "").upper()
 
 
-def _resolve_endpoint(row, which, node_eids, qname_to_eid, urn_to_eid) -> str | None:
-    eid = row.get(f"{which}_entity_id")
+def _named(eid, urn, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
+           qname_from) -> Tuple[str | None, str | None]:
+    """The entity a row (or an edge end) names: by ``eid`` (an entity's, or the file's own id of a
+    node this batch created), then ``urn``, then — only when it has no urn — ``qname``.
+    ``(entity_id | None, None)``, or ``(None, reason)`` when its qualifiedName is carried by
+    several entities, or by a node this batch created from another of the file's entity ids."""
     if eid and eid in node_eids:
-        return eid
-    qname = row.get(f"{which}QualifiedName")
+        return eid, None
+    if eid and eid in created_from:
+        return created_from[eid], None
+    if urn:
+        return urn_to_eid.get(urn), None
     if qname and qname in qname_to_eid:
-        return qname_to_eid[qname]
-    urn = row.get(f"{which}Urn")
-    if urn and urn in urn_to_eid:
-        return urn_to_eid[urn]
-    return None
+        if qname_to_eid[qname] is None:
+            return None, (f"qualifiedName '{qname}' matches more than one entity — "
+                          "give the row a urn or an entity_id")
+        if eid and qname_from.get(qname) not in (None, eid):
+            return None, (f"qualifiedName '{qname}' is carried by more than one item in this file — "
+                          "give the rows a urn")
+        return qname_to_eid[qname], None
+    return None, None
+
+
+def _match_node(row, urn_to_eid, qname_to_eid, node_eids, created_from,
+                qname_from) -> Tuple[str | None, str | None]:
+    return _named(row.get("entity_id"), row.get("urn"), row.get("qualifiedName"),
+                  node_eids, urn_to_eid, qname_to_eid, created_from, qname_from)
+
+
+def _resolve_endpoint(row, which, node_eids, qname_to_eid, urn_to_eid, created_from,
+                      qname_from) -> Tuple[str | None, str | None]:
+    return _named(row.get(f"{which}_entity_id"), row.get(f"{which}Urn"),
+                  row.get(f"{which}QualifiedName"), node_eids, urn_to_eid, qname_to_eid,
+                  created_from, qname_from)

@@ -24,7 +24,7 @@ import { VERSIONING_KEYS } from '../hooks/useVersioning'
 
 /** The branches/resolve caches must reflect a draft the moment it exists — the
  *  ?branch deep-link guard validates the URL param against the CACHED branches
- *  list, and a stale list makes it reject (and toast about) a draft this very
+ *  list, and a stale list makes it reject (and notify about) a draft this very
  *  function just opened or resumed. Loaded lazily so this model module keeps
  *  react-query out of its static graph. Fire-and-forget; never blocks the caller. */
 function invalidateVersioningCaches(): void {

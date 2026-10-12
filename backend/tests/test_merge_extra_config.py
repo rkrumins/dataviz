@@ -78,3 +78,46 @@ class TestRegistryMergeExtraConfigCacheConnection:
         assert result["cacheConnection"] == {"host": "provider-cache.internal"}
         assert result["schemaMapping"]["nodeLabel"] == "Node"
         assert result["schemaMapping"]["urnProperty"] == "urn"
+
+
+class TestMergeExtraConfigFalkordbConnection:
+    """The same hole, one key over — and the one that reaches the GRAPH
+    credentials rather than the cache's.
+
+    ``extra_config.falkordbConnection`` is the provider's connection
+    topology: host, port, mode, the cluster's startupNodes, the sentinel
+    block, TLS, and the ``authEnabled`` gate.
+    ``ProviderRegistry._create_provider_instance`` hands it to the provider
+    as ``connection_config=`` **beside the decrypted ``username`` and
+    ``password``** — so a data source that could set it would make the
+    provider dial an attacker's host and authenticate to it, or flip
+    ``authEnabled`` false and dial out unauthenticated. The guard was written
+    for ``cacheConnection`` and never extended to its sibling.
+    """
+
+    def test_a_data_source_cannot_repoint_the_graph_connection(self, caplog):
+        provider_cfg = {"falkordbConnection": {"host": "falkor.internal", "mode": "cluster"}}
+        ds_cfg = {"falkordbConnection": {"host": "attacker.example", "authEnabled": False}}
+        with caplog.at_level("WARNING"):
+            result = ProviderManager._merge_extra_config(provider_cfg, ds_cfg)
+        assert result["falkordbConnection"] == {"host": "falkor.internal", "mode": "cluster"}
+        assert "attacker" not in str(result)
+        assert any("falkordbConnection" in rec.message for rec in caplog.records)
+
+    def test_it_cannot_introduce_one_a_provider_never_had(self):
+        result = ProviderManager._merge_extra_config(
+            {"other": "value"},
+            {"falkordbConnection": {"host": "attacker.example"}},
+        )
+        assert "falkordbConnection" not in result
+        assert result["other"] == "value"
+
+    def test_the_registry_path_is_guarded_too(self, caplog):
+        """Two merge implementations, and a guard on one is not a guard."""
+        with caplog.at_level("WARNING"):
+            result = ProviderRegistry._merge_extra_config(
+                {"falkordbConnection": {"host": "falkor.internal"}},
+                {"falkordbConnection": {"host": "attacker.example"}},
+            )
+        assert result["falkordbConnection"] == {"host": "falkor.internal"}
+        assert "attacker" not in str(result)

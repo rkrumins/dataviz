@@ -12,13 +12,20 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockProvider } = vi.hoisted(() => ({
-  mockProvider: {
+const { mockProvider } = vi.hoisted(() => {
+  const mockProvider = {
     getNodes: vi.fn(async () => []),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
-  },
-}))
+    // Type and root loads page through getNodesPage; it answers from this
+    // file's own getNodes mock, so each test's getNodes behaviour applies.
+    getNodesPage: vi.fn(async (q: { offset?: number }) => {
+      const nodes = await (mockProvider.getNodes as (q: unknown) => Promise<unknown[]>)(q)
+      return { nodes, hasMore: false, nextOffset: (q.offset ?? 0) + nodes.length }
+    }),
+  }
+  return { mockProvider }
+})
 
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => mockProvider,
@@ -80,7 +87,12 @@ describe('useGraphHydration provider-health recovery wiring', () => {
   it('unhealthy→healthy re-hydrates an unavailable canvas to ready', async () => {
     let down = true
     mockProvider.getNodes.mockImplementation(async () => {
-      if (down) throw new Error('ECONNREFUSED')
+      // The backend's own breaker saying the provider is unreachable.
+      if (down) {
+        throw Object.assign(new Error('API Error 503: circuit open'), {
+          status: 503, code: 'PROVIDER_UNAVAILABLE',
+        })
+      }
       return []
     })
 

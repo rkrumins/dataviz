@@ -6,39 +6,27 @@ import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
-import { NotificationBell } from '@/components/notifications/NotificationBell'
-import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
+import { InboxBell } from '@/components/inbox/InboxBell'
+import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
+import { UserAvatar } from '@/components/ui/UserAvatar'
+import { initialsOf } from '@/lib/avatar'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
 import {
   useAuthStore,
   usePermission,
   usePermissionClaims,
+  useAnyWorkspacePermission,
   effectiveRoleFor,
   SYSTEM_ROLE_LABELS,
   type SystemRole,
 } from '@/store/auth'
-import { useSchemaStore } from '@/store/schema'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
 
 interface TopBarProps {
   onOpenCommandPalette: () => void
-}
-
-/** Dynamic search placeholder based on route context */
-function useSearchPlaceholder(): string {
-  const location = useLocation()
-  const activeView = useSchemaStore((s) => s.getActiveView())
-
-  if (location.pathname.startsWith('/views/') && activeView) {
-    return `Search nodes in ${activeView.name}...`
-  }
-  if (location.pathname.startsWith('/explorer')) {
-    return 'Filter views by name, tag, or workspace...'
-  }
-  return 'Search workspaces, views, or commands...'
 }
 
 export function TopBar({ onOpenCommandPalette }: TopBarProps) {
@@ -54,10 +42,17 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const isSystemAdmin = usePermission('system:admin')
   const isOrgAdmin = usePermission('system:org-admin')
   const claims = usePermissionClaims()
+  // The invite-activity bell answers "did the links I sent work?" — so it is
+  // worth showing only to someone who can send one. Creating an invite needs
+  // `system:admin`, or `workspace:admin` on the target workspace under the
+  // ceiling `_enforce_invite_ceiling` applies (backend users.py `create_invite`);
+  // `useAnyWorkspacePermission` asks exactly that, short-circuiting on the two
+  // global roles. For everyone else the bell could never hold anything: the
+  // endpoint is scoped to the caller's own links, so it returned an empty list
+  // forever — a third look-alike icon in a row of them, for a thing they cannot do.
+  const canInvite = useAnyWorkspacePermission('workspace:admin')
   const location = useLocation()
-  const searchPlaceholder = useSearchPlaceholder()
   const navigate = useNavigate()
-  const avatar = useAvatarContent()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
   const avatarId = usePreferencesStore((s) => s.avatarId)
   const setAvatarId = usePreferencesStore((s) => s.setAvatarId)
@@ -116,36 +111,45 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   // users/groups; the section guards inside /admin enforce that).
   const showAdminCog = isSystemAdmin || isOrgAdmin
 
+  // Through the shared helper, seeded by whatever name actually exists:
+  // a full-name-only identity has blank halves and a displayName, and
+  // the old two-char concat rendered an empty badge for them.
   const initials = user
-    ? `${(user.firstName?.[0] ?? '').toUpperCase()}${(user.lastName?.[0] ?? '').toUpperCase()}`
+    ? initialsOf(
+        user.displayName
+        || `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
+      )
     : '?'
 
-  /** Renders the user avatar — chosen illustration or initials fallback */
+  /** Renders the user avatar — provider image over chosen illustration
+   *  over initials, via the shared component. */
   const renderAvatar = (size: 'sm' | 'md') => {
     const dims = size === 'sm' ? 'w-8 h-8' : 'w-9 h-9'
     const iconDims = size === 'sm' ? 'w-4 h-4' : 'w-5 h-5'
     const textSize = size === 'sm' ? 'text-xs' : 'text-sm'
 
-    if (avatar) {
-      return (
-        <div className={cn(dims, 'rounded-full flex items-center justify-center', avatar.bg)}>
-          {avatar.content(cn(iconDims, 'text-ink'))}
-        </div>
-      )
-    }
-    if (user) {
+    if (!user) {
       return (
         <div className={cn(dims, 'rounded-full flex items-center justify-center bg-accent-lineage/15')}>
-          <span className={cn(textSize, 'font-semibold text-accent-lineage select-none leading-none')}>
-            {initials}
-          </span>
+          <User className={cn(iconDims, 'text-accent-lineage')} />
         </div>
       )
     }
     return (
-      <div className={cn(dims, 'rounded-full flex items-center justify-center bg-accent-lineage/15')}>
-        <User className={cn(iconDims, 'text-accent-lineage')} />
-      </div>
+      <UserAvatar
+        userId={user.id}
+        name={user.displayName
+            || `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()}
+        avatarId={avatarId}
+        className={dims}
+        fallback={(
+          <span className={cn('flex h-full w-full items-center justify-center rounded-full bg-accent-lineage/15')}>
+            <span className={cn(textSize, 'font-semibold text-accent-lineage select-none leading-none')}>
+              {initials}
+            </span>
+          </span>
+        )}
+      />
     )
   }
 
@@ -188,7 +192,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           >
             <Search className="w-4 h-4 group-hover:text-accent-business transition-colors duration-200" />
             <span className="flex-1 text-left text-sm group-hover:text-ink-secondary transition-colors">
-              {searchPlaceholder}
+              Search pages, views, workspaces, docs…
             </span>
             <div className="flex items-center gap-1">
               <kbd className="kbd">⌘</kbd>
@@ -208,8 +212,8 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
-          <InviteActivityBell />
-          <NotificationBell />
+          {canInvite && <InviteActivityBell />}
+          <InboxBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
@@ -236,8 +240,13 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </button>
           )}
 
-          {/* User Menu */}
-          <DropdownMenu.Root>
+          {/* User Menu — non-modal, like every other dropdown in this app. A
+              MODAL Radix layer sets `body { pointer-events: none }` and only
+              clears it on effect cleanup; unmounting while open (a re-render
+              from an auth/branding/feature store, a route change) strands that
+              lock and the whole app goes click-dead until a reload. This menu
+              is mounted on every page, which made it the widest exposure left. */}
+          <DropdownMenu.Root modal={false}>
             <DropdownMenu.Trigger asChild>
               <button
                 className={cn(

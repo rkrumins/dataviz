@@ -1,0 +1,18 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      { "kind": "property", "key": "rowCount", "op": "gte", "value": 1000000, "valueType": "number" }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": {
+    "results": "hits",
+    "pageSize": 100,
+    "sortProperty": "rowCount",
+    "sortDir": "desc",
+    "includeAncestorPath": true
+  }
+}
