@@ -44,6 +44,8 @@ export interface DirectoryPerson {
     email: string | null
     deleted: boolean
     avatarId?: string | null
+    /** A profile picture is stored; false means there is none to ask for. */
+    hasImage?: boolean
 }
 
 /** The server names at most this many ids per request. */

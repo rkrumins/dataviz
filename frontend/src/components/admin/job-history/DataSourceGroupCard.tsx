@@ -13,7 +13,8 @@ import type { AggregationJobResponse } from '@/services/aggregationService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { PlacementBrief } from '@/services/graphStoreService'
 import { getProviderLogo } from '../ProviderLogos'
-import { formatDuration, timeAgo, type DataSourceMeta } from './shared'
+import { DateTime } from '@/components/ui/DateTime'
+import { formatDuration, type DataSourceMeta } from './shared'
 import { JobRow } from './JobRow'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -413,7 +414,7 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                             </span>
                         )}
                         {lastRunAt && (
-                            <span className="ml-auto text-ink-muted/60">{timeAgo(lastRunAt)}</span>
+                            <DateTime at={lastRunAt} prefix="Last run " className="ml-auto text-ink-muted" />
                         )}
                     </div>
 

@@ -106,7 +106,8 @@ async def name_summary(session: AsyncSession, doc: dict[str, Any]) -> dict[str, 
     for row in doc["topPeople"]:
         who = page.people.get(row["id"]) or {}
         row.update(name=who.get("name") or None, email=who.get("email"),
-                   deleted=bool(who.get("deleted")))
+                   deleted=bool(who.get("deleted")),
+                   avatarId=who.get("avatar_id"), hasImage=bool(who.get("has_image")))
     for row in doc["topTargets"]:
         row["label"] = row.get("label") or page.names.get(row.get("id") or "")
     for row in doc["handsOnSources"]:

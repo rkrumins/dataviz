@@ -7,8 +7,13 @@
  * this one, and who started it). Each is one click from becoming the event in
  * the drawer.
  *
+ * Every value is drawn as what it is — people with their faces, times
+ * readable and exact on hover, a change as before → after, ids named and
+ * copyable (`ActivityDetails`, `ValueView`).
+ *
  * The raw payload is the record as emitted, kept one disclosure down for when
- * the summary is not enough. A workspace admin's scope never receives it.
+ * the summary is not enough, highlighted and foldable. A workspace admin's
+ * scope never receives it.
  */
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
@@ -16,32 +21,53 @@ import { ArrowUpRight, ChevronRight, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
-import { formatUtc, timeAgo } from '@/lib/timeAgo'
+import { formatSpan, toUtcDate } from '@/lib/smartTime'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useActivityEvent } from '@/hooks/useActivity'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { DateTime, DateTimeTile } from '@/components/ui/DateTime'
+import { JsonTree } from '@/components/ui/JsonTree'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { SkeletonText } from '@/components/ui/Skeleton'
+import { IdChip } from '@/components/ui/ValueView'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import type { ActivityEvent, ActivityScope } from '@/services/activityService'
 
-import { ActivityPerson, IdField } from './ActivityPerson'
+import { ActivityDetails } from './ActivityDetails'
 import { CATEGORY_META, actorName, reasonExpected } from './activityMeta'
 import { activityLinks, personHref } from './activityLinks'
 
 const SECTION = 'text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted'
 
-/** A detail value as a reader would write it. */
-function detailText(value: unknown): string {
-    if (value === null || value === undefined) return '—'
-    if (typeof value === 'boolean') return value ? 'Yes' : 'No'
-    if (typeof value === 'string' || typeof value === 'number') return String(value)
-    return JSON.stringify(value)
+/** A raw identifier, shown where it is useful to copy rather than to read. */
+function IdField({ label, value, href }: { label: string; value?: string | null; href?: string }) {
+    if (!value) return null
+    return (
+        <div className="min-w-0">
+            <dt className={SECTION}>{label}</dt>
+            <dd className="mt-0.5 flex min-w-0 items-center gap-1">
+                {href ? (
+                    <a href={href} onClick={(e) => e.stopPropagation()}
+                       className="truncate font-mono text-[11px] text-ink-secondary hover:text-accent-lineage hover:underline">
+                        {value}
+                    </a>
+                ) : (
+                    <span className="truncate font-mono text-[11px] text-ink-secondary">{value}</span>
+                )}
+                <CopyButton value={value} label={`Copy ${label}`} className="p-0.5" />
+            </dd>
+        </div>
+    )
 }
 
-/** `triggerSource` → "Trigger source". */
-function detailLabel(key: string): string {
-    const words = key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase()
-    return words.charAt(0).toUpperCase() + words.slice(1)
+/** How long after it happened the event reached the log: worth saying only
+ *  when it is noticeable (an import, a stalled relay), never "0 s later". */
+function loggedLater(event: ActivityEvent): string | null {
+    const occurred = toUtcDate(event.occurredAt)?.getTime()
+    const recorded = toUtcDate(event.recordedAt)?.getTime()
+    if (occurred == null || recorded == null || recorded - occurred < 5_000) return null
+    return `Reached the log ${formatSpan(recorded - occurred)} later`
 }
 
 function RelatedList({ title, events, onOpen }: {
@@ -65,13 +91,7 @@ function RelatedList({ title, events, onOpen }: {
                                 {actorName(e) && <span className="font-semibold">{actorName(e)} · </span>}
                                 {e.summary || e.label}
                             </span>
-                            <time
-                                dateTime={e.occurredAt}
-                                title={formatUtc(e.occurredAt)}
-                                className="shrink-0 text-[10px] text-ink-muted"
-                            >
-                                {timeAgo(e.occurredAt)}
-                            </time>
+                            <DateTime at={e.occurredAt} className="shrink-0 text-[10px] text-ink-muted" />
                         </button>
                     </li>
                 ))}
@@ -94,9 +114,15 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
     const event = detail.data?.event
     const meta = event ? CATEGORY_META[event.category] ?? CATEGORY_META.platform : null
     const color = meta ? theme.series[meta.slot] : undefined
-    const details = Object.entries(event?.details ?? {})
-        .filter(([key]) => key !== 'filters')
     const links = event ? activityLinks(event) : []
+    // Every name the server resolved for this event, so an id anywhere in
+    // its details is shown as what it points at.
+    const names = event ? {
+        ...event.resolvedNames,
+        ...(event.workspaceId && event.workspaceName ? { [event.workspaceId]: event.workspaceName } : {}),
+        ...(event.dataSourceId && event.dataSourceName ? { [event.dataSourceId]: event.dataSourceName } : {}),
+        ...(event.target?.id && event.target.label ? { [event.target.id]: event.target.label } : {}),
+    } : {}
 
     return createPortal(
         <>
@@ -147,27 +173,22 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                         {event && (
                             <>
                                 <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                                    <div>
+                                    <div className="min-w-0">
                                         <dt className={SECTION}>Who</dt>
                                         <dd className="mt-1.5">
                                             {event.actor
-                                                ? <ActivityPerson person={event.actor} size="md" />
+                                                ? <PersonChip id={event.actor.id} person={event.actor} size="md" showEmail />
                                                 : <span className="text-sm text-ink-secondary">{actorName(event) ?? '—'}</span>}
                                         </dd>
                                     </div>
                                     {event.subject && event.subject.id !== event.actor?.id && (
-                                        <div>
+                                        <div className="min-w-0">
                                             <dt className={SECTION}>Who it happened to</dt>
-                                            <dd className="mt-1.5"><ActivityPerson person={event.subject} size="md" /></dd>
+                                            <dd className="mt-1.5">
+                                                <PersonChip id={event.subject.id} person={event.subject} size="md" showEmail />
+                                            </dd>
                                         </div>
                                     )}
-                                    <div>
-                                        <dt className={SECTION}>When</dt>
-                                        <dd className="mt-1.5 text-sm text-ink">
-                                            <time dateTime={event.occurredAt}>{formatUtc(event.occurredAt)}</time>
-                                            <span className="block text-[11px] text-ink-muted">{timeAgo(event.occurredAt)}</span>
-                                        </dd>
-                                    </div>
                                     {(event.workspaceId || event.dataSourceId) && (
                                         <div>
                                             <dt className={SECTION}>Where</dt>
@@ -192,6 +213,8 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                                     )}
                                 </dl>
 
+                                <DateTimeTile at={event.occurredAt} label="When" footnote={loggedLater(event)} />
+
                                 <section>
                                     <h3 className={SECTION}>Why</h3>
                                     {event.statedReason ? (
@@ -207,17 +230,10 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                                     )}
                                 </section>
 
-                                {details.length > 0 && (
+                                {Object.keys(event.details ?? {}).length > 0 && (
                                     <section>
                                         <h3 className={SECTION}>Details</h3>
-                                        <dl className="mt-1.5 grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
-                                            {details.map(([key, value]) => (
-                                                <div key={key} className="min-w-0">
-                                                    <dt className="text-[11px] text-ink-muted">{detailLabel(key)}</dt>
-                                                    <dd className="break-words text-xs text-ink">{detailText(value)}</dd>
-                                                </div>
-                                            ))}
-                                        </dl>
+                                        <ActivityDetails details={event.details} names={names} className="mt-2" />
                                     </section>
                                 )}
 
@@ -270,13 +286,7 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                                         <h3 className={SECTION}>Named in this event</h3>
                                         <ul className="mt-1.5 flex flex-wrap gap-2">
                                             {Object.entries(event.resolvedNames).map(([id, name]) => (
-                                                <li
-                                                    key={id}
-                                                    className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-2 py-1"
-                                                >
-                                                    <span className="text-[11px] font-medium text-ink">{name}</span>
-                                                    <span className="font-mono text-[10px] text-ink-muted">{id}</span>
-                                                </li>
+                                                <li key={id} className="max-w-full"><IdChip id={id} name={name} /></li>
                                             ))}
                                         </ul>
                                     </section>
@@ -299,9 +309,7 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                                             <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/raw:rotate-90" />
                                             Raw event payload
                                         </summary>
-                                        <pre className="overflow-x-auto whitespace-pre-wrap break-words px-3 pb-3 font-mono text-2xs text-ink-secondary">
-                                            {JSON.stringify(event.payload, null, 2)}
-                                        </pre>
+                                        <JsonTree value={event.payload} label="event payload" className="mx-3 mb-3" />
                                     </details>
                                 )}
                             </>

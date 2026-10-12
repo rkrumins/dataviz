@@ -311,6 +311,10 @@ async def get_optional_user(request: Request) -> User | None:
     if sid and await _tombstoned(sid, user.id, where="get_optional_user"):
         return None
     _hold_for_password_change(request, payload, user)
+    # Signed in is signed in: what this request changes is this person's, as
+    # it is through ``get_current_user``. Without it, a route that signs in
+    # only through here recorded its activity with nobody's name on it.
+    activity_context.bind_actor(user.id)
     return user
 
 

@@ -242,7 +242,8 @@ describe('the drawer has the rest', () => {
         expect(within(dialog).getByRole('link', { name: /Open the run in Job History/ }))
             .toHaveAttribute('href', expect.stringContaining('search=agg_1'))
         expect(within(dialog).getByText('Raw event payload')).toBeInTheDocument()
-        expect(within(dialog).getByText(/"extra": "kept"/)).toBeInTheDocument()
+        expect(within(dialog).getByRole('group', { name: 'event payload' })).toHaveTextContent('"extra": "kept"')
+        expect(within(dialog).getByRole('button', { name: 'Copy event payload as JSON' })).toBeInTheDocument()
     })
 
     it('shows a workspace admin no raw payload — the server sends none', async () => {

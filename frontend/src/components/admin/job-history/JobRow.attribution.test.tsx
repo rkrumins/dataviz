@@ -55,11 +55,15 @@ describe('JobRow — who started a run, and why', () => {
         renderRow(job({ triggeredBy: 'usr_ana', statedReason: 'Upstream ETL re-ran' }))
 
         const block = await screen.findByTestId('run-started-by')
-        expect(await within(block).findByText('Ana Okafor')).toBeInTheDocument()
-        expect(block).toHaveTextContent('Ana Okafor — “Upstream ETL re-ran”')
+        // A face and a name that opens their account, their email, and the
+        // reason they gave, quoted.
+        expect(await within(block).findByRole('link', { name: 'Ana Okafor' }))
+            .toHaveAttribute('href', '/admin/users?user=usr_ana')
+        expect(within(block).getByText('ana@example.com')).toBeInTheDocument()
+        expect(within(block).getByText('“Upstream ETL re-ran”').tagName).toBe('BLOCKQUOTE')
         // On the row itself, without opening anything.
         expect(screen.getAllByText('Ana Okafor').length).toBeGreaterThan(1)
-        expect(screen.getByText('“Upstream ETL re-ran”')).toBeInTheDocument()
+        expect(screen.getByTitle('Upstream ETL re-ran')).toHaveTextContent('“Upstream ETL re-ran”')
         // One lookup for every mention of the same person.
         expect(peopleById).toHaveBeenCalledTimes(1)
         expect(peopleById).toHaveBeenCalledWith(['usr_ana'])
@@ -70,7 +74,7 @@ describe('JobRow — who started a run, and why', () => {
         renderRow(job({ triggeredBy: 'usr_gone', statedReason: null }))
         const block = await screen.findByTestId('run-started-by')
         expect(block).toHaveTextContent('No reason given')
-        expect(within(block).getByText('usr_gone')).toBeInTheDocument()
+        expect(await within(block).findByText('usr_gone')).toBeInTheDocument()
     })
 
     it('shows nothing extra for a run nobody started by hand', () => {

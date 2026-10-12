@@ -15,10 +15,11 @@ import { History, Loader2, Radio, RefreshCw } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { exact } from '@/lib/formatMetric'
-import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
+import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ActivityEvent, LedgerHealth } from '@/services/activityService'
 
 import { CATEGORY_META, actorName, reasonExpected } from './activityMeta'
@@ -58,6 +59,9 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
     const color = theme.series[meta.slot]
     const who = actorName(event)
     const unnamed = !!event.actor && !event.actor.name && !event.actor.email
+    // A person who acted is shown by their face, the kind of act pinned to
+    // it; the platform, a service or an id that names nobody, by the act.
+    const face = event.actorKind === 'user' && event.actor && !unnamed ? event.actor : null
 
     return (
         <li>
@@ -66,13 +70,30 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
                 onClick={() => onOpen(event.id)}
                 className="group flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04] outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
             >
-                <span
-                    aria-hidden
-                    className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border"
-                    style={{ color, borderColor: `${color}40`, backgroundColor: `${color}14` }}
-                >
-                    <Icon className="h-4 w-4" />
-                </span>
+                {face ? (
+                    <span aria-hidden className="relative mt-0.5 h-8 w-8 shrink-0">
+                        <UserAvatar
+                            userId={face.id} name={who ?? face.id} avatarId={face.avatarId} hasImage={face.hasImage}
+                            className={cn('h-8 w-8 text-[11px] font-bold', face.deleted && 'grayscale opacity-70')}
+                        />
+                        <span className="absolute -bottom-1 -right-1 rounded-md bg-canvas-elevated p-px">
+                            <span
+                                className="grid h-4 w-4 place-items-center rounded-[5px] border"
+                                style={{ color, borderColor: `${color}55`, backgroundColor: `${color}1f` }}
+                            >
+                                <Icon className="h-2.5 w-2.5" />
+                            </span>
+                        </span>
+                    </span>
+                ) : (
+                    <span
+                        aria-hidden
+                        className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border"
+                        style={{ color, borderColor: `${color}40`, backgroundColor: `${color}14` }}
+                    >
+                        <Icon className="h-4 w-4" />
+                    </span>
+                )}
                 <span className="min-w-0 flex-1">
                     <span className="flex items-baseline gap-3">
                         <span className="min-w-0 flex-1 break-words text-sm leading-snug text-ink">
@@ -89,14 +110,9 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
                                 </span>
                             )}
                         </span>
-                        {/* Right-aligned, so a day's rows read as a column of times. */}
-                        <time
-                            dateTime={event.occurredAt}
-                            title={formatUtc(event.occurredAt)}
-                            className="shrink-0 text-[11px] tabular-nums text-ink-muted"
-                        >
-                            {timeAgo(event.occurredAt)}
-                        </time>
+                        {/* Right-aligned, so a day's rows read as a column of
+                            times — the day is the heading's, so not repeated. */}
+                        <DateTime at={event.occurredAt} variant="clock" className="text-[11px] text-ink-muted" />
                     </span>
                     {event.statedReason ? (
                         <span className="mt-0.5 block truncate text-xs italic text-ink-secondary">“{event.statedReason}”</span>

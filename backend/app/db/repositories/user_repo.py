@@ -1175,6 +1175,9 @@ async def get_identities_by_ids(
             UserORM.status,
             UserORM.deleted_at,
             UserORM.avatar_id,
+            # Whether there is a picture, not the picture: IS NOT NULL is
+            # answered from the row header, never by reading the image.
+            UserORM.avatar_image.is_not(None),
         ).where(UserORM.id.in_(ids))
     )).all()
     return {
@@ -1190,6 +1193,10 @@ async def get_identities_by_ids(
             # The picked illustration, for surfaces that draw an avatar.
             # Additive: callers that only name people ignore it.
             "avatar_id": r[7],
+            # A provider picture to load. Without one, a list of people
+            # asks for none of them — rather than one 404 per face. A
+            # deleted account's picture is not served, so it has none.
+            "has_image": bool(r[8]) and r[6] is None,
         }
         for r in rows
     }

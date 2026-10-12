@@ -63,6 +63,8 @@ class DirectoryPerson(BaseModel):
     email: Optional[str] = None
     deleted: bool = False
     avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+    #: A profile picture is stored: load it. False means there is none to ask for.
+    has_image: bool = Field(default=False, alias="hasImage")
 
 
 #: Ids one request may name.
@@ -153,6 +155,7 @@ async def people_by_id(
             email=None if found[i]["deleted"] else found[i]["email"],
             deleted=found[i]["deleted"],
             avatar_id=found[i].get("avatar_id"),
+            has_image=found[i].get("has_image", False),
         )
         for i in wanted if i in found
     ]

@@ -37,6 +37,9 @@ export interface ActivityPersonRef {
     email?: string | null
     /** Soft-deleted, but still named: the log records what happened. */
     deleted: boolean
+    /** The picked illustration, and whether a profile picture is stored. */
+    avatarId?: string | null
+    hasImage?: boolean
 }
 
 export interface ActivityTarget {
@@ -142,7 +145,10 @@ export interface ActivitySummary {
     volume: { category: ActivityCategory; values: number[] }[]
     /** 7 × 24, Monday first, in UTC. */
     punchcard: number[][]
-    topPeople: { id: string; count: number; name?: string | null; email?: string | null; deleted?: boolean }[]
+    topPeople: {
+        id: string; count: number; name?: string | null; email?: string | null; deleted?: boolean
+        avatarId?: string | null; hasImage?: boolean
+    }[]
     topTargets: { type: string | null; id: string; label?: string | null; count: number }[]
     topActions: { type: string; count: number; label: string; category: ActivityCategory }[]
     handsOnSources: {

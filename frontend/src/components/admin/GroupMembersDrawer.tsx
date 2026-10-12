@@ -41,9 +41,9 @@ import { useModalA11y } from '@/hooks/useModalA11y'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
-import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
-import { PersonName } from '@/components/activity/PersonName'
+import { DateTime } from '@/components/ui/DateTime'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { ReasonField } from '@/components/activity/ReasonField'
 import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
@@ -495,10 +495,10 @@ function MemberRow({
                 )}
             </div>
             <span className="hidden sm:block text-right text-[11px] text-ink-muted shrink-0">
-                {timeAgo(m.addedAt)}
+                <DateTime at={m.addedAt} prefix="Added " empty={null} />
                 {m.addedBy && (
-                    <span className="block max-w-[9rem] truncate text-[10px]">
-                        by <PersonName id={m.addedBy} />
+                    <span className="mt-0.5 flex max-w-[9rem] items-center justify-end gap-1 text-[10px]">
+                        by <PersonChip id={m.addedBy} size="xs" className="min-w-0" />
                     </span>
                 )}
             </span>

@@ -252,3 +252,49 @@ async def test_best_effort_swallows_a_failed_write(db_session, monkeypatch):
             db_session, event_type="workspace.versioning.enabled",
             provenance=Provenance("usr_9"), target_id="ds_1",
         )
+
+
+# ── Who is acting: every way of signing in names them ─────────────────
+
+
+async def test_a_route_that_may_be_anonymous_still_names_who_signed_in(monkeypatch):
+    """``get_optional_user`` is a sign-in like ``get_current_user``: what the
+    request records is that person's. A route signing in only through it
+    recorded its activity with nobody's name on it. A request with no live
+    session is no one."""
+    from starlette.requests import Request
+
+    from backend.app.auth import dependencies as deps
+    from backend.app.services.permission_service import PermissionClaims
+    from backend.app.services.revocation_service import InMemoryBackend, RevocationService
+    from backend.auth_service.cookies import ACCESS_COOKIE_NAME
+    from backend.auth_service.core.tokens import create_access_token
+    from backend.auth_service.interface import User
+
+    class _Identity:
+        async def validate_session(self, token):
+            return User(id="usr_optional", email="o@p.q", first_name="O", last_name="P",
+                        role="user", status="active") if token else None
+
+    monkeypatch.setattr(deps, "_identity_service", lambda request: _Identity())
+    monkeypatch.setattr(deps, "get_revocation_service", lambda: RevocationService(InMemoryBackend()))
+
+    def _request(cookie: str) -> Request:
+        return Request({
+            "type": "http", "method": "GET", "path": "/api/v1/views",
+            "headers": [(b"cookie", cookie.encode())] if cookie else [],
+            "query_string": b"", "client": ("10.0.0.1", 1234),
+        })
+
+    async def _acting_as(cookie: str):
+        # A task of its own, as each request is: nothing it binds leaks here.
+        await deps.get_optional_user(_request(cookie))
+        return activity_context.current_provenance()
+
+    token = create_access_token(
+        "usr_optional", "o@p.q", "user",
+        extra=PermissionClaims(sid="sess_optional").to_jwt_dict(),
+    )
+    signed_in = await asyncio.create_task(_acting_as(f"{ACCESS_COOKIE_NAME}={token}"))
+    assert signed_in is not None and signed_in.actor_id == "usr_optional"
+    assert await asyncio.create_task(_acting_as("")) is None

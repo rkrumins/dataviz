@@ -15,8 +15,9 @@ export interface ActivityLink {
     href: string
 }
 
-/** A person's own access drawer on the user list. */
-export const personHref = (id: string) => `/admin/users?user=${encodeURIComponent(id)}`
+/** A person's own access drawer on the user list — defined beside the chip
+ *  that draws people, so every surface links a person the same way. */
+export { personHref } from '@/components/ui/PersonChip'
 
 const text = (value: unknown): string | null =>
     typeof value === 'string' && value ? value : null

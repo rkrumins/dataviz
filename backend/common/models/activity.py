@@ -23,6 +23,10 @@ class ActivityPerson(BaseModel):
     email: Optional[str] = None
     #: Soft-deleted but still named: the log is a record of what happened.
     deleted: bool = False
+    #: The picked illustration, and whether a profile picture is stored, so a
+    #: page draws each face without asking for pictures that do not exist.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+    has_image: bool = Field(default=False, alias="hasImage")
 
 
 class ActivityTarget(BaseModel):

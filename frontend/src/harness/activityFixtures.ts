@@ -15,11 +15,13 @@ import type {
 const HOUR = 3_600_000
 const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * HOUR).toISOString()
 
+// No stored pictures here (`hasImage: false`), so the harness asks for none:
+// faces are the picked illustration or initials.
 const PEOPLE = {
-    ana: { id: 'usr_7f3a', name: 'Ana Okafor', email: 'ana.okafor@example.com', deleted: false },
-    ben: { id: 'usr_19c2', name: 'Ben Lindqvist', email: 'ben.l@example.com', deleted: false },
-    chen: { id: 'usr_4d8e', name: 'Chen Wei', email: 'chen.wei@example.com', deleted: false },
-    dana: { id: 'usr_b210', name: 'Dana Ruiz', email: 'dana.ruiz@example.com', deleted: true },
+    ana: { id: 'usr_7f3a', name: 'Ana Okafor', email: 'ana.okafor@example.com', deleted: false, avatarId: 'rocket', hasImage: false },
+    ben: { id: 'usr_19c2', name: 'Ben Lindqvist', email: 'ben.l@example.com', deleted: false, hasImage: false },
+    chen: { id: 'usr_4d8e', name: 'Chen Wei', email: 'chen.wei@example.com', deleted: false, avatarId: 'cat', hasImage: false },
+    dana: { id: 'usr_b210', name: 'Dana Ruiz', email: 'dana.ruiz@example.com', deleted: true, hasImage: false },
 }
 
 let n = 0
@@ -34,7 +36,6 @@ function event(over: Partial<ActivityEvent>): ActivityEvent {
         outcome: 'success',
         summary: '',
         occurredAt: at(1),
-        recordedAt: at(1),
         actorKind: 'user',
         actor: PEOPLE.ana,
         subject: null,
@@ -49,6 +50,8 @@ function event(over: Partial<ActivityEvent>): ActivityEvent {
         resolvedNames: {},
         payload: { actor_id: 'usr_7f3a' },
         ...over,
+        // Relayed within a moment unless a fixture says otherwise.
+        recordedAt: over.recordedAt ?? over.occurredAt ?? at(1),
     }
 }
 
@@ -60,7 +63,29 @@ export const ACTIVITY_EVENTS: ActivityEvent[] = [
         target: { type: 'data_source', id: ledger.id, label: ledger.label },
         dataSourceId: ledger.id, dataSourceName: ledger.label,
         statedReason: 'Upstream ETL re-ran after the March close fix',
-        details: { jobId: 'agg_51c09e', triggerSource: 'manual' },
+        details: { jobId: 'agg_51c09e3f2a1b', triggerSource: 'manual' },
+        recordedAt: at(0.19),
+        payload: {
+            actor_id: 'usr_7f3a', data_source_id: ledger.id, workspace_id: 'ws_fin',
+            stated_reason: 'Upstream ETL re-ran after the March close fix', correlation_id: 'req-1',
+            details: { jobId: 'agg_51c09e3f2a1b', triggerSource: 'manual' },
+        },
+    }),
+    event({
+        eventType: 'aggregation.job.limits_changed', label: 'Changed a running job’s limits',
+        summary: 'Changed the limits of a running aggregation of General Ledger', occurredAt: at(0.5),
+        actor: PEOPLE.ben,
+        target: { type: 'data_source', id: ledger.id, label: ledger.label },
+        dataSourceId: ledger.id, dataSourceName: ledger.label,
+        statedReason: 'Quarter-end load on the shard — give it room',
+        details: {
+            jobId: 'agg_51c09e3f2a1b',
+            changes: [
+                { field: 'timeout_secs', from: 10_800, to: 21_600 },
+                { field: 'write_pacing_ratio', from: 1, to: 2 },
+                { field: 'scan_width', from: 200_000, to: null },
+            ],
+        },
     }),
     event({
         eventType: 'rbac.group.member_added', label: 'Added to a group', category: 'access',
@@ -163,10 +188,10 @@ export const ACTIVITY_SUMMARY: ActivitySummary = {
     ],
     punchcard,
     topPeople: [
-        { id: PEOPLE.ana.id, count: 412, name: PEOPLE.ana.name, email: PEOPLE.ana.email, deleted: false },
-        { id: PEOPLE.ben.id, count: 268, name: PEOPLE.ben.name, email: PEOPLE.ben.email, deleted: false },
-        { id: PEOPLE.chen.id, count: 191, name: PEOPLE.chen.name, email: PEOPLE.chen.email, deleted: false },
-        { id: PEOPLE.dana.id, count: 77, name: PEOPLE.dana.name, email: PEOPLE.dana.email, deleted: true },
+        { ...PEOPLE.ana, count: 412 },
+        { ...PEOPLE.ben, count: 268 },
+        { ...PEOPLE.chen, count: 191 },
+        { ...PEOPLE.dana, count: 77 },
         { id: 'usr_0aa1', count: 54 },
     ],
     topTargets: [],

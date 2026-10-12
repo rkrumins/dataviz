@@ -83,15 +83,6 @@ export function formatDuration(seconds: number | null | undefined): string {
     return m > 0 ? `${h}h ${m}m` : `${h}h`
 }
 
-export function timeAgo(iso: string | undefined): string {
-    if (!iso) return '\u2014'
-    const diff = (Date.now() - new Date(iso).getTime()) / 1000
-    if (diff < 60) return 'just now'
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-    return `${Math.floor(diff / 86400)}d ago`
-}
-
 export function useClickOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
     useEffect(() => {
         function handler(e: MouseEvent) {

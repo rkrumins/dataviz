@@ -93,6 +93,21 @@ than taking the connections the readiness probe needs. Of several replicas missi
 summary, one builds it and the others wait for its result. The warmer prepares every lens of the
 activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
 
+**People, times and values, drawn as what they are.** Wherever a record names a person — who
+started a run, who changed a running job's limits, who acted in the activity log, who added a group
+member or rebuilt a source — they appear with their face (profile picture, the illustration they
+picked, or initials) and name, linking to them in User Management, with their email and id on
+hover; an id that names nobody stays the id, and a deleted account is still named, and marked.
+Times read by age ("12 min ago", "Today 09:41", "Mon 18:02", "12 Oct") and move together on one
+shared clock; hovering gives the local time with its zone, UTC and ISO. Job History shows each
+run's timeline — created, started, finished — with how long it waited for a worker and how long it
+ran, counting up while it runs. In an activity event, a change reads as before → after (several at
+once as one per field), every value is drawn by kind — durations and sizes in their units, yes/no,
+statuses, links, ids named where the event names them — and the raw payload is a highlighted,
+foldable tree that copies as JSON. `GET /api/v1/directory/people` and the activity API also say
+which illustration a person picked (`avatarId`) and whether they have a profile picture
+(`hasImage`), so a page of people without pictures asks for none.
+
 ### Fixed
 
 - The audit page filtered people and targets after the page limit, so a filtered page could come

@@ -12,7 +12,8 @@ import { cn } from '@/lib/utils'
 import type { RunAttempt } from '@/services/aggregationService'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory } from '../Freshness/failureGuidance'
 import { STEP_LABELS } from './runSteps'
-import { formatDuration, timeAgo } from './shared'
+import { DateTime } from '@/components/ui/DateTime'
+import { formatDuration } from './shared'
 
 export const AttemptLog = memo(function AttemptLog({ attempts }: {
     attempts: RunAttempt[] | undefined | null
@@ -57,8 +58,10 @@ export const AttemptLog = memo(function AttemptLog({ attempts }: {
                                     {[
                                         attempt.secs ? formatDuration(attempt.secs) : null,
                                         attempt.writes ? `${attempt.writes.toLocaleString()} written` : null,
-                                        attempt.ended_at ? timeAgo(attempt.ended_at) : null,
                                     ].filter(Boolean).join(' · ')}
+                                    {attempt.ended_at && (
+                                        <>{attempt.secs || attempt.writes ? ' · ' : ''}<DateTime at={attempt.ended_at} /></>
+                                    )}
                                 </span>
                             </div>
                             {attempt.error && (

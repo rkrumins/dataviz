@@ -448,6 +448,7 @@ async def test_client(
         # endpoints that use get_optional_user (e.g. create_view) would see
         # a None token and fall back to the anonymous sentinel, breaking
         # created_by attribution in test assertions.
+        activity_context.bind_actor(_FAKE_USER.id)
         return _FAKE_USER
 
     async def _override_require_admin():

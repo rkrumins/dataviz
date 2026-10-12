@@ -23,6 +23,8 @@ import { punchcardTable } from '@/components/analytics/charts/punchcard'
 import { StackedAreaChart } from '@/components/analytics/charts/StackedAreaChart'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { UserAvatar } from '@/components/ui/UserAvatar'
+import { cn } from '@/lib/utils'
 import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
 import type { ActivitySummary } from '@/services/activityService'
@@ -76,7 +78,19 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
 
     const people: LeaderboardRow[] = summary.topPeople.map((p) => ({
         id: p.id,
-        label: <span className={p.name || p.email ? undefined : 'font-mono text-[11px]'}>{p.name || p.email || p.id}</span>,
+        label: (
+            <span className="flex min-w-0 items-center gap-2">
+                {p.name || p.email ? (
+                    <UserAvatar
+                        userId={p.id} name={p.name || p.email || p.id} avatarId={p.avatarId} hasImage={p.hasImage}
+                        className={cn('h-5 w-5 text-[8px] font-bold', p.deleted && 'grayscale opacity-70')}
+                    />
+                ) : null}
+                <span className={cn('truncate', !(p.name || p.email) && 'font-mono text-[11px]')}>
+                    {p.name || p.email || p.id}
+                </span>
+            </span>
+        ),
         meta: p.deleted ? 'Deleted account' : (p.name && p.email ? p.email : undefined),
         value: p.count,
     }))

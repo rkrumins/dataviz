@@ -23,7 +23,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
-import { PersonName } from '@/components/activity/PersonName'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { jobHistoryPath } from '../job-history/shared'
@@ -883,8 +883,9 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                     {/* Who, by name: the id is what the event holds, not what
                         a reader recognises. Mounted only when there is one. */}
                     {event.mode === 'manual' && event.actor && event.actor !== 'internal' && (
-                        <span className="min-w-0 truncate text-[10px] text-ink-muted">
-                            by <PersonName id={event.actor} />
+                        <span className="flex min-w-0 items-center gap-1 text-[10px] text-ink-muted">
+                            {/* No link: the whole row is a button. */}
+                            by <PersonChip id={event.actor} size="xs" link={false} className="min-w-0" />
                         </span>
                     )}
                 </span>

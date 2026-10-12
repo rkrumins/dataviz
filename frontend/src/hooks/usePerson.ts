@@ -45,8 +45,10 @@ function loadPerson(id: string): Promise<DirectoryPerson | null> {
     })
 }
 
-export function usePerson(id: string | null | undefined): DirectoryPerson | null | undefined {
-    const { data } = useQuery({
+/** The lookup itself, failure included: a page that cannot reach the
+ *  directory still shows ids — and must not shimmer for ever waiting. */
+export function usePersonLookup(id: string | null | undefined) {
+    return useQuery({
         queryKey: ['directory', 'person', id ?? ''],
         queryFn: () => loadPerson(id!),
         enabled: !!id,
@@ -54,5 +56,8 @@ export function usePerson(id: string | null | undefined): DirectoryPerson | null
         gcTime: 30 * 60_000,
         retry: false,
     })
-    return data
+}
+
+export function usePerson(id: string | null | undefined): DirectoryPerson | null | undefined {
+    return usePersonLookup(id).data
 }

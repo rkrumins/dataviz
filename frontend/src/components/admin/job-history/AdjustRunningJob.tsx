@@ -18,9 +18,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, Clock, Feather, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse, JobLimitsPatch } from '@/services/aggregationService'
-import { timeAgo } from './shared'
+import { DateTime } from '@/components/ui/DateTime'
+import { PersonChip } from '@/components/ui/PersonChip'
 import {
-    backToSettingsPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
+    backToSettingsPatch, describeChangeAction, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
     limitsInForce, pacePatch, perQueryPatch, releaseReplicaWaitPatch, secondsLeft, serialReadsPatch,
     shapeInForce, waitForReplicasPatch, smallerBatchesPatch,
 } from './timeLimits'
@@ -157,8 +158,14 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                     {history.length > 0 && (
                         <ul className="space-y-0.5" aria-label="Recent limit changes">
                             {history.map((h, i) => (
-                                <li key={`${h.at}-${i}`} className="text-[10px] text-ink-muted tabular-nums">
-                                    {describeChange(h)} {'·'} {timeAgo(h.at)}
+                                <li key={`${h.at}-${i}`} className="flex flex-wrap items-center gap-x-1 text-[10px] text-ink-muted tabular-nums">
+                                    {/* The person, by face and name, where the entry holds their id. */}
+                                    {h.by && !h.by.includes('@')
+                                        ? <PersonChip id={h.by} size="xs" />
+                                        : <span>{h.by ?? 'An operator'}</span>}{' '}
+                                    <span>{describeChangeAction(h)}</span>{' '}
+                                    <span aria-hidden>{'·'}</span>{' '}
+                                    <DateTime at={h.at} />
                                 </li>
                             ))}
                         </ul>

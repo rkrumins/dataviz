@@ -253,6 +253,7 @@ def _person(person_id: Optional[str], page: names.PageNames) -> Optional[Activit
     return ActivityPerson(
         id=person_id, name=who.get("name") or None, email=who.get("email"),
         deleted=bool(who.get("deleted")),
+        avatar_id=who.get("avatar_id"), has_image=bool(who.get("has_image")),
     )
 
 

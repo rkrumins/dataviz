@@ -146,7 +146,8 @@ async def test_events_come_newest_first_with_people_and_places_named(
     assert first["label"] == "Triggered aggregation"
     assert first["category"] == "operations"
     assert first["actor"] == {"id": "usr_ada", "name": "Ada Lovelace",
-                              "email": "ada@example.com", "deleted": False}
+                              "email": "ada@example.com", "deleted": False,
+                              "avatarId": None, "hasImage": False}
     assert first["workspaceName"] == "Finance"
     assert first["target"] == {"type": "data_source", "id": "ds_1", "label": "Ledger"}
     assert first["statedReason"] == "upstream fixed"
@@ -282,10 +283,12 @@ async def test_names_are_resolved_once_per_page_and_never_invented(
         event.remove(db_engine.sync_engine, "before_cursor_execute", _count)
     events = res.json()["events"]
     assert events[0]["actor"] == {"id": "usr_gone", "name": "Grace Hopper",
-                                  "email": "grace@example.com", "deleted": True}
+                                  "email": "grace@example.com", "deleted": True,
+                                  "avatarId": None, "hasImage": False}
     # A subject nobody can name stays a bare id.
     assert events[0]["subject"] == {"id": events[0]["subject"]["id"], "name": None,
-                                    "email": None, "deleted": False}
+                                    "email": None, "deleted": False,
+                                    "avatarId": None, "hasImage": False}
     people_reads = [s for s in statements if "FROM users" in s and "users.deleted_at" in s
                     and "users.avatar_id" in s]
     assert len(people_reads) == 1, "people must be named in one batched read per page"
@@ -676,14 +679,21 @@ async def test_only_a_cold_summary_needs_a_build_slot(
 async def test_the_directory_names_people_by_id(test_client: AsyncClient, db_session):
     await _person(db_session, "usr_ada", "Ada", "Lovelace")
     await _person(db_session, "usr_gone", "Grace", "Hopper", deleted=True)
+    await db_session.flush()
+    # A stored profile picture is reported, never sent: a page asks for the
+    # pictures that exist, and none of the rest — nor a deleted account's,
+    # which is not served.
+    ada = await db_session.get(UserORM, "usr_ada")
+    ada.avatar_image, ada.avatar_id = "iVBORw0KGgo=", "fox"
+    (await db_session.get(UserORM, "usr_gone")).avatar_image = "iVBORw0KGgo="
     await db_session.commit()
     res = await test_client.get("/api/v1/directory/people?ids=usr_gone,usr_nobody,usr_ada")
     assert res.status_code == 200
     assert res.json() == [
         {"id": "usr_gone", "displayName": "Grace Hopper", "email": None,
-         "deleted": True, "avatarId": None},
+         "deleted": True, "avatarId": None, "hasImage": False},
         {"id": "usr_ada", "displayName": "Ada Lovelace", "email": "ada@example.com",
-         "deleted": False, "avatarId": None},
+         "deleted": False, "avatarId": "fox", "hasImage": True},
     ]
     many = ",".join(f"usr_{i}" for i in range(101))
     assert (await test_client.get(f"/api/v1/directory/people?ids={many}")).status_code == 422

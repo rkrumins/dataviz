@@ -71,6 +71,21 @@ describe('UserAvatar', () => {
         expect(screen.getByTestId('custom')).toBeInTheDocument()
     })
 
+    it('asks for no picture when told there is none', () => {
+        const { container } = render(<UserAvatar userId="usr_3" name="Ada Lovelace" hasImage={false} />)
+        expect(container.querySelector('img')).toBeNull()
+        expect(screen.getByText('AL')).toBeInTheDocument()
+    })
+
+    it('asks at once when told there is one, past an earlier miss', () => {
+        rememberAvatarImage('usr_4', 'none')
+        const { container } = render(<UserAvatar userId="usr_4" name="Ada Lovelace" hasImage />)
+        const img = container.querySelector('img')
+        expect(img).not.toBeNull()
+        // A face in a long list loads when scrolled to.
+        expect(img).toHaveAttribute('loading', 'lazy')
+    })
+
     it('keeps the palette family for chip-style surfaces', () => {
         const { container } = render(
             <UserAvatar name="Ada Lovelace" shape="palette" />,
