@@ -12,8 +12,7 @@ import { TIMEOUTS } from '@/config/timeouts'
 import { useHealthStore } from '@/store/health'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import {
-  downloadExportUrl, getExport, pollJob, remember, remembered, sendInParts, triggerBrowserDownload,
-  type Job, type JobStatus, type PartsUpload,
+  pollJob, remember, remembered, sendInParts, triggerBrowserDownload, type JobStatus, type PartsUpload,
 } from './importExportApiService'
 import type { View } from './viewApiService'
 import type { ViewDefinitionDiff, ViewVersionSummary } from './viewVersionsApiService'
@@ -517,77 +516,23 @@ export interface PackageStarted {
   requestId?: string | null
 }
 
-export interface ExportedPackage extends PackageStarted {
-  bytes: number | null
-  nodes: number | null
-  edges: number | null
-  /** The views' fingerprint, as the package's manifest names it. */
-  bundleHash: string | null
-}
-
-/** The package of these views being built, remembered in this browser until its download starts:
- *  the dialog that closed meanwhile finds it again. Keyed by the views, however they were listed. */
-const packageKey = (viewIds: string[]) => `view-package:${[...viewIds].sort().join(',')}`
-
-/** The package of these views the server is building for this browser, if any. */
-export function rememberedViewPackage(viewIds: string[]): PackageStarted | null {
-  try { return JSON.parse(remembered(packageKey(viewIds)) ?? 'null') } catch { return null }
-}
-
-/** Stop remembering the package of these views (it carries on on the server). */
-export function forgetViewPackage(viewIds: string[]): void {
-  remember(packageKey(viewIds), null)
-}
-
 /**
  * Have the server package views with their graph data: the views are sealed as versions now, and
- * an export job builds the package (the data can be large). Remembered until its download starts
- * (`followViewPackage`). Sending the same `requestId` again answers with the job it started.
+ * an export job builds the package (the data can be large): follow it as any export the server
+ * prepares (`features/import-export/backgroundExports`). Sending the same `requestId` again
+ * answers with the job it started.
  */
-export async function startViewPackage(
+export function startViewPackage(
   views: Array<{ viewId: string; version?: number | null }>,
   options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string; requestId?: string },
 ): Promise<PackageStarted> {
-  const started = await postJson<PackageStarted>('/packages', {
+  return postJson<PackageStarted>('/packages', {
     views: views.map((v) => (v.version ? { viewId: v.viewId, version: v.version } : { viewId: v.viewId })),
     scope: options.scope,
     dataVersion: options.dataVersion,
     message: options.message || null,
     requestId: options.requestId ?? null,
   })
-  remember(packageKey(views.map((v) => v.viewId)), JSON.stringify(started))
-  return started
-}
-
-/**
- * Follow a package's export job until it ends, then download the package. Once the job ended it is
- * forgotten: a job that failed, or whose file is no longer kept, throws a `ViewTransferError` of
- * type `package_failed`. Any other error lost touch with the job, which carries on and stays
- * remembered; so does aborting (the dialog closed).
- */
-export async function followViewPackage(
-  started: PackageStarted,
-  opts: { onTick?: (job: Job) => void; signal?: AbortSignal } = {},
-): Promise<ExportedPackage> {
-  const job = await pollJob(() => getExport(started.workspaceId, started.graphId, started.jobId), {
-    onTick: opts.onTick, signal: opts.signal,
-  })
-  forgetViewPackage(started.views.map((v) => v.viewId))
-  if (job.status !== 'completed' || job.kept === false) {
-    throw new ViewTransferError(job.status === 'completed' ? 'The package is no longer kept. Export it again.'
-      : job.errorMessage || 'The package could not be built.', 500, 'package_failed')
-  }
-  triggerBrowserDownload(downloadExportUrl(started.workspaceId, started.graphId, started.jobId), started.fileName)
-  const summary = (job.summary ?? {}) as {
-    nodes?: number; edges?: number; package?: { bytes?: number; bundleHash?: string | null }
-  }
-  return {
-    ...started,
-    bytes: summary.package?.bytes ?? null,
-    nodes: summary.nodes ?? null,
-    edges: summary.edges ?? null,
-    bundleHash: summary.package?.bundleHash ?? null,
-  }
 }
 
 export interface PackagePart {

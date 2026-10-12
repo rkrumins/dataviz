@@ -151,7 +151,8 @@ export interface CreateImportOptions {
   idempotencyKey?: string
 }
 
-const TERMINAL: JobStatus[] = ['completed', 'failed', 'cancelled']
+/** The statuses a job ends in. */
+export const TERMINAL: JobStatus[] = ['completed', 'failed', 'cancelled']
 
 /** Infer the import format from a file name; defaults to ndjson. */
 export function inferFormat(fileName: string): ImportFormat {
@@ -516,25 +517,10 @@ export function createExport(
   })}`, { method: 'POST' })
 }
 
-/** An export the server is preparing, remembered in this browser until its download starts, so
- *  the dialog finds it again after being closed. */
-export interface PreparedExport {
-  jobId: string
-  fileName: string
-  format: ImportFormat
-  /** The records the plan counted (nodes and edges), for the progress; null when unknown. */
-  total: number | null
-  exact: boolean
-}
-
-const preparedKey = (wsId: string, graphId: string) => `graph-export:${wsId}:${graphId}`
-
-export function preparedExport(wsId: string, graphId: string): PreparedExport | null {
-  try { return JSON.parse(remembered(preparedKey(wsId, graphId)) ?? 'null') } catch { return null }
-}
-
-export function rememberExport(wsId: string, graphId: string, prepared: PreparedExport | null): void {
-  remember(preparedKey(wsId, graphId), prepared && JSON.stringify(prepared))
+/** Stop an export that hasn't ended: its creator may, or a manager. Answers with its job, wherever
+ *  it ended (one that finished just before is left finished). */
+export function cancelExport(wsId: string, graphId: string, jobId: string): Promise<Job> {
+  return authFetch<Job>(`${base(wsId)}/graphs/${graphId}/exports/${jobId}/cancel`, { method: 'POST' })
 }
 
 /** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie

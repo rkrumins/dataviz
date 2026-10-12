@@ -9,6 +9,54 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Exports you can follow from anywhere, and cancel
+
+### Added
+
+**Exports follow you around the app.** An export the server prepares, whether a data source's file
+or a view with its data, no longer lives only in the dialog that started it. Close the dialog,
+go back to the canvas, change page or reload, and an **Exports** panel at the bottom right keeps
+showing it: the step it is on, what it has written, how long it has taken and, when it can tell, how
+long is left. The file downloads by itself the moment it is ready, wherever you are, and the panel
+says so before it does. With several tabs open, it downloads once. The panel minimises to a pill
+showing the overall progress, and a finished export can be downloaded again until it is dismissed.
+
+**Cancel an export.** An export started by mistake can be stopped from its dialog or the Exports
+panel, which asks once more first. The person who started it can cancel it, and so can a
+data-source manager (`POST …/versioning/graphs/{graphId}/exports/{jobId}/cancel`). A queued export
+never starts. A running one stops within seconds, and the part of its file already written is
+removed. One that finished just before the cancel reached the server is not downloaded by itself;
+the panel offers it instead.
+
+### Changed
+
+**The export dialogs show progress the way the panel does.** Both use one component: a progress
+ring with the percent done when the export's size is known, the steps (a spreadsheet's column pass
+included), live counts of entities and relationships, the bytes written and the time taken, and
+the note that the download starts automatically.
+
+### Fixed
+
+- **Closing an export dialog no longer leaves the file undownloaded.** The dialog stopped following
+  the export when it closed, so the file downloaded only if the dialog was opened again.
+- **A spreadsheet export reports progress while it reads its columns.** CSV, TSV and Excel read
+  every record once for their columns before writing any. That first pass reported nothing, so the
+  dialog sat at "Starting…" for half the export.
+
+### Upgrading
+
+- Nothing to run. Exports started before the upgrade don't record who started them, so only a
+  data-source manager can cancel those.
+
+### Known limitations
+
+- A view package's export shows live counts and its steps, but no percentage: its total isn't
+  counted up front.
+- A hidden browser tab doesn't check on its exports. The download starts when the tab is shown
+  again, or from another open tab of the app.
+
+---
+
 ## [Unreleased] — View packages at 100k+ entities, new data sources from a package, and duplicate-safe version control
 
 ### Added

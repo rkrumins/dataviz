@@ -2,25 +2,31 @@
  * ExportViewDialog — "View + data": a view on a version-controlled data source can be packaged with
  * its graph data (its own entities or the whole source, published or as in the person's draft);
  * anywhere else the option says why it isn't there. The server builds the package: the dialog
- * says how far it has got, can be closed meanwhile (it stops following, the server carries on),
- * and opened again on the same views picks it up; a request whose answer was lost is retried under
- * the same request id.
+ * says how far it has got and that the download starts by itself, can be closed meanwhile (the
+ * package carries on, and the export tray shows it), and opened again on the same views shows it
+ * once more; it can be cancelled, asked once more first; a request whose answer was lost is retried
+ * under the same request id.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '@/services/importExportApiService'
 import type { PackageStarted } from '@/services/viewTransferApiService'
 import type { ViewVersionPage } from '@/services/viewVersionsApiService'
 
 const resolveGraphMock = vi.fn()
 
+vi.mock('@/services/importExportApiService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/importExportApiService')>(),
+  getExport: vi.fn(),
+  cancelExport: vi.fn(),
+  triggerBrowserDownload: vi.fn(),
+}))
 vi.mock('@/services/viewTransferApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/viewTransferApiService')>(),
   exportViews: vi.fn(),
   startViewPackage: vi.fn(),
-  followViewPackage: vi.fn(),
   previewExport: vi.fn(async (ids: string[]) => ({
     views: ids.map((viewId) => ({
       viewId, name: 'Finance lineage', workspaceId: 'ws1', dataSourceId: 'ds1', headVersion: 3, dirty: false,
@@ -42,8 +48,10 @@ vi.mock('@/store/auth', async (importOriginal) => ({
 }))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
-import { followViewPackage, startViewPackage } from '@/services/viewTransferApiService'
+import { cancelExport, getExport, triggerBrowserDownload } from '@/services/importExportApiService'
+import { startViewPackage } from '@/services/viewTransferApiService'
 import { listViewVersions } from '@/services/viewVersionsApiService'
+import { dismissExport, trackExport, useBackgroundExports } from '@/features/import-export/backgroundExports'
 import { ExportViewDialog } from '../ExportViewDialog'
 
 const STARTED: PackageStarted = {
@@ -51,15 +59,12 @@ const STARTED: PackageStarted = {
   views: [{ viewId: 'view_1', version: 3 }], requestId: 'req-1',
 }
 
-/** The package's job, followed until the dialog stops following it (the server carries on). */
+/** The package's job, as the server answers about it while it builds the package. */
 function building(job: Partial<Job>) {
-  vi.mocked(followViewPackage).mockImplementation((_started, opts) => {
-    opts?.onTick?.({ jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'running', ...job })
-    return new Promise((_resolve, reject) => {
-      opts?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-    })
-  })
+  vi.mocked(getExport).mockResolvedValue({ jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'running', ...job })
 }
+
+const tracked = () => useBackgroundExports.getState().exports.find((e) => e.jobId === 'exp_1')
 
 function page(): ViewVersionPage {
   return {
@@ -93,15 +98,23 @@ describe('ExportViewDialog — a view with its data', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.mocked(startViewPackage).mockReset().mockResolvedValue(STARTED)
-    vi.mocked(followViewPackage).mockReset()
+    vi.mocked(getExport).mockReset()
+    vi.mocked(cancelExport).mockReset()
+    vi.mocked(triggerBrowserDownload).mockReset()
     vi.mocked(listViewVersions).mockResolvedValue(page())
     resolveGraphMock.mockReset()
     resolveGraphMock.mockResolvedValue({ graphId: 'g1', mainBranchId: 'main', mainHeadCommitSeq: 9, myDraft: { branchId: 'br_1' } })
   })
 
+  afterEach(() => {
+    for (const e of useBackgroundExports.getState().exports) dismissExport(e.jobId)
+    useBackgroundExports.setState({ exports: [], shown: [] })
+  })
+
   it('packages the view with its data, from the draft when asked', async () => {
-    vi.mocked(followViewPackage).mockResolvedValue({
-      ...STARTED, bundleHash: 'sha256:bundle0123456789abcdef', bytes: 4096, nodes: 120, edges: 80,
+    vi.mocked(getExport).mockResolvedValue({
+      jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'completed', kept: true,
+      summary: { nodes: 120, edges: 80, bytes: 4096, package: { bytes: 4096, bundleHash: 'sha256:bundle0123456789abcdef' } } as Job['summary'],
     })
     renderDialog()
 
@@ -116,9 +129,11 @@ describe('ExportViewDialog — a view with its data', () => {
       [{ viewId: 'view_1', version: null }],
       { scope: 'source', dataVersion: 'draft', message: undefined, requestId: expect.any(String) },
     ])
-    expect(vi.mocked(followViewPackage).mock.calls[0][0]).toEqual(STARTED)
+    expect(getExport).toHaveBeenCalledWith('ws1', 'g1', 'exp_1')
     expect(await screen.findByText('Packaged')).toBeInTheDocument()
     expect(screen.getByText(/120 entities and 80 relationships/)).toBeInTheDocument()
+    expect(triggerBrowserDownload).toHaveBeenCalledWith(
+      '/api/v1/ws1/versioning/graphs/g1/exports/exp_1/download', 'finance-lineage.v3.view-package.zip')
   })
 
   it('says how far the package has got, and can be closed while the server builds it', async () => {
@@ -129,29 +144,48 @@ describe('ExportViewDialog — a view with its data', () => {
 
     expect(await screen.findByText('Writing the data… 1,200 entities and 800 relationships so far')).toBeInTheDocument()
     expect(screen.getByText('Resumed where it left off (attempt 2).')).toBeInTheDocument()
+    expect(screen.getByText('Step 3 of 4 · Writing the data')).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Export steps' })).getByText('Writing the data').closest('li'))
+      .toHaveAttribute('aria-current', 'step')
+    expect(screen.getByText(/Your download starts automatically/)).toBeInTheDocument()
     const footerClose = screen.getAllByRole('button', { name: 'Close' }).at(-1)!
     expect(footerClose).toBeEnabled()
     await userEvent.click(footerClose)
     expect(onClose).toHaveBeenCalled()
 
-    const following = vi.mocked(followViewPackage).mock.calls[0][1]!.signal!
     unmount()
-    expect(following.aborted).toBe(true)                    // it stops following; the server carries on
+    expect(tracked()?.viewIds).toEqual(['view_1'])         // it carries on, and the export tray shows it
+    expect(useBackgroundExports.getState().shown).toEqual([])
   })
 
   it('opens on a package the server was building when it last closed', async () => {
-    localStorage.setItem('view-package:view_1', JSON.stringify(STARTED))
     building({ phase: 'bundle' })
+    trackExport({ jobId: 'exp_1', kind: 'package', wsId: 'ws1', graphId: 'g1', fileName: STARTED.fileName,
+      label: 'Finance lineage · view + data', viewIds: ['view_1'] })
     renderDialog()
 
     expect(await screen.findByText('Packing the views…')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Export view with its data' })).toBeInTheDocument()
-    expect(vi.mocked(followViewPackage).mock.calls[0][0]).toEqual(STARTED)
     expect(startViewPackage).not.toHaveBeenCalled()
 
     await userEvent.click(screen.getByRole('button', { name: 'Export something else' }))
     expect(await screen.findByRole('button', { name: /Download/ })).toBeInTheDocument()
-    expect(localStorage.getItem('view-package:view_1')).toBeNull()
+    expect(tracked()).toBeDefined()                        // still being built: the tray shows it
+  })
+
+  it('cancels the package being built, asked once more first', async () => {
+    building({ phase: 'data', summary: { nodes: 10, edges: 5, bytes: 100 } })
+    vi.mocked(cancelExport).mockResolvedValue({ jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'cancelled' })
+    renderDialog()
+    await chooseData()
+    await userEvent.click(screen.getByRole('button', { name: /Download/ }))
+    await screen.findByText(/Writing the data…/)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel export' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Stop export' }))
+    expect(cancelExport).toHaveBeenCalledWith('ws1', 'g1', 'exp_1')
+    expect(await screen.findByText('Export cancelled')).toBeInTheDocument()
+    expect(triggerBrowserDownload).not.toHaveBeenCalled()
   })
 
   it('asks again under the same request id when the answer to starting it was lost', async () => {
