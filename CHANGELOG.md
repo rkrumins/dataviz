@@ -63,8 +63,7 @@ An export's plan counts and a replace import's read of the graph stream the same
 **Imports look entities up with one array, not thousands of parameters.** Each import window looked
 up the entities its rows name with IN lists of up to 20,000 bind parameters, compiled one at a time
 on the worker's event loop and planned again by Postgres for every length. They now go as one array:
-a 100k + 100k import takes 62 s instead of 80 s, and its windows no longer slow down as the draft
-grows.
+a 100k + 100k import takes 62 s instead of 80 s, and 1M + 1M takes 592 s instead of 772 s.
 
 **Version-control jobs run only on the versioning worker, and resume.** Imports, exports, publishes,
 package checks, enabling version control and purges never run in a web server any more. The worker
