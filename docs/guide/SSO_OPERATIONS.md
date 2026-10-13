@@ -157,7 +157,15 @@ beside it; once you have read it, **Hide** folds it to one line on your screen
 (it opens again if the cause changes). An unverified connection still links
 ordinary accounts by email, so it keeps working for the people it was trusted
 for, but never an administrator's or a break-glass account — a forged payload
-cannot claim one; administrators link it from their own account page. For a gateway connection the fix is one of: give it the gateway's
+cannot claim one; administrators link it from their own account page. To link
+*every* existing account automatically, administrators included, turn on
+**Link administrator accounts too** under the connection's **Identity** — it
+appears while the connection is Unverified, and the card says when it is on.
+Whether an existing account links at all is still the **Account linking**
+policy's call: *Strict* skips accounts that already have another single
+sign-on identity (choose *Allow verified* to stack them), and the gateway's
+addresses count as verified only while **Treat the gateway's email addresses as
+verified** is on (the default). For a gateway connection the fix is one of: give it the gateway's
 JWKS URL, public key or shared secret instead of trusting unsigned replies; if
 the corporate cookie reaches this app, run the exchange on the server, which
 the call itself verifies; and mount your corporate CA bundle
@@ -455,7 +463,7 @@ Each row explains its code in place. The full vocabulary for linking:
 | `unsafe_auto_link` | An account with that email exists but the linking policy refused it. The specific reasons follow | See the reasons below |
 | `strict_existing_sso` | That account already has an SSO identity, and this connection is **Strict** | Move this connection to *Allow verified*, or have them link it themselves |
 | `email_unverified` | Their IdP did not say the address is verified | Fix it in the IdP, or map a claim that does carry verification |
-| `unverified_connection` | The connection is unverified, and an unverified connection never links itself to an administrator's or break-glass account — its claims, email included, are whatever the sender wrote. Ordinary accounts still link | They sign in with their password and link it from their own account page, or make the connection Verified |
+| `unverified_connection` | The connection is unverified, and an unverified connection never links itself to an administrator's or break-glass account — its claims, email included, are whatever the sender wrote. Ordinary accounts still link | They sign in with their password and link it from their own account page; or make the connection Verified; or, accepting the risk, turn on **Link administrator accounts too** on the connection (Identity) |
 | `policy:manual_only` | The connection never links automatically, by design | The person links it from their own account page |
 | `policy:disabled` | Linking is off for this connection | Change the policy, or expect a separate account |
 | `existing_status:pending` | The account exists but was never approved | Approve it under Admin → Users |

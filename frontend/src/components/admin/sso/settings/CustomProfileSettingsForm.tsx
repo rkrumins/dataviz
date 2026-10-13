@@ -212,11 +212,15 @@ export function CustomProfileSettingsForm({
                     a real one from a forged one.{' '}
                     {BROWSER_SOURCES.includes(source) ? (
                         <>Anyone who can open the browser console can write this
-                        storage key and sign in as any user, including an
-                        administrator.</>
+                        storage key and sign in as any user — administrators
+                        only if they linked it themselves or <em>Link
+                        administrator accounts too</em> is on under
+                        Identity.</>
                     ) : (
-                        <>Anyone who can set this cookie can sign in as any user,
-                        including an administrator.</>
+                        <>Anyone who can set this cookie can sign in as any user
+                        — administrators only if they linked it themselves or
+                        {' '}<em>Link administrator accounts too</em> is on under
+                        Identity.</>
                     )}{' '}
                     Prefer a signed JWT unless you have no way to add one.
                     Every login through this path is recorded as{' '}

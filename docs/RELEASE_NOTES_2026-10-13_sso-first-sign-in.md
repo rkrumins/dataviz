@@ -235,8 +235,11 @@ Gateway connections get the same treatment, adapted to how they work:
   so an unsigned gateway keeps working for first-time users, for people who had a local
   account, and for people already linked. What remains is what *Trust unsigned* means — anyone
   who can reach the sign-in endpoint can sign in as any non-administrator, or as someone new —
+  and an operator who accepts that for administrators too turns on **Link administrator
+  accounts too** on the connection, after which every existing account links as before —
   so on an intranet the exposure is every person and device that can reach the application,
   and the fix is to make the connection Verified.
+  ![Link administrator accounts too, under the connection's Account linking](images/sso-first-sign-in/gateway-link-admins-toggle.png)
 - **The corporate CA bundle replaced the public roots.** `SSO_OUTBOUND_TLS_CA_CERTS` was
   loaded as the *only* trust store, so a bundle holding just the corporate chain — the
   documented use — would have made every public identity provider fail TLS, and the outage
@@ -360,6 +363,8 @@ Accepted and bounded, and in the activity log:
   to the next switch-off. Check **Break-glass accounts** on the Settings page.
 - **An administrator or break-glass account first signing in through an unverified
   connection** links it from their account page; everyone else links automatically as before.
+  **Link administrator accounts too** (the connection's Identity section) restores automatic
+  linking for them as well.
 - **Tell your gateway team** that each server-mode Enterprise gateway now receives one
   request a minute with no session handle, and that answering 401 for it is correct.
 - **Migration** `20261014_1000_sso_fallback` adds three nullable columns to

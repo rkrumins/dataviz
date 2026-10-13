@@ -84,7 +84,8 @@ or one holding a platform-admin role (`unsafe_auto_link`, reason `unverified_con
 administrators link it from their own account page. Ordinary accounts still link, new accounts
 are still created, and people already linked still sign in, so an unsigned gateway keeps
 working as before for everyone it was trusted for — the risk its card states (and can now fold
-away once read).
+away once read). An operator who accepts the risk for administrators as well turns on **Link
+administrator accounts too** on the connection, and every existing account links as before.
 
 ### Fixed
 
@@ -127,7 +128,8 @@ away once read).
 - **An administrator or break-glass account first signing in through an unverified connection**
   (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
   account page instead of being linked automatically. Everyone else links as before; a Verified
-  connection links administrators automatically too.
+  connection links administrators automatically too. To keep the old behaviour on an unverified
+  connection, turn on **Link administrator accounts too** under its **Identity**.
 - The migration `20261014_1000_sso_fallback` adds three nullable columns to `app_auth_config`
   and the `idp_provider_reachability` table.
 

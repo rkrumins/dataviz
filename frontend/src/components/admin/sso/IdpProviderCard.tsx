@@ -246,23 +246,28 @@ function readHidden(providerId: string): string | null {
 
 /** The live-and-unverified warning, which an admin who has read it can
  *  fold to one line and open again. */
-function UnverifiedWarning({ providerId, reason, onEdit }: {
+function UnverifiedWarning({ providerId, reason, linksAdmins, onEdit }: {
     providerId: string
     reason: string
+    /** The operator let this connection link administrators too. */
+    linksAdmins: boolean
     onEdit: () => void
 }) {
+    // What was hidden: the cause, and whether administrators were exposed —
+    // turning that on is a new risk, so it opens the warning again.
+    const hiddenAs = linksAdmins ? `${reason}|admins` : reason
     const [hiddenFor, setHiddenFor] = useState(() => readHidden(providerId))
     const setHidden = (hide: boolean) => {
         try {
-            if (hide) window.localStorage.setItem(HIDDEN_WARNING_KEY + providerId, reason)
+            if (hide) window.localStorage.setItem(HIDDEN_WARNING_KEY + providerId, hiddenAs)
             else window.localStorage.removeItem(HIDDEN_WARNING_KEY + providerId)
         } catch {
             // storage unavailable — the fold still holds for this view
         }
-        setHiddenFor(hide ? reason : null)
+        setHiddenFor(hide ? hiddenAs : null)
     }
 
-    if (hiddenFor === reason) {
+    if (hiddenFor === hiddenAs) {
         return (
             <button
                 type="button"
@@ -280,9 +285,12 @@ function UnverifiedWarning({ providerId, reason, onEdit }: {
         <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg border border-amber-500/25 bg-amber-500/5">
             <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
             <p className="flex-1 text-[11px] text-ink-muted">
-                This connection is live and unverified. {reason} It cannot
-                grant admin roles, or link itself to an administrator's or
-                break-glass account.{' '}
+                This connection is live and unverified. {reason}{' '}
+                {linksAdmins
+                    ? 'It cannot grant admin roles, but it is set to link '
+                        + 'administrator and break-glass accounts too.'
+                    : "It cannot grant admin roles, or link itself to an "
+                        + "administrator's or break-glass account."}{' '}
                 <button
                     type="button"
                     onClick={onEdit}
@@ -455,6 +463,7 @@ export function IdpProviderCard({
                     providerId={provider.id}
                     reason={provider.assuranceReason
                         || 'Anyone who can write its payload can sign in as anyone.'}
+                    linksAdmins={provider.settings?.link_admin_accounts === true}
                     onEdit={onEdit}
                 />
             )}

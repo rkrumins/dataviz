@@ -426,8 +426,10 @@ function VerifyMaterialChooser({
                     all</strong> — a signed token&rsquo;s signature is not
                     even checked, and a bare JSON object is accepted the
                     same way. Anyone who can reach the sign-in page and
-                    post a reply can sign in as <strong>any user,
-                    including an administrator&rsquo;s account</strong>.
+                    post a reply can sign in as <strong>any user</strong> —
+                    administrators and break-glass accounts only if they
+                    linked it themselves or <em>Link administrator accounts
+                    too</em> is on under Identity.
                     Every such login is recorded as{' '}
                     <code>user.sso_unsigned_accepted</code>, the connection
                     is rated <strong>Unverified</strong>, and it becomes

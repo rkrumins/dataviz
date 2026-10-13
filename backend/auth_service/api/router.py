@@ -399,6 +399,14 @@ _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS = (
 )
 
 
+def _links_admin_accounts(snap) -> bool:
+    """The operator's opt-in, on a connection below ``verified``, to link
+    administrator and break-glass accounts too. Read strictly: anything but
+    an explicit ``true`` keeps them protected. Never published — it is not
+    in the public whitelist below."""
+    return (snap.settings or {}).get("link_admin_accounts") is True
+
+
 def _public_config(snap) -> dict:
     """Non-secret settings the login UI needs to start a flow.
 
@@ -917,6 +925,7 @@ async def _dry_run_or_none(
     outcome = await svc.preview_sso_login(
         identity, provider_id=snap.id, linking_policy=snap.linking_policy,
         assurance=assurance_for(snap.kind, snap.settings),
+        link_admin_accounts=_links_admin_accounts(snap),
     )
     if extra:
         # Flow-specific facts the preview cannot know — e.g. which
@@ -1056,6 +1065,7 @@ async def _finish_sso_login(
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
             assurance=assurance_for(snap.kind, snap.settings),
+            link_admin_accounts=_links_admin_accounts(snap),
         )
     except SSOAuthError as exc:
         who = _rejected_who(identity, exc)
@@ -2283,6 +2293,7 @@ async def _complete_custom_profile(
         linking_policy=snap.linking_policy,
         link_intent_user_id=link_intent_user_id,
         assurance=assurance_for(snap.kind, snap.settings),
+        link_admin_accounts=_links_admin_accounts(snap),
     )
 
 
@@ -2612,6 +2623,7 @@ async def backchannel_handle_login(
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
             assurance=assurance_for(snap.kind, snap.settings),
+            link_admin_accounts=_links_admin_accounts(snap),
         )
     except SSOAuthError as exc:
         ref = _failure_ref()

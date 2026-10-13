@@ -445,7 +445,11 @@ claims, the email and `email_verified` included, are whatever the sender
 wrote, so linking by email would hand the break-glass Super Admin to anyone
 able to reach the sign-in endpoint. Ordinary accounts still link, so an
 unsigned connection keeps working for the people its operator trusted it
-for; administrators link it from their own page. The admin card states
+for; administrators link it from their own page. An operator who accepts
+the risk for administrators too turns on **Link administrator accounts
+too** on the connection (`link_admin_accounts`, read strictly — only an
+explicit `true` — and never published to the browser): every existing
+account then links by the linking policy, administrators included. The admin card states
 each weak row's cause and fix (`assurance_explained`), and an admin who has
 read the warning can fold it on their own screen.
 

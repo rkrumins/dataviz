@@ -1156,6 +1156,7 @@ class LocalIdentityService:
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
         assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue a
         session — :meth:`_complete_sso_login_once`, retried once if it
@@ -1177,6 +1178,7 @@ class LocalIdentityService:
                 identity, provider_id=provider_id, provider_slug=provider_slug,
                 linking_policy=linking_policy,
                 link_intent_user_id=link_intent_user_id, assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
             )
 
         try:
@@ -1204,6 +1206,7 @@ class LocalIdentityService:
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
         assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue
         a session.
@@ -1320,6 +1323,7 @@ class LocalIdentityService:
                 linking_policy=linking_policy,
                 link_intent_user_id=link_intent_user_id,
                 assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
             )
             orm = decision.user
             link_metadata = {"groups": idp_groups, "attributes": attributes}
@@ -1705,6 +1709,7 @@ class LocalIdentityService:
         linking_policy: str,
         link_intent_user_id: Optional[str] = None,
         assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> "SsoDecision":
         """Decide what this identity means, without changing anything.
 
@@ -1768,10 +1773,13 @@ class LocalIdentityService:
         # its operator chose to trust it for everyone — but never one that
         # can run the platform: its claims, email_verified included, are
         # whatever the sender wrote. With nothing to answer "is this an
-        # administrator?", every account is treated as one.
+        # administrator?", every account is treated as one. The operator
+        # can extend that trust to administrators too, on the connection
+        # (``link_admin_accounts``), knowing what it means.
         weak_claim_on_admin = (
             assurance is not None
             and not assurance_at_least(assurance, VERIFIED)
+            and not link_admin_accounts
             and (
                 bool(getattr(by_email, "is_system_account", False))
                 or self._platform_admin_checker is None
@@ -1804,6 +1812,7 @@ class LocalIdentityService:
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
         assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> dict:
         """What ``complete_sso_login`` WOULD do with this identity.
 
@@ -1863,6 +1872,7 @@ class LocalIdentityService:
                 linking_policy=linking_policy,
                 link_intent_user_id=link_intent_user_id,
                 assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
             )
             outcome["action"] = decision.action
             if decision.user is not None:

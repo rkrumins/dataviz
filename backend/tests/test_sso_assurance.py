@@ -594,6 +594,26 @@ async def test_an_unverified_connection_still_links_an_ordinary_account(db_sessi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("system, role", [(True, None), (False, "super_admin")])
+async def test_the_operator_can_let_an_unverified_connection_link_administrators(
+    db_session, system, role,
+):
+    """``link_admin_accounts`` on the connection: every existing account
+    links, administrators and break-glass included — the operator's call."""
+    gw = await _gateway_row(db_session, "trusted-unsigned-gw")
+    admin = await _local_account(
+        db_session, "chief@corp.example", system=system, role=role,
+    )
+    svc = _sso_service(db_session)
+
+    user, _ = await svc.complete_sso_login(
+        _claims("chief@corp.example", "emp-chief"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED, link_admin_accounts=True,
+    )
+    assert user.id == admin.id
+
+
+@pytest.mark.asyncio
 async def test_without_an_answer_every_account_counts_as_an_administrator(db_session):
     """Nothing wired to say who the administrators are: fail closed."""
     from backend.auth_service.interface import SSOAuthError
