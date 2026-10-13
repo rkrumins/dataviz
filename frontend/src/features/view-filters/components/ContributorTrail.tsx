@@ -1,6 +1,6 @@
 /**
  * Who made a view what it is: its creator, its last editor and whoever published
- * its latest data — each person once, in that order, as overlapping avatars.
+ * its latest data — each person once, in that order, as a row of avatars.
  *
  * The card used to show the creator's initials alone, which answers "whose is
  * this?" but not "who touched it last?", and that is usually the person to ask.
@@ -23,8 +23,11 @@ export function ContributorTrail({ view, onPick, className, avatarClassName = 'h
   const people = contributorsOf(view)
   if (people.length === 0) return null
   return (
-    <div className={cn('flex items-center -space-x-1.5', className)}>
-      {people.map((p, i) => {
+    // Side by side, not overlapping: a facepile parts its faces with a ring the
+    // colour of the card, and a card tinted by hover or selection showed those
+    // rings as white halos.
+    <div className={cn('flex items-center gap-0.5', className)}>
+      {people.map(p => {
         const label = `${p.name}: ${p.roles.join(', ')}`
         const avatar = (
           <UserAvatar
@@ -52,8 +55,10 @@ export function ContributorTrail({ view, onPick, className, avatarClassName = 'h
                 // filters instead, so neither may reach it.
                 onClick={e => { e.stopPropagation(); onPick(p.userId) }}
                 onKeyDown={e => e.stopPropagation()}
-                style={{ zIndex: people.length - i }}
-                className="relative rounded-full ring-2 ring-canvas-elevated outline-none transition-transform duration-150 hover:-translate-y-0.5 focus-visible:ring-accent-lineage"
+                // A ring, not a lift: the face stays in line with its neighbours.
+                // Flex, so the avatar isn't set on a line of text: an inline one
+                // sat initials a few pixels lower than a picture.
+                className="relative flex rounded-full outline-none hover:z-10 hover:ring-2 hover:ring-accent-lineage/50 focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-accent-lineage"
               >
                 {avatar}
               </button>
@@ -61,8 +66,7 @@ export function ContributorTrail({ view, onPick, className, avatarClassName = 'h
               <span
                 tabIndex={0}
                 aria-label={label}
-                style={{ zIndex: people.length - i }}
-                className="relative rounded-full ring-2 ring-canvas-elevated outline-none focus-visible:ring-accent-lineage"
+                className="relative flex rounded-full outline-none focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-accent-lineage"
               >
                 {avatar}
               </span>

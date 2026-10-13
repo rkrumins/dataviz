@@ -299,41 +299,51 @@ export function ExplorerViewCard({
         )}
 
         {/* Since your last visit — a coloured top edge and a tab naming it,
-            centred so it clears the checkbox (left) and Pinned (right).
-            Worded apart from "New to you", which is about opening it. */}
+            centred so it clears the checkbox (left). Worded apart from "New to
+            you", which is about opening it. */}
         {visitMark && !isDeleted && (
-          <>
-            <div
-              aria-hidden
-              className={cn(
-                'pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5',
-                visitMark === 'new' ? 'bg-emerald-500' : 'bg-sky-500',
-              )}
-            />
-            <div
-              className={cn(
-                'pointer-events-none absolute top-0 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap',
-                'rounded-b-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white shadow-sm',
-                visitMark === 'new' ? 'bg-emerald-600' : 'bg-sky-600',
-              )}
-            >
-              {visitMark === 'new' ? 'New since your visit' : 'Updated since your visit'}
-            </div>
-          </>
-        )}
-
-        {/* Pinned ribbon — compact accent badge in the top-right corner. */}
-        {view.isPinned && !isDeleted && (
           <div
             aria-hidden
             className={cn(
-              'pointer-events-none absolute top-0 right-5 z-10',
-              'inline-flex items-center gap-1 rounded-b-md px-1.5 py-0.5',
-              'bg-accent-lineage text-white text-[9px] font-semibold uppercase tracking-wider',
-              'shadow-sm',
+              'pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5',
+              visitMark === 'new' ? 'bg-emerald-500' : 'bg-sky-500',
+            )}
+          />
+        )}
+
+        {/* The tabs hanging from the top edge: since your last visit, centred, and
+            Pinned in the top-right corner — or beside it when both show, since the
+            centred tab ran under Pinned on a narrow card. */}
+        {!isDeleted && (visitMark || view.isPinned) && (
+          <div
+            className={cn(
+              'pointer-events-none absolute top-0 z-10 flex gap-1 whitespace-nowrap',
+              visitMark ? 'left-1/2 -translate-x-1/2' : 'right-5',
             )}
           >
-            Pinned
+            {visitMark && (
+              <div
+                className={cn(
+                  'rounded-b-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white shadow-sm',
+                  visitMark === 'new' ? 'bg-emerald-600' : 'bg-sky-600',
+                )}
+              >
+                {visitMark === 'new' ? 'New since your visit' : 'Updated since your visit'}
+              </div>
+            )}
+            {/* Pinned ribbon — compact accent badge. */}
+            {view.isPinned && (
+              <div
+                aria-hidden
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-b-md px-1.5 py-0.5',
+                  'bg-accent-lineage text-white text-[9px] font-semibold uppercase tracking-wider',
+                  'shadow-sm',
+                )}
+              >
+                Pinned
+              </div>
+            )}
           </div>
         )}
         {/* ── Top-left checkbox ── */}

@@ -109,6 +109,10 @@ creates, renames, reorders (`PUT /order`) and deletes the caller's own saved fil
 - **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
 - **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
   a narrower created date instead of combining with it.
+- **The bar for selected views sits in the middle of the list.** It started at the middle of the
+  window instead, so it hung to the right, further still beside the sidebar.
+- **A person's hover card opens above them in the lower half of the screen,** instead of running
+  off its foot.
 - **A view's tags are the same wherever you look.** The view wizard opened every view with no tags,
   so tags added in the Explorer were missing there, and a tag added in the wizard replaced all of
   them; tags couldn't be cleared from the wizard, and a description changed there was never saved.

@@ -22,6 +22,14 @@ import { cn } from '@/lib/utils'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 
+/** Where the card sits: `top` when it opens below its trigger, `bottom` when above. */
+interface Placement {
+  top?: number
+  bottom?: number
+  left: number
+  align: 'start' | 'end'
+}
+
 interface PersonHoverCardProps {
   /** The raw user id recorded on the view — shown only as secondary/mono detail, never as the primary label. */
   userId?: string | null
@@ -55,7 +63,7 @@ export function PersonHoverCard({
   closeDelayMs = 120,
 }: PersonHoverCardProps) {
   const [open, setOpen] = useState(false)
-  const [coords, setCoords] = useState<{ top: number; left: number; align: 'start' | 'end' } | null>(null)
+  const [coords, setCoords] = useState<Placement | null>(null)
   const triggerRef = useRef<HTMLElement | null>(null)
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -64,7 +72,7 @@ export function PersonHoverCard({
   const hasIdentity = !!(displayName || email || userId)
 
   // Compute card placement relative to the trigger.
-  function computeCoords(): { top: number; left: number; align: 'start' | 'end' } | null {
+  function computeCoords(): Placement | null {
     const el = triggerRef.current
     if (!el) return null
     const rect = el.getBoundingClientRect()
@@ -79,8 +87,10 @@ export function PersonHoverCard({
       align = 'end'
     }
     if (left < margin) left = margin
-    const top = rect.bottom + margin
-    return { top, left, align }
+    // Below the trigger, or above it in the lower half of the window: a person on
+    // the bottom row of cards opened a card that ran off the foot of the screen.
+    if (rect.top < window.innerHeight / 2) return { top: rect.bottom + margin, left, align }
+    return { bottom: window.innerHeight - rect.top + margin, left, align }
   }
 
   function handleEnter() {
@@ -155,11 +165,12 @@ export function PersonHoverCard({
         <AnimatePresence>
           {open && coords && (
             <motion.div
-              initial={{ opacity: 0, y: -4, scale: 0.98 }}
+              // From the trigger's side: down when below it, up when above.
+              initial={{ opacity: 0, y: coords.top === undefined ? 4 : -4, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.98 }}
+              exit={{ opacity: 0, y: coords.top === undefined ? 4 : -4, scale: 0.98 }}
               transition={{ duration: 0.14, ease: 'easeOut' }}
-              style={{ top: coords.top, left: coords.left, width: 260 }}
+              style={{ top: coords.top, bottom: coords.bottom, left: coords.left, width: 260 }}
               className={cn(
                 'fixed z-[1000] pointer-events-none',
                 'rounded-xl border border-glass-border bg-canvas-elevated shadow-xl',
