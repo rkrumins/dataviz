@@ -238,6 +238,7 @@ async def create_data_source(
     workspace_id: str,
     req: DataSourceCreateRequest,
     make_primary: bool = False,
+    created_by: Optional[str] = None,
 ) -> DataSourceResponse:
     if req.catalog_item_id:
         # Catalog-based: resolve provider and graph from the catalog entry
@@ -280,6 +281,7 @@ async def create_data_source(
         label=label,
         is_primary=make_primary,
         is_active=True,
+        created_by=created_by,
         extra_config=json.dumps(req.extra_config) if req.extra_config else None,
         # None → NULL, resolved to "urn" on read; only stored when the caller
         # onboards a graph whose identity property isn't the canonical urn.

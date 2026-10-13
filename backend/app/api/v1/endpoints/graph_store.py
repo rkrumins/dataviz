@@ -20,8 +20,11 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_permission_claims, requires
+from backend.app.db.engine import get_db_session
+from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.graph_store import topology
 from backend.app.services.graph_store.schemas import (
@@ -165,6 +168,7 @@ async def refresh_cache(
             "outage from a stale answer into an error."
         ),
     ),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Make the next read of every view on this source rebuild from the store.
 
@@ -197,6 +201,13 @@ async def refresh_cache(
     logger.info(
         "graph cache refreshed for %s/%s by operator request (lkg purged: %d)",
         workspaceId, dataSourceId, purged,
+    )
+    await recorder.record_for_request(
+        session, "aggregation.source.cache_refreshed",
+        workspace_id=workspaceId, data_source_id=dataSourceId,
+        target_type="data_source", target_id=dataSourceId,
+        details={"keepFallback": keepFallback, "fallbackEntriesPurged": purged},
+        best_effort=True,   # the generation has moved on in Redis
     )
     return {
         "workspaceId": workspaceId,

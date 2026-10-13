@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import {
-    backToSettingsPatch, waitForReplicasPatch, releaseReplicaWaitPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
+    backToSettingsPatch, waitForReplicasPatch, releaseReplicaWaitPatch, describeChangeAction, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
     limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce, smallerBatchesPatch,
 } from './timeLimits'
 
@@ -57,12 +57,12 @@ describe('what is left, and the history', () => {
     })
 
     it('describes a change in words and formats windows for people', () => {
-        expect(describeChange({ at: 'x', by: 'ops@example.com', field: 'timeout_secs', from: 10_800, to: 21_600 }))
-            .toBe('ops@example.com raised the stall window 3 h → 6 h')
-        expect(describeChange({ at: 'x', by: null, field: 'scan_timeout_s', from: null, to: 120 }))
-            .toBe('An operator raised the scan timeout default → 120 s')
-        expect(describeChange({ at: 'x', by: 'a', field: 'max_wall_secs', from: 172_800, to: 86_400 }))
-            .toBe('a lowered the wall clock 2 d → 1 d')
+        expect(describeChangeAction({ at: 'x', by: 'ops@example.com', field: 'timeout_secs', from: 10_800, to: 21_600 }))
+            .toBe('raised the stall window 3 h → 6 h')
+        expect(describeChangeAction({ at: 'x', by: null, field: 'scan_timeout_s', from: null, to: 120 }))
+            .toBe('raised the scan timeout default → 120 s')
+        expect(describeChangeAction({ at: 'x', by: 'a', field: 'max_wall_secs', from: 172_800, to: 86_400 }))
+            .toBe('lowered the wall clock 2 d → 1 d')
         expect(formatWindow(1_800)).toBe('30 min')
         expect(formatWindow(5_400)).toBe('1.5 h')
         expect(formatWindow(259_200)).toBe('3 d')
@@ -112,8 +112,8 @@ describe('the scan shape', () => {
     })
 
     it('describes a shape change, and a clearing, in words', () => {
-        expect(describeChange({ at: 'x', by: 'ops', field: 'write_pacing_ratio', from: 1, to: 2 })).toBe('ops set the write pacing 1× → 2×')
-        expect(describeChange({ at: 'x', by: 'ops', field: 'scan_width', from: 5_000, to: null })).toBe('ops cleared the scan width (5,000 rows → the job’s setting)')
-        expect(describeChange({ at: 'x', by: null, field: 'extract_concurrency', from: null, to: 1 })).toBe('An operator set the read concurrency the job’s setting → 1 at a time')
+        expect(describeChangeAction({ at: 'x', by: 'ops', field: 'write_pacing_ratio', from: 1, to: 2 })).toBe('set the write pacing 1× → 2×')
+        expect(describeChangeAction({ at: 'x', by: 'ops', field: 'scan_width', from: 5_000, to: null })).toBe('cleared the scan width (5,000 rows → the job’s setting)')
+        expect(describeChangeAction({ at: 'x', by: null, field: 'extract_concurrency', from: null, to: 1 })).toBe('set the read concurrency the job’s setting → 1 at a time')
     })
 })

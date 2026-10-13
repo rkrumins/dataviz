@@ -190,7 +190,7 @@ Administration lives under `/admin`, rendered by `pages/AdminPage.tsx`; each sub
 | `/admin/groups` | `components/admin/AdminGroups.tsx` | **Groups** |
 | `/admin/permissions` | `components/admin/AdminPermissions.tsx` | **Permissions** |
 | `/admin/sso` | `components/admin/AdminSso.tsx` | **SSO** |
-| `/admin/audit` | `components/admin/AdminAudit.tsx` | **Audit Log** |
+| `/admin/audit` | `components/admin/AdminActivity.tsx` | **Activity** |
 
 Registering sources happens on the Ingestion page (`/ingestion`, `pages/IngestionPage.tsx`), whose tabs are **Providers**, **Data Sources**, **Job History**, **Freshness** and **Profiling**:
 

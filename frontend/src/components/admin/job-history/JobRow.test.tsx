@@ -141,7 +141,8 @@ describe('JobRow adjust this run', () => {
         expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { writePacingRatio: 2 })
         await userEvent.click(screen.getByRole('button', { name: 'Halve scans' }))
         expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { scanWidth: 100_000 })
-        expect(screen.getByText(/ops@example.com raised the stall window 2 h → 3 h/)).toBeInTheDocument()
+        expect(screen.getByRole('list', { name: 'Recent limit changes' }))
+            .toHaveTextContent(/ops@example.com raised the stall window 2 h → 3 h · just now/)
     })
 
     it('is absent on a terminal row', () => {

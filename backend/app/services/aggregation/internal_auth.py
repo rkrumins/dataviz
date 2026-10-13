@@ -29,6 +29,8 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, Request, status
 
+from backend.app.common import activity_context
+
 logger = logging.getLogger(__name__)
 
 INTERNAL_TOKEN_ENV = "AGGREGATION_INTERNAL_TOKEN"
@@ -104,3 +106,22 @@ async def require_internal_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing internal service token.",
         )
+
+
+async def bind_forwarded_activity(request: Request):
+    """Bind the web tier's activity context — who is acting, the reason they
+    gave, the request — for the rest of this call.
+
+    It sits after :func:`require_internal_token` in the app's dependencies,
+    so with the token configured, what it trusts came from an authenticated
+    caller; the web tier fills these headers from the session, never from
+    its client. The values are re-validated, and a malformed one is dropped.
+    """
+    token = activity_context.bind(activity_context.from_forwarded(request.headers))
+    try:
+        yield
+    finally:
+        try:
+            activity_context.reset(token)
+        except ValueError:  # torn down in another context; it ends with it
+            pass

@@ -13,7 +13,7 @@
  * REAL tabs against it. No API, no providers, no auth.
  */
 import type {
-    AnalyticsSummary, WorkspaceAnalyticsRow,
+    AnalyticsDataDoc, AnalyticsSummary, AnalyticsUsageDoc, WorkspaceAnalyticsRow,
 } from '../services/analyticsService'
 
 const BUCKETS = Array.from({ length: 14 }, (_, i) => {
@@ -343,12 +343,245 @@ export const WORKSPACE_ROWS_LOCKED: WorkspaceAnalyticsRow[] = [
     WORKSPACE_ROWS[3],
 ]
 
+// ── The Data tab's document ──────────────────────────────────────────
+
+/** A level that grows most days and drops once — a source pruned on day 7. */
+const ENTITIES = running(410_000, BUCKETS.map((_, i) =>
+    i === 6 ? -9_000 : Math.round(2_400 + Math.abs(Math.sin(i * 1.3)) * 3_000)))
+const share = (values: number[], ratio: number) => values.map((v) => Math.round(v * ratio))
+const level = (start: number, end: number) => ({
+    start, end, change: end - start,
+    changePct: start ? Math.round(((end - start) / start) * 1000) / 10 : null,
+})
+const ONBOARDED = [0, 1, 0, 2, 1, 0, 0, 3, 1, 0, 1, 0, 2, 1]
+const VERSIONED = [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0]
+
+export const DATA_PRIVILEGED: AnalyticsDataDoc = {
+    windowDays: 14,
+    generatedAt: PRIVILEGED.generatedAt,
+    range: PRIVILEGED.range,
+    bucket: 'day',
+    coverage: { entitiesSince: '2026-04-20', jobsKeptDays: 90 },
+    growth: {
+        buckets: BUCKETS,
+        entities: ENTITIES,
+        relationships: ENTITIES.map((v, i) => Math.round(v * 2.6 + i * 900)),
+        totals: {
+            entities: level(ENTITIES[0], ENTITIES[ENTITIES.length - 1]),
+            relationships: level(Math.round(ENTITIES[0] * 2.6), Math.round(ENTITIES[ENTITIES.length - 1] * 2.6 + 13 * 900)),
+            sources: 58,
+        },
+        byWorkspace: [
+            { workspaceId: 'ws1', name: 'Data Platform', entities: share(ENTITIES, 0.46) },
+            { workspaceId: 'ws2', name: 'Finance', entities: share(ENTITIES, 0.27) },
+            { workspaceId: 'ws3', name: 'Growth', entities: share(ENTITIES, 0.15) },
+            { workspaceId: 'ws4', name: 'Archive 2024', entities: share(ENTITIES, 0.07) },
+            { workspaceId: null, name: 'Other', entities: share(ENTITIES, 0.05) },
+        ],
+        byProviderType: [
+            { key: 'neo4j', entities: share(ENTITIES, 0.52) },
+            { key: 'falkordb', entities: share(ENTITIES, 0.31) },
+            { key: 'datahub', entities: share(ENTITIES, 0.12) },
+            { key: 'spanner', entities: share(ENTITIES, 0.05) },
+        ],
+        movers: [
+            { dataSourceId: 'ds1', name: 'Warehouse lineage', workspaceId: 'ws1', workspaceName: 'Data Platform', canOpen: true, ...level(84_000, 101_500) },
+            { dataSourceId: 'ds2', name: 'Ledger', workspaceId: 'ws2', workspaceName: 'Finance', canOpen: true, ...level(41_200, 32_200) },
+            { dataSourceId: 'ds3', name: 'Events catalogue', workspaceId: 'ws3', workspaceName: 'Growth', canOpen: true, ...level(0, 6_400) },
+            { dataSourceId: 'ds4', name: 'dbt models', workspaceId: 'ws1', workspaceName: 'Data Platform', canOpen: true, ...level(12_900, 15_100) },
+            { dataSourceId: 'ds5', name: 'Payments', workspaceId: 'ws2', workspaceName: 'Finance', canOpen: true, ...level(8_800, 9_900) },
+        ],
+    },
+    onboarding: {
+        buckets: BUCKETS,
+        total: ONBOARDED,
+        versioned: VERSIONED,
+        external: ONBOARDED.map((n, i) => n - VERSIONED[i]),
+        totals: { sources: metric(58, 12, 7) },
+        byProviderType: [
+            { key: 'neo4j', count: 5 }, { key: 'falkordb', count: 4 },
+            { key: 'datahub', count: 2 }, { key: 'spanner', count: 1 },
+        ],
+        firstBuild: { medianHours: 5.4, p90Hours: 31, measured: 11, awaiting: 1 },
+    },
+    versionControl: {
+        available: true,
+        byKind: [
+            { key: 'authoritative', count: 9 }, { key: 'manual', count: 4 },
+            { key: 'hybrid', count: 3 }, { key: 'blank', count: 1 },
+        ],
+        adopted: {
+            buckets: BUCKETS,
+            series: [
+                { key: 'authoritative', values: [0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0] },
+                { key: 'manual', values: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0] },
+            ],
+        },
+        share: { versioned: 17, total: 58 },
+    },
+}
+
+/** As a member of one team sees it: two of the workspaces are not theirs. */
+const hidden = new Set(['ws2', 'ws3'])
+export const DATA_LOCKED: AnalyticsDataDoc = {
+    ...DATA_PRIVILEGED,
+    growth: {
+        ...DATA_PRIVILEGED.growth,
+        byWorkspace: DATA_PRIVILEGED.growth.byWorkspace.map((b) => (
+            b.workspaceId && hidden.has(b.workspaceId) ? { ...b, name: 'Restricted workspace', redacted: true } : b)),
+        movers: DATA_PRIVILEGED.growth.movers.map((m) => (
+            m.workspaceId && hidden.has(m.workspaceId)
+                ? {
+                    ...m, name: 'Restricted source', dataSourceId: null, workspaceId: null,
+                    workspaceName: 'Restricted workspace', redacted: true, canOpen: false,
+                }
+                : m)),
+    },
+    redaction: { applied: true, reportsAllWorkspaces: false },
+}
+
+const zeros = BUCKETS.map(() => 0)
+export const DATA_FIRST_RUN: AnalyticsDataDoc = {
+    ...DATA_PRIVILEGED,
+    coverage: { entitiesSince: null, jobsKeptDays: 90 },
+    growth: {
+        buckets: BUCKETS, entities: zeros, relationships: zeros,
+        totals: { entities: level(0, 0), relationships: level(0, 0), sources: 0 },
+        byWorkspace: [], byProviderType: [], movers: [],
+    },
+    onboarding: {
+        buckets: BUCKETS, total: zeros, versioned: zeros, external: zeros,
+        totals: { sources: metric(0, 0, 0) }, byProviderType: [],
+        firstBuild: { medianHours: null, p90Hours: null, measured: 0, awaiting: 0 },
+    },
+    versionControl: {
+        available: true, byKind: [],
+        adopted: { buckets: BUCKETS, series: [] }, share: { versioned: 0, total: 0 },
+    },
+}
+
+// ── The usage document ───────────────────────────────────────────────
+
+/** Office hours, Monday to Friday, with a lighter Saturday morning. */
+const PUNCHCARD = Array.from({ length: 7 }, (_, day) => Array.from({ length: 24 }, (_, hour) => {
+    if (day === 6) return 0
+    if (day === 5) return hour >= 9 && hour < 12 ? 6 : 0
+    const office = hour >= 8 && hour < 18
+    return office ? Math.round(30 + Math.sin((hour - 8) / 3) * 25 + day * 4) : hour >= 6 && hour < 21 ? 4 : 0
+}))
+
+const PULSE = [
+    { workspaceId: 'ws1', name: 'Data Platform', values: series(3, 1.4) },
+    { workspaceId: 'ws2', name: 'Finance', values: series(5, 0.9) },
+    { workspaceId: 'ws3', name: 'Growth', values: series(8, 0.6).map((v, i) => (i >= 6 && i <= 8 ? 0 : v)) },
+    { workspaceId: 'ws4', name: 'Archive 2024', values: BUCKETS.map((_, i) => (i < 2 ? 3 : 0)) },
+].map((p) => ({ ...p, total: p.values.reduce((a, b) => a + b, 0), canOpen: true }))
+
+export const USAGE_PRIVILEGED: AnalyticsUsageDoc = {
+    windowDays: 14,
+    generatedAt: PRIVILEGED.generatedAt,
+    range: PRIVILEGED.range,
+    bucket: 'day',
+    content: {
+        buckets: BUCKETS,
+        uniqueViewers: series(2, 0.9),
+        viewers: metric(212, 212, 188),
+        viewsOpened: 146,
+        reach: [
+            { key: '1', count: 58 }, { key: '2–5', count: 61 },
+            { key: '6–20', count: 22 }, { key: '21+', count: 5 },
+        ],
+        byType: [
+            { key: 'graph', built: 31, opens: 2210 }, { key: 'reference', built: 9, opens: 940 },
+            { key: 'layered-lineage', built: 14, opens: 310 }, { key: 'list', built: 9, opens: 85 },
+        ],
+        byVisibility: [
+            { key: 'workspace', built: 29, opens: 2400 }, { key: 'enterprise', built: 10, opens: 780 },
+            { key: 'private', built: 24, opens: 365 },
+        ],
+        firstOpen: { medianHours: 9.5, withinWeek: 38, opened: 44, built: 63 },
+    },
+    engagement: {
+        presence: [
+            { key: 'active', count: 412 }, { key: 'seen', count: 160 }, { key: 'recent', count: 290 },
+            { key: 'dormant', count: 330 }, { key: 'never', count: 92 },
+        ],
+        punchcard: PUNCHCARD,
+    },
+    health: {
+        buckets: BUCKETS,
+        runs: [
+            { key: 'byHand', values: series(6, 0.12) },
+            { key: 'automatic', values: series(1, 0.5) },
+            { key: 'onboarding', values: ONBOARDED },
+            { key: 'other', values: BUCKETS.map((_, i) => (i % 5 === 0 ? 1 : 0)) },
+        ],
+        totals: { byHand: 41, automatic: 233, onboarding: 12, other: 3 },
+        byHand: metric(41, 41, 29),
+        manualShare: 0.1419,
+        failureRate: 0.062,
+        handsOnSources: [
+            { dataSourceId: 'ds2', workspaceId: 'ws2', count: 14, lastAt: '2026-06-15T08:10:00+00:00', medianGapHours: 22, name: 'Ledger' },
+            { dataSourceId: 'ds1', workspaceId: 'ws1', count: 9, lastAt: '2026-06-14T16:00:00+00:00', medianGapHours: 40, name: 'Warehouse lineage' },
+            { dataSourceId: 'ds3', workspaceId: 'ws3', count: 5, lastAt: '2026-06-12T10:30:00+00:00', medianGapHours: 70, name: 'Events catalogue' },
+            { dataSourceId: 'ds5', workspaceId: 'ws2', count: 3, lastAt: '2026-06-09T09:00:00+00:00', medianGapHours: null, name: 'Payments' },
+        ],
+    },
+    workspaces: {
+        buckets: BUCKETS,
+        pulse: PULSE,
+        rows: [
+            { workspaceId: 'ws1', activity: PULSE[0].total, manualOperations: 9, accessChanges: 6 },
+            { workspaceId: 'ws2', activity: PULSE[1].total, manualOperations: 17, accessChanges: 2 },
+            { workspaceId: 'ws3', activity: PULSE[2].total, manualOperations: 5, accessChanges: 0 },
+            { workspaceId: 'ws4', activity: PULSE[3].total, manualOperations: 0, accessChanges: 1 },
+        ],
+    },
+}
+
+/** Below the posture that shows operations, with two workspaces not theirs. */
+export const USAGE_LOCKED: AnalyticsUsageDoc = {
+    ...USAGE_PRIVILEGED,
+    health: undefined,
+    workspaces: {
+        ...USAGE_PRIVILEGED.workspaces,
+        pulse: PULSE.map((p) => (hidden.has(p.workspaceId)
+            ? { ...p, name: 'Restricted workspace', redacted: true, canOpen: false } : p)),
+        rows: USAGE_PRIVILEGED.workspaces.rows.map((r) => ({ ...r, manualOperations: null, accessChanges: null })),
+    },
+    redaction: { applied: true, showsOperations: false, hidden: ['operations'] },
+}
+
+export const USAGE_FIRST_RUN: AnalyticsUsageDoc = {
+    ...USAGE_PRIVILEGED,
+    content: {
+        buckets: BUCKETS, uniqueViewers: zeros, viewers: metric(0, 0, 0), viewsOpened: 0,
+        reach: USAGE_PRIVILEGED.content.reach.map((r) => ({ ...r, count: 0 })),
+        byType: [], byVisibility: [],
+        firstOpen: { medianHours: null, withinWeek: 0, opened: 0, built: 0 },
+    },
+    engagement: {
+        presence: USAGE_PRIVILEGED.engagement.presence.map((p) => ({ ...p, count: p.key === 'active' ? 1 : 0 })),
+        punchcard: PUNCHCARD.map((row) => row.map(() => 0)),
+    },
+    health: {
+        ...USAGE_PRIVILEGED.health!,
+        runs: USAGE_PRIVILEGED.health!.runs.map((r) => ({ ...r, values: zeros })),
+        totals: { byHand: 0, automatic: 0, onboarding: 0, other: 0 },
+        byHand: metric(0, 0, 0), manualShare: null, failureRate: null, handsOnSources: [],
+    },
+    workspaces: { buckets: BUCKETS, pulse: [], rows: [] },
+}
+
 export const ANALYTICS_FIXTURES = {
-    privileged: { summary: PRIVILEGED, rows: WORKSPACE_ROWS },
-    strict: { summary: STRICT, rows: WORKSPACE_ROWS_LOCKED },
-    internal: { summary: INTERNAL, rows: WORKSPACE_ROWS_LOCKED },
-    reported: { summary: REPORTED, rows: WORKSPACE_ROWS },
-    firstRun: { summary: FIRST_RUN, rows: [] as WorkspaceAnalyticsRow[] },
+    privileged: { summary: PRIVILEGED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_PRIVILEGED },
+    strict: { summary: STRICT, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED },
+    internal: { summary: INTERNAL, rows: WORKSPACE_ROWS_LOCKED, data: DATA_LOCKED, usage: USAGE_LOCKED },
+    reported: { summary: REPORTED, rows: WORKSPACE_ROWS, data: DATA_PRIVILEGED, usage: USAGE_LOCKED },
+    firstRun: {
+        summary: FIRST_RUN, rows: [] as WorkspaceAnalyticsRow[],
+        data: DATA_FIRST_RUN, usage: USAGE_FIRST_RUN,
+    },
 } as const
 
 export type AnalyticsFixtureName = keyof typeof ANALYTICS_FIXTURES

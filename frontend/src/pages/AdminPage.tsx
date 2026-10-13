@@ -35,6 +35,10 @@ const adminGroups = [
         path: '',
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
+            // Second, so the first-visible redirect lands an auditor (who can
+            // see Activity and Telemetry, nothing else) here rather than on
+            // product telemetry.
+            { path: 'audit', label: 'Activity', icon: History, description: 'Who did what, where and why — across the platform' },
             { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
             { path: 'redis', label: 'Redis & Graph Store', icon: Database, description: 'Streams, cache & default graph endpoints — auth, TLS, provenance' },
             { path: 'graph-store', label: 'Graph store', icon: HardDrive, description: 'Shards, replicas, memory and where every graph lives' },
@@ -54,7 +58,6 @@ const adminGroups = [
             { path: 'groups', label: 'Groups', icon: Users2, description: 'Bundle members for bulk role grants' },
             { path: 'permissions', label: 'Permissions', icon: KeyRound, description: 'Roles, permissions, and who has access where' },
             { path: 'sso', label: 'SSO', icon: Network, description: 'IdP providers + IdP group mappings' },
-            { path: 'audit', label: 'Audit Log', icon: History, description: 'RBAC + user lifecycle history' },
         ]
     }
 ]

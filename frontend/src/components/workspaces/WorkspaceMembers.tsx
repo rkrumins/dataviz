@@ -48,6 +48,8 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 import { ROLE_NAMES } from '@/lib/roleNames'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -287,6 +289,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
+    const revokeReason = useReasonDraft('member-remove')
     // Bindings (the raw grants) vs People (the flattened, inheritance-
     // aware list of everyone who can actually get in).
     const [viewMode, setViewMode] = useState<'bindings' | 'people'>('bindings')
@@ -404,6 +407,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         role: RoleName,
         label: string,
         expiresIn?: string | null,
+        reason?: string,
     ) => {
         setActionLoading('add')
         setError(null)
@@ -411,7 +415,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             await workspaceMembersService.create(workspaceId, {
                 subjectType, subjectId, role,
                 expiresIn: expiresIn ?? null,
-            })
+            }, { reason })
             await fetchMembers()
             const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
             notify('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
@@ -425,11 +429,11 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         }
     }
 
-    const handleRevoke = async (member: WorkspaceMemberResponse) => {
+    const handleRevoke = async (member: WorkspaceMemberResponse, reason?: string) => {
         setActionLoading(`revoke-${member.bindingId}`)
         setError(null)
         try {
-            await workspaceMembersService.revoke(workspaceId, member.bindingId)
+            await workspaceMembersService.revoke(workspaceId, member.bindingId, { reason })
             await fetchMembers()
             notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
             setModal(null)
@@ -449,6 +453,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
      * what each member is about to lose.
      */
     const handleRequestRevoke = async (member: WorkspaceMemberResponse) => {
+        revokeReason.reset()
         setRevokePreview({ member, loading: true, preview: null, error: null })
         try {
             const preview = await workspaceMembersService.previewRevoke(
@@ -854,8 +859,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                 }
                 onCancel={() => setRevokePreview(null)}
                 onConfirm={() => {
-                    if (revokePreview) void handleRevoke(revokePreview.member)
+                    if (revokePreview) void handleRevoke(revokePreview.member, revokeReason.take())
                 }}
+                reason={revokeReason}
             />
         </div>
     )
@@ -879,9 +885,11 @@ function AddMemberModal({
         role: RoleName,
         label: string,
         expiresIn?: string | null,
+        reason?: string,
     ) => Promise<void>
     submitting: boolean
 }) {
+    const reason = useReasonDraft('member-add')
     const [subjectType, setSubjectType] = useState<SubjectType>('user')
     /** One page of matching active users; null until the first arrives. */
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
@@ -1232,6 +1240,8 @@ function AddMemberModal({
                 )}
             </AnimatePresence>
 
+            <ReasonField draft={reason} audience="workspace" disabled={submitting} className="mt-5" />
+
             {/* Footer */}
             <div className="mt-6 flex items-center justify-end gap-2">
                 <button
@@ -1246,7 +1256,7 @@ function AddMemberModal({
                         if (!selected) return
                         void onSubmit(
                             subjectType, selected.id, role, selected.label,
-                            expiresIn || null,
+                            expiresIn || null, reason.take(),
                         )
                     }}
                     disabled={!valid || conflict || submitting}

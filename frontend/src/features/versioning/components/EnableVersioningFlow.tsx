@@ -15,6 +15,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useBootstrapGraph } from '../hooks/useVersioning'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 const BENEFITS = [
   {
@@ -47,10 +49,11 @@ export function EnableVersioningFlow({
   const { notify } = useAppNotifications()
   const bootstrap = useBootstrapGraph(wsId)
   const [started, setStarted] = useState(false)
+  const reason = useReasonDraft('versioning')
 
   const start = () => {
     setStarted(true)
-    bootstrap.mutate(dataSourceId, {
+    bootstrap.mutate({ dataSourceId, reason: reason.take() }, {
       onSuccess: (res) => {
         onClose()
         notify(
@@ -139,6 +142,8 @@ export function EnableVersioningFlow({
                 {duration} · nothing changes until the check passes.
               </p>
             </div>
+
+            <ReasonField draft={reason} audience="workspace" disabled={started} className="px-6 pb-4" />
 
             <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
               <button

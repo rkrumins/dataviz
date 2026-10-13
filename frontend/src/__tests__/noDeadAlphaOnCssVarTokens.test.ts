@@ -1,38 +1,34 @@
 /**
- * `bg-canvas-elevated/95` paints NOTHING. Not a lighter panel — nothing.
+ * `bg-canvas-elevated/95` used to paint NOTHING. Not a lighter panel — nothing.
  *
- * This app's colour tokens are bare `var()`s (`tailwind.config.js`): the
- * variables hold COMPLETE colours, not channel triples, so Tailwind cannot
- * build `rgb(… / <alpha>)` out of them and silently emits no rule at all. The
- * element ends up transparent; in a gradient it is worse, because an unset
- * `--tw-gradient-stops` invalidates the whole `background-image`.
+ * This app's theme colours live in CSS variables that hold COMPLETE colours
+ * (`#8898a9`, `rgba(255,255,255,.4)`), not channel triples. Declared as bare
+ * `var()`s, Tailwind cannot build `rgb(… / <alpha>)` out of them and silently
+ * emits no rule at all for a modified class: the element ends up transparent,
+ * and in a gradient it is worse, because an unset `--tw-gradient-stops`
+ * invalidates the whole `background-image`. About 1,700 classes across the app
+ * shipped that way — sticky headers, borders that fell back to the default
+ * grey (bright in the dark theme), and 1,066 `accent-lineage/NN` usages that
+ * left the app reading grey until the accents got raw channels (b9e06b2d).
+ * `tailwind.config.js` now declares those tokens as colour FUNCTIONS that
+ * answer every modifier; a token added tomorrow as a bare `var()` would bring
+ * the silence straight back.
  *
  * The same silence swallows an OFF-SCALE modifier on a perfectly good colour:
- * `/12`, `/8`, `/22`, `/98` are not in Tailwind 3.4's opacity scale, so
- * `bg-emerald-500/12` and `bg-accent-lineage/12` emit nothing either — the
- * accent family got raw channels in b9e06b2d and 39 of its tints STILL paint
- * nothing for this second reason.
- *
- * A dead class is not automatically a transparent surface BY MISTAKE, which is
- * the trap on the way out: 75208053 reverted nine of these after they were
- * "fixed" to opaque tokens, because those surfaces float over the canvas with a
- * `backdrop-blur` and the transparency was the whole design. What is always
- * wrong is the class: it asks for a colour and gets none. Whether the answer is
- * a colour or no class at all is a look, not a lint.
+ * Tailwind's opacity scale goes in fives, so `bg-emerald-500/8` emitted nothing
+ * either until the steps this app is written with were named in the config.
+ * `/7` tomorrow would be dead again.
  *
  * Both failures are invisible in review, in jsdom, and in a screenshot of a
  * surface that also carries `backdrop-blur` — which is how five of them
  * shipped in one day (notification cards, a canvas panel, seven sticky
- * headers, HoverTip's border, PropertyManagerDrawer) and how 1,066
- * `accent-lineage/NN` usages across 208 files sat dead long enough for the app to
- * simply read grey.
+ * headers, HoverTip's border, PropertyManagerDrawer).
  *
  * So this guard does not pattern-match. It derives the token list FROM the
- * config — a bare-`var()` token added tomorrow is covered on the day it lands
- * — collects every alpha-suffixed usage of one, and COMPILES them with the
- * real Tailwind config. A class is a violation only when the compiler proves
- * no rule comes out, which is why `bg-emerald-500/10` and `bg-accent-lineage/15`
- * pass and must keep passing.
+ * config — a token added tomorrow is covered on the day it lands — collects
+ * every alpha-suffixed usage of one (and of the stock palette), and COMPILES
+ * them with the real Tailwind config. A class is a violation only when the
+ * compiler proves no rule comes out.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
@@ -44,21 +40,12 @@ const ROOT = resolve(__dirname, '../..')
 const SRC = resolve(ROOT, 'src')
 
 const HOW_TO_FIX =
-  'An alpha suffix on one of this app\'s CSS-variable tokens emits NO CSS. Four ways '
-  + 'out, and the right one depends on what the surface is FOR: the plain token when it '
-  + 'is meant to be opaque (`bg-canvas-elevated`); a real palette colour when you '
-  + 'actually want alpha (`bg-black/[0.04]`); raw channels + `<alpha-value>` in '
-  + 'tailwind.config.js, the way the accent family got them in b9e06b2d; or simply '
-  + 'DELETE the class, when the surface is meant to be see-through and a `backdrop-blur` '
-  + 'sibling is already doing the work. Do not reach for the first one by reflex — '
-  + '75208053 reverted nine surfaces made opaque on exactly that reasoning, because '
-  + 'their transparency was the design. An OFF-SCALE amount (`/8`, `/12`, `/45`) is a '
-  + 'SECOND, SEPARATE silence, and the two need opposite fixes. On a REAL PALETTE '
-  + 'COLOUR (`bg-emerald-500/8`) or a channel-triple token, the amount is the only '
-  + 'thing wrong and the fix is pure notation with no design decision at all: '
-  + '`/8` -> `/[0.08]`, `/12` -> `/[0.12]`. On a bare `var()` token no notation helps — '
-  + '`bg-ink/[0.06]` is in the baseline below proving it — so pick one of the four '
-  + 'options above. Check which kind you have before reaching for either.'
+  'An alpha suffix that emits NO CSS gives the element no colour at all. Two causes, '
+  + 'with different fixes. A colour token declared as a bare `var()` in tailwind.config.js '
+  + 'drops every modifier: declare it with `withAlpha(...)` (or as raw channels + '
+  + '`<alpha-value>`, the way the accent family is), never as a plain string. An OFF-SCALE '
+  + 'amount (`/7`) emits nothing on ANY colour: write it as an arbitrary value (`/[0.07]`), '
+  + 'or use a step on the scale.'
 
 /**
  * Alpha suffixes that are dead ON PURPOSE. Nothing qualifies yet: an unpaintable
@@ -66,185 +53,6 @@ const HOW_TO_FIX =
  * meant to have no colour rule at all.
  */
 const ALLOWED = new Map<string, string>()
-
-/**
- * The dead classes already in the tree, with the number of times each occurs.
- *
- * This is a RATCHET, not an amnesty: a new dead class fails, and a dead class
- * used MORE often than the number here fails. The numbers are a CEILING, not an
- * equality — a count that DROPS is someone fixing sites, and must not fail their
- * run (several agents work this tree at once). It is deliberately a full
- * inventory rather than a single total, so the failure message can name which
- * class moved.
- *
- * Why it exists at all: 1,669 of these are already in 323 files, and clearing
- * them is a THEME change (raw channels for the canvas/ink families, and a
- * decision about `--nx-border-glass`, which already carries its own 0.4 alpha
- * and so cannot become a channel triple without lightening 343 borders). That
- * is an app-wide visual delta that needs its own review; it is not something to
- * smuggle in under a test. What this guard buys today is that the number can
- * only go down.
- */
-/** The sum of the numbers below, recorded with them. */
-const BASELINE_TOTAL = 1726
-
-const BASELINE = new Map<string, number>([
-  ['bg-accent-business/8', 4],
-  ['bg-accent-lineage/12', 27],
-  ['bg-accent-lineage/22', 1],
-  ['bg-accent-lineage/8', 3],
-  ['bg-amber-500/12', 4],
-  ['bg-amber-500/8', 5],
-  ['bg-blue-500/8', 1],
-  ['bg-blue-600/8', 1],
-  ['bg-canvas-base/20', 5],
-  ['bg-canvas-base/30', 13],
-  ['bg-canvas-base/40', 22],
-  ['bg-canvas-base/50', 7],
-  ['bg-canvas-base/60', 4],
-  ['bg-canvas-base/70', 4],
-  ['bg-canvas-base/80', 1],
-  ['bg-canvas-elevated/10', 2],
-  ['bg-canvas-elevated/20', 1],
-  ['bg-canvas-elevated/30', 14],
-  ['bg-canvas-elevated/40', 23],
-  ['bg-canvas-elevated/50', 27],
-  ['bg-canvas-elevated/60', 18],
-  ['bg-canvas-elevated/70', 4],
-  ['bg-canvas-elevated/80', 7],
-  ['bg-canvas-elevated/85', 3],
-  ['bg-canvas-elevated/90', 6],
-  ['bg-canvas-elevated/95', 37],
-  ['bg-canvas-elevated/98', 19],
-  ['bg-canvas-overlay/30', 2],
-  ['bg-canvas-overlay/40', 15],
-  ['bg-canvas-overlay/50', 3],
-  ['bg-canvas-overlay/60', 4],
-  ['bg-canvas-overlay/95', 1],
-  ['bg-canvas/40', 5],
-  ['bg-canvas/50', 1],
-  ['bg-canvas/60', 10],
-  ['bg-canvas/70', 1],
-  ['bg-canvas/80', 4],
-  ['bg-canvas/95', 1],
-  ['bg-canvas/98', 3],
-  ['bg-cyan-500/12', 2],
-  ['bg-cyan-500/8', 1],
-  ['bg-emerald-500/12', 2],
-  ['bg-emerald-500/8', 4],
-  ['bg-glass-border/30', 1],
-  ['bg-glass-border/50', 2],
-  ['bg-glass-border/60', 13],
-  ['bg-glass-border/70', 2],
-  ['bg-glass/20', 7],
-  ['bg-glass/30', 26],
-  ['bg-glass/40', 42],
-  ['bg-glass/50', 6],
-  ['bg-glass/60', 3],
-  ['bg-glass/70', 2],
-  ['bg-indigo-500/12', 3],
-  ['bg-indigo-500/8', 7],
-  ['bg-ink-muted/10', 17],
-  ['bg-ink-muted/20', 1],
-  ['bg-ink-muted/25', 7],
-  ['bg-ink-muted/30', 2],
-  ['bg-ink-muted/40', 3],
-  ['bg-ink-muted/5', 1],
-  ['bg-ink-muted/50', 5],
-  ['bg-ink-muted/60', 3],
-  ['bg-ink/10', 2],
-  ['bg-ink/5', 5],
-  ['bg-ink/[0.06]', 1],
-  ['bg-orange-500/12', 1],
-  ['bg-purple-500/12', 1],
-  ['bg-purple-500/8', 2],
-  ['bg-red-500/12', 1],
-  ['bg-red-500/8', 6],
-  ['bg-rose-500/12', 1],
-  ['bg-rose-500/8', 1],
-  ['bg-sky-500/12', 1],
-  ['bg-sky-500/8', 2],
-  ['bg-violet-500/12', 3],
-  ['bg-violet-500/8', 4],
-  ['border-b-glass-border/30', 1],
-  ['border-glass-border/20', 5],
-  ['border-glass-border/30', 23],
-  ['border-glass-border/40', 71],
-  ['border-glass-border/50', 90],
-  ['border-glass-border/60', 110],
-  ['border-glass-border/70', 13],
-  ['border-glass-border/80', 31],
-  ['border-ink-muted/20', 2],
-  ['border-ink-muted/30', 17],
-  ['border-ink-muted/35', 4],
-  ['border-ink-muted/40', 10],
-  ['border-ink-muted/50', 3],
-  ['border-ink-muted/70', 1],
-  ['border-l-glass-border/60', 1],
-  ['decoration-ink-muted/40', 2],
-  ['divide-glass-border/30', 5],
-  ['divide-glass-border/40', 1],
-  ['divide-glass-border/50', 9],
-  ['from-accent-lineage/12', 1],
-  ['from-accent-lineage/18', 1],
-  ['from-accent-lineage/8', 1],
-  ['from-amber-500/8', 1],
-  ['from-canvas-base/55', 1],
-  ['from-canvas-elevated/40', 1],
-  ['from-canvas-elevated/80', 2],
-  ['from-canvas-elevated/90', 2],
-  ['from-canvas-elevated/95', 1],
-  ['from-canvas-elevated/96', 1],
-  ['from-canvas/80', 2],
-  ['from-glass/40', 1],
-  ['from-glass/50', 1],
-  ['from-indigo-500/8', 1],
-  ['placeholder-ink-muted/40', 1],
-  ['placeholder-ink-muted/60', 1],
-  ['ring-blue-400/12', 1],
-  ['ring-ink-muted/60', 1],
-  ['stroke-ink-muted/10', 1],
-  ['stroke-ink-muted/15', 1],
-  ['stroke-ink-muted/30', 1],
-  ['text-ink-muted/0', 3],
-  ['text-ink-muted/20', 5],
-  ['text-ink-muted/25', 2],
-  ['text-ink-muted/30', 25],
-  ['text-ink-muted/35', 1],
-  ['text-ink-muted/40', 95],
-  ['text-ink-muted/45', 6],
-  ['text-ink-muted/50', 146],
-  ['text-ink-muted/55', 5],
-  ['text-ink-muted/60', 178],
-  ['text-ink-muted/65', 2],
-  ['text-ink-muted/70', 183],
-  ['text-ink-muted/80', 85],
-  ['text-ink-muted/85', 10],
-  ['text-ink-muted/90', 4],
-  ['text-ink-muted/95', 1],
-  ['text-ink/70', 2],
-  ['text-ink/80', 2],
-  ['text-ink/85', 5],
-  ['text-ink/90', 8],
-  ['text-ink/95', 1],
-  ['to-accent-explore/3', 1],
-  ['to-canvas-base/30', 1],
-  ['to-canvas-base/95', 3],
-  ['to-canvas-elevated/20', 1],
-  ['to-canvas-elevated/30', 1],
-  ['to-canvas-elevated/90', 2],
-  ['to-canvas-elevated/95', 1],
-  ['to-canvas-elevated/96', 1],
-  ['to-glass/20', 2],
-  ['to-rose-500/8', 1],
-  ['via-canvas-elevated/30', 3],
-  ['via-canvas-elevated/40', 4],
-  ['via-canvas-elevated/70', 1],
-  ['via-canvas-elevated/80', 1],
-  ['via-canvas-elevated/95', 2],
-  ['via-canvas/70', 2],
-  ['via-glass-border/50', 1],
-])
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = []
@@ -277,6 +85,10 @@ function tokenNames(colors: Record<string, unknown>, path: string[] = []): strin
 
 /** `.bg-canvas-elevated\/95` — the selector Tailwind would emit for a class. */
 const selectorFor = (cls: string) => '.' + cls.replace(/[.\\/[\]:%]/g, (c) => '\\' + c)
+
+/** Whether `css` has a rule for `cls` — `::placeholder` ones included. */
+const emits = (css: string, cls: string) =>
+  [' ', ',', '::'].some((end) => css.includes(`${selectorFor(cls)}${end}`))
 
 let compile: (classes: string[]) => Promise<string>
 let tokens: string[]
@@ -333,7 +145,7 @@ beforeAll(async () => {
 
   const css = await compile([...occurrences.keys()])
   dead = [...occurrences.keys()]
-    .filter((cls) => !css.includes(`${selectorFor(cls)} `) && !css.includes(`${selectorFor(cls)},`))
+    .filter((cls) => !emits(css, cls))
     .sort()
 })
 
@@ -372,6 +184,33 @@ describe('an alpha suffix on a CSS-variable token emits no rule', () => {
     expect(css).not.toContain('.bg-accent-lineage\\/15')
   })
 
+  it('the theme tokens answer a modifier with a colour that renders', async () => {
+    const css = await compile([
+      'bg-canvas-elevated/95', 'bg-canvas-elevated', 'border-glass-border/50', 'border-glass-border',
+      'bg-ink-muted/10', 'text-ink-muted/60', 'text-ink-muted/0', 'placeholder-ink-muted/40',
+      'bg-emerald-500/8',
+    ])
+    const rule = (cls: string) => {
+      const at = css.indexOf(`${selectorFor(cls)} {`) >= 0
+        ? css.indexOf(`${selectorFor(cls)} {`) : css.indexOf(`${selectorFor(cls)}::placeholder {`)
+      return css.slice(at, css.indexOf('}', at)).replace(/\s+/g, ' ')
+    }
+    // A surface takes a real alpha; without a modifier the token is untouched.
+    expect(rule('bg-canvas-elevated/95')).toContain('color-mix(in srgb, var(--nx-bg-elevated) calc(0.95 * 100%), transparent)')
+    expect(rule('bg-canvas-elevated')).toContain('background-color: var(--nx-bg-elevated)')
+    expect(rule('bg-ink-muted/10')).toContain('color-mix(in srgb, var(--nx-text-muted) calc(0.1 * 100%), transparent)')
+    // A modified glass border is a divider in the theme's own ink, never the
+    // white glass that vanished on light surfaces.
+    expect(rule('border-glass-border/50')).toContain('rgb(var(--nx-divider-rgb) / calc(0.5 * 0.16))')
+    expect(rule('border-glass-border')).toContain('border-color: var(--nx-border-glass)')
+    // Text never fades below its token, except /0, which means hidden.
+    expect(rule('text-ink-muted/60')).toContain('color: var(--nx-text-muted)')
+    expect(rule('placeholder-ink-muted/40')).toContain('color: var(--nx-text-muted)')
+    expect(rule('text-ink-muted/0')).toContain('color: transparent')
+    // The in-between steps the app is written with are on the scale.
+    expect(rule('bg-emerald-500/8')).toContain('rgb(16 185 129 / 0.08)')
+  })
+
   it('the sweep reaches the config tokens and the app source', () => {
     expect(tokens).toContain('canvas-elevated')
     expect(tokens).toContain('glass-border')
@@ -381,29 +220,10 @@ describe('an alpha suffix on a CSS-variable token emits no rule', () => {
     expect(occurrences.size).toBeGreaterThan(100)
   })
 
-  it('no alpha suffix that compiles to nothing outside the recorded baseline', () => {
-    const added = dead.filter((cls) => !BASELINE.has(cls))
+  it('no alpha suffix in the app compiles to nothing', () => {
     expect(
-      added.map((cls) => `${cls} — ${occurrences.get(cls)!.slice(0, 3).join(', ')}`),
+      dead.map((cls) => `${cls} — ${occurrences.get(cls)!.slice(0, 3).join(', ')}`),
       `These classes compile to NO CSS, so the element gets no colour at all. ${HOW_TO_FIX}`,
     ).toEqual([])
-  })
-
-  it('no baselined class spreads to more sites than it already had', () => {
-    // The numbers are a CEILING, not an equality: several agents work this tree
-    // at once, so a count that DROPS is someone fixing sites and must not fail
-    // their run. A count that RISES is a new dead usage of a shape we already
-    // know paints nothing, which is exactly the regression this exists to stop.
-    const grown = dead
-      .filter((cls) => occurrences.get(cls)!.length > (BASELINE.get(cls) ?? 0))
-      .map((cls) => `${cls}: ${BASELINE.get(cls) ?? 0} -> ${occurrences.get(cls)!.length}. ${occurrences.get(cls)!.slice(0, 4).join(', ')}`)
-    expect(grown, HOW_TO_FIX).toEqual([])
-  })
-
-  it('the dead total does not grow', () => {
-    // A second ceiling over the whole sweep, so a shape that gets renamed
-    // rather than fixed cannot hide under the per-class ceilings.
-    const total = dead.reduce((n, cls) => n + occurrences.get(cls)!.length, 0)
-    expect(total, `${total} dead alpha usages, up from ${BASELINE_TOTAL}. ${HOW_TO_FIX}`).toBeLessThanOrEqual(BASELINE_TOTAL)
   })
 })

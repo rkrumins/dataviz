@@ -964,12 +964,16 @@ async def reconcile_sso_targets(
             )
         )
         memberships_removed = len(to_remove)
+        for group_id in sorted(to_remove):
+            await _record_sso_membership(
+                session, "rbac.group.member_removed", group_id, user_id, provider_id,
+            )
 
     # 5b. Add memberships the IdP asserts. Skip groups the user is
     # already a member of via a local route (we never overwrite admin-
     # set memberships).
     to_add = group_target_ids - existing_any_groups
-    for group_id in to_add:
+    for group_id in sorted(to_add):
         session.add(GroupMemberORM(
             group_id=group_id,
             user_id=user_id,
@@ -977,6 +981,9 @@ async def reconcile_sso_targets(
             source="sso",
         ))
         memberships_added += 1
+        await _record_sso_membership(
+            session, "rbac.group.member_added", group_id, user_id, provider_id,
+        )
 
     if created or revoked or reactivated or memberships_added or memberships_removed:
         await session.flush()
@@ -991,6 +998,23 @@ async def reconcile_sso_targets(
         "memberships_added": memberships_added,
         "memberships_removed": memberships_removed,
     }
+
+
+async def _record_sso_membership(
+    session: AsyncSession, event_type: str, group_id: str, user_id: str,
+    provider_id: Optional[str],
+) -> None:
+    """The same membership event a manual change writes, marked as the IdP
+    group sync's — no actor: no person did it — so the activity ledger can
+    say how someone came to be in a group, or left it."""
+    await user_repo.create_outbox_event(
+        session,
+        event_type=event_type,
+        payload={
+            "group_id": group_id, "user_id": user_id,
+            "via": "sso", "provider_id": provider_id,
+        },
+    )
 
 
 # Backwards-compatible alias for Phase 2 callers that still import the

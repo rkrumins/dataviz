@@ -9,6 +9,8 @@ import { motion } from 'framer-motion'
 import { PauseCircle } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import type { ProviderFreshnessSummary } from '@/services/freshnessService'
 import { useSetProviderHold } from './useFreshness'
 import { SnoozeRow } from './SnoozeRow'
@@ -25,6 +27,8 @@ export function ProviderHoldDialog({ providerId, providerName, current, isOpen, 
 }) {
     const { notify } = useAppNotifications()
     const setHold = useSetProviderHold()
+    // The host keys this dialog on the provider, so each open starts empty.
+    const holdReason = useReasonDraft('hold')
 
     if (!isOpen || !providerId) return null
 
@@ -62,6 +66,16 @@ export function ProviderHoldDialog({ providerId, providerName, current, isOpen, 
                         </p>
 
                         <div className="border-t border-glass-border">
+                            {/* Above the row, not below it: the row writes the
+                                moment a choice is made. */}
+                            {!inherited && (
+                                <ReasonField
+                                    draft={holdReason}
+                                    audience="platform"
+                                    disabled={setHold.isPending}
+                                    className="pt-3"
+                                />
+                            )}
                             <SnoozeRow
                                 scope="provider"
                                 idPrefix={`provider-hold-${providerId}`}
@@ -71,7 +85,7 @@ export function ProviderHoldDialog({ providerId, providerName, current, isOpen, 
                                 allowStop
                                 pending={setHold.isPending}
                                 onPatch={(patch, ok) => setHold.mutate(
-                                    { providerId, ...patch },
+                                    { providerId, ...patch, reason: holdReason.take() },
                                     {
                                         onSuccess: () => {
                                             notify('success', `${providerName}: ${ok}`)

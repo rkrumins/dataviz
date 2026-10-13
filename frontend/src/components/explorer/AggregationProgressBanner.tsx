@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
-import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Loader2, AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
 import { DEFAULT_TIMEOUT_SECS, gentlePreset } from '@/components/admin/shared/AggregationOverridesForm';
 import { friendlyError } from '@/services/providerService';
 import { extendStallPatch } from '@/components/admin/job-history/timeLimits';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt';
 
 /**
  * Statuses no amount of polling will change.
@@ -55,6 +56,8 @@ export function AggregationProgressBanner({
   const [showSkipDialog, setShowSkipDialog] = useState(false);
   // Bumped by the Re-aggregate button to restart polling for the new job.
   const [pollEpoch, setPollEpoch] = useState(0);
+  // A rebuild started from the canvas confirms first, and asks why.
+  const [reasonPrompt, askReason] = useReasonPrompt();
 
   useEffect(() => {
     if (!dataSourceId) return;
@@ -115,6 +118,7 @@ export function AggregationProgressBanner({
         : readiness.heldBy === 'provider' ? 'for this provider'
           : readiness.heldBy === 'source' ? 'for this source' : null
       return (
+        <>
         <div className="mb-6 px-4 py-3 rounded-xl border border-amber-500/20 bg-amber-500/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
@@ -134,12 +138,21 @@ export function AggregationProgressBanner({
           </div>
           <button 
             className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors"
-            onClick={() => {
+            onClick={async () => {
               if (dataSourceId) {
+                const answer = await askReason({
+                  title: 'Re-aggregate this source?',
+                  message: 'Rebuilds its rolled-up lineage so it matches the graph as it is now.',
+                  confirmLabel: 'Re-aggregate',
+                  confirmIcon: RefreshCw,
+                  context: 'aggregation',
+                  audience: 'workspace',
+                });
+                if (!answer) return;
                 // No ``tuning``: the control plane resolves the admin's
                 // configured defaults. ``timeoutSecs`` is sent because a
                 // null column falls back to the 15-minute stall window.
-                aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500, timeoutSecs: DEFAULT_TIMEOUT_SECS }, 'manual');
+                aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500, timeoutSecs: DEFAULT_TIMEOUT_SECS }, 'manual', { reason: answer.reason });
                 setReadiness(prev => prev ? { ...prev, driftDetected: false, aggregationStatus: 'pending' } : null);
                 setPollEpoch(e => e + 1);
               }
@@ -148,6 +161,8 @@ export function AggregationProgressBanner({
             Re-aggregate
           </button>
         </div>
+        {reasonPrompt}
+        </>
       );
     }
     return null;
@@ -217,12 +232,21 @@ export function AggregationProgressBanner({
               type="button"
               className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
               title="Narrow scans, serial reads, generous pacing and a longer per-query timeout — the profile for a graph the store keeps refusing"
-              onClick={() => {
+              onClick={async () => {
+                const answer = await askReason({
+                  title: 'Retry with the Gentle profile?',
+                  message: 'Starts a new run with narrow scans, serial reads, generous pacing and a longer per-query timeout.',
+                  confirmLabel: 'Retry',
+                  confirmIcon: RefreshCw,
+                  context: 'aggregation',
+                  audience: 'workspace',
+                });
+                if (!answer) return;
                 const gentle = gentlePreset();
                 aggregationService.triggerAggregation(dataSourceId, {
                   projectionMode: 'in_source', batchSize: 500,
                   maxRetries: gentle.maxRetries, timeoutSecs: gentle.timeoutMinutes * 60, tuning: gentle.tuning,
-                }, 'manual');
+                }, 'manual', { reason: answer.reason });
                 setReadiness(prev => prev ? { ...prev, aggregationStatus: 'pending' } : null);
                 setPollEpoch(e => e + 1);
               }}
@@ -243,13 +267,13 @@ export function AggregationProgressBanner({
         <SkipAggregationDialog 
           isOpen={showSkipDialog}
           onClose={() => setShowSkipDialog(false)}
-          onConfirm={async () => {
+          onConfirm={async (reason) => {
             setIsSkipping(true);
             try {
               if (activeJob) {
-                await aggregationService.cancelJob(dataSourceId, activeJob.id);
+                await aggregationService.cancelJob(dataSourceId, activeJob.id, { reason });
               }
-              const result = await aggregationService.skipAggregation(dataSourceId);
+              const result = await aggregationService.skipAggregation(dataSourceId, { reason });
               setReadiness(result);
               onStatusChange(result.isReady);
             } catch (err) {
@@ -262,6 +286,7 @@ export function AggregationProgressBanner({
           isSubmitting={isSkipping}
         />
       )}
+      {reasonPrompt}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 /**
  * OverlayIntegrity — land collapsed; click opens the windowed blotter.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -226,7 +226,28 @@ describe('OverlayIntegrity fleet-wide hold banner', () => {
 
         expect(await screen.findByText(/Automatic rebuilds are stopped fleet-wide/)).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', { name: /resume fleet-wide/i }))
+        // Resuming asks why first; nothing is written until that is confirmed.
+        const prompt = await screen.findByRole('dialog')
+        expect(putReconciliation).not.toHaveBeenCalled()
+        await userEvent.click(within(prompt).getByRole('button', { name: /resume fleet-wide/i }))
         await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: false }))
+    })
+
+    it('sends the reason given for a resume with it', async () => {
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({
+            policy: { ...POLICY, stoppedAt: '2026-09-01T00:00:00+00:00' }, runs: [],
+        })
+        renderCard()
+
+        await userEvent.click(await screen.findByRole('button', { name: /resume fleet-wide/i }))
+        const prompt = await screen.findByRole('dialog')
+        await userEvent.click(within(prompt).getByRole('button', { name: 'Maintenance finished' }))
+        await userEvent.click(within(prompt).getByRole('button', { name: /resume fleet-wide/i }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith(
+            { pausedUntil: null, stopped: false }, { reason: 'Maintenance finished' },
+        ))
     })
 
     it('banners ③ Act off as the reason and points at Automation, not at a Resume that could not release it', async () => {
@@ -267,5 +288,46 @@ describe('OverlayIntegrity fleet-wide hold banner', () => {
 
         expect(await screen.findByText(/paused for another 3h fleet-wide/)).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /resume fleet-wide/i })).not.toBeInTheDocument()
+    })
+})
+
+describe('OverlayIntegrity Check now', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({
+            policy: {
+                enabled: true, checkIntervalSecs: 3600,
+                envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+                envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700, allDetectors: [],
+            },
+            runs: [],
+        })
+        getReconciliationActivity.mockResolvedValue({ since: '', items: [] })
+        reconcileNow.mockResolvedValue({ skipped: false, findings: [], run: null })
+    })
+
+    // A real sweep can queue rebuilds, so it asks why; the preview does not.
+    it('asks why before sweeping, and sends the reason with the sweep', async () => {
+        renderCard()
+
+        await userEvent.click(await screen.findByRole('button', { name: /check now/i }))
+        const prompt = await screen.findByRole('dialog')
+        expect(reconcileNow).not.toHaveBeenCalled()
+        await userEvent.type(within(prompt).getByLabelText(/why\?/i), 'Checking after the outage{Enter}')
+
+        await waitFor(() => expect(reconcileNow).toHaveBeenCalledWith({}, { reason: 'Checking after the outage' }))
+    })
+
+    it('sweeps nothing when the prompt is dismissed', async () => {
+        renderCard()
+
+        await userEvent.click(await screen.findByRole('button', { name: /check now/i }))
+        await screen.findByRole('dialog')
+        // Escape in the "Why?" field backs out, as it does from any prompt.
+        await userEvent.keyboard('{Escape}')
+
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        expect(reconcileNow).not.toHaveBeenCalled()
     })
 })

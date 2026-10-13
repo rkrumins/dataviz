@@ -117,6 +117,7 @@ describe('AdminGroups — the membership drawer speaks the same way', () => {
 
         const u = await openMembers()
         await u.click(await screen.findByTitle('Remove from group'))
+        await u.click(await screen.findByRole('button', { name: 'Remove' }))
 
         await waitFor(() => expect(messages()).toEqual([
             'Could not remove Ada Lovelace from "Data Stewards".',
@@ -155,10 +156,72 @@ describe('AdminGroups — the membership drawer speaks the same way', () => {
 
         const u = await openMembers()
         await u.click(await screen.findByTitle('Remove from group'))
+        await u.click(await screen.findByRole('button', { name: 'Remove' }))
 
         await waitFor(() => expect(messages()).toEqual([
             'Removed Ada Lovelace from "Data Stewards".',
         ]))
+    })
+})
+
+describe('AdminGroups — membership changes say why', () => {
+    const MEMBER = {
+        userId: 'usr_1', groupId: 'grp_1', addedAt: new Date().toISOString(),
+        addedBy: null, source: 'local', displayName: 'Ada Lovelace',
+        email: 'ada@example.com', status: 'active', deleted: false,
+    }
+    const DIR_USER = { id: 'usr_2', displayName: 'Grace Hopper', email: 'grace@example.com' }
+
+    async function openMembers() {
+        const u = userEvent.setup()
+        render(<AdminGroups />)
+        await u.click(await screen.findByTitle('Manage members'))
+        return u
+    }
+
+    beforeEach(() => localStorage.clear())
+
+    it('asks why before removing someone, and sends the reason with the removal', async () => {
+        vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
+        vi.mocked(groupsService.removeMember).mockResolvedValue(undefined)
+
+        const u = await openMembers()
+        await u.click(await screen.findByTitle('Remove from group'))
+        expect(groupsService.removeMember).not.toHaveBeenCalled()
+
+        // Focus lands in the reason, so a reason is one phrase and Enter away.
+        await u.keyboard('Left the team{Enter}')
+        await waitFor(() => expect(groupsService.removeMember).toHaveBeenCalledWith(
+            'grp_1', 'usr_1', { reason: 'Left the team' },
+        ))
+    })
+
+    it('changes nothing when the removal is called off', async () => {
+        vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
+
+        const u = await openMembers()
+        await u.click(await screen.findByTitle('Remove from group'))
+        await u.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+        await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument())
+        expect(groupsService.removeMember).not.toHaveBeenCalled()
+        // The drawer is still open behind it.
+        expect(screen.getByText('Ada Lovelace')).toBeInTheDocument()
+    })
+
+    it('sends the add panel\'s reason with everyone added while it is open', async () => {
+        vi.mocked(groupsService.listMembers).mockResolvedValue([])
+        vi.mocked(searchDirectory).mockResolvedValue({ users: [DIR_USER], groups: [] })
+        vi.mocked(groupsService.addMember).mockResolvedValue({ ...MEMBER, userId: 'usr_2' })
+
+        const u = await openMembers()
+        await u.click(await screen.findByTitle('Add members'))
+        await u.click(await screen.findByRole('button', { name: 'Joined the team' }))
+        await u.click(await screen.findByText('Grace Hopper'))
+
+        await waitFor(() => expect(groupsService.addMember).toHaveBeenCalledWith(
+            'grp_1', 'usr_2', { reason: 'Joined the team' },
+        ))
     })
 })
 

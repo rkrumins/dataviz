@@ -17,9 +17,10 @@ one could bring a dead credential back to life, and correctness rested on
 can only cause a refusal, and the rows deleted here belong to tokens that
 had already expired.
 
-This runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler``
-gate the outbox relay uses. Three web replicas each sweeping the same
-table would just contend for the same rows.
+This runs on the aggregation control plane, and on a dev-role monolith
+through the ``runs_scheduler`` gate the outbox relay uses. Each batch takes
+an advisory lock first (``db/advisory.py``), so control-plane replicas take
+turns rather than contending for the same rows.
 """
 from __future__ import annotations
 

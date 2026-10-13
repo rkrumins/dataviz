@@ -503,6 +503,7 @@ The statistics service, analytics and the counts history.
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
+| `ACTIVITY_RETENTION_DAYS` | `730` | Days of activity (who did what, where and why) kept in the activity log and the outbox it is copied from. `0` keeps everything; values below 365 count as 365. Set the same value on the control plane, which deletes, and the web tier, which tells readers how far back the log goes. | `backend/app/services/activity_retention.py` |
 | `ANALYTICS_WARM_INTERVAL_SECONDS` | `300.0` | How often, in seconds, the analytics documents are recomputed. API processes also align their analytics time windows to it, so give every process the same value. Values below 30 count as 30. | `backend/app/services/analytics_cache.py` |
 | `PRODUCT_EVENT_RETENTION_DAYS` | `400` | Days of product events (view opens, lineage traces and graph searches) kept for analytics. Values below 365 count as 365, so a year-long chart always has its data. | `backend/app/services/product_event_gc.py` |
 | `PROFILING_ALERTS_ENABLED` | `true` | master switch for evaluation | `backend/app/config/resilience.py` |
@@ -832,6 +833,7 @@ These names are built in code from a fixed part and a variable part. Replace the
 | `REDIS_<ROLE>_MODE` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PASSWORD` | `<ROLE>`: `STREAMS`, `CACHE` | — (secret, set your own) | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PASSWORD_FILE` | `<ROLE>`: `STREAMS`, `CACHE` | — (secret, set your own) | `backend/common/adapters/redis_endpoint.py` |
+| `REDIS_<ROLE>_POOL_TIMEOUT` | `<ROLE>`: `STREAMS`, `CACHE` | `2.0` | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PORT` | `<ROLE>`: `STREAMS`, `CACHE` | computed | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_RETRY_ON_TIMEOUT` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_SENTINEL_AUTH_ENABLED` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |

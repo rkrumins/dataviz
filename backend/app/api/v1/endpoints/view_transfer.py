@@ -56,9 +56,11 @@ from backend.app.api.v1.endpoints.views import (
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
+from backend.app.common.activity_context import provenance_for
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
+from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.versioning.import_export import uploads
 from backend.app.services.view_transfer import importing, limits, package
@@ -933,6 +935,17 @@ async def create_source_from_package(
             raise HTTPException(status_code=502, detail={
                 "type": "provisioning_failed",
                 "message": "The new data source's version store could not be created."})
+        if created:
+            # A data source someone made, recorded as one added any other way. Best-effort: the
+            # source and its seed are already committed. Named here rather than read from the
+            # request: this route signs in through ``get_optional_user``, which binds no one.
+            await recorder.record_activity(
+                session, event_type="workspace.data_source.added", provenance=provenance_for(user),
+                **recorder.data_source_target(ds),
+                details={"providerId": ds.provider_id, "graphName": ds.graph_name,
+                         "origin": "viewPackage", "uploadId": upload_id},
+                best_effort=True,
+            )
         # No aggregation is registered here: a job dispatched now would run on the still-empty key
         # and stamp its marker there, which the seed's emptiness check then finds. The seed's
         # finalize queues the first rollup build, once the copy is live.

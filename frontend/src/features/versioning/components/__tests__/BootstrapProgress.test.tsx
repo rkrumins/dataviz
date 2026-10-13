@@ -163,7 +163,7 @@ describe('when the copy fails', () => {
   it('resumes on one click — the safe action costs nothing', () => {
     render_(failed)
     fireEvent.click(screen.getByRole('button', { name: /Resume/ }))
-    expect(retryMutate).toHaveBeenCalledWith('resume', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'resume' }), expect.anything())
   })
 
   // ── the two destructive actions sit right next to Resume. A single stray click on
@@ -180,7 +180,15 @@ describe('when the copy fails', () => {
     expect(screen.getByText(/Resuming keeps them/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Yes, start over/ }))
-    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'restart' }), expect.anything())
+  })
+
+  it('carries the reason given for giving up', () => {
+    render_(failed)
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Turned on by mistake' }))
+    fireEvent.click(screen.getByRole('button', { name: /Yes, remove it/ }))
+    expect(abandonMutate).toHaveBeenCalledWith({ reason: 'Turned on by mistake' }, expect.anything())
   })
 
   it('will not give up on one click, and promises the data source is untouched', () => {
@@ -221,7 +229,7 @@ describe('when the copy fails', () => {
     expect(screen.getByText(/would only fail the same way again/)).toBeInTheDocument()
     expect(screen.queryByText(/Resuming keeps them/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Yes, start over/ }))
-    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'restart' }), expect.anything())
   })
 
   it('offers Resume when the failure can be resumed', () => {
@@ -307,7 +315,15 @@ describe('when the source has duplicate identifiers', () => {
     expect(screen.getByText(/Giving up later won't restore them/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Yes, collapse and continue/ }))
-    expect(decideMutate).toHaveBeenCalledWith('fp_1', expect.anything())
+    expect(decideMutate).toHaveBeenCalledWith({ fingerprint: 'fp_1', reason: undefined }, expect.anything())
+  })
+
+  it('carries the reason given for collapsing', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Collapse 3 duplicates and continue/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Source loaded twice' }))
+    fireEvent.click(screen.getByRole('button', { name: /Yes, collapse and continue/ }))
+    expect(decideMutate).toHaveBeenCalledWith({ fingerprint: 'fp_1', reason: 'Source loaded twice' }, expect.anything())
   })
 
   it('asks for a fresh look when the list changed before the decision landed', () => {
@@ -334,7 +350,7 @@ describe('when the source has duplicate identifiers', () => {
   it('re-checks the source at once — nothing has been copied, so there is nothing to lose', () => {
     render_(paused)
     fireEvent.click(screen.getByRole('button', { name: /Re-check source/ }))
-    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'restart' }), expect.anything())
   })
 
   it('will not give up on one click', () => {

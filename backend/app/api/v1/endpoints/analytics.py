@@ -1,8 +1,10 @@
 """Platform Analytics API — business insights over the whole application.
 
-Three read-only endpoints backing the Analytics section: a platform-wide
-summary, one aggregate row per workspace, and a per-workspace drill-down.
-All aggregation lives in ``analytics_repo``; this module is the HTTP contract.
+Read-only endpoints backing the Analytics section: a platform-wide summary,
+one aggregate row per workspace, a per-workspace drill-down, and two
+documents a tab each — what the platform holds and how it grew
+(``/data``), and how it is used (``/usage``). All aggregation lives in the
+repositories; this module is the HTTP contract.
 
 **Access.** Gated on ``system:analytics:read`` — the dedicated privilege —
 or on ``system:org-admin`` / ``system:audit:read``, kept as implications for
@@ -37,7 +39,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.engine import get_readonly_db_session
-from backend.app.db.repositories import analytics_repo
+from backend.app.db.repositories import (
+    analytics_data_repo,
+    analytics_repo,
+    analytics_usage_repo,
+)
 from backend.app.services import analytics_cache
 from backend.app.services.analytics_scope import ViewerScope, resolve_scope
 
@@ -190,6 +196,52 @@ async def analytics_workspaces(
             _cache_key("workspaces", args, epoch=epoch),
             lambda: analytics_repo.workspace_rows(session, scope=None, **build_args),
             analytics_repo.redact_workspace_rows,
+            scope,
+        )
+    except analytics_repo.InvalidWindow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/data")
+async def analytics_data(
+    days: int = _DAYS,
+    date_from: str | None = _FROM,
+    date_to: str | None = _TO,
+    scope: ViewerScope = Depends(resolve_scope),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> dict[str, Any]:
+    """What the platform holds and how it got there: entity and relationship
+    growth, the sources onboarded, and version-control adoption."""
+    args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
+    try:
+        return await _serve(
+            _cache_key("data", args, epoch=epoch),
+            lambda: analytics_data_repo.platform_data(session, scope=None, **build_args),
+            analytics_data_repo.redact_data,
+            scope,
+        )
+    except analytics_repo.InvalidWindow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/usage")
+async def analytics_usage(
+    days: int = _DAYS,
+    date_from: str | None = _FROM,
+    date_to: str | None = _TO,
+    scope: ViewerScope = Depends(resolve_scope),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> dict[str, Any]:
+    """How the platform is used: what is opened against what is built, when
+    people are around, how ingestion is driven, and each workspace's pulse."""
+    args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
+    try:
+        return await _serve(
+            _cache_key("usage", args, epoch=epoch),
+            lambda: analytics_usage_repo.platform_usage(session, scope=None, **build_args),
+            analytics_usage_repo.redact_usage,
             scope,
         )
     except analytics_repo.InvalidWindow as exc:

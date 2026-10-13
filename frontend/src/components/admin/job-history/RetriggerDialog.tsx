@@ -15,6 +15,9 @@
  * On confirm, the dialog awaits the parent's promise. Success → close.
  * Failure → propagate so the parent's notification can render; the dialog stays
  * open so the user can retry without losing their overrides.
+ *
+ * Both paths ask why, optionally, outside the scrolling form so the question
+ * is in view beside the buttons; the reason is saved on the run.
  */
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
@@ -31,6 +34,8 @@ import {
 import { RetriggerFitCheck } from './RetriggerFitCheck'
 import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
 import { useSourceCapacity } from '../shared/useAggregationCapacity'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 
 export interface RetriggerDialogProps {
@@ -68,13 +73,17 @@ export interface RetriggerDialogProps {
     presetAction?: 'raise-per-query-limit' | null
     /** Always shown. */
     /** ``opts.purgeFirst`` routes through the purge endpoint, which deletes
-     *  every rollup edge and then chains the rebuild. Off by default. */
+     *  every rollup edge and then chains the rebuild. Off by default.
+     *  ``opts.reason`` is the person's reason, when they gave one. */
     onConfirmRetrigger: (
         overrides: AggregationOverridesValue,
-        opts?: { purgeFirst?: boolean },
+        opts?: { purgeFirst?: boolean; reason?: string },
     ) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
-    onConfirmResume?: (overrides: AggregationOverridesValue) => Promise<void>
+    onConfirmResume?: (
+        overrides: AggregationOverridesValue,
+        opts?: { reason?: string },
+    ) => Promise<void>
 }
 
 type ShardCap = { timeoutMaxMs: number | null }
@@ -113,6 +122,8 @@ export function RetriggerDialog({
     // tight for memory it makes the run need MORE room, not less (every
     // retained cell becomes a fresh write). See the note beside it.
     const [purgeFirst, setPurgeFirst] = useState(false)
+    const reason = useReasonDraft('aggregation')
+    const { reset: resetReason } = reason
 
     // Reset form to fresh `initialValue` each time the dialog re-opens.
     // We compare on `isOpen` (not `initialValue`) so that prop reference churn
@@ -123,9 +134,10 @@ export function RetriggerDialog({
             setValue(initialValue)
             setLoading(null)
             setPurgeFirst(false)   // destructive: never sticky across opens
+            resetReason()
         }
         prevOpenRef.current = isOpen
-    }, [isOpen, initialValue])
+    }, [isOpen, initialValue, resetReason])
 
     // Lock background scroll while the modal is mounted.
     useEffect(() => {
@@ -154,11 +166,12 @@ export function RetriggerDialog({
     const handleConfirm = async (kind: 'resume' | 'retrigger') => {
         if (isLoading) return
         setLoading(kind)
+        const why = reason.take()
         try {
             if (kind === 'resume' && onConfirmResume) {
-                await onConfirmResume(value)
+                await onConfirmResume(value, { reason: why })
             } else {
-                await onConfirmRetrigger(value, { purgeFirst })
+                await onConfirmRetrigger(value, { purgeFirst, reason: why })
             }
             onClose()
         } catch {
@@ -328,6 +341,14 @@ export function RetriggerDialog({
                                 : body({ timeoutMaxMs: null })
                         })()}
                     </div>
+
+                    <ReasonField
+                        draft={reason}
+                        audience="workspace"
+                        note="It also shows on the run in Job History."
+                        disabled={isLoading}
+                        className="px-6 py-4 border-t border-glass-border/40"
+                    />
 
                     {/* Footer */}
                     <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-glass-border/40 bg-black/[0.02] dark:bg-white/[0.01]">

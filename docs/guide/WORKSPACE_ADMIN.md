@@ -38,6 +38,7 @@ Open **Workspaces** in the sidebar and select a workspace. Under its header, the
 | **Ontology** | Follow changes to the semantic layers this workspace's sources use | Everyone who can open the workspace |
 | **Reviews** | Review merge requests across the workspace's versioned sources | Only while **Version control** is on — it is by default |
 | **Members** | Decide who can get in, and with which role | Workspace admins, Org Admins and Super Admins |
+| **Activity** | See who ran, changed or granted what in this workspace — when, and why | Workspace admins, Org Admins, Org Auditors and Super Admins |
 
 > **If you don't see Reviews:** **Version control** is switched off in
 > **Administration → Features** — see [Feature
@@ -305,6 +306,35 @@ draft and merged through a **merge request**, like a pull request. The
 [The Review Center](/guide/review-center) explains reviewing, resolving
 conflicts and merging in full; [Editing in a Draft](/guide/editing-in-a-draft)
 covers the other side.
+
+---
+
+## What's happening in your workspace (the Activity tab)
+
+The **Activity** tab answers "who did this here, when, and why?" for the
+workspace's operations, access and data: rebuilds, retries and purges of its
+data sources, runs stopped, members added or removed, data sources added or
+moved in, and version control turned on.
+
+1. Open the workspace and select the **Activity** tab.
+2. Choose a range, and a lens: **Everything**, **Operations**, **Access** or
+   **Data**.
+3. Narrow it down by person — as the one who **Did it** or **Had it done to
+   them** — by action, by outcome, or to the changes that came with a reason.
+4. Read the band at the top: how busy the workspace has been against the
+   period before, which data sources people operate by hand most and how
+   often, who is most active, and the reasons people give.
+5. Select an event for the full story: who it happened to, the run or data
+   source it touched, and the other events from the same request.
+
+**You should now see** the matching events, newest first, grouped by day.
+
+Changes to the views themselves stay in each View's **Activity** (above).
+Sign-ins, single sign-on and platform-wide settings never appear here;
+auditors see those in **Administration → Activity**. When you rebuild, purge or
+stop a run, or add or remove a member, {brand} asks — optionally — why. Your
+answer is shown here and in **Administration → Activity**, to auditors and this
+workspace's admins.
 
 ---
 

@@ -7,7 +7,7 @@
  * reader can take in without scrolling twice.
  */
 import {
-    Activity, Boxes, Database, Eye, LayoutGrid, MousePointerClick, TrendingUp, Users,
+    Activity, ArrowRight, Boxes, Database, Eye, LayoutGrid, MousePointerClick, TrendingUp, Users,
 } from 'lucide-react'
 
 import { compact, exact, percent } from '@/lib/formatMetric'
@@ -319,6 +319,9 @@ export function OverviewTab({
                 title="Platform scale"
                 subtitle="What has been onboarded, all time"
                 isStale={isStale}
+                action={onNavigateTab && (
+                    <TabLink label="Growth over time" onClick={() => onNavigateTab('data')} />
+                )}
             >
                 {/* Three across rather than six: each tile now says what its
                     number MEANS, and a sentence needs room to be read. Six
@@ -371,6 +374,9 @@ export function OverviewTab({
                 title="Data sources onboarded"
                 subtitle="New connections per period"
                 isStale={isStale}
+                action={onNavigateTab && (
+                    <TabLink label="Onboarding in depth" onClick={() => onNavigateTab('data')} />
+                )}
                 isEmpty={series.dataSourcesOnboarded.every((v) => v === 0)}
                 emptyLabel="No sources onboarded in this range."
                 table={
@@ -389,6 +395,20 @@ export function OverviewTab({
                 />
             </ChartFrame>
         </div>
+    )
+}
+
+/** A way into the tab that answers the frame's next question. */
+function TabLink({ label, onClick }: { label: string; onClick: () => void }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="inline-flex items-center gap-1 rounded-lg border border-glass-border px-2 py-1 text-[10px] font-semibold text-ink-muted outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+        >
+            {label}
+            <ArrowRight className="h-3 w-3" aria-hidden />
+        </button>
     )
 }
 
