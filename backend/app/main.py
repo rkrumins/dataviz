@@ -2616,11 +2616,14 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # P1.8 — explicit SSE path registry. Routers may extend this at
-    # startup via ``register_sse_path("/api/v1/.../my-stream")``. The
-    # default suffix ``/events`` matches today's only SSE convention but
-    # the contract is explicit registration, not endswith heuristics.
-    _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
+    # P1.8 — explicit SSE path registry: each live feed by its exact shape,
+    # never by how its path ends. Matching any path ending in ``/events``
+    # also exempted the activity log's event lists — ordinary paged reads —
+    # from every deadline.
+    _SSE_PATHS: tuple[re.Pattern, ...] = (
+        # An aggregation job's progress (``aggregation.stream_job_events``).
+        re.compile(r"^/api/v1/admin/data-sources/[^/]+/aggregation-jobs/[^/]+/events$"),
+    )
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
     # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
     # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
@@ -2633,6 +2636,9 @@ class _TimeoutMiddleware:
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+        # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
+        # short keyset read per chunk, two at a time per process (activity._EXPORTS).
+        re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
     )
 
     def __init__(self, app):
@@ -2685,10 +2691,7 @@ class _TimeoutMiddleware:
     def _is_sse_path(self, path: str) -> bool:
         if path in self._SSE_EXACT_PATHS:
             return True
-        for suffix in self._SSE_PATH_SUFFIXES:
-            if path.endswith(suffix):
-                return True
-        return any(p.match(path) for p in self._STREAM_PATHS)
+        return any(p.match(path) for p in (*self._SSE_PATHS, *self._STREAM_PATHS))
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
