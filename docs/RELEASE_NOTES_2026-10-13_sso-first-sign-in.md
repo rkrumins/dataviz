@@ -24,15 +24,11 @@ The page led with email and password, with the single sign-on buttons underneath
 the browser's required-field check asked for a password — even for someone whose address
 would have gone straight through single sign-on.
 
-![Before: email and password first, the single sign-on buttons underneath](images/sso-first-sign-in/before-default.png)
-
 ### "Ask for an email first" turned people away
 
 Routing needed an exact match in a connection's **Email domains**. Any other address — a
 new subsidiary, an alias, or a deployment with one connection and no domains listed — was
 answered with "We don't recognise that email's domain".
-
-![Before: an address whose domain no connection lists is refused](images/sso-first-sign-in/before-email-first.png)
 
 ### Enforcing single sign-on was a bet against the identity provider
 
@@ -78,14 +74,6 @@ Wherever a connection is live:
 
 A deployment with no connection keeps the single email-and-password form.
 
-| Light | Dark | Phone |
-|---|---|---|
-| ![The SSO-first sign-in page](images/sso-first-sign-in/identify-light.png) | ![The same page in the dark theme](images/sso-first-sign-in/identify-dark.png) | ![The same page at phone width](images/sso-first-sign-in/identify-mobile.png) |
-
-| An address that routes | Enter: the hand-off | The password step | Back from a failed sign-in |
-|---|---|---|---|
-| ![Typing a contractor address relabels the button Continue with Contractor Okta](images/sso-first-sign-in/identify-routed.png) | ![Taking you to Corporate Entra ID…](images/sso-first-sign-in/routing.png) | ![The password step, with the single sign-on button under "or"](images/sso-first-sign-in/password-step.png) | ![Sign-in through your identity provider didn't complete, with Use your password instead](images/sso-first-sign-in/sso-failed.png) |
-
 ### One rule for who may use a password
 
 `password_access` in the auth service decides, the server enforces it, and the page shows
@@ -103,10 +91,6 @@ password"` — after a password check that costs the same as a real one — inst
 break-glass accounts or Super Admins. The activity log still records
 `local_login_disabled`.
 
-| Passwords off: no password offered | `/login?password=1`: the break-glass door |
-|---|---|
-| ![Passwords off — single sign-on only](images/sso-first-sign-in/sso-only.png) | ![The break-glass password step](images/sso-first-sign-in/break-glass.png) |
-
 ### Turning passwords off needs a ready break-glass account
 
 The switch-off is refused (`409 no_break_glass_account`) until an active Super Admin with a
@@ -116,10 +100,6 @@ each with **Make break-glass**, and **Turn off anyway** proceeds
 (`acknowledgeAdminsWithoutSso`). Both checks run on the switch-off only, so saving another
 switch while passwords are off is never blocked by them, and the last ready break-glass
 account cannot be unmarked while passwords are off.
-
-![The passwords-off confirm listing a Super Admin with no SSO identity, with Make break-glass and Turn off anyway](images/sso-first-sign-in/admin-passwords-off-confirm.png)
-
-![The Primary badge on the first connection in priority order](images/sso-first-sign-in/admin-primary-badge.png)
 
 ### When an identity provider goes down
 
@@ -136,23 +116,11 @@ is over after **5 minutes** of health. Every transition is audited once
 Admins with a password get in through **Administrator sign-in**; break-glass accounts always
 could.
 
-| The outage notice | Administrator sign-in |
-|---|---|
-| ![We can't reach Corporate Entra ID right now. Administrators can sign in with their password while it's restored.](images/sso-first-sign-in/outage-admins.png) | ![The password step opened from Administrator sign-in](images/sso-first-sign-in/outage-admin-password.png) |
-
 **The emergency window.** Any admin opens password sign-in to everyone for 1 to 24 hours
 from Administration → SSO → Settings → **Emergency password access**, with a reason. It
 closes itself; **Close now** ends it early. The same page shows **Single sign-on status**
 (which connection is down and since when, when detection last ran, and a warning when it
 is not running) and **Break-glass accounts** with their readiness.
-
-| The page while the window is open | Single sign-on status |
-|---|---|
-| ![Password sign-in is open until a time an admin chose](images/sso-first-sign-in/window.png) | ![Corporate Gateway can't be reached right now, down since 07:10 PM, Gateway answered 503](images/sso-first-sign-in/gateway-admin-status.png) |
-
-| Emergency password access, open | Break-glass accounts |
-|---|---|
-| ![Open until 08:18 PM, opened by admin@example.com, with Close now](images/sso-first-sign-in/gateway-admin-emergency.png) | ![The break-glass readiness card](images/sso-first-sign-in/gateway-admin-breakglass.png) |
 
 **Sessions through an outage.**
 
@@ -191,10 +159,6 @@ Gateway connections get the same treatment, adapted to how they work:
 - **Back through the gateway, in place.** Once the gateway is back and the window has
   closed, an emergency password session's next renewal is replaced through the gateway
   without a visible redirect.
-
-| A gateway-first deployment | Gateway confirmed down | Down, with the window open |
-|---|---|---|
-| ![Continue with Corporate Gateway](images/sso-first-sign-in/gateway-identify-light.png) | ![We can't reach Corporate Gateway right now](images/sso-first-sign-in/gateway-outage-light.png) | ![With the window open the page leads with the password](images/sso-first-sign-in/gateway-outage-window-light.png) |
 
 ### Problems reported on gateway connections
 
@@ -239,15 +203,10 @@ Gateway connections get the same treatment, adapted to how they work:
   accounts too** on the connection, after which every existing account links as before —
   so on an intranet the exposure is every person and device that can reach the application,
   and the fix is to make the connection Verified.
-  ![Link administrator accounts too, under the connection's Account linking](images/sso-first-sign-in/gateway-link-admins-toggle.png)
 - **The corporate CA bundle replaced the public roots.** `SSO_OUTBOUND_TLS_CA_CERTS` was
   loaded as the *only* trust store, so a bundle holding just the corporate chain — the
   documented use — would have made every public identity provider fail TLS, and the outage
   prober report them down. Its CAs are now added to the public roots.
-
-| The warning, naming its cause and fix | Folded away once read |
-|---|---|
-| ![A browser-mode gateway's card: a green health line, and a warning naming Trust unsigned and the fix, with Open its settings and Hide](images/sso-first-sign-in/gateway-unverified-card.png) | ![The same card with the warning folded to one line](images/sso-first-sign-in/gateway-unverified-card-hidden.png) |
 
 ### When nobody can sign in at all
 
