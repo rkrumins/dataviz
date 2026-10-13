@@ -67,6 +67,9 @@ class ActivityEvent(BaseModel):
     stated_reason: Optional[str] = Field(default=None, alias="statedReason")
     #: The HTTP request it came from; events sharing it happened together.
     correlation_id: Optional[str] = Field(default=None, alias="correlationId")
+    #: The API key the change was made with, when one was, and its name.
+    api_key_id: Optional[str] = Field(default=None, alias="apiKeyId")
+    api_key_name: Optional[str] = Field(default=None, alias="apiKeyName")
     #: Recorded operations' particulars (job id, trigger source, scope…).
     details: dict[str, Any] = Field(default_factory=dict)
     #: Every other id the event mentions, named. Same contract as above.

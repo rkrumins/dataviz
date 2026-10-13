@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +28,6 @@ from backend.app.db.repositories import (
     notification_repo,
     outbox_event_repo,
 )
-from backend.auth_service.core.api_keys import parse_instant
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,18 @@ REMIND_AHEAD = timedelta(days=7)
 _BATCH = 500
 # Reminders are a week ahead, so an hour's resolution is more than enough.
 _DEFAULT_INTERVAL_SECONDS = 3600.0
+
+
+def _instant(value: Optional[str]) -> Optional[datetime]:
+    """A stored ISO-8601 instant, aware (naive reads as UTC). Parsed here, not
+    with the auth service's helper: the control plane starts without it."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 async def remind_once(session: AsyncSession) -> int:
@@ -46,8 +58,8 @@ async def remind_once(session: AsyncSession) -> int:
     )
     reminded = 0
     for key in keys:
-        created = parse_instant(key.created_at)
-        expires = parse_instant(key.expires_at)
+        created = _instant(key.created_at)
+        expires = _instant(key.expires_at)
         if created is None or expires is None or expires - created <= REMIND_AHEAD:
             continue
         await notification_repo.notify(

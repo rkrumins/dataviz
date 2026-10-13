@@ -355,8 +355,12 @@ async def test_streamed_export_bypasses_timeout():
     await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
-    # The activity log's CSV, platform-wide and one workspace's.
-    for path in ("/api/v1/admin/activity/export.csv", "/api/v1/admin/workspaces/ws_1/activity/export.csv"):
+    # The activity log's CSV, platform-wide and one workspace's, and the API
+    # key inventory's.
+    for path in (
+        "/api/v1/admin/activity/export.csv", "/api/v1/admin/workspaces/ws_1/activity/export.csv",
+        "/api/v1/admin/api-keys/export.csv",
+    ):
         await mw(_http_scope(path), _Receiver(), sink := _Sink())
         assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
@@ -366,6 +370,7 @@ async def test_streamed_export_bypasses_timeout():
     # Only those routes: the export job's status is an ordinary request.
     assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/stream/extra")
     assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1")
+    assert not mw._is_sse_path("/api/v1/admin/api-keys/apk_1")
 
 
 async def test_non_http_scope_passes_through():

@@ -2708,6 +2708,9 @@ class _TimeoutMiddleware:
         # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
         # short keyset read per chunk, two at a time per process (activity._EXPORTS).
         re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
+        # The API key inventory as CSV: at most 10,000 keys, a short read per page of 500, two
+        # at a time per process (api_keys._EXPORTS).
+        re.compile(r"^/api/v1/admin/api-keys/export\.csv$"),
     )
 
     def __init__(self, app):

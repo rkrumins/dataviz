@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Iterator, Optional, Protocol
 
-from sqlalchemy import false, func, or_, select, text, tuple_, union_all
+from sqlalchemy import and_, false, func, or_, select, text, tuple_, union_all
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +107,8 @@ class ActivityFilter:
     target_id: Optional[str] = None
     outcome: Optional[str] = None
     has_reason: Optional[bool] = None
+    #: Everything one API key did, and everything that happened to it.
+    api_key_id: Optional[str] = None
     include_noise: bool = False
     text: Optional[str] = None
     #: Forced to ``workspace`` for a workspace admin's read.
@@ -158,6 +160,11 @@ def predicates(f: ActivityFilter, *, window: bool = True) -> list[Any]:
         out.append(L.stated_reason.is_not(None))
     elif f.has_reason is False:
         out.append(L.stated_reason.is_(None))
+    if f.api_key_id:
+        out.append(or_(
+            L.api_key_id == f.api_key_id,
+            and_(L.target_type == "api_key", L.target_id == f.api_key_id),
+        ))
     if not f.include_noise:
         out.append(L.event_type.notin_(sorted(NOISE_TYPES)))
     if f.text:

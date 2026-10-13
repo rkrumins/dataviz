@@ -18,9 +18,11 @@ import {
 } from 'lucide-react'
 
 import { Backdrop } from '@/components/ui/Backdrop'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { DateTime } from '@/components/ui/DateTime'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
@@ -29,8 +31,8 @@ import { AccessMatrix } from './AccessMatrix'
 import { KeyChips } from './KeyCard'
 import { LifetimeBar } from './LifetimeBar'
 import { UsagePanel } from './UsagePanel'
-import { describeLastUsed, describeRevocation, formatDay } from './apiKeyFormat'
-import { CopyButton, KeyStatusBadge } from './parts'
+import { describeLastUsed, describeRevocation } from './apiKeyFormat'
+import { KeyStatusBadge } from './parts'
 
 type Tab = 'overview' | 'access' | 'usage'
 
@@ -123,7 +125,7 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                             <KeyStatusBadge apiKey={key} />
                             <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
                                 <code className="font-mono">{key.prefix}…</code>
-                                <CopyButton text={key.prefix} label="Copy the key’s prefix" className="p-0.5" />
+                                <CopyButton value={key.prefix} label="Copy the key’s prefix" className="p-0.5" />
                             </span>
                         </div>
                     </div>
@@ -138,16 +140,15 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                 </div>
                 {variant === 'admin' && owner && (
                     <div className="mt-4 flex items-center gap-3 p-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04]">
-                        <UserAvatar userId={owner.id} name={owner.displayName} className="w-8 h-8 text-[11px]" />
                         <div className="min-w-0 flex-1">
-                            <p className="text-xs font-semibold text-ink truncate">Acts as {owner.displayName}</p>
-                            <p className="text-[11px] text-ink-muted truncate">{owner.email}</p>
+                            <PersonChip id={owner.id} person={owner} size="md" showEmail caption="Acts as them" />
                         </div>
+                        {/* What was done with it, and what happened to it — refusals included. */}
                         <a
-                            href={`/admin/users?user=${encodeURIComponent(owner.id)}`}
+                            href={`/admin/audit?act_key=${encodeURIComponent(key.id)}&act_days=365`}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 shrink-0"
                         >
-                            Their account <ExternalLink className="w-3 h-3" aria-hidden />
+                            Its activity <ExternalLink className="w-3 h-3" aria-hidden />
                         </a>
                     </div>
                 )}
@@ -221,7 +222,7 @@ function Overview({ apiKey: key, detail, variant, onOpenKey }: {
                 <div className="p-3.5 rounded-xl border border-black/[0.07] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03]">
                     <p className="flex items-center gap-2 text-sm font-semibold text-ink">
                         <Ban className="w-4 h-4 text-ink-muted" aria-hidden />
-                        {describeRevocation(key, variant)} · {formatDay(key.revokedAt)}
+                        {describeRevocation(key, variant)} · <DateTime at={key.revokedAt} />
                     </p>
                     {key.revokedNote && (
                         <p className="mt-1.5 text-xs text-ink-secondary leading-relaxed">“{key.revokedNote}”</p>
@@ -235,11 +236,11 @@ function Overview({ apiKey: key, detail, variant, onOpenKey }: {
 
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
                 <Fact label="Created">
-                    {formatDay(key.createdAt)}
+                    <DateTime at={key.createdAt} />
                     {key.createdIp && <span className="block text-[11px] text-ink-muted">from {key.createdIp}</span>}
                 </Fact>
                 <Fact label="Last used">
-                    {used.when}
+                    <DateTime at={key.lastUsedAt} empty="Never used" />
                     {used.where && (
                         <span className="flex items-center gap-1 text-[11px] text-ink-muted">
                             <MapPin className="w-3 h-3 shrink-0" aria-hidden /> {used.where}

@@ -3389,6 +3389,7 @@ class AuthAuditLogORM(Base):
     data_source_id = Column(Text, nullable=True)
     stated_reason = Column(Text, nullable=True)   # the "why" a person gave
     correlation_id = Column(Text, nullable=True)  # the HTTP request it came from
+    api_key_id = Column(Text, nullable=True)      # the API key it was made with
     projection_version = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
@@ -3437,6 +3438,11 @@ class AuthAuditLogORM(Base):
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),
         Index("idx_aal_correlation", "correlation_id"),
         Index("idx_aal_projection_version", "projection_version"),
+        # What one API key did. Partial: most changes are made in a browser,
+        # so it costs a write only for those made with a key.
+        Index("idx_aal_api_key_occurred", "api_key_id", "occurred_at",
+              postgresql_where=text("api_key_id IS NOT NULL"),
+              sqlite_where=text("api_key_id IS NOT NULL")),
     )
 
     def __repr__(self) -> str:

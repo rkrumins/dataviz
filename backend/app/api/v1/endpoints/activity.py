@@ -128,6 +128,7 @@ class _Params:
     target_id: Optional[str]
     outcome: Optional[str]
     has_reason: Optional[bool]
+    api_key_id: Optional[str]
     include_noise: bool
     q: Optional[str]
 
@@ -155,6 +156,10 @@ def _params(
     target_id: Optional[str] = Query(None, alias="targetId", max_length=256),
     outcome: Optional[Literal["success", "failure", "denied"]] = Query(None),
     has_reason: Optional[bool] = Query(None, alias="hasReason"),
+    api_key_id: Optional[str] = Query(
+        None, alias="apiKeyId", max_length=128,
+        description="An API key: what was done with it, and what happened to it.",
+    ),
     include_noise: bool = Query(False, alias="includeNoise"),
     q: Optional[str] = Query(None, max_length=200, description="Free-text search."),
 ) -> _Params:
@@ -171,7 +176,7 @@ def _params(
         person=(person or "").strip() or None, person_role=person_role,
         workspace_id=workspace_id, data_source_id=data_source_id,
         target_type=target_type, target_id=target_id, outcome=outcome,
-        has_reason=has_reason, include_noise=include_noise,
+        has_reason=has_reason, api_key_id=api_key_id, include_noise=include_noise,
         q=(q or "").strip() or None,
     )
 
@@ -229,6 +234,7 @@ async def _filter(
         target_id=p.target_id,
         outcome=p.outcome,
         has_reason=p.has_reason,
+        api_key_id=p.api_key_id,
         include_noise=p.include_noise,
         text=p.q,
     )
@@ -279,6 +285,8 @@ async def _events(
             references.add(row.data_source_id)
         if row.target_id and not row.target_label:
             references.add(row.target_id)
+        if row.api_key_id:
+            references.add(row.api_key_id)
         references |= refs
         staged.append((row, payload, severity, summary, refs))
 
@@ -312,6 +320,8 @@ async def _events(
             data_source_name=page.names.get(row.data_source_id or ""),
             stated_reason=row.stated_reason,
             correlation_id=row.correlation_id,
+            api_key_id=row.api_key_id,
+            api_key_name=page.names.get(row.api_key_id or ""),
             details=details if isinstance(details, dict) else {},
             resolved_names={r: page.names[r] for r in refs if r in page.names},
             payload=payload if full else None,
@@ -325,7 +335,7 @@ _CSV_COLUMNS = (
     "occurredAt", "eventType", "label", "category", "outcome", "severity",
     "actorKind", "actorId", "actorName", "actorEmail", "subjectId", "subjectName",
     "targetType", "targetId", "targetLabel", "workspaceId", "workspaceName",
-    "dataSourceId", "dataSourceName", "statedReason", "correlationId", "summary",
+    "dataSourceId", "dataSourceName", "statedReason", "correlationId", "apiKeyId", "summary",
 )
 
 
@@ -348,7 +358,7 @@ def _csv_row(e: ActivityEvent) -> list[str]:
         subject and subject.id, subject and subject.name,
         target and target.type, target and target.id, target and target.label,
         e.workspace_id, e.workspace_name, e.data_source_id, e.data_source_name,
-        e.stated_reason, e.correlation_id, e.summary,
+        e.stated_reason, e.correlation_id, e.api_key_id, e.summary,
     )]
 
 

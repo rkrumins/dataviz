@@ -23,16 +23,17 @@ import {
 
 import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RevokeKeyDialog } from '@/components/apiKeys/RevokeKeyDialog'
-import { describeLastUsed, describePermissions, describeResources, formatDay } from '@/components/apiKeys/apiKeyFormat'
+import { describePermissions, describeResources } from '@/components/apiKeys/apiKeyFormat'
 import { ExpiryFact, KeyStatusBadge } from '@/components/apiKeys/parts'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { Button, IconButton } from '@/components/ui/Button'
+import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { TablePagination } from '@/components/ui/TablePagination'
-import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { cn } from '@/lib/utils'
@@ -347,13 +348,12 @@ export function AdminApiKeys() {
                                             <KeyStatusBadge apiKey={key} short />
                                         </span>
                                         <span className="flex items-center gap-2">
-                                            <UserAvatar userId={key.owner.id} name={key.owner.displayName} className="w-6 h-6 text-[9px]" />
-                                            <span className="min-w-0 text-xs text-ink-secondary truncate">{key.owner.displayName}</span>
+                                            <PersonChip id={key.owner.id} person={key.owner} size="sm" link={false} />
                                         </span>
                                         <span className="grid grid-cols-2 gap-3">
                                             <span className="text-xs text-ink-secondary tabular-nums">{key.usage.requests30d.toLocaleString()} requests · 30 d</span>
                                             {key.revokedAt
-                                                ? <span className="text-xs text-ink-muted">Ended {formatDay(key.revokedAt)}</span>
+                                                ? <DateTime at={key.revokedAt} prefix="Ended " className="text-xs text-ink-muted" />
                                                 : <ExpiryFact expiresAt={key.expiresAt} compact />}
                                         </span>
                                     </button>
@@ -470,7 +470,6 @@ function SortHeader({ label, field, sort, order, onSort, className }: {
 }
 
 function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: () => void; onRevoke?: () => void }) {
-    const used = describeLastUsed(key)
     return (
         <tr onClick={onOpen} className="border-b border-black/[0.06] dark:border-white/[0.07] last:border-0 align-top cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
             <td className="px-3 py-3.5 max-w-[14rem]">
@@ -491,13 +490,7 @@ function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: (
                 </p>
             </td>
             <td className="px-3 py-3.5">
-                <div className="flex items-center gap-2.5 min-w-0">
-                    <UserAvatar userId={key.owner.id} name={key.owner.displayName} className="w-7 h-7 text-[10px] font-bold" />
-                    <div className="min-w-0">
-                        <p className="text-ink font-medium truncate max-w-[8.5rem]">{key.owner.displayName}</p>
-                        <p className="text-ink-muted truncate max-w-[8.5rem]">{key.owner.email}</p>
-                    </div>
-                </div>
+                <PersonChip id={key.owner.id} person={key.owner} size="md" showEmail className="max-w-[11rem]" />
             </td>
             <td className="px-3 py-3.5">
                 <div className="flex items-center gap-2">
@@ -511,17 +504,15 @@ function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: (
                 )}
             </td>
             <td className="px-3 py-3.5">
-                <p className={cn('font-medium whitespace-nowrap', key.lastUsedAt ? 'text-ink' : 'text-ink-muted')}>
-                    {used.when.replace('Used ', '')}
-                </p>
+                <DateTime at={key.lastUsedAt} empty="Never used" className="font-medium text-ink" />
                 {key.lastUsedIp && <p className="text-ink-muted font-mono text-[11px]">{key.lastUsedIp}</p>}
             </td>
             <td className="px-3 py-3.5">
                 {key.revokedAt
-                    ? <span className="text-ink-muted whitespace-nowrap">Ended {formatDay(key.revokedAt)}</span>
+                    ? <DateTime at={key.revokedAt} prefix="Ended " className="text-ink-muted" />
                     : <ExpiryFact expiresAt={key.expiresAt} compact />}
             </td>
-            <td className="px-3 py-3.5 hidden 2xl:table-cell text-ink-secondary whitespace-nowrap">{formatDay(key.createdAt)}</td>
+            <td className="px-3 py-3.5 hidden 2xl:table-cell text-ink-secondary"><DateTime at={key.createdAt} /></td>
             <td className="px-2 py-3 text-right">
                 {onRevoke && (
                     <IconButton

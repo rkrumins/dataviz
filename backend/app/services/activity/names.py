@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
+    ApiKeyORM,
     GroupORM,
     IdpProviderORM,
     ProviderORM,
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 #: payload routinely names a third — a ``granted_by``, an inviter, a member
 #: added to a group, the subject of an SSO mapping — and without this that
 #: id rendered raw while every other kind beside it was named.
-REF_ID = re.compile(r"\b(?:grp|ws|idp|view|usr)_[A-Za-z0-9]+\b")
+REF_ID = re.compile(r"\b(?:grp|ws|idp|view|usr|apk)_[A-Za-z0-9]+\b")
 
 
 async def resolve_reference_names(
@@ -53,7 +54,7 @@ async def resolve_reference_names(
     which already queries them for the actor/target and the event's own
     workspace and folds the payload references into those same two
     queries. This covers the rest — internal groups, IdP connections,
-    views.
+    views, API keys.
     """
     out: dict[str, str] = {}
     if not ids:
@@ -82,6 +83,12 @@ async def resolve_reference_names(
             rows = await session.execute(
                 select(ViewORM.id, ViewORM.name)
                 .where(ViewORM.id.in_(by_prefix["view"]))
+            )
+            out.update({i: n for i, n in rows.all() if n})
+        if by_prefix.get("apk"):
+            rows = await session.execute(
+                select(ApiKeyORM.id, ApiKeyORM.name)
+                .where(ApiKeyORM.id.in_(by_prefix["apk"]))
             )
             out.update({i: n for i, n in rows.all() if n})
     except Exception:  # noqa: BLE001 — names are enrichment, ids are the record

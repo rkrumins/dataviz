@@ -12,13 +12,13 @@
  * should not be used from.
  */
 import { useEffect, useState } from 'react'
-import { CheckCircle2, Eye, EyeOff, ShieldCheck } from 'lucide-react'
+import { Check, CheckCircle2, Copy, Eye, EyeOff, ShieldCheck } from 'lucide-react'
 
+import { HoverTip } from '@/components/ui/HoverTip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { cn } from '@/lib/utils'
 import { apiKeyService, type CreatedApiKey } from '@/services/apiKeyService'
 import { clientName, describePermissions, describeResources, expiryCountdown } from './apiKeyFormat'
-import { CopyButton } from './parts'
 import { SNIPPETS, snippet } from './snippets'
 
 const POLL_MS = 3000
@@ -71,13 +71,13 @@ export function RevealPanel({ created, acknowledged, onAcknowledge }: {
                     >
                         {shown ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
-                    <CopyButton
+                    <CopyAction
                         text={token}
                         label="Copy the key"
                         className="h-9 px-3.5 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 hover:text-white"
                     >
                         Copy
-                    </CopyButton>
+                    </CopyAction>
                 </div>
                 <p className="mt-3 text-[11px] text-ink-muted">
                     {describePermissions(key.permissions)} on {describeResources(key.resources).toLowerCase()}
@@ -105,13 +105,13 @@ export function RevealPanel({ created, acknowledged, onAcknowledge }: {
                                         <span className="text-[11px] font-medium text-slate-400">
                                             {s.id === 'env' ? 'Keep this file out of version control' : 'Reads the key from API_KEY'}
                                         </span>
-                                        <CopyButton
+                                        <CopyAction
                                             text={code}
                                             label={`Copy the ${s.label} example`}
                                             className="h-7 px-2.5 rounded-lg text-xs font-semibold text-slate-200 bg-white/10 hover:bg-white/20 hover:text-white"
                                         >
                                             Copy
-                                        </CopyButton>
+                                        </CopyAction>
                                     </div>
                                     <pre className="overflow-x-auto p-4 text-[12px] leading-relaxed font-mono text-slate-100">
                                         <code>{code}</code>
@@ -199,4 +199,43 @@ function useFirstCall(keyId: string): FirstCall {
         }
     }, [keyId])
     return call
+}
+
+/** A copy button with words on it, for the two things this screen exists
+ *  to hand over: the key and a first call. */
+function CopyAction({ text, label, className, children }: {
+    text: string
+    /** What is copied, for the tooltip and screen readers: "Copy the key". */
+    label: string
+    className?: string
+    /** The words on the button. */
+    children: React.ReactNode
+}) {
+    const [copied, setCopied] = useState(false)
+    const copy = (e: React.MouseEvent) => {
+        e.stopPropagation()
+        // Best effort: a refused clipboard leaves the text selectable.
+        navigator.clipboard?.writeText(text).then(
+            () => { setCopied(true); setTimeout(() => setCopied(false), 1500) },
+            () => {},
+        )
+    }
+    const Icon = copied ? Check : Copy
+    return (
+        <HoverTip label={copied ? 'Copied' : label}>
+            <button
+                type="button"
+                onClick={copy}
+                aria-label={label}
+                className={cn(
+                    'inline-flex items-center gap-1.5 rounded-md text-ink-muted hover:text-ink transition-colors',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    className,
+                )}
+            >
+                <Icon className={cn('w-3.5 h-3.5 shrink-0', copied && 'text-emerald-500')} aria-hidden />
+                {children}
+            </button>
+        </HoverTip>
+    )
 }

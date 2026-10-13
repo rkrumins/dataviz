@@ -19,6 +19,7 @@ Pinned here:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import types
 from urllib.parse import quote
@@ -200,6 +201,34 @@ async def test_a_persons_trigger_stamps_the_job_and_records_it_once(session_fact
     assert (projected["category"], projected["audience"]) == ("operations", "workspace")
     assert (projected["actor_id"], projected["actor_kind"]) == ("usr_ana", "user")
     assert projected["stated_reason"] == "Reload after the upstream fix"
+
+
+@pytest.mark.asyncio
+async def test_a_run_started_with_an_api_key_is_the_apis_and_names_the_key(
+    session_factory, monkeypatch,
+):
+    """A script's run is its owner's, started through the API rather than by
+    hand, and the record says which key started it."""
+    await _seed(session_factory)
+    svc = _service()
+    _resolving(monkeypatch, svc)
+
+    async with session_factory() as s:
+        job = await svc.trigger(
+            "ds_1", AggregationTriggerRequest(), "manual", s,
+            provenance=dataclasses.replace(ANA, api_key_id="apk_ci"),
+        )
+    async with session_factory() as s:
+        row = await s.get(AggregationJobORM, job.id)
+        assert (row.trigger_source, row.triggered_by) == ("api", "usr_ana")
+        [(event_type, payload)] = await _events(s)
+    assert payload["details"] == {"jobId": job.id, "triggerSource": "api"}
+    projected = catalogue.project(
+        event_type=event_type, payload=payload, event_version=2,
+        aggregate_type="data_source", aggregate_id="ds_1",
+    )
+    assert (projected["actor_id"], projected["api_key_id"]) == ("usr_ana", "apk_ci")
+    assert catalogue.summarize(event_type, payload)[1] == "Triggered aggregation of Ledger (via the API)"
 
 
 @pytest.mark.asyncio

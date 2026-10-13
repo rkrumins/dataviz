@@ -190,7 +190,15 @@ export interface CreatedApiKey {
 }
 
 export interface AdminApiKey extends ApiKey {
-    owner: { id: string; email: string; displayName: string }
+    owner: {
+        id: string
+        email: string
+        displayName: string
+        /** For drawing their face: the picked illustration, and whether a picture is stored. */
+        avatarId: string | null
+        hasImage: boolean
+        deleted: boolean
+    }
 }
 
 export interface AdminApiKeyDetail extends AdminApiKey {

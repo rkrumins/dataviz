@@ -747,6 +747,10 @@ class AggregationService:
                 f"invalid trigger_source {trigger_source!r}; expected one of "
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
+        # A run started with an API key is a script's, not a person's click,
+        # whatever the request left the source at.
+        if trigger_source == "manual" and provenance is not None and provenance.api_key_id:
+            trigger_source = "api"
 
         # ── Operator hold ──────────────────────────────────────────────
         # Every path that can queue a job funnels through here, so this is

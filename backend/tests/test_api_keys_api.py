@@ -7,6 +7,7 @@ administrator. The world and the script's-eye client are shared with
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -369,12 +370,15 @@ async def test_a_key_can_be_renamed_and_described_but_never_widened(client, db_s
     await client.delete(url, headers=headers)
     assert (await client.patch(url, json={"name": "too late"}, headers=headers)).status_code == 409
 
-    updates = [
-        json.loads(e.payload)["changes"]
+    payloads = [
+        json.loads(e.payload)
         for e in (await db_session.execute(
             select(OutboxEventORM).where(OutboxEventORM.event_type == "identity.api_key.updated")
         )).scalars().all()
     ]
+    # Each edit says who made it, as the activity log reads it.
+    assert {p["updated_by"] for p in payloads} == {OWNER}
+    updates = [p["changes"] for p in payloads]
     assert len(updates) == 2
     assert {
         "name": {"from": "nightly sync", "to": "nightly export"},
@@ -852,6 +856,40 @@ async def test_the_export_is_a_spreadsheet_that_cannot_run_anything(admin, db_se
     none = await admin.get("/api/v1/admin/api-keys/export.csv?status=revoked")
     assert none.headers["x-total-count"] == "0"
     assert list(csv.reader(io.StringIO(none.text))) == [list(api_keys_endpoints._CSV_COLUMNS)]
+
+
+async def test_the_export_pages_through_the_keys_it_listed_first(admin, db_session, monkeypatch):
+    """Which keys, in what order, is read once; their rows a page at a time."""
+    monkeypatch.setattr(api_keys_endpoints, "_EXPORT_PAGE", 2)
+    for name in ("c", "a", "e", "b", "d"):
+        await mint(db_session, OWNER, views="read", name=name)
+    response = await admin.get("/api/v1/admin/api-keys/export.csv?sort=name&order=asc")
+    assert response.headers["x-total-count"] == "5"
+    assert [r["name"] for r in csv.DictReader(io.StringIO(response.text))] == list("abcde")
+
+
+async def test_a_third_export_at_once_is_told_to_retry(admin):
+    """An export streams past the request deadline, reading as it goes; two
+    run at once per process, and a third is refused before a byte is sent."""
+    exports, release = api_keys_endpoints._EXPORTS, asyncio.Event()
+    streaming = [asyncio.Event() for _ in range(2)]
+
+    async def _streams(started: asyncio.Event):
+        async with exports.slot():
+            started.set()
+            await release.wait()
+
+    holders = [asyncio.create_task(_streams(started)) for started in streaming]
+    try:
+        for started in streaming:
+            await asyncio.wait_for(started.wait(), 5)
+        busy = await admin.get("/api/v1/admin/api-keys/export.csv")
+        assert busy.status_code == 429
+        assert busy.headers["retry-after"] == "30"
+    finally:
+        release.set()
+        await asyncio.gather(*holders)
+    assert (await admin.get("/api/v1/admin/api-keys/export.csv")).status_code == 200
 
 
 # ── Expiry reminders ────────────────────────────────────────────────

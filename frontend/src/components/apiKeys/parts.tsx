@@ -1,13 +1,11 @@
 /**
  * Small pieces every API key surface shares — the status badge, a level
- * pill, the expiry countdown and a copy button — so the account page, the
- * drawer and the admin inventory say the same thing the same way.
+ * pill and the expiry countdown — so the account page, the drawer and the
+ * admin inventory say the same thing the same way.
  */
-import { useState } from 'react'
-import { Check, Copy, Hourglass, Infinity as InfinityIcon, TimerOff } from 'lucide-react'
+import { Hourglass, Infinity as InfinityIcon, TimerOff } from 'lucide-react'
 
 import { Badge, type BadgeTone } from '@/components/ui/Badge'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
 import type { ApiKey, Level } from '@/services/apiKeyService'
 import { expiryCountdown, formatDay, statusLabel, type Urgency } from './apiKeyFormat'
@@ -81,43 +79,5 @@ export function ExpiryFact({ expiresAt, compact }: { expiresAt: string | null; c
                 </span>
             )}
         </span>
-    )
-}
-
-/** Copies on click and says so; the tooltip names what it copies. */
-export function CopyButton({ text, label, className, children }: {
-    text: string
-    /** What is copied, for the tooltip and screen readers: "Copy the prefix". */
-    label: string
-    className?: string
-    /** Visible text beside the icon, when the button has some. */
-    children?: React.ReactNode
-}) {
-    const [copied, setCopied] = useState(false)
-    const copy = (e: React.MouseEvent) => {
-        e.stopPropagation()
-        // Best effort: a refused clipboard leaves the text selectable.
-        navigator.clipboard?.writeText(text).then(
-            () => { setCopied(true); setTimeout(() => setCopied(false), 1500) },
-            () => {},
-        )
-    }
-    const Icon = copied ? Check : Copy
-    return (
-        <HoverTip label={copied ? 'Copied' : label}>
-            <button
-                type="button"
-                onClick={copy}
-                aria-label={label}
-                className={cn(
-                    'inline-flex items-center gap-1.5 rounded-md text-ink-muted hover:text-ink transition-colors',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                    className,
-                )}
-            >
-                <Icon className={cn('w-3.5 h-3.5 shrink-0', copied && 'text-emerald-500')} aria-hidden />
-                {children}
-            </button>
-        </HoverTip>
     )
 }

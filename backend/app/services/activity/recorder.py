@@ -11,7 +11,7 @@ Events written here use a canonical envelope, marked ``event_version = 2``, so
 the projection can read who, where and what without a per-type extractor:
 
     actor_id · workspace_id · data_source_id · target_type · target_id
-    · target_label · stated_reason · correlation_id · details
+    · target_label · stated_reason · correlation_id · api_key_id · details
 
 ``target_label`` is the name AT THE TIME, deliberately denormalised: a source
 deleted next month must still read as the source it was.
@@ -24,6 +24,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.common.activity_context import (
+    API_KEY_KEY,
     CORRELATION_KEY,
     STATED_REASON_KEY,
     Provenance,
@@ -57,6 +58,7 @@ def build_payload(
         "target_label": target_label,
         STATED_REASON_KEY: provenance.stated_reason if provenance else None,
         CORRELATION_KEY: provenance.correlation_id if provenance else None,
+        API_KEY_KEY: provenance.api_key_id if provenance else None,
         "details": details or None,
     }
     return {k: v for k, v in payload.items() if v is not None}

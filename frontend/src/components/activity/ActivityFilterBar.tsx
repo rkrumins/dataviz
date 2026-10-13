@@ -207,6 +207,10 @@ export function ActivityFilterBar({
             value: names[params.targetId] ?? params.targetId,
             clear: { targetType: null, targetId: null },
         },
+        params.apiKeyId && {
+            key: 'apiKey', label: 'API key', value: names[params.apiKeyId] ?? params.apiKeyId,
+            clear: { apiKey: null },
+        },
     ].filter(Boolean) as { key: string; label: string; value: string; clear: Parameters<ActivityParams['patch']>[0] }[]
 
     return (

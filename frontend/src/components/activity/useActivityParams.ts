@@ -42,6 +42,7 @@ export const ACTIVITY_PARAMS = {
     targetId: 'act_tid',
     outcome: 'act_outcome',
     reason: 'act_reason',
+    apiKey: 'act_key',
     q: 'act_q',
     event: 'act_event',
 } as const
@@ -52,7 +53,7 @@ export type ActivityParamPatch = Partial<Record<ParamName, string | null>>
 /** The filters a person sets beyond the lens and the range. */
 const FILTER_PARAMS: ParamName[] = [
     'types', 'person', 'role', 'workspace', 'dataSource', 'targetType',
-    'targetId', 'outcome', 'reason', 'q',
+    'targetId', 'outcome', 'reason', 'apiKey', 'q',
 ]
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/
@@ -84,6 +85,8 @@ export interface ActivityParams {
     outcome: ActivityOutcome | null
     /** `given` — only events with a reason; `missing` — only without. */
     reason: 'given' | 'missing' | null
+    /** One API key: what was done with it, and what happened to it. */
+    apiKeyId: string | null
     q: string
     /** The event open in the drawer. */
     eventId: string | null
@@ -140,6 +143,7 @@ export function useActivityParams(): ActivityParams {
             targetId: get('targetId') || undefined,
             outcome: outcome ?? undefined,
             hasReason: reason === null ? undefined : reason === 'given',
+            apiKeyId: get('apiKey') || undefined,
             includeNoise: lens.includeNoise || outcome === 'denied' || undefined,
             q: q || undefined,
         }
@@ -150,6 +154,7 @@ export function useActivityParams(): ActivityParams {
             targetType: get('targetType'),
             targetId: get('targetId'),
             outcome, reason, q,
+            apiKeyId: get('apiKey'),
             eventId: get('event'),
             activeFilterCount: FILTER_PARAMS.filter((name) => name !== 'role' && !!get(name)).length,
         }

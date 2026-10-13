@@ -17,6 +17,7 @@ import {
 
 import { Chip } from '@/components/account/AccountShell'
 import { Button } from '@/components/ui/Button'
+import { CopyButton } from '@/components/ui/CopyButton'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { cn } from '@/lib/utils'
@@ -24,7 +25,7 @@ import type { ApiKey } from '@/services/apiKeyService'
 import {
     describeLastUsed, describeResources, describeRevocation, expiryCountdown, formatDay, stillCalled,
 } from './apiKeyFormat'
-import { CopyButton, ExpiryFact, KeyStatusBadge } from './parts'
+import { ExpiryFact, KeyStatusBadge } from './parts'
 
 const LEVEL = { none: 'none', read: 'read', write: 'read & write' } as const
 
@@ -96,7 +97,7 @@ export function KeyCard({ apiKey: key, resume, onOpen, onRotate, onEdit, onRevok
                         </div>
                         <div className="mt-1 flex items-center gap-1.5 min-w-0 text-xs text-ink-muted">
                             <code className="font-mono shrink-0">{key.prefix}…</code>
-                            <CopyButton text={key.prefix} label="Copy the key’s prefix" className="p-0.5" />
+                            <CopyButton value={key.prefix} label="Copy the key’s prefix" className="p-0.5" />
                             {key.description && (
                                 <>
                                     <span aria-hidden className="shrink-0">·</span>

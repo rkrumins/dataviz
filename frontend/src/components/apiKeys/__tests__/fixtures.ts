@@ -27,7 +27,10 @@ export function adminKey(over: Partial<AdminApiKey> = {}): AdminApiKey {
     return {
         ...apiKey(),
         name: 'etl',
-        owner: { id: 'usr_1', email: 'dana@example.com', displayName: 'Dana' },
+        owner: {
+            id: 'usr_1', email: 'dana@example.com', displayName: 'Dana',
+            avatarId: null, hasImage: false, deleted: false,
+        },
         ...over,
     }
 }

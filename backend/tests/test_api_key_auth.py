@@ -76,6 +76,67 @@ async def test_a_key_writes_without_csrf_and_the_change_names_the_key(client, db
     assert {json.loads(e.payload).get("api_key_id") for e in events} == {key.id}
 
 
+class _CancellingSvc:
+    """Stands in for the aggregation service: notes who cancelled."""
+
+    def __init__(self):
+        self.provenance = "never called"
+
+    async def cancel(self, ds_id, job_id, session, provenance=None):
+        self.provenance = provenance
+        raise ValueError("nothing to cancel")
+
+
+@pytest.mark.parametrize("proxied", [False, True], ids=["direct", "across-the-hop"])
+async def test_what_a_key_does_names_its_owner_and_the_key(client, db_session, monkeypatch, proxied):
+    """An operation made with a key is its owner's, made with that key —
+    in the web tier, and in the control plane it calls, which takes both
+    from the web tier's authentication, never from the script's headers."""
+    import httpx
+
+    from backend.app.api.v1.endpoints import aggregation as agg_endpoints
+    from backend.app.common import activity_context
+    from backend.app.main import app
+    from backend.app.services.aggregation import controlplane as cp
+    from backend.app.services.aggregation import internal_auth
+
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=OWNER, role_name="workspace_admin",
+        scope_type="workspace", scope_id="ws_a",
+    ))
+    await db_session.commit()
+    key = await mint(db_session, data="write")
+    svc = _CancellingSvc()
+    if proxied:
+        async def _no_session():
+            yield None
+
+        monkeypatch.setenv(internal_auth.INTERNAL_TOKEN_ENV, "s3cret")
+        monkeypatch.setitem(cp.app.dependency_overrides, cp._get_svc, lambda: svc)
+        monkeypatch.setitem(cp.app.dependency_overrides, cp._get_session, _no_session)
+        control_plane = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=cp.app), base_url="http://cp",
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        monkeypatch.setattr(agg_endpoints, "_PROXY_ENABLED", True)
+        monkeypatch.setattr(agg_endpoints, "_get_proxy_client", lambda: control_plane)
+    else:
+        monkeypatch.setattr(agg_endpoints, "_PROXY_ENABLED", False)
+        monkeypatch.setattr(app.state, "aggregation_service", svc, raising=False)
+
+    response = await client.post(
+        "/api/v1/admin/data-sources/ds_a/aggregation-jobs/agg_1/cancel",
+        headers={
+            **key.headers,
+            # A script cannot name another key, or another person.
+            activity_context.API_KEY_HEADER: "apk_someone_else",
+            activity_context.ACTOR_HEADER: OTHER,
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert (svc.provenance.actor_id, svc.provenance.api_key_id) == (OWNER, key.id)
+
+
 async def test_a_key_request_never_rides_a_browser_session(client, db_session):
     """Cookies are dropped from a key request: someone else's session riding
     along neither widens it nor is touched by it."""

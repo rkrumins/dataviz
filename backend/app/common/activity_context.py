@@ -45,6 +45,10 @@ ACTOR_HEADER = "X-Activity-Actor"
 #: The correlation id, on the same hop (the web tier's ``X-Request-ID``).
 CORRELATION_HEADER = "X-Request-ID"
 
+#: The API key the person is acting through, on the same hop. Like the actor,
+#: set from the request's authentication, never from its client.
+API_KEY_HEADER = "X-Activity-Api-Key"
+
 #: Longest stated reason kept. A sentence or two — the ledger records why
 #: something was done, it is not a place to paste an incident write-up.
 MAX_REASON_CHARS = 500
@@ -53,6 +57,9 @@ MAX_REASON_CHARS = 500
 #: they are not ``reason`` / ``request_id``).
 STATED_REASON_KEY = "stated_reason"
 CORRELATION_KEY = "correlation_id"
+#: The API key a change was made with. A payload that is ABOUT a key names it
+#: under ``key_id`` instead, so the two never collide.
+API_KEY_KEY = "api_key_id"
 
 #: A client-supplied ``X-Request-ID`` is honoured only in this shape. It is
 #: now stored in the ledger, so an arbitrary string from the client must not
@@ -77,6 +84,8 @@ class ActivityContext:
     stated_reason: Optional[str] = None
     #: The authenticated person, once authentication has run.
     actor_id: Optional[str] = None
+    #: The API key they authenticated with, when they used one.
+    api_key_id: Optional[str] = None
 
 
 _current: ContextVar[ActivityContext] = ContextVar(
@@ -98,14 +107,17 @@ def reset(token: Token) -> None:
     _current.reset(token)
 
 
-def bind_actor(actor_id: Optional[str]) -> None:
-    """Record who is acting, for the rest of this request.
+def bind_actor(actor_id: Optional[str], *, api_key_id: Optional[str] = None) -> None:
+    """Record who is acting, and through which API key if any, for the rest
+    of this request.
 
     Called where authentication succeeds. No reset is needed: the binding
     lives in the request's own task context, which ends with the request.
     """
     if actor_id:
-        _current.set(replace(current(), actor_id=str(actor_id)))
+        _current.set(replace(
+            current(), actor_id=str(actor_id), api_key_id=api_key_id or None,
+        ))
 
 
 def valid_correlation_id(value: Optional[str]) -> Optional[str]:
@@ -153,7 +165,8 @@ def parse_stated_reason(header_value: Optional[str]) -> Optional[str]:
 
 
 def envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    """``payload`` with this request's correlation id and stated reason added.
+    """``payload`` with this request's correlation id, stated reason and API
+    key added.
 
     Only keys the payload does not already carry are filled, so an emitter
     that knows better (the control plane, recording a forwarded reason) always
@@ -164,6 +177,8 @@ def envelope(payload: dict[str, Any]) -> dict[str, Any]:
         payload[CORRELATION_KEY] = ctx.correlation_id
     if ctx.stated_reason and STATED_REASON_KEY not in payload:
         payload[STATED_REASON_KEY] = ctx.stated_reason
+    if ctx.api_key_id and API_KEY_KEY not in payload:
+        payload[API_KEY_KEY] = ctx.api_key_id
     return payload
 
 
@@ -183,6 +198,8 @@ class Provenance:
     stated_reason: Optional[str] = None
     correlation_id: Optional[str] = None
     record: bool = True
+    #: The API key the person acted through, when they used one.
+    api_key_id: Optional[str] = None
 
     def without_recording(self) -> "Provenance":
         return replace(self, record=False)
@@ -198,6 +215,7 @@ def current_provenance() -> Optional[Provenance]:
         actor_id=ctx.actor_id,
         stated_reason=ctx.stated_reason,
         correlation_id=ctx.correlation_id,
+        api_key_id=ctx.api_key_id,
     )
 
 
@@ -212,6 +230,8 @@ def forward_headers() -> dict[str, str]:
         headers[REASON_HEADER] = quote(ctx.stated_reason, safe="")
     if ctx.correlation_id:
         headers[CORRELATION_HEADER] = ctx.correlation_id
+    if ctx.api_key_id:
+        headers[API_KEY_HEADER] = ctx.api_key_id
     return headers
 
 
@@ -222,10 +242,12 @@ def from_forwarded(headers: Mapping[str, str]) -> ActivityContext:
     value in the wrong shape is dropped rather than trusted.
     """
     actor = headers.get(ACTOR_HEADER)
+    key = headers.get(API_KEY_HEADER)
     return ActivityContext(
         correlation_id=valid_correlation_id(headers.get(CORRELATION_HEADER)),
         stated_reason=parse_stated_reason(headers.get(REASON_HEADER)),
         actor_id=actor if actor and _ACTOR_ID.match(actor) else None,
+        api_key_id=key if key and _ACTOR_ID.match(key) else None,
     )
 
 
@@ -237,4 +259,5 @@ def provenance_for(user: Any) -> Provenance:
         actor_id=str(actor) if actor else None,
         stated_reason=ctx.stated_reason,
         correlation_id=ctx.correlation_id,
+        api_key_id=ctx.api_key_id,
     )

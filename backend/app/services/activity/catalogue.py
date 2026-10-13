@@ -25,6 +25,7 @@ import json
 from typing import Any, Callable, Optional
 
 from backend.app.common.activity_context import (
+    API_KEY_KEY,
     CORRELATION_KEY,
     STATED_REASON_KEY,
     clean_reason,
@@ -866,7 +867,7 @@ def fallback_projection(event_type: str) -> dict[str, Any]:
         "actor_id": None, "actor_kind": "system", "subject_id": None,
         "target_type": None, "target_id": None, "target_label": None,
         "workspace_id": None, "data_source_id": None,
-        "stated_reason": None, "correlation_id": None,
+        "stated_reason": None, "correlation_id": None, "api_key_id": None,
         "projection_version": PROJECTION_VERSION,
     }
 
@@ -925,6 +926,7 @@ def _project(
         "data_source_id": _str(p.get("data_source_id") or p.get("dataSourceId")),
         "stated_reason": clean_reason(p.get(STATED_REASON_KEY)),
         "correlation_id": valid_correlation_id(_str(p.get(CORRELATION_KEY), 128)),
+        "api_key_id": _str(p.get(API_KEY_KEY), 128),
         "projection_version": PROJECTION_VERSION,
     }
 

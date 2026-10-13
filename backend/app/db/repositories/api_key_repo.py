@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.advisory import hold_for_transaction
 from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
-from backend.auth_service.core.password import disabled_password_hash
 
 #: Stored user agents are cut to this. They are a hint for a person reading
 #: "last used from", not evidence, and an unbounded header should not grow
@@ -117,6 +116,10 @@ def status_expr(
     (``revoked``, ``expired``, ``owner_inactive``, ``paused``, ``active``).
     Needs the key joined to its owner and outer-joined to ``facts``
     (``_identity_facts``)."""
+    # Here, not at the top: the control plane's expiry sweep imports this
+    # module and starts without the auth service's modules.
+    from backend.auth_service.core.password import disabled_password_hash
+
     has_identity = func.coalesce(facts.c.identities, 0) > 0
     no_password = or_(
         UserORM.password_hash.is_(None),
@@ -497,6 +500,62 @@ async def list_all(
     ``expiring_soon`` | ``never_expires`` | ``unused`` | ``recently_revoked``.
     ``unused_days``: live keys not used (or never used) in that many days.
     """
+    base = _filtered(
+        owner_id=owner_id, status=status, focus=focus, unused_days=unused_days,
+        search=search, max_lifetime_days=max_lifetime_days, sso_window_days=sso_window_days,
+    )
+    total = int((await session.execute(
+        select(func.count()).select_from(base.subquery())
+    )).scalar() or 0)
+    rows = (await session.execute(
+        base.order_by(*_order(sort, order), ApiKeyORM.id).limit(limit).offset(offset)
+    )).all()
+    return [(key, owner) for key, owner in rows], total
+
+
+async def list_ids(
+    session: AsyncSession,
+    *,
+    sort: str = "created",
+    order: str = "desc",
+    limit: int,
+    **filters,
+) -> list[str]:
+    """The ids ``list_all`` would list, in its order, at most ``limit`` — read
+    once, so an export paging through them sees one moment of the table, not
+    a page of each."""
+    base = _filtered(**filters)
+    return list((await session.execute(
+        base.with_only_columns(ApiKeyORM.id)
+        .order_by(*_order(sort, order), ApiKeyORM.id).limit(limit)
+    )).scalars().all())
+
+
+async def get_with_owners(
+    session: AsyncSession, key_ids: list[str],
+) -> list[tuple[ApiKeyORM, UserORM]]:
+    """These keys with their owners, in the order given. A key gone since its
+    id was read is left out."""
+    rows = (await session.execute(
+        select(ApiKeyORM, UserORM)
+        .join(UserORM, UserORM.id == ApiKeyORM.user_id)
+        .where(ApiKeyORM.id.in_(key_ids))
+    )).all()
+    found = {key.id: (key, owner) for key, owner in rows}
+    return [found[i] for i in key_ids if i in found]
+
+
+def _filtered(
+    *,
+    owner_id: Optional[str] = None,
+    status: Optional[str] = None,
+    focus: Optional[str] = None,
+    unused_days: Optional[int] = None,
+    search: Optional[str] = None,
+    max_lifetime_days: Optional[int] = None,
+    sso_window_days: Optional[int] = None,
+):
+    """The inventory, narrowed by ``list_all``'s filters."""
     now = _now()
     base, key_status = _inventory(now, max_lifetime_days, sso_window_days)
     conditions = []
@@ -515,14 +574,7 @@ async def list_all(
         ))
     if search:
         conditions.append(_search_clause(search))
-    base = base.where(*conditions)
-    total = int((await session.execute(
-        select(func.count()).select_from(base.subquery())
-    )).scalar() or 0)
-    rows = (await session.execute(
-        base.order_by(*_order(sort, order), ApiKeyORM.id).limit(limit).offset(offset)
-    )).all()
-    return [(key, owner) for key, owner in rows], total
+    return base.where(*conditions)
 
 
 async def stats(

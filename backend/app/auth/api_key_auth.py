@@ -24,8 +24,9 @@ it, and the answer is kept on ``request.state`` — in this order:
    lives in the workspace the path names (the resource fence).
 
 What it leaves behind: the user and claims for the dependencies to return,
-the key's id on ``request.state`` for the access log, and in
-``api_key_context`` for every outbox event the request writes.
+the key's id on ``request.state`` for the access log, and the owner and the
+key in the activity context (``common/activity_context``) — so every outbox
+event the request writes, here or in the control plane it calls, names both.
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 
 from backend.app.auth import api_key_errors, api_key_surface
-from backend.app.common.api_key_context import current_api_key_id
+from backend.app.common import activity_context
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db import engine as db_engine
 from backend.app.services.feature_flags import feature_flags
@@ -146,7 +147,7 @@ async def authenticate(request: Request) -> Optional[ApiKeyContext]:
     request.state.api_key_id = context.key_id
     request.state.user_id = context.user.id
     request.state.api_key_expires_at = context.expires_at
-    current_api_key_id.set(context.key_id)
+    activity_context.bind_actor(context.user.id, api_key_id=context.key_id)
     return context
 
 

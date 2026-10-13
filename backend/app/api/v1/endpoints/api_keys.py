@@ -47,6 +47,7 @@ from backend.app.auth.dependencies import (
     get_current_user,
     requires,
 )
+from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db import engine as db_engine
 from backend.app.db.engine import get_db_session
@@ -115,6 +116,9 @@ _USAGE_DETAIL_DAYS = 30
 #: Rows the CSV export writes at most, read in pages of this many.
 _EXPORT_MAX = 10_000
 _EXPORT_PAGE = 500
+#: Exports streaming at once, per process: each reads a page at a time for as
+#: long as its download lasts, which the request deadline does not cut short.
+_EXPORTS = Bulkhead("API key exports", 2, wait_seconds=10.0, retry_after_seconds=30)
 
 #: How a stored refusal reads as a status a person sees.
 _STATUS_BY_REFUSAL = {
@@ -356,6 +360,11 @@ class Owner(_Model):
     id: str
     email: str
     display_name: str = Field(alias="displayName")
+    #: Their face as every page draws it: the picked illustration, whether a
+    #: picture is stored, and whether the account is gone.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+    has_image: bool = Field(default=False, alias="hasImage")
+    deleted: bool = False
 
 
 class AdminApiKeyDTO(ApiKeyDTO):
@@ -1355,12 +1364,17 @@ async def revoke_this_key(
 # ── Everyone's keys ─────────────────────────────────────────────────
 
 
-def _owner_dto(owner: UserORM) -> Owner:
+def _owner_dto(owner: UserORM, faces: dict[str, dict]) -> Owner:
+    """``faces``: the page's owners as ``user_repo.get_identities_by_ids``
+    reads them — whether each has a picture, without reading the picture."""
+    face = faces.get(owner.id) or {}
     return Owner(
         id=owner.id, email=owner.email,
         display_name=resolve_display_name(
             getattr(owner, "display_name", None), owner.first_name, owner.last_name,
         ),
+        avatar_id=face.get("avatar_id"), has_image=bool(face.get("has_image")),
+        deleted=owner.deleted_at is not None,
     )
 
 
@@ -1417,9 +1431,12 @@ async def list_api_keys(
     )
     facts = await _identity_facts(session, {owner.id for _key, owner in rows})
     usage = await _usage(session, [key.id for key, _owner in rows])
+    faces = await user_repo.get_identities_by_ids(session, [owner.id for _key, owner in rows])
     return AdminApiKeyList(
         items=[
-            AdminApiKeyDTO(**_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner))
+            AdminApiKeyDTO(
+                **_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner, faces),
+            )
             for key, owner in rows
         ],
         total=total,
@@ -1485,50 +1502,59 @@ def _reaches(resources) -> str:
 )
 async def export_api_keys(
     filters: _InventoryFilters = Depends(),
-    session: AsyncSession = Depends(get_db_session),
+    # Ends with this function, before the download starts: the pages are read
+    # in sessions of their own, so no connection sits idle while it streams.
+    session: AsyncSession = Depends(get_db_session, scope="function"),
 ):
     """The inventory as a CSV — the credential report auditors ask for — with
-    the list's filters and order, up to 10,000 keys. Read a page at a time,
-    each in a short session of its own, so a large download never holds a
-    connection open between pages."""
+    the list's filters and order, up to 10,000 keys. Which keys, and in what
+    order, is read once; their rows a page at a time, each in a short session
+    of its own. Two exports stream at once per process; a third is told to
+    retry (429)."""
+    if _EXPORTS.full:
+        # Before a byte is sent: once the response has started, a 429 is no
+        # longer possible.
+        raise Busy(_EXPORTS.kind, _EXPORTS.retry_after_seconds)
     policy = await _policy(session)
-    query = filters.query(policy)
-    _rows, total = await api_key_repo.list_all(session, **query, limit=1, offset=0)
+    ids = await api_key_repo.list_ids(session, **filters.query(policy), limit=_EXPORT_MAX)
 
     async def stream():
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(_CSV_COLUMNS)
         yield out.getvalue()
-        for offset in range(0, min(total, _EXPORT_MAX), _EXPORT_PAGE):
-            async with db_engine.get_async_session() as page_session:
-                rows, _ = await api_key_repo.list_all(
-                    page_session, **query, limit=_EXPORT_PAGE, offset=offset,
-                )
-                facts = await _identity_facts(page_session, {o.id for _k, o in rows})
-                usage = await _usage(page_session, [k.id for k, _o in rows])
-            out.seek(0)
-            out.truncate()
-            for key, owner in rows:
-                fields = _fields(key, owner, facts, policy, usage)
-                profile = fields["permissions"]
-                writer.writerow([_cell(v) for v in (
-                    key.id, key.name, key.token_prefix, owner.id, owner.email,
-                    fields["status"], profile.get("views"), profile.get("data"),
-                    "yes" if profile.get("publish") else "no",
-                    _reaches(fields["resources"]), " ".join(fields["allowed_cidrs"]),
-                    key.created_at, fields["expires_at"], key.last_used_at,
-                    key.last_used_ip, fields["usage"].requests_30d,
-                    key.revoked_at, key.revoked_reason,
-                )])
-            yield out.getvalue()
+        # Held while the rows stream, and released when the stream ends or the
+        # client goes away.
+        async with _EXPORTS.slot():
+            for start in range(0, len(ids), _EXPORT_PAGE):
+                async with db_engine.get_async_session() as page_session:
+                    rows = await api_key_repo.get_with_owners(
+                        page_session, ids[start:start + _EXPORT_PAGE],
+                    )
+                    facts = await _identity_facts(page_session, {o.id for _k, o in rows})
+                    usage = await _usage(page_session, [k.id for k, _o in rows])
+                out.seek(0)
+                out.truncate()
+                for key, owner in rows:
+                    fields = _fields(key, owner, facts, policy, usage)
+                    profile = fields["permissions"]
+                    writer.writerow([_cell(v) for v in (
+                        key.id, key.name, key.token_prefix, owner.id, owner.email,
+                        fields["status"], profile.get("views"), profile.get("data"),
+                        "yes" if profile.get("publish") else "no",
+                        _reaches(fields["resources"]), " ".join(fields["allowed_cidrs"]),
+                        key.created_at, fields["expires_at"], key.last_used_at,
+                        key.last_used_ip, fields["usage"].requests_30d,
+                        key.revoked_at, key.revoked_reason,
+                    )])
+                yield out.getvalue()
 
     stamp = _now().strftime("%Y%m%d")
     return StreamingResponse(
         stream(), media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": f'attachment; filename="api-keys-{stamp}.csv"',
-            "X-Total-Count": str(min(total, _EXPORT_MAX)),
+            "X-Total-Count": str(len(ids)),
             "Cache-Control": "no-store",
         },
     )
@@ -1551,8 +1577,9 @@ async def get_api_key(key_id: str, session: AsyncSession = Depends(get_db_sessio
     facts = await _identity_facts(session, {owner.id})
     usage = await _usage(session, [key.id])
     replaces, replaced_by = await _lineage(session, key)
+    faces = await user_repo.get_identities_by_ids(session, [owner.id])
     return AdminApiKeyDetail(
-        **_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner),
+        **_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner, faces),
         effective_access=await _effective_access(session, owner, api_key_service.scope_of(key)),
         usage_days=_usage_days(usage.get(key.id, {})),
         replaces=replaces, replaced_by=replaced_by,

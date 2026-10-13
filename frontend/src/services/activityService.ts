@@ -73,6 +73,9 @@ export interface ActivityEvent {
     /** Absent means "no reason given" — never an empty string. */
     statedReason?: string | null
     correlationId?: string | null
+    /** The API key the change was made with, when one was, and its name. */
+    apiKeyId?: string | null
+    apiKeyName?: string | null
     details: Record<string, unknown>
     resolvedNames: Record<string, string>
     /** The event as emitted. Platform scope only. */
@@ -194,6 +197,8 @@ export interface ActivityQuery {
     targetId?: string
     outcome?: ActivityOutcome
     hasReason?: boolean
+    /** One API key: what was done with it, and what happened to it. */
+    apiKeyId?: string
     /** Include the per-request "access denied" refusals. */
     includeNoise?: boolean
     q?: string
@@ -232,6 +237,7 @@ export function activityQueryString(scope: ActivityScope, query: ActivityQuery):
     set('targetId', query.targetId)
     set('outcome', query.outcome)
     if (query.hasReason !== undefined) p.set('hasReason', String(query.hasReason))
+    set('apiKeyId', query.apiKeyId)
     if (query.includeNoise) p.set('includeNoise', 'true')
     set('q', query.q?.trim())
     return p.toString()

@@ -4,6 +4,7 @@
  * (`?ownerId=`), the detail drawer, an export that carries the filters — and
  * revocation, with a note to the owner, for those who may manage users.
  */
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -45,6 +46,13 @@ const STATS: AdminApiKeyStats = {
 
 const lastList = () => svc.adminList.mock.lastCall?.[0]
 
+/** The page as the app mounts it: people are named through the query cache. */
+const renderPage = () => render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AdminApiKeys />
+    </QueryClientProvider>,
+)
+
 beforeEach(() => {
     vi.clearAllMocks()
     perms.manage = false
@@ -58,7 +66,7 @@ beforeEach(() => {
 
 describe('the inventory', () => {
     it('shows each key, whose it is, what it can do and when it was used', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         const row = (await screen.findByRole('button', { name: 'etl' })).closest('tr')!
         expect(within(row).getByText('dana@example.com')).toBeInTheDocument()
         expect(row).toHaveTextContent('Data: read & write')
@@ -69,7 +77,7 @@ describe('the inventory', () => {
     })
 
     it('counts each status on its tab, from the stats', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         const tabs = await screen.findByRole('tablist', { name: 'Status' })
         await waitFor(() => expect(within(tabs).getByRole('tab', { name: /paused/i })).toHaveTextContent('2'))
         expect(within(tabs).getByRole('tab', { name: /owner suspended/i })).toHaveTextContent('1')
@@ -79,7 +87,7 @@ describe('the inventory', () => {
     })
 
     it('turns a count into a filter, and back', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         const counts = await screen.findByRole('group', { name: 'Key counts' })
         const expiring = within(counts).getByRole('button', { name: /expiring within 7 days/i })
         await waitFor(() => expect(expiring).toHaveAccessibleName('4 Expiring within 7 days'))
@@ -99,7 +107,7 @@ describe('the inventory', () => {
     })
 
     it('asks the server to sort by a column, and says which way', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         await screen.findByRole('button', { name: 'etl' })
         await userEvent.click(screen.getByRole('button', { name: 'Last used' }))
         await waitFor(() => expect(lastList()).toMatchObject({ sort: 'lastUsed', order: 'asc', offset: 0 }))
@@ -112,7 +120,7 @@ describe('the inventory', () => {
 
     it('shows one person’s keys when sent from their record', async () => {
         window.history.replaceState({}, '', '/admin/api-keys?ownerId=usr_1')
-        render(<AdminApiKeys />)
+        renderPage()
         expect(await screen.findByText('Keys of Dana')).toBeInTheDocument()
         expect(svc.adminList.mock.calls[0][0]).toMatchObject({ ownerId: 'usr_1' })
         expect(svc.adminStats).toHaveBeenCalledWith({ ownerId: 'usr_1', q: undefined })
@@ -121,20 +129,22 @@ describe('the inventory', () => {
     })
 
     it('exports what is on screen, filters and order included', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         const link = await screen.findByRole('link', { name: /export csv/i })
         expect(link).toHaveAttribute('href', '/api/v1/admin/api-keys/export.csv?status=active&sort=created&order=desc')
         await userEvent.click(within(screen.getByRole('group', { name: 'Key counts' })).getByRole('button', { name: /never expire/i }))
         await waitFor(() => expect(link.getAttribute('href')).toBe('/api/v1/admin/api-keys/export.csv?focus=never_expires&sort=created&order=desc'))
     })
 
-    it('opens a key’s detail: whose it is, and its tabs', async () => {
-        render(<AdminApiKeys />)
+    it('opens a key’s detail: whose it is, what it did, and its tabs', async () => {
+        renderPage()
         await userEvent.click(await screen.findByRole('button', { name: 'etl' }))
         const drawer = await screen.findByRole('dialog', { name: /api key “etl”/i })
         expect(svc.adminGet).toHaveBeenCalledWith('apk_1')
-        expect(within(drawer).getByText('Acts as Dana')).toBeInTheDocument()
-        expect(within(drawer).getByRole('link', { name: /their account/i })).toHaveAttribute('href', '/admin/users?user=usr_1')
+        expect(within(drawer).getByText('Acts as them')).toBeInTheDocument()
+        expect(within(drawer).getByRole('link', { name: 'Dana' })).toHaveAttribute('href', '/admin/users?user=usr_1')
+        expect(within(drawer).getByRole('link', { name: /its activity/i }))
+            .toHaveAttribute('href', '/admin/audit?act_key=apk_1&act_days=365')
         await userEvent.click(within(drawer).getByRole('tab', { name: /access/i }))
         expect(await within(drawer).findByText('Finance')).toBeInTheDocument()
     })
@@ -142,14 +152,14 @@ describe('the inventory', () => {
 
 describe('revoking', () => {
     it('is offered only to those who may manage users', async () => {
-        render(<AdminApiKeys />)
+        renderPage()
         await screen.findByRole('button', { name: 'etl' })
         expect(screen.queryByRole('button', { name: /revoke/i })).not.toBeInTheDocument()
     })
 
     it('revokes one key, with a note to its owner', async () => {
         perms.manage = true
-        render(<AdminApiKeys />)
+        renderPage()
         const row = (await screen.findByRole('button', { name: 'etl' })).closest('tr')!
         await userEvent.click(within(row).getByRole('button', { name: 'Revoke “etl”…' }))
         const dialog = await screen.findByRole('dialog', { name: /revoke “etl”/i })
@@ -161,7 +171,7 @@ describe('revoking', () => {
 
     it('revokes every key of its owner only once their address is typed', async () => {
         perms.manage = true
-        render(<AdminApiKeys />)
+        renderPage()
         const row = (await screen.findByRole('button', { name: 'etl' })).closest('tr')!
         await userEvent.click(within(row).getByRole('button', { name: 'Revoke “etl”…' }))
         const dialog = await screen.findByRole('dialog')
