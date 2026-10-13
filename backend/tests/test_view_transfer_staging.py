@@ -49,6 +49,10 @@ class _Versioning:
     async def branch_statuses(self, branch_ids):
         return {d["branch_id"]: d["status"] for d in self.drafts if d["branch_id"] in set(branch_ids)}
 
+    async def assert_branch_readable(self, *, graph_id, branch_id, viewer):
+        if not any(d["branch_id"] == branch_id and d["graph_id"] == graph_id for d in self.drafts):
+            raise ValueError(f"branch {branch_id} not found on graph {graph_id}")
+
     def finish(self, branch_id: str, status: str) -> None:
         next(d for d in self.drafts if d["branch_id"] == branch_id)["status"] = status
 
