@@ -82,9 +82,9 @@ describe('EntityDrawer — where editing happens', () => {
   it('shows the JSON read-only', async () => {
     render(<EntityDrawer canEdit />)
     await userEvent.click(screen.getByRole('tab', { name: /JSON/ }))
-    const json = screen.getByLabelText('Entity data as JSON')
-    expect(json.tagName).toBe('PRE')
+    const json = screen.getByRole('group', { name: 'Entity data as JSON' })
     expect(json.textContent).toContain('"urn:orders"')
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
   })
 })
 

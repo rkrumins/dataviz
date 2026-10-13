@@ -36,15 +36,45 @@ cancel, delete, purge, skip, limits, schedules and fleet settings; Freshness reb
 and provider/fleet refreshes, reconcile runs and automation holds; data sources added (by hand
 or from a view package), changed, removed, restored, made primary or switched projection mode;
 providers registered, changed or deleted; version control enabled, retried, abandoned or
-re-synced, and duplicate copies collapsed; discovery runs and asset statistics refreshes; feature
-flags, the profiling policy and the node-identity default; and group membership — by hand, or by
-the identity provider's sync, which now records the memberships it actually changed.
+re-synced, and duplicate copies collapsed; discovery runs and asset statistics refreshes;
+dead-lettered messages redriven or deleted, admission limits, graph-store query limits and graph
+cache rebuilds; feature flags, the profiling policy and the node-identity default; and group
+membership — by hand, or by the identity provider's sync, which now records the memberships it
+actually changed.
 
 **Asked, never required: why.** Wherever work is started, stopped or destroyed, the dialog asks
 for an optional reason, with one-click suggestions for that kind of change and the person's own
 recent reasons, and says who will be able to read it. One-click actions get a prompt that is also
 their confirmation, so nothing asks twice. Safe resets, previews, limit tweaks and settings edits
 do not ask.
+
+**Activity is kept for two years.** `ACTIVITY_RETENTION_DAYS` (730 unless set; `0` keeps
+everything; less than a year counts as a year, so the longest range stays whole) bounds both the
+activity log and the outbox it is copied from. A daily sweep on the control plane deletes what
+happened before that horizon, oldest first, a batch per short transaction, pacing itself so a first
+run that clears years of history shares the database. It never deletes an outbox row the relay has
+not copied, nor the password events sign-in reads back. The end of the timeline says how long the
+log keeps activity, and a range whose previous period reaches past the horizon shows no change
+rather than a comparison with what is left of it, and says why.
+
+**The explorer from the keyboard, and what needs a look.** `j`/`k` (or the arrows) walk the
+timeline and Enter opens an event; in an open event `j`/`k` or `←`/`→` step to the next and
+previous, and Esc returns to the row you reached; `/` searches and `?` lists the keys. Above the
+figures, *Needs attention* says what they suggest, each one click from the events it is about: a
+source run by hand at least daily (a schedule could take it over), a source only one person ever
+operates, manual operations up by half or more, and changes that mostly gave no reason. Each
+hands-on source shows the faces of the people who keep operating it, and picking a person puts
+them in focus: who they are, when they are busiest and what they do most.
+
+**Zoom in from the chart, and search that helps.** Drag across *What happened, by kind* — or click
+one day or week — and the whole explorer narrows to exactly those days, as a log console's
+histogram does; *Back* retraces each zoom. Search is the widest field on the bar: focused, it
+offers the searches made here before (kept in this browser) and words the range can answer — the
+reasons people gave, the sources and targets acted on most — picked with ↑/↓ and Enter, and what
+it matched is marked in each row. A range longer than search reads offers *Search the last 90
+days* instead of a disabled box. Under it, a person is picked by face from the people active in
+the range and then reads as their name; their part, the actions (several at once), the outcome and
+whether a reason was given are pills, each saying what it is set to.
 
 **Analytics → Data: what the platform holds, and how it got there.** Entities and relationships as
 they stood at the end of each period — so a pruned graph shows as a fall — overall, by workspace
@@ -104,9 +134,25 @@ run's timeline — created, started, finished — with how long it waited for a 
 ran, counting up while it runs. In an activity event, a change reads as before → after (several at
 once as one per field), every value is drawn by kind — durations and sizes in their units, yes/no,
 statuses, links, ids named where the event names them — and the raw payload is a highlighted,
-foldable tree that copies as JSON. `GET /api/v1/directory/people` and the activity API also say
+foldable tree that copies as JSON — as is an entity's or a relationship's raw data in its drawer.
+`GET /api/v1/directory/people` and the activity API also say
 which illustration a person picked (`avatarId`) and whether they have a profile picture
 (`hasImage`), so a page of people without pictures asks for none.
+
+**Theme colours take their opacity — an app-wide visual change.** About 1,700 classes asked for a
+theme colour at an opacity (`bg-canvas-elevated/95`, `border-glass-border/50`, `text-ink-muted/60`)
+and emitted no CSS, because the theme's variables hold whole colours: translucent panels and sticky
+headers were see-through, and those borders fell back to the default grey, a bright line in the dark
+theme. They now render. A surface takes its alpha; a glass border at an opacity is a divider in the
+theme's own ink (subtle in the dark theme, as it always was in the light one); text never fades
+below its token, so muted labels stay legible, and `/0` still hides. About 170 tints at in-between
+amounts (`/8`, `/12`, `/98`) emitted nothing for a second reason — they are not on Tailwind's scale
+— and render too. A source test now fails any such class.
+
+**Redis waits a moment for a free connection.** With all of a role's pooled connections busy, a
+command now waits up to `REDIS_<ROLE>_POOL_TIMEOUT` seconds (2) for one instead of failing at once,
+which sent every caller of a burst to its fallback together: sign-in checks to the database, cached
+graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once, as before.
 
 ### Fixed
 
@@ -115,6 +161,8 @@ which illustration a person picked (`avatarId`) and whether they have a profile 
   kept as it was for API clients, still filters that way.
 - Data sources added through the API recorded no creator; `created_by` is now set.
 - In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
+- A request that ran out of time could answer `500` instead of `504`, when the deadline fell inside
+  a middleware that turns a cancelled handler into "No response returned".
 
 ### Security
 
@@ -137,14 +185,18 @@ which illustration a person picked (`avatarId`) and whether they have a profile 
 - **Copying the audit backlog** (see the entry below) also classifies each event for the activity
   log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
   events. Administration → Activity says *Importing earlier activity* until it finishes.
-- **Event storage roughly doubles** while the outbox is not pruned: events are kept both in
-  `outbox_events` and in the ledger.
+- **Event storage roughly doubles:** events are kept both in `outbox_events` and in the ledger, each
+  for `ACTIVITY_RETENTION_DAYS`.
+- **The first activity retention sweep** deletes ledger events and relayed outbox rows from before
+  the horizon — two years unless set. Set `ACTIVITY_RETENTION_DAYS` alike on the control plane,
+  which deletes, and the web tier, which tells readers how far back the log goes. The Helm chart
+  and the Compose file take one value for both; the Kustomize base sets it in both config maps.
+  Set `0` before upgrading to keep everything.
 - Browser clients may send `X-Activity-Reason`; it is in the CORS allow-list.
 
 ### Known limitations
 
-- The ledger has no retention or partitioning yet, and the outbox is not pruned, because other
-  readers still depend on it.
+- The ledger is not partitioned, so retention deletes in batches rather than dropping a partition.
 - Who started a run, and why, starts at this release; earlier manual runs show their trigger only.
 - Entity history starts when daily profiling began, and aggregation runs are kept for 90 days, so
   the Data tab and runs by origin reach no further back than that.
@@ -153,8 +205,6 @@ which illustration a person picked (`avatarId`) and whether they have a profile 
 - A moved data source is attributed to its destination workspace only.
 - Version publishes and merges stay in graph history (Reviews); the ledger covers version control's
   onboarding side.
-- Not yet recorded: insights dead-letter redrive and delete, admission settings, graph-store limits
-  and cache refresh.
 - A stated reason is free text and may contain personal data. Auditors can read it, and so can the
   workspace's admins for a workspace change; the field says so.
 

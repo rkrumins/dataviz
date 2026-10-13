@@ -17,7 +17,7 @@
  */
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ArrowUpRight, ChevronRight, X } from 'lucide-react'
+import { ArrowUpRight, ChevronLeft, ChevronRight, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
@@ -100,12 +100,16 @@ function RelatedList({ title, events, onOpen }: {
     )
 }
 
-export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
+const STEP = 'p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-30 disabled:hover:bg-transparent transition-colors'
+
+export function ActivityEventDrawer({ scope, eventId, onClose, onOpen, step }: {
     scope: ActivityScope
     eventId: string | null
     onClose: () => void
     /** Switch the drawer to another event. */
     onOpen: (id: string) => void
+    /** The timeline rows either side of this event, when it is one of them. */
+    step?: { newer: string | null; older: string | null } | null
 }) {
     const theme = useChartTheme()
     const detail = useActivityEvent(scope, eventId)
@@ -152,14 +156,40 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen }: {
                                 {event ? (event.summary || event.label) : 'Loading…'}
                             </h2>
                         </div>
-                        <button
-                            type="button"
-                            onClick={onClose}
-                            aria-label="Close"
-                            className="shrink-0 p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                        >
-                            <X className="w-4 h-4" />
-                        </button>
+                        <div className="flex shrink-0 items-center gap-0.5">
+                            {step && (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => step.newer && onOpen(step.newer)}
+                                        disabled={!step.newer}
+                                        aria-label="Newer event"
+                                        title="Newer event (k or ←)"
+                                        className={STEP}
+                                    >
+                                        <ChevronLeft className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => step.older && onOpen(step.older)}
+                                        disabled={!step.older}
+                                        aria-label="Older event"
+                                        title="Older event (j or →)"
+                                        className={STEP}
+                                    >
+                                        <ChevronRight className="w-4 h-4" />
+                                    </button>
+                                </>
+                            )}
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                aria-label="Close"
+                                className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
                     </div>
 
                     <div className="space-y-6 p-4">

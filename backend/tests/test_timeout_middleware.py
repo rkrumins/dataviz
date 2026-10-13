@@ -378,6 +378,28 @@ async def test_inner_app_exception_propagates():
         await mw(_http_scope(), _Receiver(), _Sink())
 
 
+async def test_a_timeout_turned_into_an_error_inside_is_still_a_504():
+    """``BaseHTTPMiddleware`` catches the cancellation the deadline sends and
+    raises ``RuntimeError("No response returned.")`` in its place, so
+    ``asyncio.timeout()`` never sees a cancellation to turn into a
+    ``TimeoutError``. That error used to escape as a 500 — for a request
+    whose only fault was being slow."""
+
+    async def app(scope, receive, send):
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            raise RuntimeError("No response returned.")
+
+    mw = _TimeoutMiddleware(app)
+    sink = _Sink()
+    await mw(_http_scope(), _Receiver(), sink)
+
+    assert sink.status == 504
+    assert sink.terminal_chunks == 1
+    assert "timed out" in sink.total_body.decode().lower()
+
+
 async def test_no_orphan_tasks_after_timeout():
     """T-5: ``asyncio.timeout()`` cancels the inner task cleanly. After
     the middleware returns, no pending tasks should remain from this

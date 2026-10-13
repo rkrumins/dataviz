@@ -10,7 +10,10 @@
  *   open http://localhost:5199/activity-harness.html
  *
  * `&scope=workspace` renders a workspace admin's tab; `&theme=dark` the dark
- * palette; `&event=evt_0002` opens the drawer on that event.
+ * palette; `&event=evt_0002` opens the drawer on that event; `&person=usr_7f3a`
+ * puts that person in focus; `&kept=1` shows a range reaching back past what
+ * the log keeps, scrolled to its end. Any `act_*` param (`&act_q=ledger`)
+ * passes straight through to the explorer.
  */
 import { StrictMode, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -29,15 +32,31 @@ const params = new URLSearchParams(window.location.search)
 const dark = params.get('theme') === 'dark'
 const workspace = params.get('scope') === 'workspace'
 const openEvent = params.get('event')
+const person = params.get('person')
+const kept = params.get('kept') === '1'
 
 // The network calls answer from the fixtures; everything else is the real code.
-const ledger = { pending: 0, pendingCapped: false, lagSeconds: 4, backfilling: false, watermark: new Date().toISOString() }
+const ledger = {
+    pending: 0, pendingCapped: false, lagSeconds: 4, backfilling: false, watermark: new Date().toISOString(),
+    retentionDays: 730,
+}
 activityService.listEvents = async (scope) => ({
     events: ACTIVITY_EVENTS.map((e) => (scope.kind === 'workspace' ? { ...e, payload: null } : e)),
-    nextCursor: 'more', ledger,
+    nextCursor: kept ? null : 'more', ledger,
 })
 activityService.countNewer = async () => ({ count: 2, capped: false })
-activityService.getSummary = async () => ACTIVITY_SUMMARY
+activityService.getSummary = async () => (kept
+    ? {
+        ...ACTIVITY_SUMMARY,
+        window: { ...ACTIVITY_SUMMARY.window, keptFrom: new Date(Date.now() - 730 * 86_400_000).toISOString() },
+        totals: {
+            ...ACTIVITY_SUMMARY.totals,
+            events: { ...ACTIVITY_SUMMARY.totals.events, previous: null, delta: null },
+            people: { ...ACTIVITY_SUMMARY.totals.people, previous: null, delta: null },
+            operations: { ...ACTIVITY_SUMMARY.totals.operations, previous: null, delta: null },
+        },
+    }
+    : ACTIVITY_SUMMARY)
 activityService.getCatalogue = async () => ACTIVITY_CATALOGUE
 activityService.getEvent = async (scope, id) => {
     const detail = activityDetail(id)
@@ -67,7 +86,11 @@ function Harness() {
 
     return (
         <QueryClientProvider client={queryClient}>
-            <MemoryRouter initialEntries={[openEvent ? `/?act_event=${openEvent}` : '/']}>
+            <MemoryRouter initialEntries={[`/?${new URLSearchParams({
+                ...Object.fromEntries([...params].filter(([k]) => k.startsWith('act_'))),
+                ...(openEvent ? { act_event: openEvent } : {}),
+                ...(person ? { act_person: person, act_role: 'actor' } : {}),
+            })}`]}>
                 <div className="min-h-screen bg-canvas">
                     {workspace ? (
                         <div className="mx-auto max-w-[1500px] p-6"><ActivityExplorer scope={WORKSPACE} /></div>

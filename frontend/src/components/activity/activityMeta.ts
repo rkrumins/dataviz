@@ -126,3 +126,28 @@ export function cadencePhrase(medianGapHours: number | null): string | null {
     if (medianGapHours < 36) return `every ~${Math.round(medianGapHours)}h`
     return `every ~${Math.round(medianGapHours / 24)} days`
 }
+
+/** "2 years", "400 days": how long the log keeps activity. */
+export function retentionPhrase(days: number): string {
+    if (days % 365 !== 0) return `${days} days`
+    const years = days / 365
+    return `${years} year${years === 1 ? '' : 's'}`
+}
+
+/** A user id, as a drill-in writes it — not text to match against names. */
+export const isPersonId = (value: string) => /^usr_[A-Za-z0-9_-]{2,}$/.test(value)
+
+const addDays = (day: string, n: number) =>
+    new Date(Date.parse(`${day.slice(0, 10)}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10)
+
+/**
+ * The days a span of chart buckets covers, as a custom range. A week bucket
+ * runs six days past the day it starts, but a span never reaches past the
+ * window's own last day.
+ */
+export function spanToRange(
+    buckets: string[], granularity: 'day' | 'week', first: number, last: number, lastDay: string,
+): { kind: 'custom'; from: string; to: string } {
+    const end = granularity === 'week' ? addDays(buckets[last], 6) : buckets[last].slice(0, 10)
+    return { kind: 'custom', from: buckets[first].slice(0, 10), to: end < lastDay ? end : lastDay }
+}

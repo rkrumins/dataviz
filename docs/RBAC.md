@@ -690,6 +690,19 @@ it. A reason is free text and may contain personal data: auditors can read
 it, and so can the workspace's admins for a workspace event. The UI says so
 under the field.
 
+**How long.** Activity is kept for `ACTIVITY_RETENTION_DAYS` days — two
+years unless set, never less than one, `0` for everything — in the ledger
+and in the outbox it is copied from. A daily sweep on the control plane
+deletes what happened before that horizon, oldest first, a batch per short
+transaction. It never deletes an outbox row the relay has not copied, nor
+the password events sign-in reads back to decide whether an account chose
+its own password (`user.password_changed`, `user.password_reset_completed`,
+`user.password_reset_by_admin`). The first page of `events` reports
+`ledger.retentionDays`. A `summary` whose previous period starts before the
+horizon compares with nothing — `previous` and `delta` are `null` — and
+says from when activity is kept (`window.keptFrom`), rather than comparing
+with what is left of it.
+
 Every `requires()` 403 also emits a `user.access_denied` event,
 sampled hourly per `(user, permission, scope)` so a hostile scan
 can't drown the signal. Emission is best-effort (wrapped in
@@ -718,6 +731,7 @@ last 7 days. Through the API:
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
+| Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |
 | Activity API (both scopes)             | `backend/app/api/v1/endpoints/activity.py`                    |
 | Activity explorer UI                   | `frontend/src/components/activity/`                           |

@@ -228,6 +228,9 @@ async def lifespan(app: FastAPI):
     # control planes — or a rolling update's old and new — never run one at
     # the same time.
     from backend.app.db.engine import get_readonly_session
+    from backend.app.services.activity_retention import (
+        run_sweeper as run_activity_retention,
+    )
     from backend.app.services.analytics_warmer import run_warmer
     from backend.app.services.outbox_relay import run_relay
     from backend.app.services.product_event_gc import (
@@ -249,6 +252,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             run_refresh_token_gc(get_jobs_session, housekeeping_shutdown),
             name="refresh-token-gc",
+        ),
+        asyncio.create_task(
+            run_activity_retention(get_jobs_session, housekeeping_shutdown),
+            name="activity-retention",
         ),
         # Reads only, so it stays off the JOBS pool the job API runs on.
         asyncio.create_task(

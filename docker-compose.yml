@@ -255,6 +255,9 @@ services:
       # services is what keeps them identical.
       ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
       PRODUCT_EVENT_RETENTION_DAYS: "${PRODUCT_EVENT_RETENTION_DAYS:-400}"
+      # The activity log's horizon: the sweep runs here, and viz-service
+      # reads the same variable to tell readers how far back the log goes.
+      ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -375,8 +378,12 @@ services:
       # Not the warmer (that is controlplane-only) — this is the grid every
       # analytics window ends on. It has to be the SAME value the controlplane
       # warms with, or readers ask for epochs the warmer never wrote.
-      # Retention is deliberately absent: the sweep does not run on this role.
+      # Product-event retention is deliberately absent: that sweep does not
+      # run on this role.
       ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
+      # The activity sweep runs on the control plane, but this role tells
+      # readers how far back the log goes: the same ${VAR} keeps them honest.
+      ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev

@@ -465,6 +465,11 @@ async def test_the_summary_describes_the_window_in_a_fixed_number_of_reads(
     assert ledger["count"] == 5
     assert ledger["workspaceName"] == "Finance"
     assert ledger["medianGapHours"] is not None
+    # Who keeps doing it, named in the same batched lookup as the leaderboard.
+    assert ledger["people"] == [{
+        "id": "usr_ada", "count": 5, "name": "Ada Lovelace", "email": "ada@example.com",
+        "deleted": False, "avatarId": None, "hasImage": False,
+    }]
     assert doc["topActions"][0] == {
         "type": "aggregation.job.triggered", "count": 6,
         "label": "Triggered aggregation", "category": "operations",

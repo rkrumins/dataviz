@@ -18,11 +18,12 @@ import { exact } from '@/lib/formatMetric'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { HighlightedText } from '@/components/ui/HighlightedText'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ActivityEvent, LedgerHealth } from '@/services/activityService'
 
-import { CATEGORY_META, actorName, reasonExpected } from './activityMeta'
+import { CATEGORY_META, actorName, reasonExpected, retentionPhrase } from './activityMeta'
 import { groupEvents, type TimelineRow } from './groupEvents'
 
 function LedgerBanner({ ledger }: { ledger: LedgerHealth | null }) {
@@ -51,7 +52,15 @@ function LedgerBanner({ ledger }: { ledger: LedgerHealth | null }) {
     return null
 }
 
-function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: string) => void }) {
+/** A search match, marked like a highlighter pen: legible in both themes. */
+const MATCH = 'rounded-sm bg-amber-300/50 px-0.5 text-inherit dark:bg-amber-400/25'
+
+function TimelineRowView({ row, onOpen, highlight }: {
+    row: TimelineRow
+    onOpen: (id: string) => void
+    /** The search on screen, marked wherever the row says it. */
+    highlight: string
+}) {
     const theme = useChartTheme()
     const { event, count } = row
     const meta = CATEGORY_META[event.category] ?? CATEGORY_META.platform
@@ -67,6 +76,7 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
         <li>
             <button
                 type="button"
+                data-activity-row={event.id}
                 onClick={() => onOpen(event.id)}
                 className="group flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04] outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
             >
@@ -103,7 +113,7 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
                                 </span>
                             )}
                             {who && <span className="text-ink-muted"> · </span>}
-                            <span>{event.summary || event.label}</span>
+                            <HighlightedText text={event.summary || event.label} query={highlight} matchClassName={MATCH} />
                             {count > 1 && (
                                 <span className="ml-1.5 rounded-md bg-black/[0.05] dark:bg-white/[0.08] px-1.5 text-[10px] font-semibold tabular-nums text-ink-secondary">
                                     ×{count}
@@ -115,7 +125,10 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
                         <DateTime at={event.occurredAt} variant="clock" className="text-[11px] text-ink-muted" />
                     </span>
                     {event.statedReason ? (
-                        <span className="mt-0.5 block truncate text-xs italic text-ink-secondary">“{event.statedReason}”</span>
+                        <HighlightedText
+                            text={`“${event.statedReason}”`} query={highlight} matchClassName={MATCH}
+                            className="mt-0.5 block truncate text-xs italic text-ink-secondary"
+                        />
                     ) : reasonExpected(event) ? (
                         <span className="mt-0.5 block text-[11px] text-ink-muted">No reason given</span>
                     ) : null}
@@ -145,7 +158,7 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
 
 export function ActivityTimeline({
     events, ledger, isLoading, isStale, error, hasNextPage, isFetchingNextPage,
-    onLoadMore, onOpen, newer, onShowNewer, onClearFilters,
+    onLoadMore, onOpen, newer, onShowNewer, onClearFilters, highlight = '',
 }: {
     events: ActivityEvent[]
     ledger: LedgerHealth | null
@@ -161,6 +174,8 @@ export function ActivityTimeline({
     onShowNewer: () => void
     /** Offered on an empty result when filters are set. */
     onClearFilters?: () => void
+    /** The search, marked in the rows that match it. */
+    highlight?: string
 }) {
     const days = useMemo(() => groupEvents(events), [events])
 
@@ -207,7 +222,7 @@ export function ActivityTimeline({
                             </h3>
                             <ul>
                                 {day.rows.map((row) => (
-                                    <TimelineRowView key={row.event.id} row={row} onOpen={onOpen} />
+                                    <TimelineRowView key={row.event.id} row={row} onOpen={onOpen} highlight={highlight} />
                                 ))}
                             </ul>
                         </div>
@@ -224,6 +239,11 @@ export function ActivityTimeline({
                                 Show older events
                             </button>
                         </div>
+                    )}
+                    {!hasNextPage && ledger?.retentionDays != null && (
+                        <p className="px-3 pb-2 pt-3 text-center text-[11px] text-ink-muted">
+                            The end of this range. The log keeps {retentionPhrase(ledger.retentionDays)} of activity.
+                        </p>
                     )}
                 </div>
             )}

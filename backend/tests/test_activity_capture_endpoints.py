@@ -442,3 +442,124 @@ async def test_adding_and_removing_a_group_member_by_hand_says_so(test_client, d
         payload = await _only(db_session, event_type)
         assert payload["via"] == "manual"
         assert (payload["group_id"], payload["user_id"]) == (group.id, "usr_ana")
+
+
+# ── The stores and the statistics pipeline ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retrying_and_deleting_a_failed_statistics_message_is_recorded(
+    test_client, db_session, monkeypatch,
+):
+    from backend.insights_service import redis_streams
+
+    async def _redrive(msg_id):
+        return types.SimpleNamespace(
+            redriven_msg_id="2-0", original_stream="insights:discovery", redrive_count=1,
+        )
+
+    existed = {"1-0": True, "9-9": False}
+
+    async def _delete(msg_id):
+        return existed[msg_id]
+
+    monkeypatch.setattr(redis_streams, "redrive_dlq_entry", _redrive)
+    monkeypatch.setattr(redis_streams, "delete_dlq_entry", _delete)
+
+    retried = await test_client.post(f"{INSIGHTS}/dlq/1-0/redrive", headers=HEADERS)
+    assert retried.status_code == 200, retried.text
+    payload = await _only(db_session, "stats.dlq.redriven")
+    assert payload["details"] == {
+        "messageId": "1-0", "redrivenMessageId": "2-0",
+        "originalStream": "insights:discovery", "redriveCount": 1,
+    }
+
+    # Deleting is idempotent; only a deletion that removed something is one.
+    for msg_id in ("1-0", "9-9"):
+        resp = await test_client.delete(f"{INSIGHTS}/dlq/{msg_id}", headers=HEADERS)
+        assert resp.status_code == 204, resp.text
+    payload = await _only(db_session, "stats.dlq.deleted")
+    assert payload["details"] == {"messageId": "1-0"}
+
+
+@pytest.mark.asyncio
+async def test_changing_statistics_admission_records_before_and_after(
+    test_client, db_session, estate,
+):
+    first = await test_client.put(
+        f"{INSIGHTS}/admission/prov_1", json={"bucket_capacity": 8, "refill_per_sec": 2},
+        headers=HEADERS,
+    )
+    assert first.status_code == 200, first.text
+    again = await test_client.put(
+        f"{INSIGHTS}/admission/prov_1", json={"bucket_capacity": 8, "refill_per_sec": 2},
+        headers=HEADERS,
+    )
+    assert again.status_code == 200, again.text   # unchanged: nothing to record
+    payload = await _only(db_session, "stats.admission.updated")
+    _filed_under(payload, target=("provider", "prov_1"), label="Prod graph")
+    assert payload["details"] == {
+        "from": None, "to": {"bucketCapacity": 8, "refillPerSec": 2},
+    }
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_sources_cached_reads_is_recorded_under_it(
+    test_client, db_session, estate, monkeypatch,
+):
+    from backend.app.api.v1.endpoints import graph_store
+
+    class _Cache:
+        async def bump_generation(self, scope):
+            return None
+
+        async def purge_lkg_scope(self, scope):
+            return 3
+
+    monkeypatch.setattr(graph_store, "get_graph_cache", lambda: _Cache())
+    resp = await test_client.post(
+        "/api/v1/admin/graph-store/cache/refresh"
+        "?workspaceId=ws_1&dataSourceId=ds_1&keepFallback=false",
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = await _only(db_session, "aggregation.source.cache_refreshed")
+    _filed_under(payload, ws="ws_1", ds="ds_1", target=("data_source", "ds_1"))
+    assert payload["details"] == {"keepFallback": False, "fallbackEntriesPurged": 3}
+    # A workspace's admins see what was done to their source.
+    assert catalogue._audience("aggregation.source.cache_refreshed", payload, "ws_1") == "workspace"
+
+
+@pytest.mark.asyncio
+async def test_changing_a_graph_store_nodes_limits_records_before_and_after(
+    test_client, db_session, monkeypatch,
+):
+    from dataclasses import dataclass, field
+
+    from backend.app.services.aggregation import graph_store_limits
+
+    @dataclass
+    class _Applied:
+        previous: dict = field(default_factory=dict)
+        applied: dict = field(default_factory=dict)
+        applied_to: list = field(default_factory=list)
+
+    async def _apply(session, endpoint, patch):
+        return _Applied(
+            previous={"TIMEOUT_MAX": 60_000, "QUERY_MEM_CAPACITY": None},
+            applied={"TIMEOUT_MAX": 300_000},
+            applied_to=["falkor-0"],
+        )
+
+    monkeypatch.setattr(graph_store_limits, "apply_graph_store_limits", _apply)
+    resp = await test_client.patch(
+        "/api/v1/admin/graph-store/falkor-0/limits", json={"timeoutMaxMs": 300_000},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    payload = await _only(db_session, "aggregation.graph_store.limits_changed")
+    _filed_under(payload, target=("graph_store_node", "falkor-0"), label="falkor-0")
+    assert payload["details"] == {
+        "changes": [{"field": "timeoutMaxMs", "from": 60_000, "to": 300_000}],
+        "appliedTo": ["falkor-0"],
+    }

@@ -42,6 +42,7 @@ Legacy (still honoured, ROLE-SCOPED — they only ever meant one role):
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from dataclasses import dataclass, field
@@ -96,6 +97,12 @@ class RedisEndpointConfig:
     sentinel_auth_enabled: bool = False
     tls: TLSSettings = TLSSettings()
     max_connections: int = 20
+    #: Seconds a command waits for a free pooled connection once all
+    #: ``max_connections`` are busy, before failing. A burst queues for a
+    #: moment instead of failing at once (and sending every caller to its
+    #: fallback); the cap on connections to Redis stays the same. 0 fails at
+    #: once, as the pools did before.
+    pool_timeout: float = 2.0
     socket_timeout: float = 10.0
     socket_connect_timeout: float = 5.0
     health_check_interval: int = 30
@@ -543,6 +550,7 @@ def resolve_redis_config(
         sentinel_auth_enabled=sentinel_auth_enabled,
         tls=tls,
         max_connections=_knob("MAX_CONNECTIONS", "max_connections", 20, int),
+        pool_timeout=_knob("POOL_TIMEOUT", "pool_timeout", 2.0, float),
         socket_timeout=_knob("SOCKET_TIMEOUT", "socket_timeout", 10.0, float),
         socket_connect_timeout=_knob(
             "SOCKET_CONNECT_TIMEOUT", "socket_connect_timeout", 5.0, float,
@@ -651,6 +659,7 @@ def _resolve_provider_cache(
         sentinel_auth_enabled=bool(sentinel.get("authEnabled", False)),
         tls=_tls_from_json(conn.get("tls") or {}),
         max_connections=_knob("maxConnections", "max_connections", 20, int),
+        pool_timeout=_knob("poolTimeout", "pool_timeout", 2.0, float),
         socket_timeout=_knob("socketTimeout", "socket_timeout", 10.0, float),
         socket_connect_timeout=_knob(
             "socketConnectTimeout", "socket_connect_timeout", 5.0, float,
@@ -731,10 +740,56 @@ def build_redis_client(
         sentinel = Sentinel(
             list(cfg.sentinel_nodes), sentinel_kwargs=sentinel_kwargs, **common,
         )
-        client = sentinel.master_for(cfg.sentinel_master, **common)
+        client = sentinel.master_for(
+            cfg.sentinel_master, **common,
+            connection_pool_class=_blocking_sentinel_pool(), timeout=cfg.pool_timeout,
+        )
         logger.info("redis_endpoint: %s", cfg.describe())
         return client
 
-    client = aioredis.Redis(host=cfg.host, port=cfg.port, **common)
+    client = _queue_for_connections(
+        aioredis.Redis(host=cfg.host, port=cfg.port, **common), cfg.pool_timeout,
+    )
     logger.info("redis_endpoint: %s", cfg.describe())
     return client
+
+
+def _queue_for_connections(client: Any, timeout: float) -> Any:
+    """``client`` on a pool that waits up to ``timeout`` for a free connection.
+
+    redis-py's default pool raises "Too many connections" the moment every
+    connection is busy, so a burst fails callers that a moment's wait would
+    have served — and each falls back (auth to the database, a cache to a
+    rebuild) all at once. The blocking pool keeps the same cap and the same
+    connection settings (auth and TLS included: they are copied from the
+    pool the client built for itself, which has not opened a connection yet).
+    """
+    import redis.asyncio as aioredis
+
+    pool = getattr(client, "connection_pool", None)
+    if not isinstance(pool, aioredis.ConnectionPool) or isinstance(pool, aioredis.BlockingConnectionPool):
+        return client
+    client.connection_pool = aioredis.BlockingConnectionPool(
+        connection_class=pool.connection_class,
+        max_connections=pool.max_connections,
+        timeout=timeout,
+        **pool.connection_kwargs,
+    )
+    return client
+
+
+@functools.lru_cache(maxsize=None)
+def _blocking_sentinel_pool() -> type:
+    """Sentinel's master-following pool, waiting for a free connection like
+    :func:`_queue_for_connections` instead of failing at once.
+
+    Both bases come from the ``redis.asyncio`` package, never through
+    ``redis.asyncio.sentinel`` as imported now: that module can be stood in
+    for (tests do), and the class built here is kept for the process.
+    """
+    import redis.asyncio as aioredis
+
+    class BlockingSentinelConnectionPool(aioredis.SentinelConnectionPool, aioredis.BlockingConnectionPool):
+        pass
+
+    return BlockingSentinelConnectionPool

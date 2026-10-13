@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.common.bulkhead import Busy
 from backend.app.db.repositories import activity_repo, analytics_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
-from backend.app.services import analytics_cache
+from backend.app.services import activity_retention, analytics_cache
 from backend.app.services.activity import catalogue, names
 
 logger = logging.getLogger(__name__)
@@ -79,17 +79,19 @@ async def summary(
         # Redis only: a fold holds every person and target in its span, too
         # large to keep a copy of in every worker.
         return await analytics_cache.cached(
-            f"activity:fold:v2:p{catalogue.PROJECTION_VERSION}:{scope}:{selection}:{span}",
+            f"activity:fold:v3:p{catalogue.PROJECTION_VERSION}:{scope}:{selection}:{span}",
             build, ttl=FOLD_TTL_SECONDS, memory=False,
         )
 
     async def _build() -> dict[str, Any]:
-        doc = await activity_repo.summary(session, f, window, reuse=_reuse)
+        doc = await activity_repo.summary(
+            session, f, window, reuse=_reuse, kept_from=activity_retention.horizon(),
+        )
         doc["generatedAt"] = datetime.now(timezone.utc).isoformat()
         return await name_summary(session, doc)
 
     return await analytics_cache.cached(
-        f"activity:v2:{scope}:{selection}:d{window.days}:{window.start[:10]}:{window.end[:10]}",
+        f"activity:v3:{scope}:{selection}:d{window.days}:{window.start[:10]}:{window.end[:10]}",
         _build, ttl=ttl,
     )
 
@@ -98,7 +100,8 @@ async def name_summary(session: AsyncSession, doc: dict[str, Any]) -> dict[str, 
     """Name the leaderboards: one batched lookup per kind, like a page."""
     page = await names.name_page(
         session,
-        people={r["id"] for r in doc["topPeople"]},
+        people={r["id"] for r in doc["topPeople"]}
+        | {p["id"] for r in doc["handsOnSources"] for p in r.get("people", ())},
         workspaces={r["workspaceId"] for r in doc["handsOnSources"] if r.get("workspaceId")},
         references={r["dataSourceId"] for r in doc["handsOnSources"]}
         | {r["id"] for r in doc["topTargets"] if r.get("id") and not r.get("label")},
@@ -113,6 +116,11 @@ async def name_summary(session: AsyncSession, doc: dict[str, Any]) -> dict[str, 
     for row in doc["handsOnSources"]:
         row["name"] = page.names.get(row["dataSourceId"])
         row["workspaceName"] = page.workspaces.get(row.get("workspaceId") or "")
+        for person in row.get("people", ()):
+            who = page.people.get(person["id"]) or {}
+            person.update(name=who.get("name") or None, email=who.get("email"),
+                          deleted=bool(who.get("deleted")),
+                          avatarId=who.get("avatar_id"), hasImage=bool(who.get("has_image")))
     for row in doc["topActions"]:
         row.update(label=catalogue.label_of(row["type"]), category=catalogue.category_of(row["type"]))
     return doc

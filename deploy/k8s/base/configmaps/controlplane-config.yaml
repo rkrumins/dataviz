@@ -17,3 +17,7 @@ data:
   # symptom is a dashboard that quietly stops being fast.
   ANALYTICS_WARM_INTERVAL_SECONDS: "300"
   PRODUCT_EVENT_RETENTION_DAYS: "400"
+  # The activity log's horizon (ledger and relayed outbox). The sweep runs
+  # here; viz-config carries the same value so readers are told the truth
+  # about how far back the log goes.
+  ACTIVITY_RETENTION_DAYS: "730"

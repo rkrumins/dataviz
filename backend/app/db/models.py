@@ -3246,7 +3246,9 @@ class AuthAuditLogORM(Base):
 
     * The RECORD — ``source_event_id``, ``event_type``, ``event_version``,
       ``aggregate_*``, ``payload``, ``occurred_at``, ``recorded_at`` — is
-      written once by the relay and never updated or deleted. ``source_event_id`` is the
+      written once by the relay and never updated; it is deleted only by the
+      retention sweep (``services/activity_retention``), once it happened
+      before ``ACTIVITY_RETENTION_DAYS``. ``source_event_id`` is the
       originating outbox event id and is UNIQUE, so a relay re-run after a
       crash cannot double-record.
     * The PROJECTION — everything from ``category`` down — is an index over

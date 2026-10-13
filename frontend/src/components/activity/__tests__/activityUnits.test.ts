@@ -9,12 +9,16 @@ import {
     activityQueryString,
     type ActivityEvent,
     type ActivityQuery,
+    type ActivitySummary,
 } from '@/services/activityService'
 import { busiestSlot, punchcardTable } from '@/components/analytics/charts/punchcard'
 
 import { activityLinks } from '../activityLinks'
 import { groupEvents } from '../groupEvents'
-import { cadencePhrase, reasonExpected, workspaceActivityScope } from '../activityMeta'
+import { attentionItems } from '../attention'
+import {
+    cadencePhrase, isPersonId, reasonExpected, retentionPhrase, spanToRange, workspaceActivityScope,
+} from '../activityMeta'
 
 const Q: ActivityQuery = { range: { kind: 'preset', days: 30 } }
 
@@ -142,5 +146,122 @@ describe('who sees a workspace\'s Activity tab', () => {
             .toEqual({ kind: 'workspace', workspaceId: 'ws_1', asAuditor: true })
         expect(workspaceActivityScope('ws_1', { isAdmin: false, isAuditor: false })).toBeNull()
         expect(workspaceActivityScope(undefined, { isAdmin: true, isAuditor: true })).toBeNull()
+    })
+})
+
+describe('how long the log keeps activity', () => {
+    it('says it in years when it is whole years, and in days otherwise', () => {
+        expect(retentionPhrase(730)).toBe('2 years')
+        expect(retentionPhrase(365)).toBe('1 year')
+        expect(retentionPhrase(400)).toBe('400 days')
+    })
+})
+
+describe('a spotlight is for a person picked by id', () => {
+    it('not for text that could match several people', () => {
+        expect(isPersonId('usr_ana')).toBe(true)
+        expect(isPersonId('ana')).toBe(false)
+        expect(isPersonId('ana@example.com')).toBe(false)
+    })
+})
+
+describe('what needs attention', () => {
+    const ANA = { id: 'usr_ana', name: 'Ana Lyst', deleted: false }
+    function summary(over: {
+        sources?: Partial<ActivitySummary['handsOnSources'][number]>[]
+        operations?: ActivitySummary['totals']['operations']
+        reasons?: ActivitySummary['totals']['reasons']
+    } = {}): ActivitySummary {
+        return {
+            window: { days: 30, start: '', end: '', granularity: 'day', buckets: [], previousStart: '' },
+            totals: {
+                events: { current: 10, previous: 10, delta: 0 },
+                people: { current: 2, previous: 2, delta: 0 },
+                operations: over.operations ?? { current: 4, previous: 4, delta: 0 },
+                reasons: over.reasons ?? { given: 9, of: 10, share: 0.9 },
+            },
+            volume: [], punchcard: [], topPeople: [], topTargets: [], topActions: [], topReasons: [],
+            handsOnSources: (over.sources ?? []).map((s, i) => ({
+                dataSourceId: `ds_${i}`, count: 8, lastAt: '', medianGapHours: 6, name: `Source ${i}`, people: [],
+                ...s,
+            })),
+            cadenceCapped: false,
+        }
+    }
+
+    it('has nothing to say about a quiet, well-explained range', () => {
+        expect(attentionItems(summary({ sources: [{ count: 2 }, { medianGapHours: 200 }] }))).toEqual([])
+    })
+
+    it('calls a source run by hand at least daily toil, most frequent first, and narrows to it', () => {
+        const items = attentionItems(summary({ sources: [{ medianGapHours: 20 }, { medianGapHours: 3 }] }))
+        expect(items.map((i) => i.title)).toEqual([
+            'Source 1 is run by hand every ~3h',
+            'Source 0 is run by hand every ~20h',
+        ])
+        expect(items[0].show).toEqual({ dataSource: 'ds_1' })
+        expect(items[0].detail).toBe('8 manual operations in this range. A schedule could take this over.')
+    })
+
+    it('names the one person behind a source, unless the selection is already theirs', () => {
+        const sole = summary({ sources: [{ people: [{ ...ANA, count: 8 }] }] })
+        expect(attentionItems(sole)[0].detail).toContain('all by Ana Lyst')
+        expect(attentionItems(sole, { personFiltered: true })[0].detail).not.toContain('Ana')
+
+        const carried = summary({ sources: [{ medianGapHours: 96, people: [{ ...ANA, count: 8 }] }] })
+        expect(attentionItems(carried)).toEqual([expect.objectContaining({
+            kind: 'one-person', title: 'Only Ana Lyst operates Source 0', show: { dataSource: 'ds_0' },
+        })])
+        expect(attentionItems(carried, { personFiltered: true })).toEqual([])
+        // Shared work is not one person's.
+        expect(attentionItems(summary({ sources: [{ medianGapHours: 96, people: [{ ...ANA, count: 5 }] }] })))
+            .toEqual([])
+    })
+
+    it('flags manual work rising sharply, but not a small or incomparable change', () => {
+        expect(attentionItems(summary({ operations: { current: 18, previous: 10, delta: 0.8 } }))).toEqual([
+            expect.objectContaining({
+                title: 'Manual operations are up 80%',
+                detail: '18 in this range against 10 the period before. Something upstream may need fixing.',
+                show: { lens: 'operations', types: null },
+            }),
+        ])
+        expect(attentionItems(summary({ operations: { current: 6, previous: 3, delta: 1 } }))).toEqual([])
+        expect(attentionItems(summary({ operations: { current: 40, previous: null, delta: null } }))).toEqual([])
+    })
+
+    it('flags changes that mostly do not say why, and shows the ones that did not', () => {
+        expect(attentionItems(summary({ reasons: { given: 4, of: 40, share: 0.1 } }))).toEqual([
+            expect.objectContaining({
+                title: 'Most changes don’t say why',
+                detail: 'Only 4 of 40 changes in this range gave a reason.',
+                show: { reason: 'missing' },
+            }),
+        ])
+        expect(attentionItems(summary({ reasons: { given: 1, of: 5, share: 0.2 } }))).toEqual([])
+    })
+
+    it('says at most three things', () => {
+        const items = attentionItems(summary({
+            sources: [{ medianGapHours: 2 }, { medianGapHours: 4 }],
+            operations: { current: 18, previous: 10, delta: 0.8 },
+            reasons: { given: 4, of: 40, share: 0.1 },
+        }))
+        expect(items.map((i) => i.kind)).toEqual(['toil', 'toil', 'surge'])
+    })
+})
+
+describe('a span picked on the chart is a range of days', () => {
+    it('from the first day to the last, for day buckets', () => {
+        expect(spanToRange(['2026-10-01', '2026-10-02', '2026-10-03'], 'day', 0, 1, '2026-10-03'))
+            .toEqual({ kind: 'custom', from: '2026-10-01', to: '2026-10-02' })
+    })
+
+    it('to the end of the last week, but never past the window', () => {
+        const weeks = ['2026-07-01', '2026-07-08', '2026-07-15']
+        expect(spanToRange(weeks, 'week', 0, 1, '2026-07-18'))
+            .toEqual({ kind: 'custom', from: '2026-07-01', to: '2026-07-14' })
+        expect(spanToRange(weeks, 'week', 1, 2, '2026-07-18'))
+            .toEqual({ kind: 'custom', from: '2026-07-08', to: '2026-07-18' })
     })
 })

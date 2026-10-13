@@ -40,6 +40,7 @@ from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.db.engine import get_db_session, get_readonly_db_session
 from backend.app.db.repositories import activity_repo, analytics_repo, user_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
+from backend.app.services import activity_retention
 from backend.app.services.activity import catalogue, names, recorder, summaries
 from backend.auth_service.interface import User
 from backend.common.models.activity import (
@@ -379,10 +380,15 @@ def _mount(r: APIRouter, scope_dependency) -> None:
                 "message": "Searching that window took too long. Narrow the dates "
                            "or add a filter, then search again.",
             })
+        ledger = None
+        if cursor is None:
+            ledger = await activity_repo.ledger_health(session)
+            # How far back the log goes, so the end of the list can say so.
+            ledger["retentionDays"] = activity_retention.retention_days()
         return ActivityPage(
             events=await _events(session, rows, full=scope.full),
             next_cursor=next_cursor,
-            ledger=await activity_repo.ledger_health(session) if cursor is None else None,
+            ledger=ledger,
         )
 
     @r.get("/events/newer", response_model=ActivityNewer, response_model_by_alias=True)

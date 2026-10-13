@@ -35,3 +35,6 @@ data:
   # PRODUCT_EVENT_RETENTION_DAYS is deliberately absent: the sweep does not
   # run on this role, and setting it here would only imply it did.
   ANALYTICS_WARM_INTERVAL_SECONDS: "300"
+  # The activity sweep runs on the control plane, but this tier tells readers
+  # how far back the log goes, so it MUST match controlplane-config's value.
+  ACTIVITY_RETENTION_DAYS: "730"

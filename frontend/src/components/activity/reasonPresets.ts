@@ -19,6 +19,7 @@ export type ReasonContext =
     | 'member-remove'
     | 'versioning'
     | 'duplicates'
+    | 'cache'
 
 export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
     aggregation: [
@@ -63,6 +64,11 @@ export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
         'Turned on by mistake',
     ],
     duplicates: ['Source loaded twice', 'Known duplicates upstream', 'Left over from a migration'],
+    cache: [
+        'Graph changed outside the app',
+        'Restored from a backup',
+        'Views show stale data',
+    ],
 }
 
 /** Who can read a reason once it is saved — said under the field, because a
