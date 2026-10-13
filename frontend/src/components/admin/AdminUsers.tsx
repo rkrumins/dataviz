@@ -35,6 +35,7 @@ import { AdminInvites } from './AdminInvites'
 import { InviteWizard } from './InviteWizard'
 import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
+import { apiKeyService } from '@/services/apiKeyService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -306,6 +307,41 @@ function UserIdChip({ id }: { id: string }) {
 }
 
 
+/**
+ * "API keys — 2 active · View": a person's keys, one click from their record.
+ *
+ * Keys outlive sessions — ending someone's sessions leaves their keys working
+ * — so the count belongs beside their activity. A plain link, because the
+ * inventory reads its filter from the address; it says nothing at all when
+ * the count cannot be had, since the rest of the drawer does not depend on it.
+ */
+function ApiKeysFact({ userId }: { userId: string }) {
+    const [active, setActive] = useState<number | null>(null)
+    useEffect(() => {
+        let live = true
+        apiKeyService.adminStats({ ownerId: userId })
+            .then((s) => { if (live) setActive(s.byStatus.active) })
+            .catch(() => {})
+        return () => { live = false }
+    }, [userId])
+    if (active === null) return null
+    return (
+        <div className="flex items-baseline gap-3">
+            <dt className="w-24 shrink-0 text-ink-muted">API keys</dt>
+            <dd className="min-w-0 truncate text-ink-secondary">
+                {active === 0 ? 'None active' : `${active} active`}
+                <span className="text-ink-muted"> · </span>
+                <a
+                    href={`/admin/api-keys?ownerId=${encodeURIComponent(userId)}`}
+                    className="font-semibold text-accent-lineage hover:underline"
+                >
+                    View
+                </a>
+            </dd>
+        </div>
+    )
+}
+
 export function AdminUsers() {
     // Phase 6: only super_admins can grant super_admin. Org admins
     // see ``org_admin`` only — the dropdown shouldn't tease a role
@@ -313,6 +349,7 @@ export function AdminUsers() {
     // ``PUT /admin/users/{id}/role`` (which checks ``system:admin``
     // legacy + claim) so the FE filter agrees with the BE gate.
     const canGrantSuperAdmin = usePermission('system:admin')
+    const canSeeApiKeys = usePermission('system:audit:read')
     const { notify } = useAppNotifications()
     const assignableRoles = useMemo(
         () =>
@@ -1640,6 +1677,7 @@ export function AdminUsers() {
                                             </dd>
                                         </div>
                                     ))}
+                                    {canSeeApiKeys && <ApiKeysFact userId={accessUser.id} />}
                                 </dl>
                             </div>
                             {/* Body: show skeleton placeholders while the

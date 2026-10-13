@@ -3,9 +3,10 @@
  *
  * Minting a key (create, rotate) can be refused for a reason the page acts
  * on rather than shows: the session has to prove it is really you first
- * (`step_up_required`, with how). So these calls keep the server's
- * structured refusal instead of flattening it to a message, and pass
- * `silent403` — a step-up 403 is part of this form, not an access denial.
+ * (`step_up_required`, with how), or cannot from this sign-in at all
+ * (`step_up_unavailable`). So these calls keep the server's structured
+ * refusal instead of flattening it to a message, and pass `silent403` — a
+ * step-up 403 is part of this form, not an access denial.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
@@ -51,7 +52,38 @@ export interface ApiKey {
     revokedAt: string | null
     revokedBy: string | null
     revokedReason: string | null
+    /** An administrator's note to the owner, given when they revoked it. */
+    revokedNote: string | null
     rotatedFrom: string | null
+    usage: ApiKeyUsage
+}
+
+/** Calls made with a key: the last 30 days, and the last 14 by UTC day. */
+export interface ApiKeyUsage {
+    requests30d: number
+    writes30d: number
+    /** Refused because of the key: 401, 403 or 429. */
+    refused30d: number
+    /** Any other answer of 400 or above. */
+    errors30d: number
+    /** Requests per UTC day, oldest first; today last. */
+    daily14: number[]
+}
+
+export interface UsageDay {
+    /** YYYY-MM-DD, UTC. */
+    day: string
+    requests: number
+    writes: number
+    refused: number
+    errors: number
+}
+
+/** The key one replaced, or the one that replaced it. */
+export interface KeyRef {
+    id: string
+    name: string
+    prefix: string
 }
 
 export interface WorkspaceAccess {
@@ -69,12 +101,22 @@ export interface ResourceAccess {
     level: Level
 }
 
+/** What a key can do right now: its owner's access today, narrowed by the key. */
+export interface EffectiveAccess {
+    workspaces: WorkspaceAccess[]
+    views: ResourceAccess[]
+    dataSources: ResourceAccess[]
+    /** Set when the key reaches every workspace through an organisation-wide
+     *  role; `workspaces` is then not a list of them. */
+    everyWorkspace: { views: Level; data: Level; publish: boolean } | null
+}
+
 export interface ApiKeyDetail extends ApiKey {
-    effectiveAccess: {
-        workspaces: WorkspaceAccess[]
-        views: ResourceAccess[]
-        dataSources: ResourceAccess[]
-    }
+    effectiveAccess: EffectiveAccess
+    /** 30 UTC days, oldest first. */
+    usageDays: UsageDay[]
+    replaces: KeyRef | null
+    replacedBy: KeyRef | null
 }
 
 export interface ApiKeyOptions {
@@ -85,8 +127,15 @@ export interface ApiKeyOptions {
         maxActiveKeys: number
     }
     stepUp: { method: 'password' | 'sso'; fresh: boolean }
+    /** False: this session cannot prove it is you, and the deployment does not
+     *  accept a fresh round trip instead — creating or rotating is refused. */
+    stepUpAvailable: boolean
     activeKeys: number
     workspaces: WorkspaceAccess[]
+    /** The address the server sees this browser at. */
+    clientIp: string | null
+    /** Where someone whose keys are paused signs in to resume them. */
+    ssoSignInUrl: string | null
 }
 
 export interface PickerItem {
@@ -111,6 +160,24 @@ export interface CreateApiKeyBody extends Expiry {
     currentPassword?: string
 }
 
+/** What creating would make, without making it. */
+export type PreviewApiKeyBody = Omit<CreateApiKeyBody, 'currentPassword'>
+
+export interface ApiKeyPreview {
+    permissions: ApiKeyPermissions
+    resources: ApiKeyResources
+    allowedCidrs: string[]
+    expiresAt: string | null
+    effectiveAccess: EffectiveAccess
+    activeKeys: number
+    maxActiveKeys: number
+}
+
+export interface UpdateApiKeyBody {
+    name?: string
+    description?: string | null
+}
+
 export interface RotateApiKeyBody extends Expiry {
     graceSeconds: 0 | 3600 | 86400 | 604800
     currentPassword?: string
@@ -124,6 +191,36 @@ export interface CreatedApiKey {
 
 export interface AdminApiKey extends ApiKey {
     owner: { id: string; email: string; displayName: string }
+}
+
+export interface AdminApiKeyDetail extends AdminApiKey {
+    effectiveAccess: EffectiveAccess
+    usageDays: UsageDay[]
+    replaces: KeyRef | null
+    replacedBy: KeyRef | null
+}
+
+export type AdminKeyStatus = 'active' | 'paused' | 'owner_inactive' | 'expired' | 'revoked'
+export type AdminKeyFocus = 'expiring_soon' | 'never_expires' | 'unused' | 'recently_revoked'
+export type AdminKeySort = 'created' | 'lastUsed' | 'expires' | 'name'
+
+/** The inventory's filters — the list, the export and (owner, search) the stats. */
+export interface AdminKeyFilters {
+    ownerId?: string
+    status?: AdminKeyStatus
+    focus?: AdminKeyFocus
+    q?: string
+    sort?: AdminKeySort
+    order?: 'asc' | 'desc'
+}
+
+export interface AdminApiKeyStats {
+    total: number
+    byStatus: { active: number; paused: number; ownerInactive: number; expired: number; revoked: number }
+    expiringSoon: number
+    neverExpires: number
+    unused90: number
+    revoked30d: number
 }
 
 /** A refusal with the server's own code, and what the page needs to act on it. */
@@ -175,17 +272,32 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
     return res.json() as Promise<T>
 }
 
+/** A query string of the values that are set. */
+function query(params: object): string {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null && value !== '') search.set(key, String(value))
+    }
+    return search.toString()
+}
+
+/** A note is sent only when there is one. */
+function noteBody(note?: string): string {
+    return JSON.stringify(note?.trim() ? { note: note.trim() } : {})
+}
+
 export const apiKeyService = {
     options(): Promise<ApiKeyOptions> {
         return call(`${MINE}/options`)
     },
 
-    list(): Promise<ApiKey[]> {
-        return call(MINE)
+    /** Live keys and those ended in the last 90 days; `all` for every one. */
+    list(history?: 'all'): Promise<ApiKey[]> {
+        return call(history ? `${MINE}?history=all` : MINE)
     },
 
-    get(id: string): Promise<ApiKeyDetail> {
-        return call(`${MINE}/${encodeURIComponent(id)}`)
+    get(id: string, signal?: AbortSignal): Promise<ApiKeyDetail> {
+        return call(`${MINE}/${encodeURIComponent(id)}`, { signal })
     },
 
     searchResources(
@@ -201,6 +313,15 @@ export const apiKeyService = {
         return call(MINE, { method: 'POST', body: JSON.stringify(body) })
     },
 
+    preview(body: PreviewApiKeyBody, signal?: AbortSignal): Promise<ApiKeyPreview> {
+        return call(`${MINE}/preview`, { method: 'POST', body: JSON.stringify(body), signal })
+    },
+
+    /** Name and description only: what a key may do is fixed when it is made. */
+    update(id: string, body: UpdateApiKeyBody): Promise<ApiKey> {
+        return call(`${MINE}/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
+    },
+
     rotate(id: string, body: RotateApiKeyBody): Promise<CreatedApiKey> {
         return call(`${MINE}/${encodeURIComponent(id)}/rotate`, {
             method: 'POST', body: JSON.stringify(body),
@@ -211,28 +332,31 @@ export const apiKeyService = {
         return call(`${MINE}/${encodeURIComponent(id)}`, { method: 'DELETE' })
     },
 
-    adminList(params: {
-        ownerId?: string
-        status?: 'active' | 'expired' | 'revoked'
-        unusedDays?: number
-        q?: string
-        limit?: number
-        offset?: number
-    }): Promise<{ items: AdminApiKey[]; total: number }> {
-        const search = new URLSearchParams()
-        for (const [key, value] of Object.entries(params)) {
-            if (value !== undefined && value !== '') search.set(key, String(value))
-        }
-        return call(`${ADMIN}?${search}`)
+    adminList(params: AdminKeyFilters & { limit?: number; offset?: number }): Promise<{ items: AdminApiKey[]; total: number }> {
+        return call(`${ADMIN}?${query(params)}`)
     },
 
-    adminRevoke(id: string): Promise<void> {
-        return call(`${ADMIN}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    adminStats(params: { ownerId?: string; q?: string }): Promise<AdminApiKeyStats> {
+        return call(`${ADMIN}/stats?${query(params)}`)
     },
 
-    adminRevokeAll(userId: string): Promise<{ revoked: number }> {
+    adminGet(id: string): Promise<AdminApiKeyDetail> {
+        return call(`${ADMIN}/${encodeURIComponent(id)}`)
+    },
+
+    /** The note (up to 500 characters) is shown to the owner. */
+    adminRevoke(id: string, note?: string): Promise<void> {
+        return call(`${ADMIN}/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: noteBody(note) })
+    },
+
+    adminRevokeAll(userId: string, note?: string): Promise<{ revoked: number }> {
         return call(`/api/v1/admin/users/${encodeURIComponent(userId)}/api-keys/revoke-all`, {
-            method: 'POST',
+            method: 'POST', body: noteBody(note),
         })
+    },
+
+    /** The inventory as CSV, with the same filters and order — for a plain link. */
+    adminExportUrl(filters: AdminKeyFilters): string {
+        return `${ADMIN}/export.csv?${query(filters)}`
     },
 }

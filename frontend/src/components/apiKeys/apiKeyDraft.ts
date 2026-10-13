@@ -1,20 +1,34 @@
 /**
- * The create/rotate form's contents, and parking them across a sign-in.
+ * The create/rotate choices, and parking them across a sign-in.
  *
  * Confirming it's you with an identity provider leaves the page, so what was
- * filled in waits in `sessionStorage` — never a password, never a token — and
- * is taken (once) when the provider sends you back.
+ * chosen waits in `sessionStorage` — never a password, never a token — and is
+ * picked up when the provider sends you back, at the step you left from.
+ *
+ * A parked draft is versioned and lasts 30 minutes: a shape this code no
+ * longer reads, or a form someone walked away from, starts fresh rather than
+ * coming back half-understood.
  */
 import type { ApiKey, ApiKeyOptions, ApiKeyPermissions, PickerItem, RotateApiKeyBody } from '@/services/apiKeyService'
 import { defaultExpiry, type ExpiryChoice } from './apiKeyFormat'
+import type { PresetId } from './presets'
 
 export type ResourceMode = 'all' | 'workspaces' | 'items'
 export type Grace = RotateApiKeyBody['graceSeconds']
+export type WizardStep = 'purpose' | 'reach' | 'permissions' | 'safety' | 'review'
+
+export const DRAFT_VERSION = 2
+/** How long a parked draft waits for its owner to come back. */
+export const DRAFT_SHELF_LIFE_MS = 30 * 60 * 1000
 
 /** Everything the form holds, minus secrets: what is parked across a sign-in. */
 export interface ApiKeyDraft {
-    mode: 'create' | 'rotate'
+    v: typeof DRAFT_VERSION
+    /** Renew is a rotation of a key that has stopped: no grace to give. */
+    mode: 'create' | 'rotate' | 'renew'
     keyId?: string
+    step: WizardStep
+    preset: PresetId | null
     name: string
     description: string
     resourceMode: ResourceMode
@@ -24,35 +38,52 @@ export interface ApiKeyDraft {
     permissions: ApiKeyPermissions
     expiry: ExpiryChoice | 'same'
     customDate: string
-    cidrs: string
+    cidrs: string[]
     grace: Grace
 }
 
 const DRAFT_KEY = 'nx-api-key-draft'
 
-export function parkDraft(draft: ApiKeyDraft): void {
+export function parkDraft(draft: ApiKeyDraft, now: number = Date.now()): void {
     try {
-        sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
+        sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ ...draft, savedAt: now }))
     } catch {
         // Private mode: the form simply starts empty when they come back.
     }
 }
 
-/** The parked draft, removed as it is read — it is used once. */
-export function takeDraft(): ApiKeyDraft | null {
+/** The parked draft, if it is one this code reads and it is still fresh. */
+export function peekDraft(now: number = Date.now()): ApiKeyDraft | null {
     try {
         const raw = sessionStorage.getItem(DRAFT_KEY)
-        sessionStorage.removeItem(DRAFT_KEY)
-        return raw ? (JSON.parse(raw) as ApiKeyDraft) : null
+        if (!raw) return null
+        const { savedAt, ...draft } = JSON.parse(raw) as ApiKeyDraft & { savedAt?: number }
+        if (draft.v !== DRAFT_VERSION || typeof savedAt !== 'number') return null
+        if (now - savedAt > DRAFT_SHELF_LIFE_MS || now < savedAt) return null
+        return draft
     } catch {
         return null
     }
 }
 
-export function freshDraft(options: ApiKeyOptions | null, rotating?: ApiKey): ApiKeyDraft {
+/** A draft is used once: cleared as soon as the page has read it. */
+export function clearDraft(): void {
+    try {
+        sessionStorage.removeItem(DRAFT_KEY)
+    } catch {
+        // Nothing was parked where nothing can be stored.
+    }
+}
+
+export function freshDraft(
+    options: ApiKeyOptions | null, rotating?: ApiKey, mode: ApiKeyDraft['mode'] = rotating ? 'rotate' : 'create',
+): ApiKeyDraft {
     return {
-        mode: rotating ? 'rotate' : 'create',
+        v: DRAFT_VERSION,
+        mode,
         keyId: rotating?.id,
+        step: 'purpose',
+        preset: null,
         name: '',
         description: '',
         resourceMode: 'items',
@@ -62,7 +93,7 @@ export function freshDraft(options: ApiKeyOptions | null, rotating?: ApiKey): Ap
         permissions: { views: 'read', data: 'none', publish: false },
         expiry: rotating ? 'same' : defaultExpiry(options?.policy.maxLifetimeDays ?? null),
         customDate: '',
-        cidrs: '',
+        cidrs: [],
         grace: 0,
     }
 }

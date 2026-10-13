@@ -55,6 +55,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
     'user.reactivated': 'Your account was reactivated',
     'identity.api_key.created': 'You created an API key',
     'identity.api_key.rotated': 'You rotated an API key',
+    'identity.api_key.updated': 'You changed an API key’s name or description',
     'identity.api_key.revoked': 'An API key was revoked',
     'identity.api_key.misuse': 'One of your API keys was used where it should not be',
 }

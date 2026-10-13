@@ -1,68 +1,42 @@
 /**
- * Account → API keys: what a key can do at a glance, minting one behind a
- * fresh proof that it is you, seeing it once, and ending it.
+ * Account → API keys: what a key can do at a glance, what needs doing first,
+ * and ending a key in place. Making one is the wizard's, and is pinned in
+ * `components/apiKeys/wizard/__tests__`.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { MyApiKeysPage } from '../MyApiKeysPage'
-import { parkDraft } from '@/components/apiKeys/apiKeyDraft'
-import type { ApiKey, ApiKeyOptions } from '@/services/apiKeyService'
+import { apiKey, inDays, options as opts, usage } from '@/components/apiKeys/__tests__/fixtures'
 
-const { list, options, create, revoke, searchResources, get, notify, feature } = vi.hoisted(() => ({
+const { list, options, revoke, get, rotate, notify, feature } = vi.hoisted(() => ({
     list: vi.fn(),
     options: vi.fn(),
-    create: vi.fn(),
     revoke: vi.fn(),
-    searchResources: vi.fn(),
     get: vi.fn(),
+    rotate: vi.fn(),
     notify: vi.fn(),
     feature: { on: true },
 }))
 
-vi.mock('@/services/apiKeyService', async () => {
-    const actual = await vi.importActual<typeof import('@/services/apiKeyService')>(
-        '@/services/apiKeyService',
-    )
-    return {
-        ...actual,
-        apiKeyService: { list, options, create, revoke, searchResources, get, rotate: vi.fn() },
-    }
-})
-vi.mock('@/components/account/AccountShell', () => ({
+vi.mock('@/services/apiKeyService', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/apiKeyService')>()),
+    apiKeyService: { list, options, revoke, get, rotate, searchResources: vi.fn(), create: vi.fn(), preview: vi.fn() },
+}))
+vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),
     AccountShell: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
-    AccountCard: ({ children, title }: { children?: React.ReactNode; title?: string }) => (
-        <section aria-label={title}>{children}</section>
+    AccountCard: ({ children, title, blurb }: { children?: React.ReactNode; title?: string; blurb?: string }) => (
+        <section aria-label={title}><p>{blurb}</p>{children}</section>
     ),
-    EmptyState: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
 }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/lib/useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 vi.mock('@/store/features', () => ({ useFeature: () => feature.on }))
 
-const KEY: ApiKey = {
-    id: 'apk_1', name: 'nightly sync', description: null, prefix: 'nxpat_AbCdEfGh', kind: 'personal',
-    permissions: { views: 'read', data: 'write', publish: false },
-    resources: { workspaces: [], views: ['v1'], dataSources: ['ds1', 'ds2'] },
-    allowedCidrs: [], expiresAt: '2030-01-01T00:00:00+00:00', status: 'active',
-    createdAt: '2026-10-01T00:00:00+00:00', createdIp: null,
-    lastUsedAt: null, lastUsedIp: null, lastUsedUserAgent: null,
-    revokedAt: null, revokedBy: null, revokedReason: null, rotatedFrom: null,
-}
-const REVOKED: ApiKey = { ...KEY, id: 'apk_0', name: 'old one', status: 'revoked', revokedAt: '2026-09-01T00:00:00+00:00' }
-
-function opts(over: Partial<ApiKeyOptions> = {}): ApiKeyOptions {
-    return {
-        policy: { enabled: true, maxLifetimeDays: null, ssoSignInWindowDays: 30, maxActiveKeys: 25 },
-        stepUp: { method: 'password', fresh: false },
-        activeKeys: 1,
-        workspaces: [{ id: 'ws1', name: 'Finance', views: 'write', data: 'read', publish: false }],
-        ...over,
-    }
-}
-
-const realLocation = window.location
+const KEY = apiKey()
+const REVOKED = apiKey({ id: 'apk_0', name: 'old one', status: 'revoked', revokedAt: '2026-09-01T00:00:00+00:00', revokedReason: 'owner' })
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -70,12 +44,8 @@ beforeEach(() => {
     feature.on = true
     list.mockResolvedValue([KEY, REVOKED])
     options.mockResolvedValue(opts())
-    searchResources.mockResolvedValue([])
     revoke.mockResolvedValue(undefined)
-    Object.defineProperty(window, 'location', {
-        configurable: true,
-        value: { ...realLocation, href: 'http://localhost/me/api-keys', origin: 'http://localhost' },
-    })
+    get.mockReturnValue(new Promise(() => {}))
 })
 
 describe('the list', () => {
@@ -83,11 +53,33 @@ describe('the list', () => {
         render(<MyApiKeysPage />)
         const yours = await screen.findByRole('region', { name: 'Your keys' })
         expect(within(yours).getByText('nightly sync')).toBeInTheDocument()
-        expect(within(yours).getByText(/views: read · data: read & write on 1 view, 2 data sources/i)).toBeInTheDocument()
+        expect(within(yours).getByText('Views: read')).toBeInTheDocument()
+        expect(within(yours).getByText('Data: read & write')).toBeInTheDocument()
+        expect(within(yours).getByText('1 view, 2 data sources')).toBeInTheDocument()
         expect(within(yours).getByText('Never used')).toBeInTheDocument()
         expect(within(yours).queryByText('old one')).not.toBeInTheDocument()
         const ended = screen.getByRole('region', { name: 'Expired and revoked' })
         expect(within(ended).getByText('old one')).toBeInTheDocument()
+        expect(within(ended).getByText(/you revoked it/i)).toBeInTheDocument()
+    })
+
+    it('says how to send a key without quoting markdown at you', async () => {
+        render(<MyApiKeysPage />)
+        const yours = await screen.findByRole('region', { name: 'Your keys' })
+        expect(within(yours).getByText(/bearer token in the authorization header/i)).toBeInTheDocument()
+        expect(yours.textContent).not.toContain('`')
+    })
+
+    it('sums the overview: keys in use of the limit, expiring, paused, requests today', async () => {
+        list.mockResolvedValue([
+            apiKey({ usage: usage({ daily14: [...Array(13).fill(0), 7] }) }),
+            apiKey({ id: 'apk_2', name: 'soon', expiresAt: inDays(3), usage: usage({ daily14: [...Array(13).fill(0), 5] }) }),
+        ])
+        render(<MyApiKeysPage />)
+        await screen.findByText('soon')
+        expect(screen.getByText('Keys in use').parentElement).toHaveTextContent('2/ 25')
+        expect(screen.getByText('Expiring within 7 days').parentElement).toHaveTextContent('1')
+        expect(screen.getByText('Requests today').parentElement).toHaveTextContent('12')
     })
 
     it('revokes after asking, in place', async () => {
@@ -109,69 +101,86 @@ describe('the list', () => {
         expect(within(row).getByRole('button', { name: /revoke/i })).toBeEnabled()
         expect(within(row).queryByRole('button', { name: /rotate/i })).not.toBeInTheDocument()
     })
+
+    it('says up front when this sign-in cannot confirm it is you, and offers nothing that would be refused', async () => {
+        options.mockResolvedValue(opts({ stepUpAvailable: false }))
+        render(<MyApiKeysPage />)
+        expect(await screen.findByText(/Administration → Features → Authentication/)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
+        const row = screen.getByText('nightly sync').closest('li')!
+        expect(within(row).queryByRole('button', { name: /rotate/i })).not.toBeInTheDocument()
+    })
+
+    it('reads older history on request', async () => {
+        render(<MyApiKeysPage />)
+        await screen.findByText('nightly sync')
+        expect(list).toHaveBeenLastCalledWith(undefined)
+        await userEvent.click(screen.getByRole('button', { name: /show older history/i }))
+        await waitFor(() => expect(list).toHaveBeenLastCalledWith('all'))
+        expect(screen.queryByRole('button', { name: /show older history/i })).not.toBeInTheDocument()
+    })
 })
 
-describe('creating a key', () => {
-    it('asks for the password, then shows the token once', async () => {
-        create.mockResolvedValue({ key: { ...KEY, id: 'apk_2', name: 'ci' }, token: 'nxpat_THE_TOKEN' })
+describe('what needs doing first', () => {
+    it('offers to rotate a key that expires within a week', async () => {
+        list.mockResolvedValue([apiKey({ expiresAt: inDays(3) })])
         render(<MyApiKeysPage />)
-        await userEvent.click(await screen.findByRole('button', { name: /create key/i }))
-
-        const dialog = await screen.findByRole('dialog')
-        await userEvent.type(within(dialog).getByLabelText('Name'), 'ci')
-        await userEvent.click(within(dialog).getByRole('radio', { name: /everything i can access/i }))
-        const submit = within(dialog).getByRole('button', { name: /^create key$/i })
-        expect(submit).toBeDisabled()                          // no password yet
-        await userEvent.type(within(dialog).getByLabelText('Your password'), 'pw')
-        await userEvent.click(submit)
-
-        await waitFor(() => expect(create).toHaveBeenCalled())
-        const body = create.mock.calls[0][0]
-        expect(body).toMatchObject({
-            name: 'ci', resources: 'all', currentPassword: 'pw', neverExpires: false,
-            permissions: { views: 'read', data: 'none', publish: false },
-        })
-        expect(body.expiresAt).toBeTruthy()
-
-        expect(await within(dialog).findByDisplayValue('nxpat_THE_TOKEN')).toBeInTheDocument()
-        await userEvent.click(within(dialog).getByRole('button', { name: /i’ve copied it/i }))
-        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-        expect(list).toHaveBeenCalledTimes(2)                  // reloaded after closing
+        const item = (await screen.findByText(/“nightly sync” expires in 3 days/i)).closest('li') as HTMLElement
+        expect(screen.getByRole('region', { name: 'Needs your attention' })).toContainElement(item)
+        await userEvent.click(within(item).getByRole('button', { name: /rotate/i }))
+        expect(await screen.findByRole('dialog', { name: /rotate “nightly sync”/i })).toBeInTheDocument()
     })
 
-    it('with an identity provider, parks the form and signs in again', async () => {
-        const { ApiKeyError } = await vi.importActual<typeof import('@/services/apiKeyService')>(
-            '@/services/apiKeyService',
-        )
-        options.mockResolvedValue(opts({ stepUp: { method: 'sso', fresh: false } }))
-        create.mockRejectedValue(new ApiKeyError(403, 'Confirm it’s you', {
-            error: 'step_up_required', method: 'sso',
-            loginUrl: '/api/v1/auth/corp/login?next=/me/api-keys&force=1',
-        }))
+    it('sends someone with paused keys to sign in again, rather than renewing them', async () => {
+        list.mockResolvedValue([apiKey({ status: 'paused' })])
         render(<MyApiKeysPage />)
-        await userEvent.click(await screen.findByRole('button', { name: /create key/i }))
-        const dialog = await screen.findByRole('dialog')
-        expect(within(dialog).queryByLabelText('Your password')).not.toBeInTheDocument()
-        await userEvent.type(within(dialog).getByLabelText('Name'), 'from sso')
-        await userEvent.click(within(dialog).getByRole('radio', { name: /everything i can access/i }))
-        await userEvent.click(within(dialog).getByRole('button', { name: /^create key$/i }))
+        const banner = (await screen.findByText(/“nightly sync” is paused/i)).closest('li') as HTMLElement
+        expect(within(banner).getByRole('link', { name: /sign in to resume/i }))
+            .toHaveAttribute('href', '/api/v1/auth/corp/login?next=/me/api-keys')
+        expect(banner).toHaveTextContent(/nothing was revoked/i)
+        expect(banner).toHaveTextContent(/30 days/)
 
-        await userEvent.click(await within(dialog).findByRole('button', { name: /sign in again/i }))
-        expect(window.location.href).toBe('/api/v1/auth/corp/login?next=/me/api-keys&force=1')
-        const parked = JSON.parse(sessionStorage.getItem('nx-api-key-draft')!)
-        expect(parked).toMatchObject({ mode: 'create', name: 'from sso', resourceMode: 'all' })
-        expect(JSON.stringify(parked)).not.toMatch(/password/i)
+        const card = within(screen.getByRole('region', { name: 'Your keys' })).getByText('nightly sync').closest('li') as HTMLElement
+        expect(within(card).getByRole('link', { name: /sign in to resume/i }))
+            .toHaveAttribute('href', '/api/v1/auth/corp/login?next=/me/api-keys')
+        expect(within(card).getByRole('button', { name: /^rotate$/i })).toBeInTheDocument()
+        expect(within(card).queryByRole('button', { name: /renew/i })).not.toBeInTheDocument()
+        expect(card).toHaveTextContent(/nothing was revoked/i)
     })
 
-    it('reopens the form with what was filled in, on the way back', async () => {
-        parkDraft({
-            mode: 'create', name: 'resumed', description: '', resourceMode: 'all', workspaces: [],
-            views: [], dataSources: [], permissions: { views: 'write', data: 'none', publish: true },
-            expiry: '30', customDate: '', cidrs: '', grace: 0,
-        })
+    it('offers nothing to sign in through when there is nowhere to sign in', async () => {
+        options.mockResolvedValue(opts({ ssoSignInUrl: null }))
+        list.mockResolvedValue([apiKey({ status: 'paused' })])
         render(<MyApiKeysPage />)
-        const dialog = await screen.findByRole('dialog')
-        expect(within(dialog).getByLabelText('Name')).toHaveValue('resumed')
-        expect(sessionStorage.getItem('nx-api-key-draft')).toBeNull()   // used once
+        await screen.findByText(/“nightly sync” is paused/i)
+        expect(screen.queryByRole('link', { name: /sign in to resume/i })).not.toBeInTheDocument()
+    })
+
+    it('says when an expired key is still being called, and offers to renew it', async () => {
+        list.mockResolvedValue([apiKey({
+            status: 'expired', expiresAt: inDays(-2),
+            usage: usage({ daily14: [...Array(12).fill(0), 9, 4] }),
+        })])
+        render(<MyApiKeysPage />)
+        const banner = (await screen.findByText(/expired, but something still calls it/i)).closest('li') as HTMLElement
+        expect(banner).toHaveTextContent('13 requests in the last 7 days were refused')
+        await userEvent.click(within(banner).getByRole('button', { name: /renew/i }))
+        expect(await screen.findByRole('dialog', { name: /renew “nightly sync”/i })).toBeInTheDocument()
+    })
+})
+
+describe('before the first key', () => {
+    it('says what a key is, and how to make one', async () => {
+        list.mockResolvedValue([])
+        render(<MyApiKeysPage />)
+        await screen.findByText('Let scripts and services work as you')
+        const hero = screen.getByRole('region', { name: 'Your keys' })
+        expect(within(hero).getByText('Only what you choose')).toBeInTheDocument()
+        expect(within(hero).getByText('Shown once, kept safe')).toBeInTheDocument()
+        expect(within(hero).getByText('Yours to stop')).toBeInTheDocument()
+        expect(within(hero).getByRole('link', { name: /how keys work/i })).toHaveAttribute('href', '/guide/api-keys')
+        expect(within(hero).getByRole('link', { name: /calling the api/i })).toHaveAttribute('href', '/docs/api-guide')
+        await userEvent.click(within(hero).getByRole('button', { name: /create your first key/i }))
+        expect(await screen.findByRole('dialog', { name: /create an api key/i })).toBeInTheDocument()
     })
 })
