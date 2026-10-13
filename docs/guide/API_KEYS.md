@@ -74,10 +74,17 @@ away with a credential.
   connections do. If it has been longer, **Sign in again** takes you to your
   provider and brings you back to the review, with everything you chose still
   there — never the key itself, which doesn't exist yet.
-- **Gateway and portal connections** can't say when you signed in, so keys
-  can't be created through them unless your administrator has turned on
-  **Accept a fresh sign-in round trip for API keys**. The review step tells you
-  when that is the case.
+- **Through your company's Enterprise gateway**, there is usually nothing to
+  do: the gateway is asked, as you create the key, whether your company
+  sign-in is still live. If it has ended, sign in again; if the gateway
+  doesn't answer, try again in a moment — no key is made without its answer.
+  Where only your browser talks to the gateway, a sign-in through it in the
+  last 15 minutes counts, and **Sign in again** takes you through it and back
+  to the review.
+- **Portal connections** can't say when you signed in, so keys can't be
+  created through them unless your administrator has turned on **Accept a
+  fresh sign-in round trip for API keys**. The review step tells you when that
+  is the case.
 
 ### What it can do, before and after
 
@@ -185,8 +192,9 @@ those, rotate it or make a new key.
 **Rotate** makes a new token that can do exactly what the old one does.
 Choose how long the old token keeps working beside it — not at all, an hour,
 a day or a week — and the dialog says when that is, so you can swap the new
-one in everywhere first. A key can be replaced once: rotate its replacement
-next time.
+one in everywhere first. While both work they count as two of your 25, so at
+the limit, rotate without keeping the old one. A key can be replaced once:
+rotate its replacement next time.
 
 **Renew** is for a key that has expired: it makes a new token with the same
 access as the old one, starting from what your access is *today*. There is no
@@ -219,10 +227,11 @@ something, and how many were refused or failed. Counts are added every half
 minute.
 
 Creating, renaming, rotating and revoking a key are on your account's
-activity, and on the audit log administrators read, as is a revoked key being
-used again or a key being used from a network it does not allow — those also
-tell you in your inbox. Everything a key changes is recorded as you, marked
-with the key. A week before a key expires, you get a reminder.
+activity, and in **Administration → Activity**, as is a revoked key being used
+again or a key being used from a network it does not allow — those also tell
+you in your inbox. Everything a key changes is recorded as you, marked with
+the key, and an administrator can list everything one key did: **Its
+activity** on the key. A week before a key expires, you get a reminder.
 
 ## Network limits behind a proxy
 
@@ -244,14 +253,16 @@ creation. Open a key for its owner, what it can do right now, its usage and
 the keys it replaced. With permission to manage users you can revoke one key —
 optionally with a note its owner sees — or every key a person holds; ending
 someone's sessions does not touch their keys. **Export CSV** downloads the list
-as filtered and sorted, up to 10,000 keys. The access drawer on
+as filtered and sorted, up to 10,000 keys; two exports run at once on each
+server, and a third is asked to try again shortly. The access drawer on
 **Administration → Users** links to each person's keys.
 
 Four switches in **Administration → Features → Authentication** govern keys:
 **API keys** (the switch for all of them at once), **Longest an API key may
 live**, **Pause keys of people who stop signing in**, and **Accept a fresh
-sign-in round trip for API keys** (see [Confirming it's
-you](#confirming-its-you)). See [Feature Switches](/guide/feature-switches).
+sign-in round trip for API keys**, which concerns portal connections only (see
+[Confirming it's you](#confirming-its-you)). See [Feature
+Switches](/guide/feature-switches).
 
 ---
 

@@ -315,16 +315,29 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   without a database lookup. Only its SHA-256 hash is stored, and the token is shown once. It
   is accepted only in the `Authorization: Bearer` header — never in a URL — and never logged.
 - **Minting needs a fresh sign-in.** Creating or rotating a key asks for the password, or for
-  a sign-in through the identity provider in the last 15 minutes that the provider itself
-  dated. A provider that signs someone back in silently from a session it still holds proves
-  nothing about who is at the keyboard, so a sign-in it did not date is not enough: OIDC
-  (`prompt=login` with `max_age`) and SAML (`ForceAuthn`) connections date theirs, and the
-  sign-in page asks them to. Gateway and portal connections cannot, so their users cannot make
-  keys unless an administrator accepts a fresh round trip instead. The proof is a signed
-  `auth_time_proven` claim beside `auth_time` in both session tokens, carried through every
-  renewal and never settable from outside the sign-in. A person may hold 25 keys still in
-  date; rotations and renewals take a per-person lock, so two at once can neither pass the
-  limit nor leave a revoked key with a live replacement, and a key can be replaced only once.
+  the identity provider the session came from (named by a signed `idp` claim) to vouch for
+  the person now. A provider that signs someone back in silently from a session it still
+  holds proves nothing about who is at the keyboard, so:
+  - OIDC (`prompt=login` with `max_age`) and SAML (`ForceAuthn`) connections must have dated
+    a sign-in in the last 15 minutes, and the sign-in page asks them to. The proof is a
+    signed `auth_time_proven` claim beside `auth_time` in both session tokens, carried
+    through every renewal and never settable from outside the sign-in. A portal's
+    `auth_time`, which it maps from its own payload, never counts as proof.
+  - An **Enterprise gateway** this server can ask — server exchange with an ambient token
+    source — is asked, on the create or rotate request itself, whether the company session
+    behind the request is still live. Confirmed mints; ended or refused asks for a new
+    sign-in; no answer mints nothing (`503 gateway_unreachable`, `Retry-After`) — unlike
+    session renewal, there is no grace. It proves the company session is live, not that a
+    credential was typed just now. A gateway only the browser reaches vouches by having
+    signed the session in within the last 15 minutes.
+  - Portal connections can do neither, so their users cannot make keys unless an
+    administrator accepts a fresh round trip instead.
+
+  Every `created` and `rotated` event records how it was confirmed (`step_up`). A person may
+  hold 25 keys still in date, and a rotation that keeps the old key working for a while
+  counts as one more until it ends; rotations and renewals take a per-person lock, so two at
+  once can neither pass the limit nor leave a revoked key with a live replacement, and a key
+  can be replaced only once.
 - **Narrower than its owner, never wider.** A key reaches everything its owner can, or chosen
   workspaces, views and data sources; and none, read, or read & write on views (with
   publishing) and on data. On anything, it may do what its owner may do there *now*, narrowed
@@ -337,9 +350,13 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   asking to change something answers `403 api_key_read_only`. A view opens reads of the data
   it renders, never the routes about that data source itself (its jobs, readiness or pull
   requests). A fork's pull request needs the parent graph's data source too, and a draft is
-  reached only through its own graph. The ontologies and catalog entries a key lists are
-  those of the data sources it covers. A key's job event stream ends after five minutes, and
-  the client's reconnect (with `Last-Event-ID`) checks the key again.
+  reached only through its own graph. The ontologies and catalog entries a key lists, and
+  the data sources a workspace shows it, are those of the data sources it covers; a
+  workspace-wide data source permission holds for a key limited to some of them only for a
+  data source the request names and the key selects itself, never one it reaches through a
+  view. A view named in a search's body must be one the caller can read. A key's job event
+  stream ends after five minutes, and the client's reconnect (with `Last-Event-ID`) checks
+  the key again.
 - **Checked on every request.** A revoked or expired key, a suspended owner, or a key used
   from a network it isn't limited to is refused with `401`. So is the key of a person who signs
   in through an identity provider and hasn't for a set time (30 days by default): the key
@@ -354,8 +371,11 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   so a client told to slow down costs no database read. Tokens nobody issued count against
   `RATELIMIT_API_KEY_FAILURES_PER_IP` per client address (an IPv6 client per /64); a key that
   exists but is refused — revoked, expired — is charged to its own budget instead, so one
-  integration looping on a dead key cannot lock out the healthy ones behind the same NAT. If
-  the database can't be reached the answer is `503`, never "invalid key".
+  integration looping on a dead key cannot lock out the healthy ones behind the same NAT. A
+  request with no client address at all (a Unix socket with no proxy headers) skips the
+  per-address budget, and the operator is warned once, rather than every such request
+  sharing one budget that 120 bad tokens would exhaust for every key. If the database can't
+  be reached the answer is `503`, never "invalid key".
 - **Network limits are as strong as the proxy setting.** A key limited to networks is checked
   against the client address the API server sees, which behind a proxy comes from
   `X-Forwarded-For` — believed only from the peers `FORWARDED_ALLOW_IPS` names. The shipped
@@ -372,7 +392,7 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
 (`apiKeyMaxLifetime`, no maximum by default) also shortens keys that already exist; **Pause keys
 of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default); **Accept a fresh
 sign-in round trip for API keys** (`apiKeySsoRoundTripStepUp`, off by default) lets people on
-gateway and portal connections make keys with a sign-in their provider did not date. Keys are
+portal connections make keys with a sign-in their portal did not date. Keys are
 refused with `503` while RBAC enforcement is switched off. Behind a proxy, set
 `FORWARDED_ALLOW_IPS` to exactly your proxies, so that per-key network limits and recorded
 addresses see the real client.
@@ -674,7 +694,9 @@ never changes. Recorded events include:
   scope per hour;
 - API keys created, rotated and revoked, and keys refused — expired or paused, or misused: a
   revoked key presented again, or a key used from a network it isn't limited to — once per key
-  and reason an hour; every event a key's request writes carries the key's id;
+  and reason an hour; every event a key's request writes names its owner as the actor and
+  carries the key's id, which the explorer filters on (**Its activity** on a key), including
+  for work the control plane does on the request's behalf;
 - operations people start by hand — aggregation runs started, resumed, stopped, purged or
   skipped, freshness rebuilds, refreshes and holds — and changes to data sources, providers,
   version control, feature switches and other platform settings, each with the person who

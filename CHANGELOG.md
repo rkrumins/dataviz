@@ -28,7 +28,8 @@ recommends the narrowest choice; **Permissions** says what each level lets a scr
 networks, offering the address you are calling from; **Review** shows how exposed the key would be
 and what it could do right now, checked by the server exactly as creating it is
 (`POST /me/api-keys/preview`, which creates nothing). Creating, rotating or renewing a key asks for
-the password, or for a sign-in the identity provider dated within the last 15 minutes. The key is
+the password, or for a sign-in the identity provider dated within the last 15 minutes — or, through
+an Enterprise gateway, the gateway's word that the company sign-in is still live. The key is
 shown once, with snippets for cURL, Python, JavaScript and `.env`, and the page waits for its first
 call.
 
@@ -53,14 +54,21 @@ who has left stop without anyone remembering them. A suspended account's keys st
 
 **Administration → API keys** opens on counts that filter the list — active, expiring within 7
 days, never expiring, unused for 90 days, paused — with tabs for every status, search by key or
-owner, and sorting by name, last use, expiry or creation. Open a key for its owner, access, usage
-and lineage; revoke it with a note its owner sees, or all of a person's; **Export CSV** downloads
-the list as filtered, up to 10,000 keys. The access drawer on **Administration → Users** links to
-a person's keys. Seeing keys needs `system:audit:read`; revoking needs `system:users:manage`. Four
-switches under **Administration → Features → Authentication** govern keys: **API keys**, **Longest
-an API key may live**, **Pause keys of people who stop signing in** and **Accept a fresh sign-in
-round trip for API keys** — off by default, it lets people on gateway and portal connections, which
-can't date a sign-in, make keys.
+owner, and sorting by name, last use, expiry or creation. Open a key for its owner, access, usage,
+lineage and everything it did (**Its activity**); revoke it with a note its owner sees, or all of a
+person's; **Export CSV** downloads the list as filtered, up to 10,000 keys. The access drawer on
+**Administration → Users** links to a person's keys. Seeing keys needs `system:audit:read`;
+revoking needs `system:users:manage`. Four switches under **Administration → Features →
+Authentication** govern keys: **API keys**, **Longest an API key may live**, **Pause keys of
+people who stop signing in** and **Accept a fresh sign-in round trip for API keys** — off by
+default, it lets people on portal connections, which can't date a sign-in, make keys.
+
+**Enterprise gateway users make keys with nothing to switch on.** When this server can reach the
+gateway (server exchange with an ambient token), creating or rotating a key asks it, then and
+there, whether the company session behind the request is still live: confirmed makes the key, ended
+asks for a sign-in, and no answer makes nothing (`503 gateway_unreachable`; try again). Where only
+the browser reaches the gateway, a sign-in through it in the last 15 minutes counts, and **Sign in
+again** goes through it and back to the review. Every key's record says how it was confirmed.
 
 **Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
 administrator revokes it (with their note), and when a revoked key is presented again or a key is
@@ -80,10 +88,16 @@ used from a network it isn't limited to — even when it only asks about itself.
   the import rewrite that view's layout, while the route checked only that the caller could manage
   the data source — so it reached any view on the platform. The view must now be live, in the
   import's workspace, and editable by the caller (`create_import`, `complete_import_upload`).
-- **Everything a key does is attributed.** Audit events written during a key's request carry the
-  key's id, and the access log records `authMethod=api_key` with it. Creating, renaming, rotating
-  and revoking keys, and keys refused or misused, are on the Audit Log and on the owner's **Recent
-  activity**.
+- **Everything a key does is attributed.** Every change made with a key is on **Administration →
+  Activity** with its owner as the actor and the key named — filter by the key, or open **Its
+  activity** on it — including what the control plane does for the request; an aggregation run a
+  key starts is recorded as started through the API. The access log records `authMethod=api_key`
+  with the key's id. Creating, renaming, rotating and revoking keys, and keys refused or misused,
+  are in Activity under Identity and on the owner's **Recent activity**.
+- **A search can't read a view its caller can't open.** A view named in a search's body
+  (`/graph/search/advanced`, `/graph/search/explain`) was used without checking the caller could
+  open it, and `explain` returned its roots, types and layers. It now needs the same access as
+  opening the view.
 - **A job's event stream belongs to its data source.** `GET /admin/data-sources/{ds}/aggregation-jobs/{job}/events`
   streamed any job named in the path, whatever data source the caller was checked against. A job
   of another data source is now `404`.
@@ -92,12 +106,20 @@ used from a network it isn't limited to — even when it only asks about itself.
   the draft belonged to the graph in the path, or that the caller could read it. Both now do.
 - **Signing in through an identity provider proves when.** The session records whether the
   provider itself dated the sign-in (`auth_time_proven`), and keeps that through every renewal. A
-  sign-in it re-issued silently, or dated too long ago to use, does not count as a fresh one.
+  sign-in it re-issued silently, or dated too long ago to use, does not count as a fresh one, and
+  only OIDC and SAML can prove one: a portal's `auth_time`, which it maps from its own payload,
+  never does. The session also names the provider it came from (`idp`), so a confirmation is asked
+  of that provider.
 
 ### Upgrading
 
 - **Run the upgrade job.** Migrations `20261012_1000_api_keys` and `20261013_1000_api_key_usage`
-  add the `api_keys` and `api_key_usage` tables.
+  add the `api_keys` and `api_key_usage` tables; `20261013_1100_merge_api_keys` joins them to the
+  activity ledger's chain; `20261013_1200_activity_api_key` adds `auth_audit_log.api_key_id` and a
+  partial index on it, and `20261013_1300_api_key_scale` indexes `user_identities (user_id,
+  last_login_at)` and a key's successor. The indexes are built in the migration's transaction, as
+  the others here are: building them reads `auth_audit_log` and `user_identities` once, and holds
+  writes to each table for that long (seconds at millions of rows).
 - **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
   Features → Authentication**; people can still see and revoke their keys while it is off.
 - **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and
@@ -123,8 +145,12 @@ used from a network it isn't limited to — even when it only asks about itself.
 - The refresh audit (`refresh_events`) and graph commits record a key's owner, not the key.
 - **Usage counts are best-effort.** A process that stops abruptly loses up to its last 30 seconds
   of counts, and a streamed response is counted when it starts.
-- **Gateway and portal sign-ins can't make keys** unless an administrator turns on **Accept a fresh
-  sign-in round trip for API keys**.
+- **Portal sign-ins can't make keys** unless an administrator turns on **Accept a fresh sign-in
+  round trip for API keys**, and an Enterprise gateway that doesn't answer stops its users making
+  keys until it does.
+- **The inventory's counts take a moment on a large deployment.** A key's status depends on its
+  owner's latest identity-provider sign-in, read for every owner: measured on Postgres 16, the
+  counts take about 0.4 seconds at 100,000 keys from 30,000 owners with a million identities.
 - `publish_view_library.py` still signs in with a password.
 
 ---
