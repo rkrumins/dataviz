@@ -281,8 +281,8 @@ function UnverifiedWarning({ providerId, reason, onEdit }: {
             <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
             <p className="flex-1 text-[11px] text-ink-muted">
                 This connection is live and unverified. {reason} It cannot
-                grant privileged roles, and it never links itself to an
-                existing account.{' '}
+                grant admin roles, or link itself to an administrator's or
+                break-glass account.{' '}
                 <button
                     type="button"
                     onClick={onEdit}

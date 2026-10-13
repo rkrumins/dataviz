@@ -1064,6 +1064,13 @@ async def lifespan(_app: FastAPI):
         from backend.app.db.repositories import binding_repo
         return user_id in await binding_repo.super_admin_user_ids(session)
 
+    # Asked when a connection below verified would link itself to an
+    # existing account: never one holding a platform-admin role. Same
+    # constraints as above — read-only, before anyone has proved anything.
+    async def _is_platform_admin(session, user_id: str) -> bool:
+        from backend.app.db.repositories import binding_repo
+        return user_id in await binding_repo.platform_admin_user_ids(session)
+
     async def _fetch_avatar_image(
         url: str, *, provider_id: str | None = None,
     ) -> tuple[bytes, str]:
@@ -1138,6 +1145,7 @@ async def lifespan(_app: FastAPI):
         session_revoker=_revoke_one_session,
         revocation_checker=_is_session_revoked,
         super_admin_checker=_is_super_admin,
+        platform_admin_checker=_is_platform_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
     )

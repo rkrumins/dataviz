@@ -437,13 +437,15 @@ existed — or inserted out of band — is still refused when it would take
 effect. `super_admin` is refused from *every* provider regardless of
 assurance; admin grants stay manual.
 
-Nor may a provider below `verified` **link itself to an existing account**
-(`_link_deny_reasons`, reason `unverified_connection`): its claims, the
-email and `email_verified` included, are whatever the sender wrote, so
-linking by email would hand any local account — the break-glass Super Admin
-among them — to anyone able to reach the sign-in endpoint. Accounts already
-linked to it, and new accounts, are the risk its operator accepted; people
-with an existing account link it from their own page. The admin card states
+Nor may a provider below `verified` **link itself to an administrator's
+account** — a system (break-glass) account, or one holding a platform-admin
+role (`_link_deny_reasons`, reason `unverified_connection`; who holds one is
+answered by an injected checker, and with none every account counts): its
+claims, the email and `email_verified` included, are whatever the sender
+wrote, so linking by email would hand the break-glass Super Admin to anyone
+able to reach the sign-in endpoint. Ordinary accounts still link, so an
+unsigned connection keeps working for the people its operator trusted it
+for; administrators link it from their own page. The admin card states
 each weak row's cause and fix (`assurance_explained`), and an admin who has
 read the warning can fold it on their own screen.
 

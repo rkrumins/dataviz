@@ -75,15 +75,16 @@ passwords are off.
 
 ### Security
 
-**An unverified connection can no longer link itself to an existing account.** Its claims —
+**An unverified connection can no longer claim an administrator's account.** Its claims —
 `email_verified` included — are whatever the sender wrote, yet under an auto-linking policy
-(**Strict**, the default) a hand-written payload naming an existing account's email signed in
-as that account: any local account with no single sign-on identity, the break-glass Super Admin
-among them, for anyone able to reach the sign-in endpoint. Such a link is now refused
-(`unsafe_auto_link`, reason `unverified_connection`); people link the connection from their own
-account page once signed in another way. Accounts already linked to the connection, and new
-accounts, are unaffected — that is the risk its operator accepted by trusting it, and its card
-says so (and can now be folded away once read).
+(**Strict**, the default) a hand-written payload naming an existing account's email linked to
+that account — the break-glass Super Admin among them — for anyone able to reach the sign-in
+endpoint. A connection below verified now never links itself to a system (break-glass) account
+or one holding a platform-admin role (`unsafe_auto_link`, reason `unverified_connection`);
+administrators link it from their own account page. Ordinary accounts still link, new accounts
+are still created, and people already linked still sign in, so an unsigned gateway keeps
+working as before for everyone it was trusted for — the risk its card states (and can now fold
+away once read).
 
 ### Fixed
 
@@ -92,6 +93,9 @@ says so (and can now be folded away once read).
   unavailable" (`duplicate key value violates unique constraint "uq_users_email"` in the log). The
   second reads again and signs in to the account the first created; a conflict that survives the
   re-read is refused as `account_conflict`, with a reference, like any sign-in that cannot complete.
+- **`SSO_OUTBOUND_TLS_CA_CERTS` adds your corporate CAs to the public roots** instead of
+  replacing them. A bundle holding only the corporate chain — the documented way to use it — used
+  to make every public identity provider (Entra, Okta) fail TLS the moment it was set.
 - **An Enterprise gateway whose exchange runs in the browser** no longer shows *No gateway_url
   configured; this provider cannot sign anyone in* on its card. That shape has no gateway URL by
   design: the health check now looks at the browser exchange URL and, when the connection verifies
@@ -120,10 +124,10 @@ says so (and can now be folded away once read).
   wrong password gets.
 - **Passwords off without a break-glass account** stays off; the new check applies to the next
   switch-off. Check **Break-glass accounts** on the Settings page.
-- **Someone with an existing account who first signs in through an unverified connection** (an
-  unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their account
-  page instead of being linked automatically. Making the connection Verified restores automatic
-  linking.
+- **An administrator or break-glass account first signing in through an unverified connection**
+  (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
+  account page instead of being linked automatically. Everyone else links as before; a Verified
+  connection links administrators automatically too.
 - The migration `20261014_1000_sso_fallback` adds three nullable columns to `app_auth_config`
   and the `idp_provider_reachability` table.
 

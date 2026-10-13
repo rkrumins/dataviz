@@ -19,7 +19,7 @@ from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import GroupMemberORM, RoleBindingORM
-from backend.common.roles import RoleName
+from backend.common.roles import PLATFORM_ADMIN_ROLES, RoleName
 
 
 def _is_expired(expires_at: Optional[str], *, now: datetime) -> bool:
@@ -286,10 +286,23 @@ async def super_admin_user_ids(session: AsyncSession) -> set[str]:
     fallback during an IdP outage, so the three cannot disagree about who
     the administrators are. Read-only.
     """
+    return await _global_role_holder_ids(session, {RoleName.SUPER_ADMIN.value})
+
+
+async def platform_admin_user_ids(session: AsyncSession) -> set[str]:
+    """User ids that hold any platform-admin role (``PLATFORM_ADMIN_ROLES``)
+    globally, the same way. Read by SSO linking: a connection below
+    ``verified`` never links itself to one of these accounts. Read-only."""
+    return await _global_role_holder_ids(session, PLATFORM_ADMIN_ROLES)
+
+
+async def _global_role_holder_ids(
+    session: AsyncSession, role_names: set[str] | frozenset[str],
+) -> set[str]:
     now = datetime.now(timezone.utc)
     bindings = await session.execute(
         select(RoleBindingORM).where(
-            RoleBindingORM.role_name == RoleName.SUPER_ADMIN.value,
+            RoleBindingORM.role_name.in_(sorted(role_names)),
             RoleBindingORM.scope_type == "global",
         )
     )

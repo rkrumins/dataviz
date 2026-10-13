@@ -33,6 +33,7 @@ import ssl
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+import certifi
 import httpx
 
 from backend.common.adapters.redis_tls import _normalize_cert_path
@@ -96,11 +97,11 @@ def _is_prod() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES
 
 
-#: Deployment-level trust anchor for outbound SSO TLS: a PEM bundle
-#: path (``file:`` URIs tolerated, like the ``REDIS_*_TLS_CA_CERTS``
-#: family). Read at CALL time, like :func:`_is_prod`, so tests
-#: (``monkeypatch.setenv``) and restartless reconfigures take effect on
-#: the next request.
+#: Deployment-level trust for outbound SSO TLS: a PEM bundle path
+#: (``file:`` URIs tolerated, like the ``REDIS_*_TLS_CA_CERTS`` family)
+#: whose CAs are trusted IN ADDITION to the public roots. Read at CALL
+#: time, like :func:`_is_prod`, so tests (``monkeypatch.setenv``) and
+#: restartless reconfigures take effect on the next request.
 SSO_OUTBOUND_TLS_CA_CERTS_ENV = "SSO_OUTBOUND_TLS_CA_CERTS"
 
 #: One ``ssl.SSLContext`` per bundle path. Building one re-reads the
@@ -119,7 +120,13 @@ def _bundle_context(raw: str) -> ssl.SSLContext | None:
     if ctx is not None:
         return ctx
     try:
-        ctx = ssl.create_default_context(cafile=path)
+        # Added to the public roots httpx trusts by default, not put in
+        # their place: one deployment reaches Entra or Okta AND an internal
+        # gateway, and a bundle holding only the corporate chain must not
+        # cost it the first to gain the second. ``cafile=`` alone trusts
+        # that file and nothing else.
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        ctx.load_verify_locations(cafile=path)
     except (OSError, ssl.SSLError) as exc:
         logger.error(
             "%s names %r, which cannot be loaded (%s). Outbound TLS "

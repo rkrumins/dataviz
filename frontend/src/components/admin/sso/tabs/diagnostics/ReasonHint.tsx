@@ -127,10 +127,11 @@ const REASONS: Record<string, Reason> = {
     },
     unverified_connection: {
         what: 'This connection is unverified, so it never links itself to an '
-            + 'existing account: its claims, email included, are whatever the '
-            + 'sender wrote.',
-        next: 'They link it from their own account page once signed in another '
-            + 'way — or make the connection Verified (its card says how).',
+            + "administrator's or break-glass account: its claims, email "
+            + 'included, are whatever the sender wrote.',
+        next: 'They sign in with their password and link it from their own '
+            + 'account page — or make the connection Verified (its card says '
+            + 'how).',
     },
     existing_deleted: {
         what: 'The account that email belongs to was deleted.',

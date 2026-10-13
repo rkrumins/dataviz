@@ -229,12 +229,18 @@ Gateway connections get the same treatment, adapted to how they work:
   default **Strict** linking policy a hand-written payload naming an existing account's
   email *linked to that account*: one unauthenticated request signed in as the break-glass
   Super Admin (reproduced against the test stack before the fix). An unverified connection
-  now never links itself to an existing account (`unsafe_auto_link`, reason
-  `unverified_connection`); people link it from their own account page once signed in
-  another way. What remains is what *Trust unsigned* means — anyone who can reach the sign-in
-  endpoint can sign in as anyone already linked to that connection, or as someone new — so
-  on an intranet the exposure is every person and device that can reach the application,
+  now never links itself to an administrator's account — a system (break-glass) account or
+  one holding a platform-admin role (`unsafe_auto_link`, reason `unverified_connection`);
+  administrators link it from their own account page. Ordinary accounts still link by email,
+  so an unsigned gateway keeps working for first-time users, for people who had a local
+  account, and for people already linked. What remains is what *Trust unsigned* means — anyone
+  who can reach the sign-in endpoint can sign in as any non-administrator, or as someone new —
+  so on an intranet the exposure is every person and device that can reach the application,
   and the fix is to make the connection Verified.
+- **The corporate CA bundle replaced the public roots.** `SSO_OUTBOUND_TLS_CA_CERTS` was
+  loaded as the *only* trust store, so a bundle holding just the corporate chain — the
+  documented use — would have made every public identity provider fail TLS, and the outage
+  prober report them down. Its CAs are now added to the public roots.
 
 | The warning, naming its cause and fix | Folded away once read |
 |---|---|
@@ -352,6 +358,8 @@ Accepted and bounded, and in the activity log:
   an email first**. Misses all look the same, as before.
 - **Passwords already off without a break-glass account** stay off; the new check applies
   to the next switch-off. Check **Break-glass accounts** on the Settings page.
+- **An administrator or break-glass account first signing in through an unverified
+  connection** links it from their account page; everyone else links automatically as before.
 - **Tell your gateway team** that each server-mode Enterprise gateway now receives one
   request a minute with no session handle, and that answering 401 for it is correct.
 - **Migration** `20261014_1000_sso_fallback` adds three nullable columns to

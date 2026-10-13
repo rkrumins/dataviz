@@ -470,17 +470,16 @@ async def test_reconciler_withholds_platform_roles_from_unsigned_backchannel(
     assert [b.role_name for b in bindings] == []
 
 
-# ── An unverified connection never claims an existing account ────────
+# ── An unverified connection never claims an administrator ───────────
 #
 # Its claims are whatever the sender wrote, ``email_verified`` included.
-# Linking by email would hand any existing account — a local one, the
-# break-glass Super Admin — to anyone able to reach the sign-in endpoint
-# with a hand-written payload. People already linked to it, and new
-# accounts, are the risk its operator accepted by trusting it; somebody
-# else's account is not.
+# Linking by email would hand the break-glass Super Admin — or any account
+# holding a platform-admin role — to anyone able to reach the sign-in
+# endpoint with a hand-written payload. Ordinary accounts still link, so an
+# unsigned connection keeps working for the people it was trusted for.
 
 
-def _sso_service(db_session):
+def _sso_service(db_session, *, checks_admins=True):
     from contextlib import asynccontextmanager
 
     from backend.app.db.repositories import user_identity_repo, user_repo
@@ -491,10 +490,14 @@ def _sso_service(db_session):
     async def factory():
         yield db_session
 
+    async def is_platform_admin(session, user_id):
+        return user_id in await binding_repo.platform_admin_user_ids(session)
+
     return LocalIdentityService(
         session_factory=factory, user_repo=user_repo,
         user_identity_repo=user_identity_repo,
         refresh_store_factory=make_refresh_store,
+        platform_admin_checker=is_platform_admin if checks_admins else None,
     )
 
 
@@ -517,21 +520,31 @@ async def _gateway_row(db_session, slug):
     return row
 
 
-async def _local_admin(db_session, email):
+async def _local_account(db_session, email, *, system=False, role=None):
+    from datetime import datetime, timezone
+
+    from backend.app.db.models import RoleBindingORM
     from backend.app.db.repositories import user_repo
     user = await user_repo.create_user(
-        db_session, email=email, password_hash="x", first_name="Break",
-        last_name="Glass", status="active",
+        db_session, email=email, password_hash="x", first_name="Local",
+        last_name="Account", status="active",
     )
+    user.is_system_account = system
+    if role:
+        db_session.add(RoleBindingORM(
+            id=f"bnd_{user.id}", subject_type="user", subject_id=user.id,
+            role_name=role, scope_type="global", scope_id=None,
+            granted_at=datetime.now(timezone.utc).isoformat(), source="local",
+        ))
     await db_session.flush()
     return user
 
 
 @pytest.mark.asyncio
-async def test_an_unverified_connection_cannot_claim_an_existing_account(db_session):
+async def test_an_unverified_connection_cannot_claim_the_break_glass_account(db_session):
     from backend.auth_service.interface import SSOAuthError
     gw = await _gateway_row(db_session, "unsigned-gw")
-    await _local_admin(db_session, "glass@corp.example")
+    await _local_account(db_session, "glass@corp.example", system=True)
     svc = _sso_service(db_session)
 
     with pytest.raises(SSOAuthError) as err:
@@ -552,15 +565,58 @@ async def test_an_unverified_connection_cannot_claim_an_existing_account(db_sess
 
 
 @pytest.mark.asyncio
-async def test_a_verified_connection_still_links_by_email(db_session):
+@pytest.mark.parametrize("role", ["super_admin", "org_admin"])
+async def test_an_unverified_connection_cannot_claim_a_platform_admin(db_session, role):
+    from backend.auth_service.interface import SSOAuthError
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    await _local_account(db_session, "boss@corp.example", role=role)
+
+    with pytest.raises(SSOAuthError) as err:
+        await _sso_service(db_session).complete_sso_login(
+            _claims("boss@corp.example", "forged-2"), provider_id=gw.id,
+            linking_policy="strict", assurance=UNVERIFIED,
+        )
+    assert "unverified_connection" in err.value.deny_reasons
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_still_links_an_ordinary_account(db_session):
+    """Someone who had a local account signs in through the unsigned
+    gateway for the first time: same account, now linked."""
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    local = await _local_account(db_session, "member@corp.example")
+
+    user, _ = await _sso_service(db_session).complete_sso_login(
+        _claims("member@corp.example", "emp-7"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED,
+    )
+    assert user.id == local.id
+
+
+@pytest.mark.asyncio
+async def test_without_an_answer_every_account_counts_as_an_administrator(db_session):
+    """Nothing wired to say who the administrators are: fail closed."""
+    from backend.auth_service.interface import SSOAuthError
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    await _local_account(db_session, "plain@corp.example")
+
+    with pytest.raises(SSOAuthError):
+        await _sso_service(db_session, checks_admins=False).complete_sso_login(
+            _claims("plain@corp.example", "emp-8"), provider_id=gw.id,
+            linking_policy="strict", assurance=UNVERIFIED,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_verified_connection_still_links_an_administrator(db_session):
     gw = await _gateway_row(db_session, "signed-gw")
-    admin = await _local_admin(db_session, "linked@corp.example")
+    glass = await _local_account(db_session, "linked@corp.example", system=True)
 
     user, _ = await _sso_service(db_session).complete_sso_login(
         _claims("linked@corp.example", "emp-1"), provider_id=gw.id,
         linking_policy="strict", assurance=VERIFIED,
     )
-    assert user.id == admin.id
+    assert user.id == glass.id
 
 
 @pytest.mark.asyncio

@@ -96,7 +96,7 @@ Sign-in, session tokens and cookies, single sign-on and the sign-in rate limits.
 | `REFRESH_ROTATION_GRACE_SECONDS` | `30` | How long a re-presented refresh token is treated as a concurrent refresh (two tabs, a retried POST, a lost Set-Cookie) rather than a stolen chain. | `backend/auth_service/core/config.py` |
 | `SESSION_ABSOLUTE_MAX_HOURS` | `168` | Longest a sign-in can last, in hours, counted from the original sign-in however active the session stays. `0` turns the limit off. | `backend/auth_service/core/config.py` |
 | `SESSION_IDLE_MAX_HOURS` | `12` | Longest a session can go unused, in hours, before it ends. `0` turns the limit off. | `backend/auth_service/core/config.py` |
-| `SSO_OUTBOUND_TLS_CA_CERTS` | (empty) | Trust anchor for every outbound SSO call (gateway legs, OIDC discovery/token/JWKS, SAML metadata, avatar fetches). | `backend/auth_service/providers/outbound.py` |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (empty) | PEM bundle of extra CAs (your corporate chain) trusted, in addition to the public roots, by every outbound SSO call (gateway legs, OIDC discovery/token/JWKS, SAML metadata, avatar fetches, the outage prober). | `backend/auth_service/providers/outbound.py` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | SSO sessions must re-authenticate at the IdP this often, regardless of the refresh cookie's life. | `backend/auth_service/core/config.py` |
 
 ### Internal tuning

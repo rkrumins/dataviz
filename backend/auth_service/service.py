@@ -230,6 +230,9 @@ class LocalIdentityService:
       * ``super_admin_checker(session, user_id)`` -> bool — does the
         account hold ``super_admin``? Asked only while passwords are off
         and an SSO outage is confirmed; see :meth:`_password_door`.
+      * ``platform_admin_checker(session, user_id)`` -> bool — does the
+        account hold a platform-admin role? Asked only when a connection
+        below ``verified`` would link itself to an existing account.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -253,6 +256,7 @@ class LocalIdentityService:
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         revocation_checker: Optional[Callable[[str], Awaitable[bool]]] = None,
         super_admin_checker: Optional[Callable[..., Awaitable[bool]]] = None,
+        platform_admin_checker: Optional[Callable[..., Awaitable[bool]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
             Callable[..., Awaitable[tuple[bytes, str]]]
@@ -288,6 +292,7 @@ class LocalIdentityService:
         # reason; read-only, with no side effects, because it is asked
         # before anyone has proved who they are.
         self._super_admin_checker = super_admin_checker
+        self._platform_admin_checker = platform_admin_checker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
         # operator's host allowlist — auth_service may not import
@@ -1759,11 +1764,25 @@ class LocalIdentityService:
         has_existing_identity = await self._user_identity_repo.has_any_identity(
             session, by_email.id,
         )
+        # A connection below verified still links an ordinary account —
+        # its operator chose to trust it for everyone — but never one that
+        # can run the platform: its claims, email_verified included, are
+        # whatever the sender wrote. With nothing to answer "is this an
+        # administrator?", every account is treated as one.
+        weak_claim_on_admin = (
+            assurance is not None
+            and not assurance_at_least(assurance, VERIFIED)
+            and (
+                bool(getattr(by_email, "is_system_account", False))
+                or self._platform_admin_checker is None
+                or await self._platform_admin_checker(session, by_email.id)
+            )
+        )
         deny_reasons = self._link_deny_reasons(
             by_email, linking_policy=linking_policy,
             email_verified=email_verified,
             has_existing_identity=has_existing_identity,
-            assurance=assurance,
+            weak_claim_on_admin=weak_claim_on_admin,
         )
         if deny_reasons:
             return SsoDecision(
@@ -1917,20 +1936,17 @@ class LocalIdentityService:
     @staticmethod
     def _link_deny_reasons(
         existing, *, linking_policy: str, email_verified: bool,
-        has_existing_identity: bool, assurance: Optional[str] = None,
+        has_existing_identity: bool, weak_claim_on_admin: bool = False,
     ) -> list[str]:
         """The collision-branch gate, in one place so the dry-run and the
         real path cannot disagree about why a link is refused."""
         reasons: list[str] = []
         if linking_policy in ("manual_only", "disabled"):
             reasons.append(f"policy:{linking_policy}")
-        if assurance is not None and not assurance_at_least(assurance, VERIFIED):
-            # Its claims are whatever the sender wrote, ``email_verified``
-            # included, so auto-linking would hand any existing account —
-            # a local one, the break-glass Super Admin — to anyone able to
-            # reach the sign-in endpoint. People already linked to it, and
-            # new accounts, are the risk its operator accepted; claiming
-            # someone else's account is not. They link from their own page.
+        if weak_claim_on_admin:
+            # A forged payload naming the break-glass Super Admin's email
+            # would otherwise sign its sender in as them. Administrators
+            # link such a connection from their own account page.
             reasons.append("unverified_connection")
         if not email_verified:
             reasons.append("email_unverified")

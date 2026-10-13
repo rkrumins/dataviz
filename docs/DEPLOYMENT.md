@@ -465,10 +465,13 @@ By default outbound single sign-on calls trust the public trust store only, so e
 calls fails with *certificate verify failed* and a rehearsal of the connection reports
 `tls_verify_failed`.
 
-Point `SSO_OUTBOUND_TLS_CA_CERTS` at a PEM bundle holding your corporate CA chain. Every
-outbound single sign-on call — gateway calls, OIDC discovery, token and key endpoints, SAML
-metadata imports, avatar fetches — verifies against it from the next request; a bundle
-mounted after startup starts working on its own.
+Point `SSO_OUTBOUND_TLS_CA_CERTS` at a PEM bundle holding your corporate CA chain. Its CAs
+are trusted **in addition to** the public trust store, so public identity providers (Entra,
+Okta, Google) keep working beside the internal endpoints. Every outbound single sign-on call
+— gateway calls, OIDC discovery, token and key endpoints, SAML metadata imports, avatar
+fetches, the outage prober — uses it from the next request; a bundle mounted after startup
+starts working on its own. The corporate chain alone is enough: there is no need to append
+the public roots to it.
 
 **Docker Compose** — add the variable and a read-only mount to `viz-service` in
 `docker-compose.yml`:
