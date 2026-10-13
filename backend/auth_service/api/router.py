@@ -1864,8 +1864,11 @@ async def _idp_unreachable(
     like every other SSO failure, rather than a bare 503 JSON body — the
     page says what happened and offers whatever password door is open."""
     ref = _failure_ref()
+    # The provider's own id, not the slug from the URL: the line stays
+    # free of request text, and the ref finds the record that has both.
     logger.warning(
-        "SSO authorize build failed (slug=%s, ref=%s): %s", slug, ref, exc,
+        "SSO authorize build failed (provider=%s, ref=%s): %s",
+        getattr(provider, "provider_id", None), ref, exc,
     )
     await _record_sso_failure(
         _identity_service(request), ref=ref, slug=slug,

@@ -1855,7 +1855,7 @@ async def lifespan(_app: FastAPI):
             try:
                 await _reach_task
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # cancelled on purpose; shutdown carries on
 
     # Stop the IdP health sweep before DB pool teardown, same shape as the
     # relay above. The loop waits on the shutdown event rather than
