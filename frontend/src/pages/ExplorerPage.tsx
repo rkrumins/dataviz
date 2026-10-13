@@ -13,7 +13,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw,
+  Compass, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw, ListFilter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
@@ -28,10 +28,9 @@ import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerFilterBar } from '@/components/explorer/ExplorerFilterBar'
 import { ExplorerStatsBar } from '@/components/explorer/ExplorerStatsBar'
 import { DensityToggle } from '@/components/explorer/DensityToggle'
-import { ExplorerSearchSuggestions } from '@/components/explorer/ExplorerSearchSuggestions'
+import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
 import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcutsDialog'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
-import { useTypewriter } from '@/hooks/useTypewriter'
 import { usePreferencesStore } from '@/store/preferences'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
 import { ExplorerHero } from '@/components/explorer/ExplorerHero'
@@ -68,7 +67,9 @@ import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
 import { VISIT_RULE } from '@/features/view-filters/dateFilter'
 import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
 import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/people'
-import { activeDimensions } from '@/features/view-filters/dimensions'
+import { activeDimensions, filterChips } from '@/features/view-filters/dimensions'
+import { searchTextOf } from '@/features/view-filters/tokens'
+import { FilterPalette } from '@/features/view-filters/components/FilterPalette'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { useRelaxations } from '@/features/view-filters/useRelaxations'
 import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
@@ -86,16 +87,6 @@ const STAGGER_STYLE = `
   to { opacity: 1; transform: translateY(0); }
 }
 .card-stagger { animation: card-in 0.3s ease-out both; }
-
-/* Typewriter caret: hard on/off blink using steps(), so the cursor
-   feels like a proper terminal cursor rather than a smeared fade. */
-@keyframes typewriter-caret-blink {
-  0%, 49.99% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-.typewriter-caret-blink {
-  animation: typewriter-caret-blink 1.05s steps(1, end) infinite;
-}
 
 /* The loading line under the toolbar: a short glint crossing the full width. */
 @keyframes explorer-progress {
@@ -178,24 +169,9 @@ export function ExplorerPage() {
 
   const [searchInput, setSearchInput] = useState(filterState.search)
   const searchRef = useRef<HTMLInputElement>(null)
-  const [searchFocused, setSearchFocused] = useState(false)
   const { recents, record: recordRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches()
-
-  // Typewriter placeholder — cycles tips while the field is empty + not
-  // focused so new users discover the search surface passively, with a
-  // live "someone is typing" feel rather than a jarring snap-replace.
-  // The hook pauses itself when ``enabled`` flips to false.
-  const placeholderPhrases = useMemo(() => [
-    'views by name, tag, or workspace…',
-    'a workspace — "production", "analytics"…',
-    'a tag — "finance", "pii", "kpi"…',
-    'a creator name or email…',
-    'views in a specific data source…',
-  ], [])
-  const typewriter = useTypewriter({
-    phrases: placeholderPhrases,
-    enabled: !searchFocused && !searchInput,
-  })
+  // The box can hold a token being typed (`by:al`), which is not search text.
+  const searchText = searchTextOf(searchInput)
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [previewEditMode, setPreviewEditMode] = useState(false)
@@ -210,6 +186,7 @@ export function ExplorerPage() {
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   
   // no-op callback for aggregation banner (informational only — no longer gates view creation)
   const onAggregationStatus = useCallback((_isReady: boolean) => {}, [])
@@ -228,10 +205,20 @@ export function ExplorerPage() {
     }, { replace: true })
   }, [setSearchParams])
 
-  /** Write a whole filter set to the address; sort, layout and anything else
-   *  there are kept. */
-  const setFilterState = useCallback((next: ViewFilterState) => {
-    setSearchParams(prev => writeFilterState(prev, next), { replace: true })
+  // react-router hands setSearchParams' updater the params of the last render
+  // and commits the navigation in a transition, so two writes before a
+  // re-render would both start from the same params and the second would undo
+  // the first — typing two tokens quickly kept only one. Writes compose on the
+  // latest state written instead.
+  const latestFilters = useRef(filterState)
+  useEffect(() => { latestFilters.current = filterState }, [filterState])
+
+  /** Write a filter set (or a change to the latest one) to the address; sort,
+   *  layout and anything else there are kept. */
+  const setFilterState = useCallback((next: ViewFilterState | ((prev: ViewFilterState) => ViewFilterState)) => {
+    const value = typeof next === 'function' ? next(latestFilters.current) : next
+    latestFilters.current = value
+    setSearchParams(prev => writeFilterState(prev, value), { replace: true })
   }, [setSearchParams])
 
   // "Show all views": every filter goes, the person's sort and layout stay —
@@ -272,8 +259,7 @@ export function ExplorerPage() {
   useEffect(() => {
     if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current)
     searchSyncTimer.current = setTimeout(() => {
-      const currentQ = searchParams.get('q') ?? ''
-      if (searchInput !== currentQ) setParam('q', searchInput || null)
+      if (searchText !== latestFilters.current.search) setFilterState(prev => ({ ...prev, search: searchText }))
     }, 350)
     return () => { if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current) }
   }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -288,7 +274,7 @@ export function ExplorerPage() {
 
   const filters: ExplorerFilters = {
     // The live input — the hook debounces it before it reaches the wire.
-    ...resolveFilters({ ...filterState, search: searchInput }, resolveCtx),
+    ...resolveFilters({ ...filterState, search: searchText }, resolveCtx),
     sort: parsed.sort,
     // Favourites is driven exclusively by the "Favorites" category pill;
     // the server-side resolver maps that category to ``favouritedOnly=true``.
@@ -347,6 +333,20 @@ export function ExplorerPage() {
   const listEmpty = !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters
   const relaxations = useRelaxations(filterState, resolveCtx, lookups, { enabled: listEmpty })
 
+  // Backspace in an empty search box takes off the last chip — with an Undo,
+  // since one key too many shouldn't cost a filter you built.
+  const removeLastFilter = useCallback(() => {
+    const chips = filterChips(filterState, lookups)
+    const last = chips[chips.length - 1]
+    if (!last) return
+    const previous = filterState
+    setFilterState(last.without(filterState))
+    notify('info', `Removed ${last.prefix}: ${last.value}`, {
+      label: 'Undo',
+      onClick: () => setFilterState(previous),
+    })
+  }, [filterState, lookups, setFilterState, notify])
+
   const layout = parsed.layout
 
   // ─── Keyboard navigation ────────────────────────────────────────────
@@ -376,6 +376,13 @@ export function ExplorerPage() {
       if (e.key === '/' && !inInput) {
         e.preventDefault()
         searchRef.current?.focus()
+        return
+      }
+      // ⇧F → the filter palette. Shift itself, not the letter's case, so a
+      // plain f with Caps Lock on still favourites below.
+      if (e.shiftKey && e.key.toLowerCase() === 'f' && !inInput && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        setPaletteOpen(true)
         return
       }
       // ? → show keyboard shortcuts cheat-sheet. ``?`` is a Shift+/ on
@@ -416,7 +423,7 @@ export function ExplorerPage() {
       } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         setPreviewView(views[focusedIndex])
-      } else if (e.key === 'f' && focusedIndex >= 0 && focusedIndex < views.length) {
+      } else if (e.key.toLowerCase() === 'f' && !e.shiftKey && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         toggleFavourite(views[focusedIndex].id)
       }
@@ -644,87 +651,22 @@ export function ExplorerPage() {
           onShowAttention={() => setParam('category', 'needs-attention')}
         />
 
-        {/* ── Search bar ──────────────────────────────────────── */}
-        <div data-tour="explorer-search" className="mb-5 relative">
-          <div className={cn(
-            'relative flex items-center rounded-xl border bg-canvas-elevated overflow-hidden',
-            'transition-[border-color,box-shadow] duration-200',
-            searchFocused
-              ? 'border-accent-lineage/50 shadow-[0_0_0_3px_rgba(var(--accent-lineage-rgb,99,102,241),0.08)]'
-              : 'border-glass-border',
-          )}>
-            <Search className={cn(
-              'w-4.5 h-4.5 ml-4 shrink-0 transition-colors duration-150',
-              searchFocused ? 'text-accent-lineage' : 'text-ink-muted'
-            )} />
-            {/* Input wrapper — lets the typewriter overlay sit atop the
-                input without blocking pointer events. The real input is
-                still the focus/typing surface; the overlay only paints
-                the animated placeholder. */}
-            <div className="flex-1 relative">
-              <input
-                ref={searchRef}
-                type="text"
-                /* Fallback for no-JS / reduced-motion: a static prompt. */
-                placeholder={(!searchFocused && !searchInput) ? '' : 'Search views by name, tag, workspace...'}
-                value={searchInput}
-                onChange={e => setSearchInput(e.target.value)}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
-                className="w-full bg-transparent py-2.5 px-3 text-sm text-ink outline-none placeholder:text-ink-muted/50 font-medium"
-              />
-              {!searchFocused && !searchInput && (
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute inset-0 px-3 py-2.5 flex items-center text-sm font-medium text-ink-muted/60 overflow-hidden whitespace-nowrap"
-                >
-                  <span>Search </span>
-                  {/* The animated text and the caret's blink are driven by the
-                      hook writing DIRECTLY to these refs — it holds no React
-                      state, so this ticking animation re-renders NOTHING. See
-                      useTypewriter's performance contract: driving it through
-                      state re-rendered this whole page (and every result card)
-                      ~30x/sec forever, which in React 19 dev leaked millions of
-                      PerformanceMeasure objects into an uncapped timeline. */}
-                  <span ref={typewriter.textRef} className="ml-1" />
-                  <span
-                    ref={typewriter.caretRef}
-                    className="ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px] typewriter-caret-blink"
-                  />
-                </div>
-              )}
-            </div>
-            {searchInput && (
-              <button
-                onClick={() => setSearchInput('')}
-                title="Clear search"
-                aria-label="Clear search"
-                className="mr-1.5 p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors duration-150"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-            <kbd className="hidden sm:block mr-3 rounded border border-glass-border bg-black/[0.03] dark:bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium text-ink-muted">
-              /
-            </kbd>
-          </div>
-
-          {/* Search suggestions dropdown — recent + examples. Only
-              visible while the input is focused and empty so it never
-              competes with live results. */}
-          {searchFocused && !searchInput && (
-            <ExplorerSearchSuggestions
-              recentSearches={recents}
-              onPick={q => {
-                setSearchInput(q)
-                setSearchFocused(false)
-                searchRef.current?.blur()
-              }}
-              onClearRecents={clearRecents}
-              onRemoveRecent={removeRecent}
-            />
-          )}
-        </div>
+        {/* ── Search bar — words search, and typed tokens (by:ada,
+            is:versioned, updated:<7d) become the filters their menus set ── */}
+        <ExplorerSearchBox
+          value={searchInput}
+          onChange={setSearchInput}
+          onCommit={text => setFilterState(prev => ({ ...prev, search: searchTextOf(text) }))}
+          inputRef={searchRef}
+          state={filterState}
+          onApplyFilters={setFilterState}
+          ctx={resolveCtx}
+          currentUser={me}
+          recents={recents}
+          onClearRecents={clearRecents}
+          onRemoveRecent={removeRecent}
+          onRemoveLastFilter={removeLastFilter}
+        />
 
         {/* ── Unified toolbar: filters, with sort + layout ending the first row
             so the filter row beneath gets the full width ─────────── */}
@@ -737,6 +679,17 @@ export function ExplorerPage() {
             ctx={resolveCtx}
             trailing={(
               <>
+                <button
+                  type="button"
+                  onClick={() => setPaletteOpen(true)}
+                  title="Filter by anything (Shift+F)"
+                  aria-label="Filter by anything"
+                  aria-keyshortcuts="Shift+F"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2 py-1 text-xs font-medium text-ink-muted hover:text-ink hover:border-accent-lineage/40 transition-colors duration-150"
+                >
+                  <ListFilter className="h-3.5 w-3.5" />
+                  <kbd className="text-[10px] font-semibold">⇧F</kbd>
+                </button>
                 <ExplorerSortControl
                   sort={parsed.sort}
                   onSortChange={v => setParam('sort', v)}
@@ -1088,6 +1041,15 @@ export function ExplorerPage() {
         isOpen={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
+      {paletteOpen && (
+        <FilterPalette
+          state={filterState}
+          onChange={setFilterState}
+          ctx={resolveCtx}
+          currentUser={me}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
     </div>
   )

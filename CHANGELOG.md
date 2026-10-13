@@ -54,6 +54,16 @@ calendar marks the busy days with a dot.
 and published its latest data, each person once; hover one for what they did and when, click it to
 show only views by that person. The preview lists them as **Contributors**.
 
+**Type filters into the search box.** `by:ada`, `is:versioned`, `updated:<7d`, `tag:pii`,
+`created:2026-09` and the like turn into the same chips their menus make as soon as they are
+finished, with suggestions and counts while you type; the rest of what you type stays a search. A
+value that matches nothing, or more than one thing, is never guessed. **Backspace** in an empty box
+removes the last chip, with an **Undo**. The workspace Views tab takes them too.
+
+**Filter by anything (Shift+F).** One searchable list of every filter value in the Explorer — each
+person, tag, source, workspace, type, date period and visibility — with live counts and a check by
+those already on. **Ctrl/⌘+Enter** picks several in a row.
+
 **Since your last visit.** Back after half an hour or more, the Explorer and each workspace's Views
 tab say how many views are new or updated since you were last there, counted with your filters;
 click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
@@ -84,6 +94,7 @@ created or updated per hour (or ten minutes) over a window, with the same filter
 
 ### Fixed
 
+- **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
 - **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
   a narrower created date instead of combining with it.
 

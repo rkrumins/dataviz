@@ -288,8 +288,9 @@ Each workspace has a **Views** tab for working with its whole collection: open
 - **Publication requests** lists pending requests for the people who can answer
   them, and holds the workspace's publishing settings for its admins.
 - **Recent activity** shows what changed across the workspace.
-- **Filter the list** with the same controls as the Explorer: search,
-  **Versioned** or **External**, **Date**, **People** and **Source** (see
+- **Filter the list** with the same controls as the Explorer: search (which
+  takes typed filters such as `by:me` or `updated:<7d`), **Versioned** or
+  **External**, **Date**, **People** and **Source** (see
   [Narrow the list](/guide/browsing-views#narrow-the-list)). The **Timeline**
   under them shows how many of the workspace's Views were created or updated on
   each of the past 90 days; drag across it to filter by those days. After a

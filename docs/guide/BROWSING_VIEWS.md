@@ -31,8 +31,45 @@ flowchart LR
 Search looks for every word you type in each view's name, description and
 tags, and in the names of its workspace and data source. A view has to match
 all the words. To find the views one person made or edited, use the
-**People** filter instead (next section). When you click into the empty search box, your
-**Recent searches** in this browser appear; **Clear** empties the list.
+**People** filter instead (next section), or type it (below). When you click
+into the empty search box, your **Recent searches** in this browser appear,
+with a few filters you can type; **Clear** empties the list.
+
+### Type a filter instead of picking it
+
+Anything in the search box written as `name:value` is a filter. When you finish
+it with a space, **Enter** or **Tab** it turns into the same chip its menu
+would make, and the rest of what you typed stays a search. While you type one,
+the box suggests its values with how many views each would show: pick one with
+the arrow keys and **Enter** or **Tab**.
+
+| Type | To see views… |
+| --- | --- |
+| `by:ada`, `by:me` | created or edited last by Ada, or by you |
+| `created-by:`, `edited-by:`, `published-by:` | by that person in only that role |
+| `is:versioned`, `is:external` | whose data is versioned in {brand}, or kept elsewhere |
+| `is:private`, `is:workspace`, `is:enterprise` | with that visibility |
+| `is:mine`, `is:fav`, `is:shared`, `is:recent`, `is:attention`, `is:deleted` | in that quick filter |
+| `updated:<7d`, `created:<30d` | changed, or made, in the past 7 or 30 days |
+| `updated:>90d` | not changed for more than 90 days |
+| `updated:today`, `created:2026-09`, `updated:2026-09-01..2026-09-15` | changed or made on that day, in that month, or in that range |
+| `updated:visit` | changed since your last visit |
+| `tag:pii`, `type:graph`, `ws:finance`, `source:warehouse` | with that tag, type, workspace or data source |
+
+Put a name with a space in quotes: `by:"Ada Lovelace"`. A name that matches
+more than one person, tag or source isn't guessed: it stays in the box, with a
+note under it, until you finish it from the suggestions or remove it.
+**Backspace** in an empty search box removes the last chip, with an **Undo**.
+
+### Filter by anything from one list
+
+Press **Shift+F**, or click the filter button beside **Sort**, for every filter
+value in one searchable list: each person, tag, source, workspace, type, date
+period and visibility, with the number of views it would show and a check by
+the ones already on. Type to narrow it — a group's name such as `tag` or
+`people` lists that group. **Enter** applies the highlighted value and closes
+the list; **Ctrl+Enter** (**⌘+Enter** on a Mac) applies it and keeps the list
+open, to pick several in a row.
 
 > **If you don't see the view:** the list says **No views match your search**
 > (or **these filters**). Under it, each filter you have set is listed with how
@@ -343,11 +380,13 @@ another environment) isn't listed until that draft is published.
 | Key | What it does |
 | --- | --- |
 | `/` | Jump to the search box |
+| `Shift`+`F` | Filter by anything, from one list |
 | `?` | Show the keyboard shortcuts |
 | `Esc` | Clear the search, or close an overlay |
 | Arrow keys | Move between cards |
 | `Enter` | Preview the card you've moved to |
 | `f` | Favourite or unfavourite that card |
+| `Backspace` | In an empty search box: remove the last filter chip |
 
 ## Where to next
 

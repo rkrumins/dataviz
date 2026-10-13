@@ -1,7 +1,7 @@
 /**
  * KeyboardShortcutsDialog — cheat-sheet modal for the Explorer.
  *
- * Surfaces the shortcuts the page already ships with (``/``, ``?``,
+ * Surfaces the shortcuts the page already ships with (``/``, ``⇧F``, ``?``,
  * arrows, ``Enter``, ``f``, ``Esc``) plus a Command Palette slot
  * reserved for the future ⌘K feature. Undiscoverable shortcuts are
  * nearly worthless; this makes them one keystroke away.
@@ -22,8 +22,16 @@ interface Shortcut {
 
 const NAV_SHORTCUTS: Shortcut[] = [
   { keys: ['/'], label: 'Focus search', hint: 'From anywhere on the page' },
+  { keys: ['⇧', 'F'], label: 'Filter by anything', hint: 'Every filter value in one searchable list' },
   { keys: ['?'], label: 'Show this help' },
   { keys: ['Esc'], label: 'Clear search / close overlay' },
+]
+
+const SEARCH_SHORTCUTS: Shortcut[] = [
+  { keys: ['Space'], label: 'Turn a typed filter into a chip', hint: 'by:me, is:versioned, updated:<7d, tag:pii' },
+  { keys: ['Tab'], label: 'Finish a filter from the suggestions' },
+  { keys: ['Enter'], label: 'Search now' },
+  { keys: ['⌫'], label: 'Remove the last filter', hint: 'In an empty search box' },
 ]
 
 const GRID_SHORTCUTS: Shortcut[] = [
@@ -104,6 +112,7 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
               {/* ── Sections ── */}
               <div className="px-5 py-4 grid gap-5 sm:grid-cols-2">
                 <ShortcutSection title="Navigation" items={NAV_SHORTCUTS} />
+                <ShortcutSection title="Search" items={SEARCH_SHORTCUTS} />
                 <ShortcutSection title="Grid & cards" items={GRID_SHORTCUTS} />
               </div>
             </motion.div>

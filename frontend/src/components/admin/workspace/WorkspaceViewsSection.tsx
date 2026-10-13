@@ -23,11 +23,11 @@
  * change of each kind (created / settings-edited / data-published, each with
  * who + when). A full activity log per view is a backend follow-up.
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import {
-    Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
+    Eye, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
     Check, Loader2, FileUp, Database,
 } from 'lucide-react'
@@ -83,6 +83,8 @@ import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
 import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
+import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
+import { searchTextOf } from '@/features/view-filters/tokens'
 import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
 import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
 import { VISIT_RULE } from '@/features/view-filters/dateFilter'
@@ -134,6 +136,11 @@ export default function WorkspaceViewsSection({
     // chips below; the rest by the toolbar.
     const [fstate, setFstate] = useState<ViewFilterState>(EMPTY_FILTERS)
     const patchFilters = (patch: Partial<ViewFilterState>) => setFstate(prev => ({ ...prev, ...patch }))
+    // The box can hold a token being typed (`by:al`); the filter searches only
+    // its words. A reset from elsewhere (Clear all, a suggestion) wins.
+    const [searchBox, setSearchBox] = useState('')
+    const searchBoxText = searchTextOf(searchBox) === fstate.search ? searchBox : fstate.search
+    const searchRef = useRef<HTMLInputElement>(null)
     const visFilter = fstate.visibility
     const attentionOnly = fstate.category === 'needs-attention'
     const [sort, setSort] = useState<SortOption>('updated')
@@ -718,15 +725,27 @@ export default function WorkspaceViewsSection({
 
             {/* ── Toolbar ────────────────────────────────────────── */}
             <div className="flex flex-wrap items-center gap-2 mb-3">
-                <div className="relative flex-1 min-w-[200px]">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input
-                        value={fstate.search}
-                        onChange={e => patchFilters({ search: e.target.value })}
-                        placeholder="Search views by name or description…"
-                        className="w-full pl-9 pr-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                    />
-                </div>
+                <ExplorerSearchBox
+                    className="flex-1 min-w-[200px]"
+                    value={searchBoxText}
+                    onChange={text => { setSearchBox(text); patchFilters({ search: searchTextOf(text) }) }}
+                    inputRef={searchRef}
+                    state={fstate}
+                    onApplyFilters={setFstate}
+                    ctx={resolveCtx}
+                    currentUser={me}
+                    onRemoveLastFilter={() => {
+                        const last = chips[chips.length - 1]
+                        if (!last) return
+                        const previous = fstate
+                        setFstate(last.without(fstate))
+                        notify('info', `Removed ${last.prefix}: ${last.value}`, {
+                            label: 'Undo',
+                            onClick: () => setFstate(previous),
+                        })
+                    }}
+                    fixedWorkspace
+                />
                 <SourceKindToggle
                     value={fstate.sourceKind}
                     onChange={v => patchFilters({ sourceKind: v })}
