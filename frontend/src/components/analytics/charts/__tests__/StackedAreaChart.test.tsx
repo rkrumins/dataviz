@@ -161,4 +161,37 @@ describe('StackedAreaChart — picking a span', () => {
         expect(screen.queryByTestId('chart-span')).not.toBeInTheDocument()
         expect(svg).not.toHaveClass('cursor-crosshair')
     })
+
+    it('lets go of the pointer when a zoom leaves fewer buckets under it', () => {
+        // A zoom redraws the chart with the days it picked while the pointer
+        // still rests where the drag ended. The bucket it was over is gone:
+        // read as a date, it crashed the page ("reading 'slice'").
+        const day = (b: string) => b.slice(0, 10)
+        const { rerender } = render(
+            <StackedAreaChart
+                buckets={FIVE} series={[s('a', [1, 2, 3, 4, 5])]} formatBucket={day} onSelectSpan={vi.fn()}
+            />,
+        )
+        const svg = screen.getByRole('img')
+        fireEvent.pointerDown(svg, { clientX: at(3), button: 0, pointerId: 1 })
+        fireEvent.pointerMove(svg, { clientX: at(4), pointerId: 1 })
+        fireEvent.pointerUp(svg, { clientX: at(4), pointerId: 1 })
+
+        rerender(
+            <StackedAreaChart
+                buckets={FIVE.slice(3)} series={[s('a', [4, 5])]} formatBucket={day} onSelectSpan={vi.fn()}
+            />,
+        )
+        // Read at the latest day again, as when nothing is hovered.
+        expect(screen.getAllByText('2026-10-05').length).toBeGreaterThan(0)
+
+        // A refetch mid-drag lets go of the drag too: its ends named other days.
+        fireEvent.pointerDown(svg, { clientX: at(0), button: 0, pointerId: 1 })
+        rerender(
+            <StackedAreaChart
+                buckets={FIVE.slice(4)} series={[s('a', [5])]} formatBucket={day} onSelectSpan={vi.fn()}
+            />,
+        )
+        expect(screen.queryByTestId('chart-span')).not.toBeInTheDocument()
+    })
 })

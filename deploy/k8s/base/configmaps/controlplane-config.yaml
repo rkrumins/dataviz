@@ -21,3 +21,6 @@ data:
   # here; viz-config carries the same value so readers are told the truth
   # about how far back the log goes.
   ACTIVITY_RETENTION_DAYS: "730"
+  # How long a finished aggregation run is kept. The prune runs here;
+  # viz-config carries the same value so Analytics says how far back runs reach.
+  AGGREGATION_JOB_RETENTION_DAYS: "90"

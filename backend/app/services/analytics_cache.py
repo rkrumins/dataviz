@@ -126,6 +126,46 @@ async def _redis_set(key: str, value: Any, ttl: float | None = None) -> bool:
         return False
 
 
+async def get_many(keys: list[str], *, ttl: float) -> list[Optional[Any]]:
+    """Each of ``keys`` from Redis, in one round trip, ``None`` where there is
+    none (or no Redis). An entry read stays ``ttl`` longer: what is still being
+    read is kept, and what nobody reads ages out."""
+    global _redis_down_until
+    if not keys or time.monotonic() < _redis_down_until:
+        return [None] * len(keys)
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        pipe = get_redis().pipeline(transaction=False)
+        for key in keys:
+            pipe.getex(_PREFIX + key, ex=int(ttl))
+        return [json.loads(raw) if raw else None for raw in await pipe.execute()]
+    except Exception as exc:  # noqa: BLE001 — a cache must never fail a read
+        _redis_down_until = time.monotonic() + _REDIS_RETRY_AFTER
+        logger.debug("Analytics cache batch read skipped: %s", exc)
+        return [None] * len(keys)
+
+
+async def put_many(entries: dict[str, Any], *, ttl: float) -> bool:
+    """Store ``entries`` in Redis, in one round trip. Returns whether they
+    reached it."""
+    global _redis_down_until
+    if not entries or time.monotonic() < _redis_down_until:
+        return False
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        pipe = get_redis().pipeline(transaction=False)
+        for key, value in entries.items():
+            pipe.set(_PREFIX + key, json.dumps(value), ex=int(ttl))
+        await pipe.execute()
+        return True
+    except Exception as exc:  # noqa: BLE001 — same: never fail the request
+        _redis_down_until = time.monotonic() + _REDIS_RETRY_AFTER
+        logger.debug("Analytics cache batch write skipped: %s", exc)
+        return False
+
+
 def _memory_put(key: str, value: Any, ttl: float | None = None) -> None:
     """Store one entry, first dropping whatever has aged out of reach."""
     now = time.monotonic()

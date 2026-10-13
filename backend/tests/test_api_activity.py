@@ -14,7 +14,9 @@ Pinned here:
   accounts named and marked, unresolvable ids left bare, never invented;
 * the live count counts what arrived since the page loaded, but not history
   the relay is still importing;
-* the summary is a fixed handful of grouped reads, however much there is;
+* the summary reads each day of the ledger once, ever: grouped reads in
+  passes over days — never per row, person or target — kept as they land, so
+  a zoom into days already folded reads none of their rows;
 * an export is capped, safe to open in a spreadsheet, and itself recorded.
 """
 from __future__ import annotations
@@ -408,12 +410,43 @@ def _redis_in_memory(monkeypatch) -> dict:
         store[key] = (time.monotonic() + (ttl or 300.0), json.loads(json.dumps(value)))
         return True
 
+    async def _get_many(keys, ttl):
+        return [await _get(k) for k in keys]
+
+    async def _put_many(entries, ttl):
+        for k, v in entries.items():
+            await _set(k, v, ttl)
+        return True
+
     monkeypatch.setattr(analytics_cache, "_redis_get", _get)
     monkeypatch.setattr(analytics_cache, "_redis_set", _set)
+    monkeypatch.setattr(analytics_cache, "get_many", _get_many)
+    monkeypatch.setattr(analytics_cache, "put_many", _put_many)
     return store
 
 
-async def test_the_summary_describes_the_window_in_a_fixed_number_of_reads(
+class _Kept:
+    """Folds kept in memory, as Redis keeps them, counting the spans built."""
+
+    def __init__(self) -> None:
+        self.spans: dict[str, dict] = {}
+        self.day_folds: dict[str, dict] = {}
+        self.builds = 0
+
+    async def span(self, key, build):
+        if key not in self.spans:
+            self.builds += 1
+            self.spans[key] = json.loads(json.dumps(await build()))
+        return self.spans[key]
+
+    async def days(self, days):
+        return {d: self.day_folds[d] for d in days if d in self.day_folds}
+
+    async def keep(self, folds):
+        self.day_folds.update(json.loads(json.dumps(folds)))
+
+
+async def test_the_summary_reads_its_window_in_passes_over_days(
     test_client: AsyncClient, db_session, db_engine, monkeypatch,
 ):
     from backend.app.api.v1.endpoints import activity
@@ -448,9 +481,11 @@ async def test_the_summary_describes_the_window_in_a_fixed_number_of_reads(
 
     doc, cold = await _summary_reads()
     again, warm = await _summary_reads()
-    # A fixed number of grouped reads, however many rows the window holds…
-    assert cold <= 18, f"the summary fanned out into {cold} reads"
-    # …and once the closed days are folded, a request reads today, and names.
+    # Grouped reads in passes over days — here six passes of four, for the
+    # 29 closed days and the 30 before them: as many as the window has days,
+    # never as many as it has rows, people or targets…
+    assert cold <= 6 * 4 + 10, f"the summary fanned out into {cold} reads"
+    # …and once the days are folded, a request reads today, and names.
     assert warm <= 10, f"a warm summary still made {warm} reads"
     assert again["totals"] == doc["totals"]
 
@@ -520,34 +555,122 @@ async def test_the_closed_days_are_folded_once_a_day(db_session):
     await _emit(db_session, "user.logged_in", {"user_id": "usr_2"}, minutes_ago=ago(t0 - timedelta(minutes=7)))
     await _relay(db_session)
 
-    folds: dict[str, dict] = {}
-    builds = 0
-
-    async def reuse(key, build):
-        nonlocal builds
-        if key not in folds:
-            builds += 1
-            folds[key] = await build()
-        return folds[key]
-
+    kept = _Kept()
     w = analytics_repo.build_window(7, now=t0)
     f = ActivityFilter(since=w.start, until=w.end)
-    first = await activity_repo.summary(db_session, f, w, reuse=reuse, now=t0)
+    first = await activity_repo.summary(db_session, f, w, folds=kept, now=t0)
     # One of yesterday's events reaches the ledger late.
     await _emit(db_session, "user.logged_in", {"user_id": "usr_3"}, minutes_ago=ago(t0 - timedelta(minutes=6)))
     await _relay(db_session)
     later = await activity_repo.summary(
-        db_session, f, w, reuse=reuse, now=t0 + timedelta(hours=12),
+        db_session, f, w, folds=kept, now=t0 + timedelta(hours=12),
     )
 
     yesterday = (t0 - timedelta(days=1)).date().isoformat()
-    assert list(folds) == [
-        f"full:{activity_repo._midnight(w.start)}:{yesterday}T00:00:00+00:00",
-        f"totals:{activity_repo._midnight(w.previous_start)}:{activity_repo._midnight(w.start)}",
+    assert list(kept.spans) == [
+        f"{w.start[:10]}:{yesterday}", f"{w.previous_start[:10]}:{w.start[:10]}",
     ]
-    assert builds == 2
+    assert kept.builds == 2
+    # Every day before yesterday is kept, and nothing after it.
+    assert max(kept.day_folds) < yesterday
+    assert len(kept.day_folds) == 6 + 7
     assert first["totals"]["events"]["current"] == 2
     assert later["totals"]["events"]["current"] == 3
+
+
+async def test_a_zoom_into_folded_days_reads_none_of_their_rows(
+    test_client: AsyncClient, db_session, db_engine, monkeypatch,
+):
+    """A zoom picks a span nobody asked for before. Its days, and the days
+    before them it is compared with, were folded for the window it zooms
+    into: the zoom is their sum, not another pass over the ledger."""
+    from backend.app.db.repositories import activity_repo, analytics_repo
+    from backend.app.db.repositories.activity_repo import ActivityFilter
+
+    _redis_in_memory(monkeypatch)
+    for day in range(2, 20):
+        await _emit(db_session, "aggregation.job.triggered", {
+            "actor_id": f"usr_{day % 3}", "workspace_id": "ws_1", "data_source_id": "ds_1",
+            "target_type": "data_source", "target_id": "ds_1", "target_label": "Ledger",
+            **({"stated_reason": "backfill"} if day % 4 == 0 else {}),
+        }, version=2, minutes_ago=60 * 24 * day)
+    await _relay(db_session)
+    assert (await test_client.get(f"{API}/summary?days=30")).status_code == 200
+
+    first = (NOW - timedelta(days=12)).date().isoformat()
+    last = (NOW - timedelta(days=6)).date().isoformat()
+    ledger_reads: list[str] = []
+
+    def _count(conn, cursor, statement, *a):
+        if "auth_audit_log" in statement:
+            ledger_reads.append(statement)
+
+    event.listen(db_engine.sync_engine, "before_cursor_execute", _count)
+    try:
+        res = await test_client.get(f"{API}/summary", params={"from": first, "to": last})
+    finally:
+        event.remove(db_engine.sync_engine, "before_cursor_execute", _count)
+    assert res.status_code == 200, res.text
+    # The manual operations alone, which are rows rather than counters.
+    assert len(ledger_reads) == 1, ledger_reads
+
+    # And the sum of the days is what one pass over the span reads.
+    w = analytics_repo.build_window(start=first, end=last)
+    read = await activity_repo.summary(db_session, ActivityFilter(since=w.start, until=w.end), w)
+    zoom = res.json()
+    assert zoom["totals"]["events"]["current"] == 7
+    for key in ("window", "totals", "volume", "punchcard", "topReasons"):
+        assert zoom[key] == read[key], key
+    assert [(p["id"], p["count"]) for p in zoom["topPeople"]] == [
+        (p["id"], p["count"]) for p in read["topPeople"]]
+    assert [(t["id"], t["count"]) for t in zoom["topTargets"]] == [
+        (t["id"], t["count"]) for t in read["topTargets"]]
+
+
+async def test_a_build_cut_short_keeps_the_days_it_folded(db_session, monkeypatch):
+    """A cold year may not fold within one request's deadline. Each pass of
+    days is kept as it lands, so the next request goes on from there rather
+    than starting over — and running out of time the same way, every time."""
+    from backend.app.db.repositories import activity_repo, analytics_repo
+    from backend.app.db.repositories.activity_repo import ActivityFilter
+
+    await _emit(db_session, "user.logged_in", {"user_id": "usr_1"}, minutes_ago=60 * 24 * 40)
+    await _relay(db_session)
+    real = activity_repo._fold_days
+    passes: list[tuple[str, str]] = []
+
+    async def _out_of_time_after(n, session, f, start, end):
+        if len(passes) == n:
+            raise TimeoutError
+        passes.append((start[:10], end[:10]))
+        return await real(session, f, start, end)
+
+    kept = _Kept()
+    w = analytics_repo.build_window(90)
+    f = ActivityFilter(since=w.start, until=w.end)
+    monkeypatch.setattr(activity_repo, "_fold_days", lambda *a: _out_of_time_after(2, *a))
+    with pytest.raises(TimeoutError):
+        await activity_repo.summary(db_session, f, w, folds=kept)
+    assert len(kept.day_folds) == 2 * activity_repo._DAYS_PER_PASS
+    folded_first = set(kept.day_folds)
+
+    passes.clear()
+    monkeypatch.setattr(activity_repo, "_fold_days", lambda *a: _out_of_time_after(99, *a))
+    doc = await activity_repo.summary(db_session, f, w, folds=kept)
+    # Not one of the days kept before is read again.
+    assert not any(start <= day < end for start, end in passes for day in folded_first)
+    assert doc["totals"]["events"]["current"] == 1
+
+
+def test_days_not_kept_are_read_in_runs_of_consecutive_days():
+    """One pass per run: the days kept between two runs are not read again."""
+    from backend.app.db.repositories import activity_repo
+
+    days = ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-05", "2026-01-31", "2026-02-01"]
+    assert activity_repo._runs(days) == [
+        ["2026-01-01", "2026-01-02", "2026-01-03"], ["2026-01-05"], ["2026-01-31", "2026-02-01"],
+    ]
+    assert activity_repo._runs([]) == []
 
 
 async def test_a_workspace_summary_counts_only_that_workspace(

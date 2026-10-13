@@ -31,6 +31,11 @@ class _Redis:
 
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.ttl: dict[str, int] = {}
+        self.round_trips = 0
+
+    def pipeline(self, transaction=True):
+        return _Pipeline(self)
 
     async def get(self, key):
         return self.data.get(key)
@@ -43,6 +48,28 @@ class _Redis:
 
     async def delete(self, key):
         self.data.pop(key, None)
+
+
+class _Pipeline:
+    def __init__(self, redis: _Redis) -> None:
+        self.redis, self.ops = redis, []
+
+    def getex(self, key, ex=None):
+        self.ops.append(("getex", key, None, ex))
+
+    def set(self, key, value, ex=None):
+        self.ops.append(("set", key, value, ex))
+
+    async def execute(self):
+        self.redis.round_trips += 1
+        out = []
+        for op, key, value, ex in self.ops:
+            if op == "set":
+                self.redis.data[key] = value
+            if key in self.redis.data:
+                self.redis.ttl[key] = ex
+            out.append(self.redis.data.get(key) if op == "getex" else True)
+        return out
 
 
 @pytest.fixture
@@ -133,3 +160,29 @@ async def test_without_redis_every_replica_builds_for_itself(monkeypatch):
 
     assert await analytics_cache.cached(KEY, build, memory=False) == {"ok": True}
     assert built == 1
+
+
+# ── Days of activity, many at once ──────────────────────────────────
+
+
+async def test_days_are_read_and_kept_in_one_round_trip(redis):
+    """A span reads all of its days at once, and a day that is read is kept
+    longer: the days of the views people open stay, the rest age out."""
+    assert await analytics_cache.put_many({"day:1": {"n": 1}, "day:2": {"n": 2}}, ttl=60)
+    redis.ttl.clear()
+    got = await analytics_cache.get_many(["day:1", "day:3", "day:2"], ttl=600)
+    assert got == [{"n": 1}, None, {"n": 2}]
+    assert redis.ttl == {
+        f"{analytics_cache._PREFIX}day:1": 600, f"{analytics_cache._PREFIX}day:2": 600,
+    }
+    assert redis.round_trips == 2
+
+
+async def test_without_redis_no_day_is_kept(monkeypatch):
+    def _unreachable():
+        raise ConnectionError("no Redis here")
+
+    monkeypatch.setattr(redis_client, "get_redis", _unreachable)
+    monkeypatch.setattr(analytics_cache, "_redis_down_until", 0.0)
+    assert await analytics_cache.put_many({"day:1": {"n": 1}}, ttl=60) is False
+    assert await analytics_cache.get_many(["day:1", "day:2"], ttl=60) == [None, None]

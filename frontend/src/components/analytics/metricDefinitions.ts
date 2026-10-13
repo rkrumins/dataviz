@@ -209,7 +209,6 @@ export const METRICS: Record<string, MetricDefinition> = {
         what: 'How long a newly connected source waited for its first completed aggregation — the moment its lineage became usable.',
         how: 'For sources connected in the range: the first completed aggregation run minus when the source was added. The middle value is shown.',
         why: 'The wait between connecting a source and being able to use it. If it grows, onboarding is outrunning the build capacity.',
-        caveat: 'Aggregation runs are kept for 90 days.',
     },
     uniqueViewers: {
         title: 'Viewers',
