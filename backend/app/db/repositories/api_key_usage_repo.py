@@ -88,9 +88,12 @@ async def prune(session: AsyncSession, *, keep_days: int = RETENTION_DAYS) -> in
     longer exist. Returns how many rows went."""
     cutoff = (_today() - timedelta(days=keep_days)).isoformat()
     old = await session.execute(delete(ApiKeyUsageORM).where(ApiKeyUsageORM.day < cutoff))
+    # NOT EXISTS, not NOT IN: an anti-join however many keys there are,
+    # where NOT IN falls back to a rescan of every key per row once their
+    # ids no longer fit in memory.
     orphans = await session.execute(
         delete(ApiKeyUsageORM).where(
-            ~ApiKeyUsageORM.key_id.in_(select(ApiKeyORM.id))
+            ~select(ApiKeyORM.id).where(ApiKeyORM.id == ApiKeyUsageORM.key_id).exists()
         )
     )
     return int(old.rowcount or 0) + int(orphans.rowcount or 0)

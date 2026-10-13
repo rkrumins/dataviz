@@ -17,7 +17,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect as orm_state, select
+from sqlalchemy.exc import InvalidRequestError
 
 from backend.app.api.v1.endpoints import api_keys as api_keys_endpoints
 from backend.app.db import engine as db_engine
@@ -617,6 +618,26 @@ async def test_a_keys_use_is_on_its_card_and_in_its_detail(client, db_session):
     }
 
 
+async def test_a_new_keys_first_call_is_watched_with_one_light_read(client, db_session):
+    """The page that shows a new key asks every few seconds whether it has
+    been used: when and from where, and nothing more — only of your own."""
+    key = await mint(db_session, views="read")
+    theirs = await mint(db_session, OTHER, views="read")
+    _sign_in(client)
+
+    assert (await client.get(f"/api/v1/me/api-keys/{key.id}/last-use")).json() == {
+        "lastUsedAt": None, "lastUsedIp": None, "lastUsedUserAgent": None,
+    }
+    await api_key_repo.touch_last_used(
+        db_session, key.id, ip="198.51.100.7", user_agent="curl/8.5.0", resolution_seconds=0,
+    )
+    await db_session.commit()
+    seen = (await client.get(f"/api/v1/me/api-keys/{key.id}/last-use")).json()
+    assert (seen["lastUsedIp"], seen["lastUsedUserAgent"]) == ("198.51.100.7", "curl/8.5.0")
+    assert seen["lastUsedAt"]
+    assert (await client.get(f"/api/v1/me/api-keys/{theirs.id}/last-use")).status_code == 404
+
+
 # ── A key on itself ─────────────────────────────────────────────────
 
 
@@ -800,6 +821,48 @@ async def test_a_key_past_the_lifetime_cap_is_expired_all_over_the_inventory(adm
     assert stats["neverExpires"] == 0
 
 
+async def test_the_inventory_search_finds_the_text_as_typed(admin, db_session):
+    """``%`` and ``_`` are characters someone typed, not wildcards."""
+    percent = await mint(db_session, views="read", name="50% sample")
+    await mint(db_session, views="read", name="500 rows")
+    underscore = await mint(db_session, views="read", name="etl_load")
+    await mint(db_session, views="read", name="etl-load")
+
+    assert _ids(await admin.get("/api/v1/admin/api-keys", params={"q": "50%"})) == [percent.id]
+    assert _ids(await admin.get("/api/v1/admin/api-keys", params={"q": "ETL_"})) == [underscore.id]
+    stats = (await admin.get("/api/v1/admin/api-keys/stats", params={"q": "50%"})).json()
+    assert stats["total"] == 1
+
+
+async def test_an_owners_picture_is_never_read_with_their_keys(admin, db_session):
+    """A provider's picture is kept in the user row — up to a few hundred KB
+    of it. A key request, the inventory and the export read the owner
+    without it (and asking for it is an error, not a quiet second read)."""
+    owner = await db_session.get(UserORM, OWNER)
+    owner.avatar_image, owner.avatar_image_type = "A" * 300_000, "image/png"
+    await db_session.commit()
+    key = await mint(db_session, views="read")
+    token_hash = (await db_session.get(ApiKeyORM, key.id)).token_hash
+
+    async def by_token():
+        return (await api_key_repo.find_for_auth(db_session, token_hash)).owner
+
+    async def listed():
+        return (await api_key_repo.list_all(db_session))[0][0][1]
+
+    async def exported():
+        return (await api_key_repo.get_with_owners(db_session, [key.id]))[0][1]
+
+    for read_owner in (by_token, listed, exported):
+        db_session.expunge_all()  # each read starts from the database, not the last one
+        read = await read_owner()
+        assert read.id == OWNER and "avatar_image" not in orm_state(read).dict, read_owner
+        with pytest.raises(InvalidRequestError):
+            read.avatar_image  # noqa: B018 — the read is the test
+    listed = (await admin.get("/api/v1/admin/api-keys")).json()["items"]
+    assert listed[0]["owner"]["hasImage"] is True
+
+
 async def test_the_inventory_sorts_never_used_and_never_expiring_keys_where_they_belong(
     admin, db_session,
 ):
@@ -973,3 +1036,41 @@ async def test_owners_hear_a_week_ahead_once_and_not_for_short_lived_keys(db_ses
         select(OutboxEventORM).where(OutboxEventORM.event_type == "identity.api_key.expiring")
     )).scalars().all()
     assert [json.loads(e.payload)["key_id"] for e in events] == [soon.id]
+
+
+async def test_a_prune_that_fails_does_not_take_the_reminders_with_it(db_session, monkeypatch):
+    """Usage pruning runs after the reminders in the same pass. When it
+    fails — a timeout on a large table — the reminders already sent stay
+    sent, rather than rolling back and failing again on every pass."""
+    db_session.add(user_row(OWNER))
+    await db_session.commit()
+    soon = await mint(db_session, views="read",
+                      expires_at=(datetime.now(timezone.utc) + timedelta(days=3)).isoformat())
+    (await db_session.get(ApiKeyORM, soon.id)).created_at = days_ago(60)
+    await db_session.commit()
+
+    shutdown = asyncio.Event()
+
+    async def _times_out(_session):
+        shutdown.set()
+        raise TimeoutError("canceling statement due to statement timeout")
+
+    @asynccontextmanager
+    async def _transaction():
+        # As the jobs pool's sessions are: committed if the block ends, rolled back if it raises.
+        try:
+            yield db_session
+            await db_session.commit()
+        except BaseException:
+            await db_session.rollback()
+            raise
+
+    monkeypatch.setattr(api_key_usage_repo, "prune", _times_out)
+    await asyncio.wait_for(
+        api_key_housekeeping.run_sweeper(_transaction, shutdown, interval=3600), timeout=10,
+    )
+    notes = (await db_session.execute(
+        select(NotificationORM.resource_id).where(NotificationORM.kind == "api_key_expiring")
+    )).scalars().all()
+    assert notes == [soon.id]
+    assert (await db_session.get(ApiKeyORM, soon.id)).expiry_reminded_at

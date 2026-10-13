@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import Headers
 
-from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
+from backend.app.db.models import ApiKeyORM, IdpProviderORM, UserIdentityORM, UserORM
 from backend.app.db.repositories import api_key_repo
 from backend.auth_service.core import api_keys
 
@@ -157,8 +157,15 @@ async def _key(session, user_id: str, **overrides):
     return generated, await api_key_repo.create(session, **fields)
 
 
+def _idp(session) -> None:
+    session.add(IdpProviderORM(
+        id="idp_x", slug="x", display_name="X", kind="oidc", settings="{}", linking_policy="strict",
+    ))
+
+
 async def test_the_auth_lookup_returns_key_owner_and_identity_facts(db_session):
     await _user(db_session, "usr_owner1")
+    _idp(db_session)
     db_session.add(UserIdentityORM(
         user_id="usr_owner1", provider_id="idp_x", external_id="sub-1",
         last_login_at="2026-10-01T00:00:00+00:00",
@@ -291,6 +298,7 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
         users[uid] = await _user(db_session, uid, password=uid in passwords, **extra)
     users["usr_deleted"].deleted_at = ago(1)
     last_login = {"usr_sso_fresh": ago(1), "usr_sso_stale": ago(40), "usr_sso_never": None}
+    _idp(db_session)
     for uid, last in last_login.items():
         db_session.add(UserIdentityORM(
             user_id=uid, provider_id="idp_x", external_id=f"sub-{uid}", last_login_at=last,

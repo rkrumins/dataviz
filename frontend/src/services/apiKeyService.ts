@@ -119,6 +119,8 @@ export interface ApiKeyDetail extends ApiKey {
     replacedBy: KeyRef | null
 }
 
+export type ApiKeyLastUse = Pick<ApiKey, 'lastUsedAt' | 'lastUsedIp' | 'lastUsedUserAgent'>
+
 export interface ApiKeyOptions {
     policy: {
         enabled: boolean
@@ -306,6 +308,11 @@ export const apiKeyService = {
 
     get(id: string, signal?: AbortSignal): Promise<ApiKeyDetail> {
         return call(`${MINE}/${encodeURIComponent(id)}`, { signal })
+    },
+
+    /** When and from where the key was last used, and nothing else: one read. */
+    lastUse(id: string, signal?: AbortSignal): Promise<ApiKeyLastUse> {
+        return call(`${MINE}/${encodeURIComponent(id)}/last-use`, { signal })
     },
 
     searchResources(

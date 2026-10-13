@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from backend.app.db.models import (
     CatalogItemORM,
+    OntologyORM,
     PermissionORM,
     ProviderORM,
     RoleBindingORM,
@@ -51,6 +52,7 @@ async def _world(session):
     ))
     for ws in ("ws_a", "ws_b", "ws_c"):
         session.add(WorkspaceORM(id=ws, name=ws))
+    session.add(ProviderORM(id="prov", name="prov", provider_type="mock", permitted_workspaces="[]"))
     session.add(WorkspaceDataSourceORM(id="ds_a", workspace_id="ws_a", provider_id="prov"))
     session.add(WorkspaceDataSourceORM(id="ds_b", workspace_id="ws_b", provider_id="prov"))
     views = [
@@ -257,19 +259,19 @@ async def test_a_selection_key_lists_only_the_ontologies_and_catalog_entries_it_
     from backend.app.services import workspace_visibility as visibility
 
     await _world(db_session)
-    db_session.add(ProviderORM(
-        id="prov", name="prov", provider_type="mock", permitted_workspaces="[]",
-    ))
     db_session.add(WorkspaceDataSourceORM(
         id="ds_a2", workspace_id="ws_a", provider_id="prov", is_primary=True,
     ))
     await db_session.flush()
     for ds in ("ds_a", "ds_a2", "ds_b"):
-        row = await db_session.get(WorkspaceDataSourceORM, ds)
-        row.ontology_id, row.catalog_item_id = f"ont_{ds[3:]}", f"cat_{ds[3:]}"
+        db_session.add(OntologyORM(id=f"ont_{ds[3:]}", name=ds))
         db_session.add(CatalogItemORM(
             id=f"cat_{ds[3:]}", provider_id="prov", name=ds, permitted_workspaces="[]",
         ))
+    await db_session.flush()
+    for ds in ("ds_a", "ds_a2", "ds_b"):
+        row = await db_session.get(WorkspaceDataSourceORM, ds)
+        row.ontology_id, row.catalog_item_id = f"ont_{ds[3:]}", f"cat_{ds[3:]}"
     db_session.add(CatalogItemORM(
         id="cat_shared", provider_id="prov", name="shared", permitted_workspaces='["ws_a"]',
     ))

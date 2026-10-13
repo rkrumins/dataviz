@@ -2118,6 +2118,10 @@ class UserIdentityORM(Base):
             name="uq_user_identities_user_provider",
         ),
         Index("idx_user_identities_user", "user_id"),
+        # A person's latest sign-in through any provider, read from the
+        # index alone: what keeps their API keys from pausing, asked on every
+        # key request and for every owner on the admin inventory.
+        Index("idx_user_identities_user_login", "user_id", "last_login_at"),
     )
 
     def __repr__(self) -> str:
@@ -3216,10 +3220,13 @@ class ApiKeyORM(Base):
         Index("idx_api_keys_expires_at", "expires_at"),
         # The admin inventory's order, and its "unused for 90 days" filter.
         Index("idx_api_keys_created_at", "created_at"),
+        # A key's successor, looked up whenever a key is shown or rotated.
+        # Partial: only rotations have one. (Nothing indexes the "last used"
+        # columns, so the stamp they get every few minutes stays cheap.)
         Index(
-            "idx_api_keys_live_last_used", "last_used_at",
-            postgresql_where=text("revoked_at IS NULL"),
-            sqlite_where=text("revoked_at IS NULL"),
+            "idx_api_keys_rotated_from", "rotated_from",
+            postgresql_where=text("rotated_from IS NOT NULL"),
+            sqlite_where=text("rotated_from IS NOT NULL"),
         ),
         CheckConstraint(
             "kind IN ('personal', 'service')", name="ck_api_keys_kind",
@@ -3240,12 +3247,12 @@ class ApiKeyUsageORM(Base):
 
     key_id = Column(Text, primary_key=True)
     day = Column(Text, primary_key=True)                # YYYY-MM-DD, UTC
-    requests = Column(Integer, nullable=False, default=0)
+    requests = Column(Integer, nullable=False, default=0, server_default="0")
     # Of which: changed something; refused as a key (401, 403 or 429 on the
     # key's own account); failed otherwise (any other 4xx or 5xx).
-    writes = Column(Integer, nullable=False, default=0)
-    refused = Column(Integer, nullable=False, default=0)
-    errors = Column(Integer, nullable=False, default=0)
+    writes = Column(Integer, nullable=False, default=0, server_default="0")
+    refused = Column(Integer, nullable=False, default=0, server_default="0")
+    errors = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (Index("idx_api_key_usage_day", "day"),)
 

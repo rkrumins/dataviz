@@ -256,6 +256,12 @@ class ApiKeyDTO(_Model):
     usage: UsageSummary = Field(default_factory=UsageSummary)
 
 
+class LastUse(_Model):
+    last_used_at: Optional[str] = Field(None, alias="lastUsedAt")
+    last_used_ip: Optional[str] = Field(None, alias="lastUsedIp")
+    last_used_user_agent: Optional[str] = Field(None, alias="lastUsedUserAgent")
+
+
 class CreatedApiKey(_Model):
     key: ApiKeyDTO
     #: The key itself. Shown here, once; it cannot be retrieved again.
@@ -446,7 +452,7 @@ async def _identity_facts(
     rows = (await session.execute(
         select(
             UserIdentityORM.user_id,
-            func.count(UserIdentityORM.id),
+            func.count(),
             func.max(UserIdentityORM.last_login_at),
         )
         .where(UserIdentityORM.user_id.in_(sorted(user_ids)))
@@ -1192,6 +1198,23 @@ async def get_my_api_key(
         effective_access=await _effective_access(session, user, api_key_service.scope_of(key)),
         usage_days=_usage_days(usage.get(key.id, {})),
         replaces=replaces, replaced_by=replaced_by,
+    )
+
+
+@router.get("/{key_id}/last-use", response_model=LastUse)
+async def get_my_api_key_last_use(
+    key_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """When, and from where, one of your keys was last used — and nothing
+    else, in one read: for a page waiting on a new key's first call."""
+    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return LastUse(
+        last_used_at=key.last_used_at, last_used_ip=key.last_used_ip,
+        last_used_user_agent=key.last_used_user_agent,
     )
 
 

@@ -24,6 +24,7 @@ from typing import Iterable, Optional, Sequence
 
 from sqlalchemy import and_, case, false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from backend.app.db.advisory import hold_for_transaction
 from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
@@ -32,6 +33,13 @@ from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
 #: "last used from", not evidence, and an unbounded header should not grow
 #: a row without limit.
 _USER_AGENT_MAX = 256
+
+
+#: Owners are read for their names and status, never their picture: the
+#: provider's image is kept in the user row (up to a few hundred KB) and has
+#: no business on a key request or an inventory page. Raising, so a new use
+#: of it fails a test rather than quietly loading it again.
+_NO_PICTURE = defer(UserORM.avatar_image, raiseload=True)
 
 
 def _now() -> datetime:
@@ -95,13 +103,16 @@ def _expired_clause(now: datetime, max_lifetime_days: Optional[int]):
 
 
 def _identity_facts():
-    """Per owner: how many SSO identities, and their latest sign-in."""
+    """Per key owner: how many SSO identities, and their latest sign-in.
+    Only owners: everyone else's identities have no key to tell about, and
+    there are far more of them."""
     return (
         select(
             UserIdentityORM.user_id.label("user_id"),
-            func.count(UserIdentityORM.id).label("identities"),
+            func.count().label("identities"),
             func.max(UserIdentityORM.last_login_at).label("last_login_at"),
         )
+        .where(UserIdentityORM.user_id.in_(select(ApiKeyORM.user_id)))
         .group_by(UserIdentityORM.user_id)
         .subquery("identity_facts")
     )
@@ -324,7 +335,7 @@ class AuthRow:
 
 async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[AuthRow]:
     identity_count = (
-        select(func.count(UserIdentityORM.id))
+        select(func.count()).select_from(UserIdentityORM)
         .where(UserIdentityORM.user_id == ApiKeyORM.user_id)
         .scalar_subquery()
     )
@@ -337,6 +348,7 @@ async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[Auth
         select(ApiKeyORM, UserORM, identity_count, idp_last_login)
         .join(UserORM, UserORM.id == ApiKeyORM.user_id)
         .where(ApiKeyORM.token_hash == token_hash)
+        .options(_NO_PICTURE)
     )).first()
     if row is None:
         return None
@@ -452,11 +464,13 @@ def _focus_clause(
 
 
 def _search_clause(search: str):
-    like = f"%{search.strip().lower()}%"
+    """Contains the text, as typed: a ``%`` or ``_`` in it is that character,
+    not a wildcard."""
+    term = search.strip().lower()
     return or_(
-        func.lower(ApiKeyORM.name).like(like),
-        func.lower(ApiKeyORM.token_prefix).like(like),
-        func.lower(UserORM.email).like(like),
+        func.lower(ApiKeyORM.name).contains(term, autoescape=True),
+        func.lower(ApiKeyORM.token_prefix).contains(term, autoescape=True),
+        func.lower(UserORM.email).contains(term, autoescape=True),
     )
 
 
@@ -509,6 +523,7 @@ async def list_all(
     )).scalar() or 0)
     rows = (await session.execute(
         base.order_by(*_order(sort, order), ApiKeyORM.id).limit(limit).offset(offset)
+        .options(_NO_PICTURE)
     )).all()
     return [(key, owner) for key, owner in rows], total
 
@@ -540,6 +555,7 @@ async def get_with_owners(
         select(ApiKeyORM, UserORM)
         .join(UserORM, UserORM.id == ApiKeyORM.user_id)
         .where(ApiKeyORM.id.in_(key_ids))
+        .options(_NO_PICTURE)
     )).all()
     found = {key.id: (key, owner) for key, owner in rows}
     return [found[i] for i in key_ids if i in found]

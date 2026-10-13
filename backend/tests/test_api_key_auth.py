@@ -21,6 +21,7 @@ from sqlalchemy.exc import OperationalError
 from backend.app.auth import api_key_auth
 from backend.app.db.models import (
     ApiKeyORM,
+    IdpProviderORM,
     NotificationORM,
     OutboxEventORM,
     RoleBindingORM,
@@ -264,6 +265,10 @@ async def test_an_sso_owner_who_stops_signing_in_has_their_keys_paused(client, d
     db_session.add(RoleBindingORM(
         subject_type="user", subject_id="usr_sso", role_name="workspace_member",
         scope_type="workspace", scope_id="ws_a",
+    ))
+    db_session.add(IdpProviderORM(
+        id="idp_corp", slug="corp", display_name="Corp", kind="oidc",
+        settings="{}", linking_policy="strict",
     ))
     identity = UserIdentityORM(
         user_id="usr_sso", provider_id="idp_corp", external_id="sub-1",

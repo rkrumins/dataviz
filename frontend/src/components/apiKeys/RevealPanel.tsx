@@ -181,10 +181,10 @@ function useFirstCall(keyId: string): FirstCall {
             else timer = setTimeout(poll, POLL_MS)
         }
         const poll = () => {
-            apiKeyService.get(keyId, abort.signal).then((detail) => {
+            apiKeyService.lastUse(keyId, abort.signal).then((use) => {
                 if (abort.signal.aborted) return
-                if (detail.lastUsedAt) {
-                    setCall({ state: 'seen', ip: detail.lastUsedIp, client: clientName(detail.lastUsedUserAgent) })
+                if (use.lastUsedAt) {
+                    setCall({ state: 'seen', ip: use.lastUsedIp, client: clientName(use.lastUsedUserAgent) })
                 } else {
                     next()
                 }

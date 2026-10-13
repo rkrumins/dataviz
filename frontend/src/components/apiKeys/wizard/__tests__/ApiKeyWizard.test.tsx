@@ -21,6 +21,7 @@ const svc = vi.hoisted(() => ({
     preview: vi.fn(),
     searchResources: vi.fn(),
     get: vi.fn(),
+    lastUse: vi.fn(),
     list: vi.fn(),
     options: vi.fn(),
     revoke: vi.fn(),
@@ -344,15 +345,17 @@ describe('the reveal', () => {
     it('lights up when the key is first used — by watching its record, never by calling with it', async () => {
         vi.useFakeTimers({ shouldAdvanceTime: true })
         try {
-            svc.get.mockResolvedValueOnce({ ...apiKey({ id: 'apk_9' }), lastUsedAt: null })
-                .mockResolvedValueOnce({ ...apiKey({ id: 'apk_9' }), lastUsedAt: '2026-10-13T12:00:00Z', lastUsedIp: '198.51.100.7', lastUsedUserAgent: 'curl/8.5.0' })
+            svc.lastUse.mockResolvedValueOnce({ lastUsedAt: null, lastUsedIp: null, lastUsedUserAgent: null })
+                .mockResolvedValueOnce({ lastUsedAt: '2026-10-13T12:00:00Z', lastUsedIp: '198.51.100.7', lastUsedUserAgent: 'curl/8.5.0' })
             await revealed()
             expect(screen.getByText('Waiting for the first call…')).toBeInTheDocument()
             await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
-            expect(svc.get).toHaveBeenCalledWith('apk_9', expect.any(AbortSignal))
+            expect(svc.lastUse).toHaveBeenCalledWith('apk_9', expect.any(AbortSignal))
             await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
             expect(await screen.findByText(/first call from 198\.51\.100\.7 · curl 8\.5\.0/i)).toBeInTheDocument()
-            expect(svc.get).toHaveBeenCalledTimes(2)
+            expect(svc.lastUse).toHaveBeenCalledTimes(2)
+            // The light read, not the key's whole record, every few seconds.
+            expect(svc.get).not.toHaveBeenCalled()
         } finally {
             vi.useRealTimers()
         }

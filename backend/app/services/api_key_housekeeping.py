@@ -111,7 +111,12 @@ async def run_sweeper(
                     reminded = await remind_once(session)
                     if reminded:
                         logger.info("Sent %d API key expiry reminder(s)", reminded)
-                    await api_key_usage_repo.prune(session)
+                    # Committed first, so a prune that fails cannot take the
+                    # reminders back with it. The commit lets the pass go,
+                    # so the prune claims it again.
+                    await session.commit()
+                    if await claim_this_pass(session, "auth:api-key-housekeeping"):
+                        await api_key_usage_repo.prune(session)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

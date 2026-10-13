@@ -181,6 +181,7 @@ async def test_old_counts_and_counts_of_deleted_keys_are_pruned(db_session):
         id="usr_p", email="p@example.com", password_hash="x", first_name="P",
         last_name="Q", status="active",
     ))
+    await db_session.flush()
     db_session.add(ApiKeyORM(
         id="apk_live", user_id="usr_p", kind="personal", name="n",
         token_prefix="nxpat_aaaaaaaa", token_hash="h" * 64, permissions="{}",

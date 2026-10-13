@@ -24,6 +24,7 @@ from backend.app.db.engine import (
     get_readonly_db_session,
 )
 from backend.app.db.models import (
+    ProviderORM,
     RoleBindingORM,
     UserORM,
     ViewORM,
@@ -65,8 +66,10 @@ async def world(session) -> None:
     session.add(user_row(OTHER))
     for ws in ("ws_a", "ws_b"):
         session.add(WorkspaceORM(id=ws, name=ws))
+    session.add(ProviderORM(id="prov", name="prov", provider_type="mock", permitted_workspaces="[]"))
     for ds, ws in (("ds_a", "ws_a"), ("ds_a2", "ws_a"), ("ds_b", "ws_b")):
         session.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id="prov"))
+    await session.flush()  # the views below name these data sources
     for vid, ws, visibility, creator, ds in (
         ("v_a_ws", "ws_a", "workspace", OTHER, "ds_a"),
         ("v_a_mine", "ws_a", "private", OWNER, None),
