@@ -12,7 +12,8 @@
  * `&scope=workspace` renders a workspace admin's tab; `&theme=dark` the dark
  * palette; `&event=evt_0002` opens the drawer on that event; `&person=usr_7f3a`
  * puts that person in focus; `&kept=1` shows a range reaching back past what
- * the log keeps, scrolled to its end.
+ * the log keeps, scrolled to its end. Any `act_*` param (`&act_q=ledger`)
+ * passes straight through to the explorer.
  */
 import { StrictMode, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -86,6 +87,7 @@ function Harness() {
     return (
         <QueryClientProvider client={queryClient}>
             <MemoryRouter initialEntries={[`/?${new URLSearchParams({
+                ...Object.fromEntries([...params].filter(([k]) => k.startsWith('act_'))),
                 ...(openEvent ? { act_event: openEvent } : {}),
                 ...(person ? { act_person: person, act_role: 'actor' } : {}),
             })}`]}>

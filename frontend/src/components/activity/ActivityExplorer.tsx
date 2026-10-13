@@ -67,6 +67,19 @@ export function ActivityExplorer({ scope }: { scope: ActivityScope }) {
         return out
     }, [timeline.events, summary.data])
 
+    // Words this range can answer, for an empty search: what people said, and
+    // the sources and targets acted on most. Search reads reasons, targets'
+    // names and payloads, so each of these finds something.
+    const searchSuggestions = useMemo(() => {
+        const s = summary.data
+        if (!s) return []
+        return [
+            ...s.topReasons.map((r) => r.reason),
+            ...s.handsOnSources.map((h) => h.name),
+            ...s.topTargets.map((t) => t.label),
+        ].filter((x): x is string => !!x)
+    }, [summary.data])
+
     // The open event's neighbours are the rows either side of it, as shown:
     // a folded run is one stop, not twelve.
     const rowIds = useMemo(
@@ -116,6 +129,8 @@ export function ActivityExplorer({ scope }: { scope: ActivityScope }) {
                 isFetching={summary.isFetching || timeline.isFetching}
                 names={names}
                 onShowShortcuts={showShortcuts}
+                people={summary.data?.topPeople}
+                searchSuggestions={searchSuggestions}
             />
             {isPersonId(params.person) && (
                 <ActivityPersonSpotlight
@@ -147,6 +162,7 @@ export function ActivityExplorer({ scope }: { scope: ActivityScope }) {
                 newer={newer.data ?? null}
                 onShowNewer={() => { void timeline.refetch() }}
                 onClearFilters={params.activeFilterCount > 0 ? params.clearFilters : undefined}
+                highlight={params.q}
             />
             <ActivityEventDrawer
                 scope={scope}

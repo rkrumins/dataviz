@@ -17,7 +17,7 @@ import { activityLinks } from '../activityLinks'
 import { groupEvents } from '../groupEvents'
 import { attentionItems } from '../attention'
 import {
-    cadencePhrase, isPersonId, reasonExpected, retentionPhrase, workspaceActivityScope,
+    cadencePhrase, isPersonId, reasonExpected, retentionPhrase, spanToRange, workspaceActivityScope,
 } from '../activityMeta'
 
 const Q: ActivityQuery = { range: { kind: 'preset', days: 30 } }
@@ -248,5 +248,20 @@ describe('what needs attention', () => {
             reasons: { given: 4, of: 40, share: 0.1 },
         }))
         expect(items.map((i) => i.kind)).toEqual(['toil', 'toil', 'surge'])
+    })
+})
+
+describe('a span picked on the chart is a range of days', () => {
+    it('from the first day to the last, for day buckets', () => {
+        expect(spanToRange(['2026-10-01', '2026-10-02', '2026-10-03'], 'day', 0, 1, '2026-10-03'))
+            .toEqual({ kind: 'custom', from: '2026-10-01', to: '2026-10-02' })
+    })
+
+    it('to the end of the last week, but never past the window', () => {
+        const weeks = ['2026-07-01', '2026-07-08', '2026-07-15']
+        expect(spanToRange(weeks, 'week', 0, 1, '2026-07-18'))
+            .toEqual({ kind: 'custom', from: '2026-07-01', to: '2026-07-14' })
+        expect(spanToRange(weeks, 'week', 1, 2, '2026-07-18'))
+            .toEqual({ kind: 'custom', from: '2026-07-08', to: '2026-07-18' })
     })
 })

@@ -10,12 +10,12 @@
  * than usual"; the volume chart and the punchcard answer "what kind" and
  * "when"; the leaderboards answer "who" and "where"; the reasons answer "why".
  */
-import { useMemo } from 'react'
-import { Activity, Hand, Info, MessageSquareQuote, Users } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Activity, Hand, Info, MessageSquareQuote, Undo2, Users } from 'lucide-react'
 
 import { KpiCard } from '@/components/analytics/KpiCard'
 import { Leaderboard, type LeaderboardRow } from '@/components/analytics/Leaderboard'
-import { comparisonLabel } from '@/components/analytics/RangePicker'
+import { comparisonLabel, rangeLabel, todayIso } from '@/components/analytics/RangePicker'
 import { ChartFrame } from '@/components/analytics/charts/ChartFrame'
 import { ChartTable } from '@/components/analytics/charts/ChartTable'
 import { PunchcardGrid } from '@/components/analytics/charts/PunchcardGrid'
@@ -29,10 +29,11 @@ import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
 import { describeInstant } from '@/lib/smartTime'
 import type { ActivityHandsOnPerson, ActivitySummary } from '@/services/activityService'
+import { rangeKey, type AnalyticsRangeSelection } from '@/services/analyticsService'
 
 import { ActivityAttention } from './ActivityAttention'
 import { attentionItems } from './attention'
-import { CATEGORY_META, cadencePhrase } from './activityMeta'
+import { CATEGORY_META, cadencePhrase, spanToRange } from './activityMeta'
 import type { ActivityParams } from './useActivityParams'
 
 /** The server's delta is a ratio; a KPI card shows percent. */
@@ -73,6 +74,12 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
         () => (summary ? attentionItems(summary, { personFiltered: !!params.person }) : []),
         [summary, params.person],
     )
+    // Each zoom from the chart remembers the range it replaced, so Back
+    // retraces them. Offered only while the range is still the zoom's own: a
+    // range picked some other way has moved on from it.
+    const [zooms, setZooms] = useState<{ from: AnalyticsRangeSelection; to: AnalyticsRangeSelection }[]>([])
+    const back = zooms.at(-1)
+    const canGoBack = !!back && rangeKey(back.to) === rangeKey(params.range)
 
     if (error && !summary) {
         return (
@@ -93,6 +100,19 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
     const vs = comparisonLabel(params.range)
     const weekly = window.granularity === 'week'
     const formatBucket = (b: string) => (weekly ? `Week of ${shortDate(b, true)}` : shortDate(b, true))
+    const lastDay = params.range.kind === 'custom' ? params.range.to : todayIso()
+    const spanOf = (first: number, last: number) => spanToRange(window.buckets, window.granularity, first, last, lastDay)
+    const zoomTo = (first: number, last: number) => {
+        if (first === 0 && last === window.buckets.length - 1) return   // already the whole range
+        const next = spanOf(first, last)
+        setZooms((z) => [...z, { from: params.range, to: next }])
+        params.setRange(next)
+    }
+    const goBack = () => {
+        if (!back) return
+        setZooms((z) => z.slice(0, -1))
+        params.setRange(back.from)
+    }
     const series = summary.volume.map((v) => ({
         key: v.category,
         label: CATEGORY_META[v.category]?.label ?? v.category,
@@ -191,9 +211,19 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <ChartFrame
                     title="What happened, by kind"
-                    subtitle={weekly ? 'Events per week' : 'Events per day'}
+                    subtitle={`${weekly ? 'Events per week' : 'Events per day'} · drag across it to zoom in`}
                     className="xl:col-span-2"
                     isStale={isStale}
+                    action={canGoBack ? (
+                        <button
+                            type="button"
+                            onClick={goBack}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2.5 py-1 text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                        >
+                            <Undo2 className="h-3 w-3" aria-hidden />
+                            Back to {rangeLabel(back!.from).replace(/^Last/, 'the last')}
+                        </button>
+                    ) : undefined}
                     isEmpty={totalsByBucket.every((n) => n === 0)}
                     emptyLabel="Nothing recorded in this range."
                     series={series.map((s) => ({
@@ -208,7 +238,14 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
                         />
                     )}
                 >
-                    <StackedAreaChart buckets={window.buckets} series={series} formatBucket={formatBucket} height={220} />
+                    <StackedAreaChart
+                        buckets={window.buckets} series={series} formatBucket={formatBucket} height={220}
+                        onSelectSpan={zoomTo}
+                        formatSpan={(first, last) => {
+                            const { from, to } = spanOf(first, last)
+                            return from === to ? shortDate(from, true) : `${shortDate(from)} – ${shortDate(to, true)}`
+                        }}
+                    />
                 </ChartFrame>
 
                 <ChartFrame

@@ -66,6 +66,16 @@ operates, manual operations up by half or more, and changes that mostly gave no 
 hands-on source shows the faces of the people who keep operating it, and picking a person puts
 them in focus: who they are, when they are busiest and what they do most.
 
+**Zoom in from the chart, and search that helps.** Drag across *What happened, by kind* — or click
+one day or week — and the whole explorer narrows to exactly those days, as a log console's
+histogram does; *Back* retraces each zoom. Search is the widest field on the bar: focused, it
+offers the searches made here before (kept in this browser) and words the range can answer — the
+reasons people gave, the sources and targets acted on most — picked with ↑/↓ and Enter, and what
+it matched is marked in each row. A range longer than search reads offers *Search the last 90
+days* instead of a disabled box. Under it, a person is picked by face from the people active in
+the range and then reads as their name; their part, the actions (several at once), the outcome and
+whether a reason was given are pills, each saying what it is set to.
+
 **Analytics → Data: what the platform holds, and how it got there.** Entities and relationships as
 they stood at the end of each period — so a pruned graph shows as a fall — overall, by workspace
 and by kind of source, with the sources that moved most; sources onboarded, under version control
