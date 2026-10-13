@@ -64,18 +64,24 @@ import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { useQueryClient } from '@tanstack/react-query'
 import { FilterDropdown } from '@/components/explorer/FilterDropdown'
-import { useViewFacets } from '@/hooks/useViewFacets'
 import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
 import { resolveFilters } from '@/features/view-filters/params'
 import { writeFilterState } from '@/features/view-filters/url'
 import { filterChips } from '@/features/view-filters/dimensions'
+import { useLiveFacets } from '@/features/view-filters/useLiveFacets'
+import { useRelaxations } from '@/features/view-filters/useRelaxations'
+import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
+import { withCounts } from '@/features/view-filters/facetOptions'
+import { SOURCE_KIND_META } from '@/features/view-filters/sourceKindMeta'
+import { RelaxationList } from '@/features/view-filters/components/RelaxationList'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
 import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
-import { peopleFromFacets, currentPersonOf } from '@/features/view-filters/people'
+import { currentPersonOf } from '@/features/view-filters/people'
 import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
 
 type Visibility = 'private' | 'workspace' | 'enterprise'
@@ -130,30 +136,45 @@ export default function WorkspaceViewsSection({
     const today = useLocalDay()
     const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
+    const resolveCtx = useMemo(
+        () => ({ currentUserId: currentUser?.id ?? null, today, scopeWorkspaceId: wsId }),
+        [currentUser?.id, today, wsId],
+    )
     const filters: ExplorerFilters = useMemo(() => ({
-        ...resolveFilters(fstate, {
-            currentUserId: currentUser?.id ?? null, today, scopeWorkspaceId: wsId,
-        }),
+        ...resolveFilters(fstate, resolveCtx),
         sort,
         favouritedOnly: false,
         limit: 60,
         offset: 0,
-    }), [fstate, wsId, sort, today, currentUser?.id])
+    }), [fstate, resolveCtx, sort])
 
-    // People who made or edited this workspace's views — from the server, so
-    // the list isn't limited to the first page of views the parent loaded.
-    const { facets } = useViewFacets(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
-    const people = useMemo(() => peopleFromFacets(facets), [facets])
+    // People, sources and counts for this workspace — from the server, so they
+    // aren't limited to the first page of views the parent loaded, and with
+    // each option's count following the other filters.
+    const { universe, people, counts, sourceKinds, pending: countsPending } = useLiveFacets(fstate, resolveCtx)
     const lookups = useFilterLookups(people, today, currentUser?.id)
     const chips = useMemo(
         () => filterChips(fstate, lookups, ['workspace', 'category', 'search']),
         [fstate, lookups],
     )
+    const sourceOptions = useMemo(() => {
+        const kinds = new Map((universe.dataSources ?? []).map(d => [d.id, d.kind]))
+        return withCounts(dataSources, ds => ds.id, counts.dataSources)
+            .map(({ option: ds, count }) => {
+                const kind = kinds.get(ds.id)
+                const meta = kind ? SOURCE_KIND_META[kind] : null
+                return {
+                    id: ds.id, label: ds.label || ds.catalogItemId || ds.id, count,
+                    icon: meta?.icon ?? Database, iconClassName: meta?.glyph ?? 'text-emerald-500',
+                }
+            })
+    }, [dataSources, universe.dataSources, counts.dataSources])
 
     const {
-        views: loadedViews, totalCount, isLoading,
+        views: loadedViews, totalCount, isLoading, error: listError,
         toggleFavourite, removeView, refetch, loadMore, hasMore,
     } = useExplorerViews(filters)
+    const queryClient = useQueryClient()
     const healthMap = useViewHealth(loadedViews)
 
     // Same batched call as the Explorer, and the same reason: a card fetching
@@ -168,17 +189,20 @@ export default function WorkspaceViewsSection({
     const { stats } = useViewStats(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
 
     // ─── Insight header (whole-workspace population) ─────────────────
+    // The counts come from the server, over the whole workspace: `allViews` is
+    // only the first page the parent loads, so counting it understated every
+    // number in a large workspace. The last activity still reads it — the
+    // newest changes are on that first page.
     const insight = useMemo(() => {
-        let mine = 0, priv = 0, wsVis = 0, ent = 0
-        const owners = new Set<string>()
+        const visibilityCount = (v: string) => universe.visibilities?.find(x => x.value === v)?.count
+        // The unfiltered people, not the toolbar's: their numbers follow the filters.
+        const everyone = universe.contributors
+        const owners = everyone
+            ? everyone.filter(p => p.createdCount > 0).length
+            : new Set(allViews.map(v => v.createdBy).filter(Boolean)).size
         let lastAt: string | null = null
         let lastBy: string | null = null
         for (const v of allViews) {
-            if (currentUser?.id && v.createdBy === currentUser.id) mine++
-            if (v.visibility === 'private') priv++
-            else if (v.visibility === 'workspace') wsVis++
-            else if (v.visibility === 'enterprise') ent++
-            if (v.createdBy) owners.add(v.createdBy)
             const dataAt = v.dataUpdatedAt ?? null
             const freshest = dataAt && dataAt > v.updatedAt ? dataAt : v.updatedAt
             if (freshest && (!lastAt || freshest > lastAt)) {
@@ -187,8 +211,19 @@ export default function WorkspaceViewsSection({
                     ?? v.createdByName ?? null
             }
         }
-        return { total: allViews.length, mine, priv, wsVis, ent, owners: owners.size, lastAt, lastBy }
-    }, [allViews, currentUser?.id])
+        return {
+            total: stats.total || allViews.length,
+            mine: everyone
+                ? (everyone.find(p => p.userId === currentUser?.id)?.createdCount ?? 0)
+                : allViews.filter(v => currentUser?.id && v.createdBy === currentUser.id).length,
+            priv: visibilityCount('private') ?? allViews.filter(v => v.visibility === 'private').length,
+            wsVis: visibilityCount('workspace') ?? allViews.filter(v => v.visibility === 'workspace').length,
+            ent: visibilityCount('enterprise') ?? allViews.filter(v => v.visibility === 'enterprise').length,
+            owners,
+            lastAt,
+            lastBy,
+        }
+    }, [allViews, currentUser?.id, universe.visibilities, universe.contributors, stats.total])
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -220,12 +255,14 @@ export default function WorkspaceViewsSection({
         removeView(id)
         setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n })
         notify('success', `"${name}" has been deleted`)
+        invalidateViewAggregates(queryClient)
     }
 
     const handleRestore = async (view: View) => {
         try {
             await restoreViewApi(view.id)
             refetch()
+            invalidateViewAggregates(queryClient)
             notify('success', `"${view.name}" has been restored`)
         } catch {
             notify('error', `Failed to restore "${view.name}"`)
@@ -249,6 +286,7 @@ export default function WorkspaceViewsSection({
             await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
             setSelectedIds(new Set())
             refetch()
+            invalidateViewAggregates(queryClient)
             notify('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
         } catch {
             notify('error', 'Some views could not be updated')
@@ -287,6 +325,7 @@ export default function WorkspaceViewsSection({
             setDenyReason('')
             setConfirmingId(null)
             refetch()
+            invalidateViewAggregates(queryClient)
             onWorkspaceChanged?.()
             notify('success', successMessage)
         } catch (err) {
@@ -332,11 +371,16 @@ export default function WorkspaceViewsSection({
         ids.forEach(id => removeView(id))
         setSelectedIds(new Set())
         setShowBulkDelete(false)
+        invalidateViewAggregates(queryClient)
         notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     }
 
     const hasActiveFilters = isAnyFilterActive(fstate, { workspace: true })
     const clearFilters = () => setFstate(EMPTY_FILTERS)
+    const relaxations = useRelaxations(fstate, resolveCtx, lookups, {
+        enabled: !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters,
+        hide: ['workspace'],
+    })
 
     // Shared per-view action props for card + row.
     const actionProps = (v: View) => ({
@@ -650,6 +694,7 @@ export default function WorkspaceViewsSection({
                 <SourceKindToggle
                     value={fstate.sourceKind}
                     onChange={v => patchFilters({ sourceKind: v })}
+                    counts={sourceKinds}
                 />
                 <DateFilterMenu
                     created={fstate.created}
@@ -670,7 +715,8 @@ export default function WorkspaceViewsSection({
                     accent="emerald"
                     selectionMode="single"
                     disableSearch={dataSources.length < 8}
-                    options={dataSources.map(ds => ({ id: ds.id, label: ds.label || ds.catalogItemId || ds.id }))}
+                    options={sourceOptions}
+                    countsPending={countsPending}
                     selectedIds={fstate.dataSourceId ? [fstate.dataSourceId] : []}
                     onChange={ids => patchFilters({ dataSourceId: ids[0] ?? null })}
                     activeLabelFormatter={(ids, opts) => opts.find(o => o.id === ids[0])?.label ?? 'Source'}
@@ -752,11 +798,19 @@ export default function WorkspaceViewsSection({
                     <h4 className="text-sm font-bold text-ink mb-1">
                         {hasActiveFilters ? 'No matching views' : 'No views yet'}
                     </h4>
-                    <p className="text-xs text-ink-muted mb-4 max-w-sm mx-auto">
-                        {hasActiveFilters
-                            ? 'Try a different search or filter.'
-                            : 'Views are saved visual perspectives on this workspace’s graph data. Create one to get started.'}
-                    </p>
+                    {hasActiveFilters && relaxations.length > 0 ? (
+                        <RelaxationList
+                            relaxations={relaxations}
+                            onRelax={setFstate}
+                            className="mx-auto mb-4 max-w-md px-4"
+                        />
+                    ) : (
+                        <p className="text-xs text-ink-muted mb-4 max-w-sm mx-auto">
+                            {hasActiveFilters
+                                ? 'Try a different search or filter.'
+                                : 'Views are saved visual perspectives on this workspace’s graph data. Create one to get started.'}
+                        </p>
+                    )}
                     {hasActiveFilters ? (
                         <button
                             onClick={clearFilters}

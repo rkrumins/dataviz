@@ -35,9 +35,20 @@ and Source sit in its toolbar, with the same chips underneath. Its People list c
 server, so it names everyone, not just the people behind the first 50 views. **Browse in
 Explorer** now opens the Explorer with the tab's filters.
 
+**Every filter shows what it would leave.** Each option in the Workspace, Source, Type, Tag,
+Visibility and People menus, and the Versioned and External buttons, shows how many views it would
+leave given your other filters; a choice that would leave none is greyed out. The Source menu also
+marks each source Versioned or External and names its workspace.
+
+**No dead ends.** When nothing matches, the Explorer and the workspace Views tab list each active
+filter with how many views removing just that one would bring back — click one to drop it — instead
+of only offering to clear everything. **Clear all filters** now has an **Undo**.
+
 API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
 `updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
-`/views/facets` takes `workspaceIds` and returns `contributors`.
+`/views/facets` takes every list filter plus `fields`, counts each dimension with the OTHER filters
+applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
+`GET /views/count` returns how many views a filter set leaves.
 
 ### Changed
 
@@ -47,6 +58,8 @@ API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`,
 - **The preview's data-source line names version control.** It said *Managed graph* or *External
   graph* from how the source was first connected, which called many versioned sources external.
 - **Clearing every filter keeps your sort and layout.**
+- **The workspace Views tab counts the whole workspace.** Its summary counted only the first 50
+  views the page loaded, so in a large workspace every number was short.
 - An invalid `createdAfter` is now refused with a 422 instead of being compared as text.
 - **A version store that goes down is asked again every 30 seconds, not on every request.** The
   versioned-sources lookup kept serving its last answer after a failed refresh but retried on the

@@ -1390,6 +1390,38 @@ class ViewFacetContributor(BaseModel):
         populate_by_name = True
 
 
+class ViewFacetWorkspace(BaseModel):
+    """A workspace facet row; ``name`` falls back to the id when unresolvable."""
+    id: str
+    name: str
+    count: int
+
+
+class ViewFacetDataSource(BaseModel):
+    """A data-source facet row. ``kind`` is None when the versioned set is
+    unknown; ``name`` falls back to the id when the source has no label."""
+    id: str
+    name: str
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    kind: Optional[Literal["versioned", "external"]] = None
+    count: int
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewFacetSourceKinds(BaseModel):
+    """How many views each Versioned / External choice would leave."""
+    versioned: int
+    external: int
+
+
+class ViewCountResponse(BaseModel):
+    """``GET /views/count`` — the list's ``total`` without the rows."""
+    total: int
+
+
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 
@@ -1409,17 +1441,22 @@ class ViewCatalogStats(BaseModel):
 class ViewFacetsResponse(BaseModel):
     """Aggregate facets across the views table.
 
-    Used by the Explorer to populate the Tag / View Type / Creator
-    dropdowns so users can pick from the real set of values in the
-    database rather than a derived-from-current-page approximation.
-    Facets are intentionally GLOBAL (not filter-scoped) so dropdowns
-    always offer the full option space — see ``GET /views/stats`` for
-    filter-aware counts.
+    Used by the Explorer's filter dropdowns, from the real set of values in
+    the database rather than a derived-from-current-page approximation.
+    Each facet is counted under every active filter except its own, so a
+    count says what choosing that option would leave (see
+    ``view_repo.get_view_facets``). A facet the caller did not ask for
+    (``fields``) is empty, and ``source_kinds`` None.
     """
     tags: List[ViewFacetValue]
     view_types: List[ViewFacetValue] = Field(alias="viewTypes")
     creators: List[ViewFacetCreator]
     contributors: List[ViewFacetContributor] = Field(default_factory=list)
+    workspaces: List[ViewFacetWorkspace] = Field(default_factory=list)
+    data_sources: List[ViewFacetDataSource] = Field(default_factory=list, alias="dataSources")
+    visibilities: List[ViewFacetValue] = Field(default_factory=list)
+    # None when not asked for, or while the versioned set cannot be read.
+    source_kinds: Optional[ViewFacetSourceKinds] = Field(None, alias="sourceKinds")
 
     class Config:
         populate_by_name = True

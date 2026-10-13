@@ -34,8 +34,11 @@ all the words. To find the views one person made or edited, use the
 **People** filter instead (next section). When you click into the empty search box, your
 **Recent searches** in this browser appear; **Clear** empties the list.
 
-> **If you don't see the view:** the list says **No views match your search**.
-> Click **Show all views** to clear the search and filters, then try again.
+> **If you don't see the view:** the list says **No views match your search**
+> (or **these filters**). Under it, each filter you have set is listed with how
+> many views removing just that one would bring back — click one to remove it.
+> **Show all views** clears the search and every filter; the message that
+> follows has an **Undo**.
 > Still missing? See
 > [I can't find a view someone shared](#i-cant-find-a-view-someone-shared).
 
@@ -59,6 +62,11 @@ The row below holds the filters you can combine: **Versioned** and
 Each one you set shows as a chip under the row, such as *Workspace: Finance* or
 *Edited by: You*. Click a chip's **×** to remove it, or **Clear all** to remove
 every filter in the row.
+
+Every choice in these menus shows how many views it would leave, counting your
+other filters, and so do the **Versioned** and **External** buttons. A choice
+that would leave none is greyed out, so you can see a dead end before you click
+it.
 
 - **Filter by a tag from a card.** Click any tag on a card to filter by it;
   click it again to remove it.

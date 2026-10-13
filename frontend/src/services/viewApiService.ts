@@ -340,7 +340,34 @@ export interface ViewFacetsResponse {
     creators: ViewFacetCreator[]
     /** Absent from servers that predate the People filter. */
     contributors?: ViewFacetContributor[]
+    /** Absent from servers that predate live facet counts. */
+    workspaces?: ViewFacetWorkspace[]
+    dataSources?: ViewFacetDataSource[]
+    visibilities?: ViewFacetValue[]
+    /** Null when the server couldn't tell versioned sources from external ones. */
+    sourceKinds?: { versioned: number; external: number } | null
 }
+
+export interface ViewFacetWorkspace {
+    id: string
+    name: string
+    count: number
+}
+
+export interface ViewFacetDataSource {
+    id: string
+    name: string
+    /** Null when the source's record is gone. */
+    workspaceId?: string | null
+    workspaceName?: string | null
+    kind?: 'versioned' | 'external' | null
+    count: number
+}
+
+/** The facets a request can ask for; omit to get them all. */
+export type ViewFacetField =
+    | 'tags' | 'viewTypes' | 'creators' | 'contributors'
+    | 'workspaces' | 'dataSources' | 'visibilities' | 'sourceKinds'
 
 // ============================================
 // API Client
@@ -443,14 +470,20 @@ export async function listPopularViews(limit = 20): Promise<View[]> {
 }
 
 /**
- * Aggregate distinct tags, view types, and creators across non-deleted views.
+ * Aggregate distinct tags, view types, creators and the rest across live views.
  *
- * Used to populate Explorer filter dropdowns from the authoritative
- * DB-wide set rather than deriving from the currently-loaded page.
+ * Without params: the catalogue-wide set the filter menus list their options
+ * from. With params: each dimension counted with every OTHER filter applied —
+ * how many views each option would leave — which is what the menus show
+ * beside their options.
  */
-export async function getViewFacets(params?: ViewFilterParams): Promise<ViewFacetsResponse> {
+export async function getViewFacets(
+    params?: ViewFilterParams,
+    fields?: ViewFacetField[],
+): Promise<ViewFacetsResponse> {
     const sp = new URLSearchParams()
     appendViewQuery(sp, params)
+    fields?.forEach(f => sp.append('fields', f))
     const qs = sp.toString()
     return apiFetch<ViewFacetsResponse>(`/api/v1/views/facets${qs ? `?${qs}` : ''}`)
 }

@@ -39,6 +39,9 @@ from backend.common.models.management import (
     ViewFacetValue,
     ViewFacetCreator,
     ViewFacetContributor,
+    ViewFacetDataSource,
+    ViewFacetSourceKinds,
+    ViewFacetWorkspace,
     ViewFacetsResponse,
     ViewCatalogStats,
 )
@@ -1728,6 +1731,15 @@ def _view_order_by(sort: Optional[str]):
     return [ViewORM.updated_at.desc()]
 
 
+async def count_views(session: AsyncSession, **filters) -> int:
+    """How many views ``_apply_view_filters(**filters)`` leaves: the list's
+    ``total`` (``list_views_filtered`` counts through here), without the rows."""
+    # COUNT(DISTINCT id): DISTINCT guards against the joins multiplying rows
+    # when a view has many favourites (for favourited_only queries) or other cases.
+    query = _apply_view_filters(select(func.count(func.distinct(ViewORM.id))), **filters)
+    return (await session.execute(query)).scalar_one() or 0
+
+
 async def list_views_filtered(
     session: AsyncSession,
     *,
@@ -1810,19 +1822,10 @@ async def list_views_filtered(
         .offset(offset)
     )
 
-    # Count query uses the same filters but selects COUNT(DISTINCT id).
-    # DISTINCT guards against the joins multiplying rows when a view has
-    # many favourites (for favourited_only queries) or other cases.
-    count_query = _apply_view_filters(
-        select(func.count(func.distinct(ViewORM.id))),
-        **filter_kwargs,
-    )
-
     result = await session.execute(select_query)
     rows = result.scalars().unique().all()
 
-    count_result = await session.execute(count_query)
-    total = count_result.scalar_one() or 0
+    total = await count_views(session, **filter_kwargs)
 
     if _batch_enrich_enabled():
         responses = await _batch_enrich_rows(session, rows, user_id)
@@ -1839,155 +1842,275 @@ async def list_views_filtered(
     )
 
 
+#: Every facet ``get_view_facets`` can compute, by its name in the response.
+FACET_FIELDS = (
+    "tags", "viewTypes", "creators", "contributors",
+    "workspaces", "dataSources", "visibilities", "sourceKinds",
+)
+
+# The filters each facet leaves out. A facet counted under its own selection
+# would read 0 for every option but the chosen one, so the menu could no longer
+# say what switching to another option leaves. Creators and contributors share
+# one query; ``created_by`` stays in it, because it is My Views — a scope, not a
+# person picked from that menu.
+_OWN_FILTERS = {
+    "tags": ("tags",),
+    "viewTypes": ("view_type", "view_types"),
+    "workspaces": ("workspace_id", "workspace_ids"),
+    "dataSources": ("data_source_id",),
+    "visibilities": ("visibility", "visibility_in"),
+    "people": ("contributor_in", "contributor_role", "created_by_in"),
+    "sourceKinds": ("source_kind",),
+}
+
+# Tags and people run to thousands on a large catalog, and a menu shows the top
+# of them. A value the request has selected is kept past the cap: a selection
+# must never vanish from its own menu.
+_FACET_CAP = 500
+
+
+def _person(user_id: Optional[str]) -> Optional[str]:
+    """NULL, empty and the legacy "anonymous" sentinel are nobody."""
+    return user_id if user_id and user_id != "anonymous" else None
+
+
+def _capped(rows: list, key, is_selected) -> list:
+    """``rows`` ranked by ``key``: the first ``_FACET_CAP``, then any selected one
+    past them (still in rank order)."""
+    ranked = sorted(rows, key=key)
+    return ranked[:_FACET_CAP] + [r for r in ranked[_FACET_CAP:] if is_selected(r)]
+
+
+async def _workspace_and_source_names(
+    session: AsyncSession, ws_ids, ds_ids,
+) -> tuple[Dict[str, str], Dict[str, tuple]]:
+    """Names for the workspace and data-source facets, in one statement:
+    ``({ws_id: name}, {ds_id: (label, ws_id, ws_name)})``.
+
+    One statement because both tables are the workspace domain's, so joining
+    them is not the cross-domain kind (DOMAIN_OWNERSHIP.md); the views are only
+    ever matched to either by id. A source's workspace comes from the source
+    itself, not from the views that name it.
+    """
+    if not ws_ids and not ds_ids:
+        return {}, {}
+    rows = (await session.execute(
+        select(
+            WorkspaceORM.id, WorkspaceORM.name,
+            WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
+        )
+        .select_from(WorkspaceORM)
+        .outerjoin(
+            WorkspaceDataSourceORM,
+            and_(
+                WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id,
+                WorkspaceDataSourceORM.id.in_(list(ds_ids)),
+            ),
+        )
+        .where(or_(
+            WorkspaceORM.id.in_(list(ws_ids)),
+            WorkspaceDataSourceORM.id.isnot(None),
+        ))
+    )).all()
+    ws_names: Dict[str, str] = {}
+    sources: Dict[str, tuple] = {}
+    for ws_id, ws_name, ds_id, ds_label in rows:
+        ws_names[ws_id] = ws_name
+        if ds_id:
+            sources[ds_id] = (ds_label, ws_id, ws_name)
+    return ws_names, sources
+
+
 async def get_view_facets(
     session: AsyncSession,
     *,
-    readable=None,
-    workspace_ids: Optional[List[str]] = None,
+    fields: Sequence[str] = FACET_FIELDS,
+    **filters,
 ) -> ViewFacetsResponse:
-    """Aggregate distinct tags, view types, creators and contributors across
-    non-deleted views.
+    """The Explorer's filter menus: each facet's values, and how many views each
+    would leave.
 
-    Used by the Explorer to populate the Tag / View Type / Creator / contributor
-    filter dropdowns. Facets are intentionally unscoped by the caller's *other*
-    active filters (the picker is a discovery tool, not a query
-    refinement) — but ALWAYS scoped by ``readable``: a facet computed
-    over views the caller cannot read leaks their tags and creators.
-    ``workspace_ids`` narrows them to the workspaces an Explorer is showing.
+    ``filters`` are ``_apply_view_filters`` kwargs — what the list applies,
+    ``readable`` and the category's ``ids_in`` / ``created_by_not`` included.
+    Every facet is counted through ``_apply_view_filters`` with only its own
+    filter left out (``_OWN_FILTERS``), so an option's count is the list's
+    ``total`` were that option chosen instead — and nothing is ever counted
+    beyond the caller's read reach (``readable``) or outside ``view_is_live``:
+    an unscoped facet leaks private views' tags and people, which is how the
+    endpoint first shipped. ``source_kind_sets`` must accompany ``source_kind``;
+    without sets ``sourceKinds`` is None and a data source's ``kind`` unknown.
+
+    One statement per facet plus one user and one name lookup, whatever the
+    catalog's size: nine at most. Facets not in ``fields`` are left empty.
     """
-    base_where = view_is_live()
-    if readable is not None:
-        base_where = and_(base_where, readable)
-    if workspace_ids:
-        base_where = and_(base_where, ViewORM.workspace_id.in_(workspace_ids))
-
-    # 1. Tags — parsed in Python since the column is a JSON string.
-    tags_query = (
-        select(ViewORM.tags)
-        .where(base_where)
-        .where(ViewORM.tags.isnot(None))
-    )
-    tags_result = await session.execute(tags_query)
-    tag_counts: Dict[str, int] = {}
-    for (tags_json,) in tags_result.all():
-        try:
-            parsed = json.loads(tags_json) if tags_json else []
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(parsed, list):
-            continue
-        for t in parsed:
-            if isinstance(t, str) and t:
-                tag_counts[t] = tag_counts.get(t, 0) + 1
-    tag_facets = [
-        ViewFacetValue(value=v, count=c)
-        for v, c in sorted(tag_counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-
-    # 2. View types — direct GROUP BY.
-    vt_query = (
-        select(ViewORM.view_type, func.count().label("cnt"))
-        .where(base_where)
-        .group_by(ViewORM.view_type)
-        .order_by(func.count().desc())
-    )
-    vt_result = await session.execute(vt_query)
-    view_type_facets = [
-        ViewFacetValue(value=vt or "graph", count=cnt)
-        for vt, cnt in vt_result.all()
-    ]
-
-    # 3. Creators — GROUP BY created_by + join users for display metadata.
-    creators_query = (
-        select(ViewORM.created_by, func.count(ViewORM.id).label("cnt"))
-        .where(base_where)
-        .where(ViewORM.created_by.isnot(None))
-        .group_by(ViewORM.created_by)
-        .order_by(func.count(ViewORM.id).desc())
-    )
-    creators_result = await session.execute(creators_query)
-    creator_rows = creators_result.all()
-
-    # Batch-resolve display names in a single query.
-    creator_ids = [cid for cid, _ in creator_rows if cid]
-    user_map: Dict[str, UserORM] = {}
-    if creator_ids:
-        users_result = await session.execute(
-            select(UserORM).where(UserORM.id.in_(creator_ids))
+    def counted(query, facet: str):
+        own = _OWN_FILTERS[facet]
+        return _apply_view_filters(
+            query, **{k: v for k, v in filters.items() if k not in own},
         )
-        for u in users_result.scalars().all():
-            user_map[u.id] = u
 
-    creator_facets: List[ViewFacetCreator] = []
-    for creator_id, cnt in creator_rows:
-        user = user_map.get(creator_id)
-        if user:
-            display_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email
-            email = user.email
-        else:
-            # Orphaned row — creator id is stored but the user record is
-            # gone or never existed (e.g. legacy "anonymous" sentinel).
-            display_name = creator_id
-            email = None
-        creator_facets.append(ViewFacetCreator(
-            user_id=creator_id,
-            display_name=display_name,
-            email=email,
-            count=cnt,
+    sets = filters.get("source_kind_sets")
+    n_views = func.count(func.distinct(ViewORM.id))
+    response = ViewFacetsResponse(tags=[], view_types=[], creators=[])
+
+    if "tags" in fields:
+        # Parsed in Python since the column is a JSON string.
+        tag_counts: Counter = Counter({t: 0 for t in filters.get("tags") or ()})
+        tag_rows = await session.execute(counted(
+            select(ViewORM.tags).where(ViewORM.tags.isnot(None)), "tags",
         ))
+        for (tags_json,) in tag_rows.all():
+            try:
+                parsed = json.loads(tags_json) if tags_json else []
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, list):
+                continue
+            for t in parsed:
+                if isinstance(t, str) and t:
+                    tag_counts[t] += 1
+        selected_tags = set(filters.get("tags") or ())
+        response.tags = [
+            ViewFacetValue(value=v, count=c)
+            for v, c in _capped(
+                list(tag_counts.items()), lambda x: (-x[1], x[0]),
+                lambda x: x[0] in selected_tags,
+            )
+        ]
 
-    # 4. Contributors — creator, last editor and last data publisher, from ONE
-    # grouped scan whose rows are (creator, editor, publisher) combinations.
-    contributor_rows = (await session.execute(
-        select(
-            ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by,
-            func.count(func.distinct(ViewORM.id)),
+    # A GROUP BY each; an unset value reads as the view itself shows it (_to_response).
+    for facet, column, unset, attr in (
+        ("viewTypes", ViewORM.view_type, "graph", "view_types"),
+        ("visibilities", ViewORM.visibility, "private", "visibilities"),
+    ):
+        if facet in fields:
+            value_rows = await session.execute(counted(
+                select(column, n_views).group_by(column), facet,
+            ))
+            setattr(response, attr, sorted(
+                (ViewFacetValue(value=v or unset, count=n) for v, n in value_rows.all()),
+                key=lambda f: (-f.count, f.value),
+            ))
+
+    if "creators" in fields or "contributors" in fields:
+        # Creator, last editor and last data publisher from ONE grouped scan
+        # whose rows are (creator, editor, publisher) combinations.
+        people_rows = (await session.execute(counted(
+            select(
+                ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by, n_views,
+            ).group_by(ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by),
+            "people",
+        ))).all()
+        # The creator facet lists every stored creator, the sentinel included.
+        by_creator: Counter = Counter()
+        created, edited, published, either = Counter(), Counter(), Counter(), Counter()
+        for creator, editor, publisher, n in people_rows:
+            if creator is not None:
+                by_creator[creator] += n
+            creator, editor, publisher = map(_person, (creator, editor, publisher))
+            if creator:
+                created[creator] += n
+            if editor:
+                edited[editor] += n
+            if publisher:
+                published[publisher] += n
+            # A set: whoever created AND last edited a view counts it once.
+            for person in {creator, editor} - {None}:
+                either[person] += n
+
+        # Only people in the views counted are looked up. One selected but in none
+        # of them is listed as sent — resolving any id a caller names would make
+        # this a directory of everyone, readable views or not.
+        people = set(either) | set(published)
+        selected_people = set(filter(None, map(_person, filters.get("contributor_in") or ())))
+        identities = await _resolve_user_identities(
+            session,
+            (set(by_creator) if "creators" in fields else set())
+            | (people if "contributors" in fields else set()),
         )
-        .where(base_where)
-        .group_by(ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by)
-    )).all()
-    created, edited, published, either = Counter(), Counter(), Counter(), Counter()
-    for creator, editor, publisher, n in contributor_rows:
-        # NULL and the legacy "anonymous" sentinel are nobody.
-        creator, editor, publisher = (
-            p if p and p != "anonymous" else None for p in (creator, editor, publisher)
+        if "creators" in fields:
+            creator_facets = []
+            for uid, n in by_creator.items():
+                # Unresolvable (record gone, or the legacy sentinel): the raw id.
+                name, email, _avatar = identities.get(uid, (uid, None, None))
+                creator_facets.append(ViewFacetCreator(
+                    user_id=uid, display_name=name, email=email, count=n,
+                ))
+            response.creators = sorted(
+                creator_facets, key=lambda c: (-c.count, c.display_name.lower(), c.user_id),
+            )
+        if "contributors" in fields:
+            contributor_facets = []
+            for uid in people | selected_people:
+                name, email, avatar_id = identities.get(uid, (uid, None, None))
+                contributor_facets.append(ViewFacetContributor(
+                    user_id=uid,
+                    display_name=name,
+                    email=email,
+                    avatar_id=avatar_id,
+                    count=either[uid],
+                    created_count=created[uid],
+                    edited_count=edited[uid],
+                    published_count=published[uid],
+                ))
+            response.contributors = _capped(
+                contributor_facets,
+                lambda c: (-c.count, -c.published_count, c.display_name.lower(), c.user_id),
+                lambda c: c.user_id in selected_people,
+            )
+
+    ws_counts: Dict[str, int] = {}
+    if "workspaces" in fields:
+        ws_counts = dict((await session.execute(counted(
+            select(ViewORM.workspace_id, n_views).group_by(ViewORM.workspace_id),
+            "workspaces",
+        ))).all())
+    ds_counts: Dict[str, int] = {}
+    if "dataSources" in fields:
+        # Only views that name their source: what ``dataSourceId`` matches.
+        ds_counts = dict((await session.execute(counted(
+            select(ViewORM.data_source_id, n_views)
+            .where(ViewORM.data_source_id.isnot(None))
+            .group_by(ViewORM.data_source_id),
+            "dataSources",
+        ))).all())
+    if ws_counts or ds_counts:
+        ws_names, sources = await _workspace_and_source_names(session, ws_counts, ds_counts)
+        response.workspaces = sorted(
+            (
+                ViewFacetWorkspace(id=ws_id, name=ws_names.get(ws_id) or ws_id, count=n)
+                for ws_id, n in ws_counts.items()
+            ),
+            key=lambda w: (-w.count, w.name.lower(), w.id),
         )
-        if creator:
-            created[creator] += n
-        if editor:
-            edited[editor] += n
-        if publisher:
-            published[publisher] += n
-        # A set: whoever created AND last edited a view counts it once.
-        for person in {creator, editor} - {None}:
-            either[person] += n
+        data_source_facets = []
+        for ds_id, n in ds_counts.items():
+            label, ws_id, ws_name = sources.get(ds_id, (None, None, None))
+            data_source_facets.append(ViewFacetDataSource(
+                id=ds_id,
+                name=label or ds_id,
+                workspace_id=ws_id,
+                workspace_name=ws_name,
+                kind=sets.kind_for(ds_id, ws_id) if sets is not None else None,
+                count=n,
+            ))
+        response.data_sources = sorted(
+            data_source_facets, key=lambda d: (-d.count, d.name.lower(), d.id),
+        )
 
-    people = set(either) | set(published)
-    identities = await _resolve_user_identities(session, people)
-    contributor_facets = []
-    for uid in people:
-        # Unresolvable (record gone): fall back to the raw id, like creators.
-        name, email, avatar_id = identities.get(uid, (uid, None, None))
-        contributor_facets.append(ViewFacetContributor(
-            user_id=uid,
-            display_name=name,
-            email=email,
-            avatar_id=avatar_id,
-            count=either[uid],
-            created_count=created[uid],
-            edited_count=edited[uid],
-            published_count=published[uid],
-        ))
-    contributor_facets.sort(key=lambda c: (
-        -c.count, -c.published_count, c.display_name.lower(), c.user_id,
-    ))
+    if "sourceKinds" in fields and sets is not None:
+        versioned, external = (await session.execute(counted(
+            select(
+                func.sum(case((source_kind_clause("versioned", sets), 1), else_=0)),
+                func.sum(case((source_kind_clause("external", sets), 1), else_=0)),
+            ),
+            "sourceKinds",
+        ))).one()
+        response.source_kinds = ViewFacetSourceKinds(
+            versioned=versioned or 0, external=external or 0,
+        )
 
-    return ViewFacetsResponse(
-        tags=tag_facets,
-        view_types=view_type_facets,
-        creators=creator_facets,
-        contributors=contributor_facets,
-    )
+    return response
 
 
 async def get_view_stats(

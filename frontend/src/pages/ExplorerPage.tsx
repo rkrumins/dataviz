@@ -11,6 +11,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw,
 } from 'lucide-react'
@@ -61,7 +62,12 @@ import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/featur
 import { readFilterState, writeFilterState } from '@/features/view-filters/url'
 import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
-import { currentPersonOf } from '@/features/view-filters/people'
+import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/people'
+import { activeDimensions } from '@/features/view-filters/dimensions'
+import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
+import { useRelaxations } from '@/features/view-filters/useRelaxations'
+import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
+import { useViewFacets } from '@/hooks/useViewFacets'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -188,6 +194,9 @@ export function ExplorerPage() {
   // no-op callback for aggregation banner (informational only — no longer gates view creation)
   const onAggregationStatus = useCallback((_isReady: boolean) => {}, [])
 
+  const { notify } = useAppNotifications()
+  const queryClient = useQueryClient()
+
   // ─── URL param setters ──────────────────────────────────────────────
 
   const setParam = useCallback((key: string, value: string | null) => {
@@ -205,11 +214,19 @@ export function ExplorerPage() {
     setSearchParams(prev => writeFilterState(prev, next), { replace: true })
   }, [setSearchParams])
 
-  // "Show all views": every filter goes, the person's sort and layout stay.
+  // "Show all views": every filter goes, the person's sort and layout stay —
+  // with an Undo, because a carefully built filter set is one click from gone.
   const clearAllFilters = useCallback(() => {
+    const previous = filterState
     setFilterState(EMPTY_FILTERS)
     setSearchInput('')
-  }, [setFilterState])
+    if (isAnyFilterActive(previous)) {
+      notify('info', 'Filters cleared', {
+        label: 'Undo',
+        onClick: () => { setFilterState(previous); setSearchInput(previous.search) },
+      })
+    }
+  }, [filterState, setFilterState, notify])
 
   // Debounced URL sync
   const searchSyncTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -281,6 +298,15 @@ export function ExplorerPage() {
   const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
   const hasActiveFilters = isAnyFilterActive(filterState)
+
+  // The way out of an empty list: one count per active filter, asked only
+  // while the list is empty. The universe facets are the filter bar's own
+  // (same cache entry), here for the people's names.
+  const { facets: universeFacets } = useViewFacets()
+  const people = useMemo(() => peopleFromFacets(universeFacets), [universeFacets])
+  const lookups = useFilterLookups(people, today, currentUser?.id)
+  const listEmpty = !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters
+  const relaxations = useRelaxations(filterState, resolveCtx, lookups, { enabled: listEmpty })
 
   const layout = parsed.layout
 
@@ -375,8 +401,6 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
-  const { notify } = useAppNotifications()
-
   const copyViewLink = useCopyViewLink()
   const handleShare = useCallback((view: View) => {
     void copyViewLink(view.id)
@@ -395,8 +419,9 @@ export function ExplorerPage() {
   const handleVisibilityChanged = useCallback(
     (viewId: string) => (visibility: 'private' | 'workspace' | 'enterprise') => {
       patchView(viewId, { visibility })
+      invalidateViewAggregates(queryClient)
     },
-    [patchView],
+    [patchView, queryClient],
   )
 
   // BE rule (views.py: can_delete_view): creator OR
@@ -437,7 +462,8 @@ export function ExplorerPage() {
     })
     // Notification
     notify('success', `"${deletedName}" has been deleted`)
-  }, [deleteView, removeViewFromList, notify])
+    invalidateViewAggregates(queryClient)
+  }, [deleteView, removeViewFromList, notify, queryClient])
 
   const handleBulkDelete = useCallback(() => {
     if (selectedIds.size === 0) return
@@ -463,7 +489,8 @@ export function ExplorerPage() {
     setSelectedIds(new Set())
     setShowBulkDelete(false)
     notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
-  }, [selectedIds, removeViewFromList, notify])
+    invalidateViewAggregates(queryClient)
+  }, [selectedIds, removeViewFromList, notify, queryClient])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
@@ -474,6 +501,7 @@ export function ExplorerPage() {
     const failed = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[]
     setSelectedIds(new Set())
     refetch()
+    invalidateViewAggregates(queryClient)
     if (failed.length === 0) {
       notify('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     } else {
@@ -494,7 +522,7 @@ export function ExplorerPage() {
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, notify, refetch])
+  }, [selectedIds, notify, refetch, queryClient])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -514,11 +542,12 @@ export function ExplorerPage() {
     try {
       await restoreViewApi(view.id)
       refetch()
+      invalidateViewAggregates(queryClient)
       notify('success', `"${view.name}" has been restored`)
     } catch {
       notify('error', `Failed to restore "${view.name}"`)
     }
-  }, [refetch, notify])
+  }, [refetch, notify, queryClient])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -835,6 +864,9 @@ export function ExplorerPage() {
                 activeCategory={filterState.category}
                 onClearFilters={clearAllFilters}
                 onCreateView={() => openViewEditor()}
+                relaxations={relaxations}
+                onRelax={next => { setFilterState(next); setSearchInput(next.search) }}
+                activeFilterCount={activeDimensions(filterState).length}
               />
             </motion.div>
           ) : layout === 'grid' ? (

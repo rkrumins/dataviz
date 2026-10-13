@@ -212,6 +212,69 @@ async def test_facets_narrow_to_workspace_ids(test_client: AsyncClient, db_sessi
     assert r_bob.json()["contributors"] == []
 
 
+@pytest.mark.asyncio
+async def test_live_facets_never_count_or_name_unreadable_views(
+    test_client: AsyncClient, db_session,
+):
+    """Each facet leaves out its own filter — never the caller's read reach. So
+    however the filters are set, no facet counts or names a view the caller
+    cannot read. A value the caller selected comes back as sent, counting 0."""
+    from backend.app.db.models import ProviderORM, UserORM, WorkspaceDataSourceORM
+
+    ids = await _seed(db_session)
+    # Real accounts, so naming them would show (an id with no account reads as itself).
+    for uid in ("usr_carol", "usr_frank"):
+        db_session.add(UserORM(
+            id=uid, email=f"{uid}@example.com", password_hash="x",
+            first_name="Hidden", last_name="Person", status="active", avatar_id="owl",
+        ))
+    db_session.add(ProviderORM(id="prov_s", name="P", provider_type="falkordb"))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_beta", workspace_id=WS_B, provider_id="prov_s", label="Beta Source",
+        graph_name="g_beta", is_active=True,
+    ))
+    foreign = await db_session.get(ViewORM, ids["workspace_b"])
+    foreign.data_source_id = "ds_beta"
+    foreign.tags = '["beta-only"]'
+    private = await db_session.get(ViewORM, ids["private_a"])
+    private.updated_by = "usr_frank"
+    await db_session.commit()
+    hidden_people = {"usr_carol", "usr_frank"}
+
+    for params in (
+        {}, {"workspaceIds": WS_B}, {"visibility": "private"},
+        {"dataSourceId": "ds_beta"}, {"tags": ["secret", "beta-only"]},
+        {"contributorIn": ["usr_carol", "usr_frank"]}, {"createdByIn": "usr_carol"},
+    ):
+        with _auth(user=BOB, claims=BOB_CLAIMS):
+            r = await test_client.get("/api/v1/views/facets", params=params)
+        assert r.status_code == 200, (params, r.text)
+        body = r.json()
+        # Bob reads ws_a's workspace-tier view and its enterprise one: two views, both alice's.
+        assert {w["id"] for w in body["workspaces"]} <= {WS_A}, params
+        assert body["dataSources"] == [], params
+        assert {v["value"] for v in body["visibilities"]} <= {"workspace", "enterprise"}, params
+        assert {c["userId"] for c in body["creators"]} <= {ALICE.id}, params
+        for tag in body["tags"]:
+            assert tag["count"] == 0 and tag["value"] in params.get("tags", ()), params
+        for person in body["contributors"]:
+            if person["userId"] in hidden_people:
+                assert person == {
+                    "userId": person["userId"], "displayName": person["userId"],
+                    "email": None, "avatarId": None, "count": 0, "createdCount": 0,
+                    "editedCount": 0, "publishedCount": 0,
+                }, params
+            else:
+                assert person["userId"] == ALICE.id, params
+
+    with _auth(user=BOB, claims=BOB_CLAIMS):
+        r = await test_client.get("/api/v1/views/facets", params={"workspaceIds": WS_B})
+        counted = await test_client.get("/api/v1/views/count", params={"workspaceIds": WS_B})
+    # The workspace facet leaves the workspace filter out, not the read reach.
+    assert r.json()["workspaces"] == [{"id": WS_A, "name": "Alpha", "count": 2}]
+    assert counted.json() == {"total": 0}
+
+
 # ── stats ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

@@ -70,6 +70,7 @@ from backend.common.models.management import (
     ViewListResponse,
     ViewFacetsResponse,
     ViewCatalogStats,
+    ViewCountResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -443,33 +444,76 @@ async def get_workspace_audience(
     )
 
 
+async def _facet_source_kind_sets(
+    session: AsyncSession, f: ViewFilterQuery, fields: tuple,
+) -> Optional[view_source_kinds.SourceKindSets]:
+    """The classification the requested facets need, if any.
+
+    Filtering by kind needs it for every facet but ``sourceKinds`` (which
+    leaves its own filter out), so then it is required, as for the list.
+    Otherwise only the ``sourceKinds`` counts and each data source's ``kind``
+    use it, and both read as unknown while it is unavailable.
+    """
+    if f.source_kind and set(fields) - {"sourceKinds"}:
+        return await _source_kind_filter_sets(session, f)
+    if {"sourceKinds", "dataSources"} & set(fields):
+        return await view_source_kinds.load_sets(session, required=False)
+    return None
+
+
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
-    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
+    f: ViewFilterQuery = Depends(view_filter_query),
+    fields: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Facets to compute (repeatable): " + ", ".join(view_repo.FACET_FIELDS)
+            + ". All when absent; the others come back empty (sourceKinds null)."
+        ),
+    ),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
-    """Return distinct tags, view types, creators and contributors across
-    the views the caller can read — within ``workspaceIds`` when given.
+    """Filter menus for the views the caller can read: each facet's values and
+    how many views each would leave.
 
-    Used to populate the Explorer's Tag / View Type / Creator / contributor
-    filter dropdowns from the authoritative set of values rather than deriving
-    them from the currently-loaded page (which would miss tags/creators
-    beyond the first page at scale). Scoped per principal — an
-    unscoped facet aggregate leaks private views' tags and creator
-    identities, which is how this endpoint shipped originally.
+    Takes the list's filters. Each facet is counted under all of them except
+    its own, so a count is the list's ``total`` were that option chosen
+    instead. Built from the authoritative set of values rather than the
+    currently-loaded page (which would miss tags/creators beyond the first
+    page at scale). Scoped per principal — an unscoped facet aggregate leaks
+    private views' tags and creator identities, which is how this endpoint
+    shipped originally.
 
-    Single-flight wrapped per principal: the response depends on who
-    asks, so the key must too (and on the workspaces asked about).
+    Single-flight wrapped: the response depends on who asks and on every
+    filter and field asked for, so the key holds all of them.
     """
-    clause, _scope = await _readable_clause(session, user, claims)
+    unknown = set(fields or ()) - set(view_repo.FACET_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"fields must be any of: {', '.join(view_repo.FACET_FIELDS)}",
+        )
+    wanted = tuple(sorted(set(fields or view_repo.FACET_FIELDS)))
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
     principal = normalised_principal(_user_id(user))
+
+    async def _facets() -> ViewFacetsResponse:
+        return await view_repo.get_view_facets(
+            session,
+            fields=wanted,
+            **f.repo_kwargs(),
+            source_kind_sets=await _facet_source_kind_sets(session, f, wanted),
+            created_by_not=created_by_not,
+            ids_in=ids_in,
+            user_id=_user_id(user),
+            readable=clause,
+        )
+
     return await read_views_sf.run(
-        ("facets", principal, tuple(sorted(workspace_ids or ()))),
-        lambda: view_repo.get_view_facets(
-            session, readable=clause, workspace_ids=workspace_ids,
-        ),
+        ("facets", principal, f.cache_key(), wanted), _facets,
     )
 
 
@@ -497,6 +541,30 @@ async def get_view_stats(
         user_id=_user_id(user),
         readable=clause,
     )
+
+
+# Declared before ``/{view_id}``, which would otherwise take "count" for an id.
+@router.get("/count", response_model=ViewCountResponse)
+async def count_views(
+    f: ViewFilterQuery = Depends(view_filter_query),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewCountResponse:
+    """How many views the list's filters leave — its ``total``, from the same
+    count, without loading and enriching a page of rows."""
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    total = await view_repo.count_views(
+        session,
+        **f.repo_kwargs(),
+        source_kind_sets=await _source_kind_filter_sets(session, f),
+        created_by_not=created_by_not,
+        ids_in=ids_in,
+        user_id=_user_id(user),
+        readable=clause,
+    )
+    return ViewCountResponse(total=total)
 
 
 @router.get("/", response_model=ViewListResponse)

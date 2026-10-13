@@ -281,8 +281,8 @@ later updates the same View as its next version. The whole journey is in
 Each workspace has a **Views** tab for working with its whole collection: open
 **Workspaces** in the sidebar, choose the workspace, then **Views**.
 
-- **The summary** counts the workspace's Views and owners, and its **Private**,
-  **Workspace** and **Enterprise** chips filter the list. **Need attention**
+- **The summary** counts all the workspace's Views and owners, and its
+  **Private**, **Workspace** and **Enterprise** chips filter the list. **Need attention**
   appears when Views haven't been updated in 90 days or point at a workspace or
   data source that is inactive or gone.
 - **Publication requests** lists pending requests for the people who can answer

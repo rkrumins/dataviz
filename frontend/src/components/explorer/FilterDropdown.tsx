@@ -73,6 +73,10 @@ export interface FilterOption {
   icon?: LucideIcon
   /** Per-option icon colour class (e.g. ``text-indigo-500``). */
   iconClassName?: string
+  /** Views this option would leave with the other filters applied. A zero is
+   *  dimmed — a dead end — but still pickable: with several picked, any one
+   *  of them is enough. */
+  count?: number
 }
 
 export interface FilterDropdownProps {
@@ -109,6 +113,8 @@ export interface FilterDropdownProps {
   /** `single`: picking an option selects only it and closes the panel; picking
    *  the selected one clears it. Defaults to `multi`. */
   selectionMode?: 'multi' | 'single'
+  /** The counts shown are about to be replaced; they dim until they are. */
+  countsPending?: boolean
 }
 
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
@@ -137,6 +143,7 @@ export function FilterDropdown({
   header,
   triggerPrefix,
   selectionMode = 'multi',
+  countsPending,
 }: FilterDropdownProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -291,6 +298,7 @@ export function FilterDropdown({
                     checked
                       ? accentClasses.optionActive
                       : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                    opt.count === 0 && !checked && 'opacity-50',
                   )}
                 >
                   {!single && (
@@ -313,6 +321,14 @@ export function FilterDropdown({
                       </span>
                     )}
                   </span>
+                  {opt.count !== undefined && (
+                    <span className={cn(
+                      'shrink-0 tabular-nums text-[10px] font-semibold text-ink-muted transition-opacity duration-150',
+                      countsPending && 'opacity-50',
+                    )}>
+                      {opt.count.toLocaleString()}
+                    </span>
+                  )}
                   {single && checked && <Check className="h-3.5 w-3.5 shrink-0" />}
                 </button>
               )
