@@ -17,8 +17,8 @@ import re
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Iterator, Optional, Protocol
 
 from sqlalchemy import false, func, or_, select, text, tuple_, union_all
 from sqlalchemy.exc import DBAPIError
@@ -454,29 +454,84 @@ def _cadence(rows: list[tuple], *, people: bool = False) -> list[dict[str, Any]]
     return out[:_TOP]
 
 
-# A summary is the merge of FOLDS: raw, mergeable counters over a span of
-# time. Every day in a window but today is over, so the fold of the closed
-# days is computed once and reused until the window moves on, and a request
-# reads only today's rows. Counters rather than results, so any two folds
-# merge exactly — people as an id→count map, not a count, because "distinct
-# people" over two spans is not the sum of each span's.
+# A summary is the sum of FOLDS: raw, additive counters over whole UTC days.
+# A day that is over never changes, so each is folded once and kept, and any
+# span — a preset window, a zoom, the period before either — is the sum of
+# its days: a span nobody asked for before costs a sum of kept days, not a
+# pass over its rows. Counters rather than results, so any two folds add up
+# exactly — people as an id→count map, not a count, because "distinct people"
+# over two spans is not the sum of each span's.
+
+#: Most days one pass folds. Days not kept yet are folded in passes of at
+#: most this many, each kept as it lands: a build cut short by its request's
+#: deadline leaves what it folded to the next, so a cold year comes ready
+#: over a few requests rather than timing out every time.
+_DAYS_PER_PASS = 14
 
 
-async def _fold(
-    session: AsyncSession, f: ActivityFilter, start: str, end: str, *, full: bool,
-) -> dict[str, Any]:
-    """The counters for ``[start, end)``: two grouped reads, or five.
+class FoldStore(Protocol):
+    """Where folds of days that are over are kept, for :func:`summary`."""
+
+    async def span(
+        self, key: str, build: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """The fold of a span of days, built at most once."""
+
+    async def days(self, days: list[str]) -> dict[str, dict[str, Any]]:
+        """The kept folds of ``days`` (``YYYY-MM-DD``); a day not kept is absent."""
+
+    async def keep(self, folds: dict[str, dict[str, Any]]) -> None:
+        """Keep each day's fold."""
+
+
+def _empty_fold() -> dict[str, Any]:
+    return {
+        "days": {}, "punchcard": [[0] * 24 for _ in range(7)], "types": {},
+        "events": 0, "operations": 0,
+        "actors": {}, "changes": 0, "reasoned": 0,
+        "targets": {}, "reasons": {},
+    }
+
+
+def _add(total: dict[str, Any], fold: dict[str, Any]) -> None:
+    """Add ``fold`` into ``total``. ``fold`` is never changed: kept folds are shared."""
+    for day, cells in fold["days"].items():
+        mine = total["days"].setdefault(day, {})
+        for category, n in cells.items():
+            mine[category] = mine.get(category, 0) + n
+    for row, more in zip(total["punchcard"], fold["punchcard"]):
+        for hour, n in enumerate(more):
+            row[hour] += n
+    for key in ("types", "actors", "reasons"):
+        mine = total[key]
+        for k, n in fold[key].items():
+            mine[k] = mine.get(k, 0) + n
+    for key in ("events", "operations", "changes", "reasoned"):
+        total[key] += fold[key]
+    for target_type, ids in fold["targets"].items():
+        mine = total["targets"].setdefault(target_type, {})
+        for target_id, (label, n) in ids.items():
+            had = mine.get(target_id)
+            mine[target_id] = [had[0] or label, had[1] + n] if had else [label, n]
+
+
+async def _fold_days(
+    session: AsyncSession, f: ActivityFilter, start: str, end: str,
+) -> dict[str, dict[str, Any]]:
+    """Each day's counters in ``[start, end)``: four grouped reads, however
+    many days. A day without events has no entry.
 
     Reading the span's rows is the cost — a bare ``count(*)`` over a busy
-    month takes as long as any grouping of it — which is why a closed span is
-    folded once and reused (:func:`summary`), not made cheaper per read.
-    (One read with ``GROUPING SETS`` was measured: 13% faster, not worth a
-    second, Postgres-only way of counting.)
+    month takes as long as any grouping of it — which is why a day is folded
+    once and kept (:func:`summary`), not made cheaper per read. (One read with
+    ``GROUPING SETS`` was measured: 13% faster, not worth a second,
+    Postgres-only way of counting.)
     """
     base = [*predicates(f, window=False), L.occurred_at >= start, L.occurred_at < end]
     is_user = L.actor_kind == "user"
     reasoned_kind = L.category.in_(REASONED_CATEGORIES) & is_user
-    fold = _empty_fold()
+    day = func.substr(L.occurred_at, 1, 10)
+    folds: dict[str, dict[str, Any]] = defaultdict(_empty_fold)
 
     # Volume by hour × category × type: the series, the punchcard, the
     # action leaderboard and the totals, from one GROUP BY.
@@ -485,85 +540,99 @@ async def _fold(
         select(hour, L.category, L.event_type, func.count())
         .where(*base).group_by(hour, L.category, L.event_type)
     )).all():
-        cell = fold["hours"].setdefault(h, {})
-        cell[category or "platform"] = cell.get(category or "platform", 0) + n
+        fold = folds[h[:10]]
+        cells = fold["days"].setdefault(h[:10], {})
+        cells[category or "platform"] = cells.get(category or "platform", 0) + n
+        try:
+            at = datetime.strptime(h, "%Y-%m-%dT%H")
+            fold["punchcard"][at.weekday()][at.hour] += n
+        except ValueError:
+            pass
         fold["types"][event_type] = fold["types"].get(event_type, 0) + n
         fold["events"] += n
         if category == "operations":
             fold["operations"] += n
 
     # People: who, how often, and how many of their changes said why.
-    for actor, n, changes, reasoned in (await session.execute(
+    for d, actor, n, changes, reasoned in (await session.execute(
         select(
-            L.actor_id, func.count(),
+            day, L.actor_id, func.count(),
             func.count().filter(reasoned_kind),
             func.count().filter(reasoned_kind & L.stated_reason.is_not(None)),
-        ).where(*base, is_user, L.actor_id.is_not(None)).group_by(L.actor_id)
+        ).where(*base, is_user, L.actor_id.is_not(None)).group_by(day, L.actor_id)
     )).all():
+        fold = folds[d]
         fold["actors"][actor] = n
         fold["changes"] += changes or 0
         fold["reasoned"] += reasoned or 0
-    if not full:
-        return fold
 
-    for target_type, target_id, label, n in (await session.execute(
-        select(L.target_type, L.target_id, func.max(L.target_label), func.count())
+    for d, target_type, target_id, label, n in (await session.execute(
+        select(day, L.target_type, L.target_id, func.max(L.target_label), func.count())
         .where(*base, L.target_id.is_not(None))
-        .group_by(L.target_type, L.target_id)
+        .group_by(day, L.target_type, L.target_id)
     )).all():
-        fold["targets"].setdefault(target_type or "", {})[target_id] = [label, n]
+        folds[d]["targets"].setdefault(target_type or "", {})[target_id] = [label, n]
 
-    # Manual operations per source: rows, not groups, so capped — newest
-    # first, so a capped answer is the recent past. Cheap: operations are
-    # few, and the category index finds them.
-    fold["ops"] = [list(r) for r in (await session.execute(
+    for d, reason, n in (await session.execute(
+        select(day, L.stated_reason, func.count())
+        .where(*base, L.stated_reason.is_not(None)).group_by(day, L.stated_reason)
+    )).all():
+        folds[d]["reasons"][reason] = n
+    return dict(folds)
+
+
+def operations_statement(f: ActivityFilter, start: str, end: str):
+    """Manual operations on a source in ``[start, end)``, for their cadence:
+    rows, not groups, so capped — newest first, so a capped answer is the
+    recent past.
+
+    Answered from ``idx_aal_cadence`` alone: it leads with the time and
+    carries what this selects and filters on, so the read walks back from
+    ``end`` and stops at the cap. Through the category index it fetched
+    every operation in the window from the table first."""
+    return (
         select(L.data_source_id, L.workspace_id, L.occurred_at, L.actor_id)
-        .where(*base, L.category == "operations", L.data_source_id.is_not(None))
+        .where(
+            *predicates(f, window=False), L.occurred_at >= start, L.occurred_at < end,
+            L.category == "operations", L.data_source_id.is_not(None),
+        )
         .order_by(L.occurred_at.desc()).limit(_CADENCE_ROWS)
-    )).all()]
-
-    fold["reasons"] = {r: n for r, n in (await session.execute(
-        select(L.stated_reason, func.count())
-        .where(*base, L.stated_reason.is_not(None)).group_by(L.stated_reason)
-    )).all()}
-    return fold
+    )
 
 
-def _empty_fold() -> dict[str, Any]:
-    return {
-        "hours": {}, "types": {}, "events": 0, "operations": 0,
-        "actors": {}, "changes": 0, "reasoned": 0,
-        "targets": {}, "ops": [], "reasons": {},
-    }
-
-
-def _merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key in a.keys() | b.keys():
-        x, y = a.get(key), b.get(key)
-        if x is None or y is None:
-            out[key] = x if y is None else y
-        elif isinstance(x, list):
-            out[key] = x + y
-        elif isinstance(x, dict):
-            out[key] = {k: _merge_value(x.get(k), y.get(k)) for k in x.keys() | y.keys()}
-        else:
-            out[key] = x + y
-    return out
-
-
-def _merge_value(x: Any, y: Any) -> Any:
-    if x is None or y is None:
-        return x if y is None else y
-    if isinstance(x, dict):
-        return {k: _merge_value(x.get(k), y.get(k)) for k in x.keys() | y.keys()}
-    if isinstance(x, list):  # a target: [label, count]
-        return [x[0] or y[0], x[1] + y[1]]
-    return x + y
+async def _operations(
+    session: AsyncSession, f: ActivityFilter, start: str, end: str,
+) -> list[tuple]:
+    if f.categories and "operations" not in f.categories:
+        return []
+    return [tuple(r) for r in (await session.execute(operations_statement(f, start, end))).all()]
 
 
 def _midnight(ts: str) -> str:
     return f"{ts[:10]}T00:00:00+00:00"
+
+
+def _next_day(day: str) -> str:
+    return (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+
+def _iter_days(first: str, end: str) -> Iterator[str]:
+    """``YYYY-MM-DD`` from ``first`` up to, not including, ``end``."""
+    day = first
+    while day < end:
+        yield day
+        day = _next_day(day)
+
+
+def _runs(days: list[str]) -> list[list[str]]:
+    """Ascending days as runs of consecutive ones."""
+    runs: list[list[str]] = []
+    for day in days:
+        if runs and _next_day(runs[-1][-1]) == day:
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+    return runs
 
 
 async def _backfilling(session: AsyncSession) -> bool:
@@ -574,30 +643,40 @@ async def _backfilling(session: AsyncSession) -> bool:
         select(func.count()).select_from(inner))).scalar() or 0) >= _BACKFILL_PENDING
 
 
-#: How a caller lets closed folds be reused: ``reuse(key, build)`` returns
-#: the document under ``key``, building it at most once.
-Reuse = Callable[[str, Callable[[], Awaitable[dict[str, Any]]]], Awaitable[dict[str, Any]]]
-
-
 async def _closed_fold(
     session: AsyncSession, f: ActivityFilter, start: str, end: str, *,
-    full: bool, reuse: Optional[Reuse],
+    folds: Optional[FoldStore],
 ) -> dict[str, Any]:
-    """A fold over days that are over, reused until the window moves on."""
+    """The fold of whole days that are over, ``[start, end)``: the sum of
+    its days' folds, itself kept, so the same span again is one read.
+
+    Read and added up a fortnight at a time, so a long span holds one
+    running total and one fortnight of days, never all of them at once."""
     if start >= end:
         return _empty_fold()
+    days = list(_iter_days(start[:10], end[:10]))
 
     async def _build() -> dict[str, Any]:
-        return await _fold(session, f, start, end, full=full)
+        total = _empty_fold()
+        for i in range(0, len(days), _DAYS_PER_PASS):
+            chunk = days[i:i + _DAYS_PER_PASS]
+            kept = await folds.days(chunk) if folds else {}
+            for run in _runs([d for d in chunk if d not in kept]):
+                got = await _fold_days(session, f, _midnight(run[0]), _midnight(_next_day(run[-1])))
+                fresh = {d: got.get(d) or _empty_fold() for d in run}
+                if folds:
+                    await folds.keep(fresh)
+                kept.update(fresh)
+            for fold in kept.values():
+                _add(total, fold)
+        return total
 
-    if reuse is None:
-        return await _build()
-    return await reuse(f"{'full' if full else 'totals'}:{start}:{end}", _build)
+    return await folds.span(f"{start[:10]}:{end[:10]}", _build) if folds else await _build()
 
 
 async def summary(
     session: AsyncSession, f: ActivityFilter, w: Window, *,
-    reuse: Optional[Reuse] = None, now: Optional[datetime] = None,
+    folds: Optional[FoldStore] = None, now: Optional[datetime] = None,
     kept_from: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """The insight band over ``w``, aligned to whole UTC days.
@@ -607,25 +686,23 @@ async def summary(
     reasons people gave, all under the same predicates as the timeline, so
     the band describes what the list below it shows.
 
-    Cost: the closed days of the window, and the whole previous window, are
-    folds a caller may ``reuse`` until midnight (``None`` reuses nothing).
-    What a request then reads itself is yesterday and today: five grouped
-    reads over at most two days' rows, however long the window — not a pass
-    over every row in it.
+    Cost: the days of the window that are over, and the whole previous
+    window, are sums of day folds a caller may keep in ``folds`` (``None``
+    keeps nothing): each day is read once, ever, whatever spans it is in.
+    What a request then reads itself is yesterday and today — four grouped
+    reads over at most two days' rows, however long the window — and its
+    manual operations, newest first.
     """
     now = now or datetime.now(timezone.utc)
-    if reuse is not None and await _backfilling(session):
+    if folds is not None and await _backfilling(session):
         # History is still arriving for closed days; a fold of them now
-        # would be reused short.
-        reuse = None
+        # would be kept short.
+        folds = None
     day0 = _midnight(w.start)
     # The closed days end where yesterday begins, and yesterday is read live
     # with today: its last events may still be on their way from the relay
-    # after midnight. So the fold before it changes once a day, when the
-    # window moves on, and is reusable from the moment it is built. (Ending
-    # it at today's midnight meant a fold too fresh to reuse for the first
-    # minutes of every day — rebuilt by every reader of every view at once —
-    # and then built a second time.)
+    # after midnight. So a day is kept only once nothing more can arrive
+    # for it, and is kept from the moment it is folded.
     live0 = min(_midnight((now - timedelta(days=1)).isoformat()), w.end)
     previous0 = _midnight(w.previous_start)
     # A previous period reaching back past the retention horizon was partly
@@ -633,29 +710,26 @@ async def summary(
     # read at all.
     comparable = kept_from is None or datetime.fromisoformat(previous0) >= kept_from
 
-    closed = await _closed_fold(session, f, day0, live0, full=True, reuse=reuse)
-    live = (
-        await _fold(session, f, live0, w.end, full=True) if live0 < w.end else _empty_fold()
-    )
+    closed = await _closed_fold(session, f, day0, live0, folds=folds)
+    live = await _fold_days(session, f, live0, w.end) if live0 < w.end else {}
+    cur = _empty_fold()
+    for fold in (closed, *live.values()):
+        _add(cur, fold)
     previous = (
-        await _closed_fold(session, f, previous0, day0, full=False, reuse=reuse)
-        if comparable else None
+        await _closed_fold(session, f, previous0, day0, folds=folds) if comparable else None
     )
-    cur = _merge(closed, live)
+    ops = await _operations(session, f, day0, w.end)
 
-    by_day_cat: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    by_hour: dict[str, int] = {}
-    for h, cells in cur["hours"].items():
-        by_hour[h] = sum(cells.values())
+    by_day_cat: dict[str, dict[str, int]] = defaultdict(dict)
+    for day, cells in cur["days"].items():
         for category, n in cells.items():
-            by_day_cat[category][h[:10]] += n
+            by_day_cat[category][day] = n
 
     targets = [
         {"type": t or None, "id": i, "label": label, "count": n}
         for t, ids in cur["targets"].items() for i, (label, n) in ids.items()
     ]
     targets.sort(key=lambda r: (-r["count"], r["id"]))
-    ops = sorted(cur["ops"], key=lambda r: r[2], reverse=True)[:_CADENCE_ROWS]
 
     return {
         "window": {
@@ -675,10 +749,10 @@ async def summary(
             },
         },
         "volume": [
-            {"category": c, "values": w.align(dict(per_day))}
+            {"category": c, "values": w.align(per_day)}
             for c, per_day in sorted(by_day_cat.items())
         ],
-        "punchcard": _punchcard(by_hour),
+        "punchcard": cur["punchcard"],
         "topPeople": [
             {"id": a, "count": n}
             for a, n in sorted(cur["actors"].items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP]
@@ -688,10 +762,10 @@ async def summary(
             {"type": t, "count": n}
             for t, n in sorted(cur["types"].items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP]
         ],
-        "handsOnSources": _cadence([tuple(r) for r in ops], people=True),
+        "handsOnSources": _cadence(ops, people=True),
         "topReasons": [
             {"reason": r, "count": n}
             for r, n in sorted(cur["reasons"].items(), key=lambda kv: (-kv[1], kv[0]))[:5]
         ],
-        "cadenceCapped": len(cur["ops"]) >= _CADENCE_ROWS,
+        "cadenceCapped": len(ops) >= _CADENCE_ROWS,
     }

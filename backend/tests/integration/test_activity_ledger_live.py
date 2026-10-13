@@ -214,6 +214,25 @@ async def test_the_workspace_lens_reads_its_own_index(factory):
     assert "idx_aal_workspace_lens" in plan, plan
 
 
+async def test_the_cadence_of_operations_reads_its_own_index(factory):
+    """Every summary — and so every zoom — reads the newest manual operations
+    on a source in its window. Through the category index that fetched every
+    operation in the window from the table to keep the newest (250 ms for a
+    fortnight of ten million); the cadence index walks back from the end of
+    the window and stops at the cap, from the index alone — under every lens
+    that shows operations."""
+    for f in (ActivityFilter(), ActivityFilter(categories=("operations",))):
+        stmt = activity_repo.operations_statement(
+            f, "2026-07-20T00:00:00+00:00", "2026-08-03T00:00:00+00:00",
+        )
+        sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        async with factory() as s, s.begin():
+            await s.execute(text("SET LOCAL enable_seqscan = off"))
+            await s.execute(text("SET LOCAL enable_bitmapscan = off"))
+            plan = "\n".join((await s.execute(text("EXPLAIN " + sql))).scalars())
+        assert "Index Only Scan Backward using idx_aal_cadence" in plan, plan
+
+
 async def test_the_workspace_pulse_reads_its_own_index(factory, run_id):
     """The pulse asks for every workspace's rows in a window. The lens index
     leads with the workspace, so through it that was the whole index and then

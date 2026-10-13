@@ -123,6 +123,19 @@ than taking the connections the readiness probe needs. Of several replicas missi
 summary, one builds it and the others wait for its result. The warmer prepares every lens of the
 activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
 
+**A zoom adds up days already counted.** The activity insight band is the sum of whole days. Each day
+that is over is counted once and kept, in Redis, until it has gone three days unread. Any range — a
+preset, a zoom, or the period it is compared with — adds up the days it covers, so a zoom into days
+already counted reads none of the log's rows. The warmer counts each lens's last 180 days before
+anyone opens them, and the counts survive a restart. Days not yet counted are read a fortnight at a
+time and kept as each fortnight lands, so a long range that cannot be counted within one request
+is ready after a few, instead of timing out every time. How often each source is run by hand is
+read from a new index that holds the operations (`idx_aal_cadence`), without touching the table.
+Measured with 300 people reading the explorer on a ten-million-event log, about one action in
+eight a zoom: a zoom's band answered in 96 ms (p95 204 ms). Before, it took 15 s (p95 24 s), and
+one zoom in five was refused or timed out. The readiness probe stays at p95 63 ms (was 4.7 s), and
+none of the 6,929 requests failed.
+
 **People, times and values, drawn as what they are.** Wherever a record names a person — who
 started a run, who changed a running job's limits, who acted in the activity log, who added a group
 member or rebuilt a source — they appear with their face (profile picture, the illustration they
@@ -178,10 +191,14 @@ graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once
 
 ### Upgrading
 
-- **Three migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
+- **Four migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
   no data updates), `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
-  `stated_reason`) and `20261011_1000_activity_pulse` (a partial index on `auth_audit_log` for the
-  workspace pulse). Run the upgrade job before rolling out.
+  `stated_reason`), `20261011_1000_activity_pulse` (a partial index on `auth_audit_log` for the
+  workspace pulse) and `20261013_1000_activity_cadence` (a partial index over its manual
+  operations: 3.4 s and 171 MB for 1.5 million operations among ten million events; the ledger
+  takes no writes while it builds, and the relay waits). Run the upgrade job before rolling out.
+- **The activity band's kept counts change shape.** The first band after the upgrade counts its
+  days again; the warmer does this for the leading views.
 - **Copying the audit backlog** (see the entry below) also classifies each event for the activity
   log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
   events. Administration → Activity says *Importing earlier activity* until it finishes.

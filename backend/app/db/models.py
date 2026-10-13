@@ -3321,6 +3321,15 @@ class AuthAuditLogORM(Base):
               postgresql_include=["workspace_id", "category", "actor_kind"],
               postgresql_where=text("audience = 'workspace'"),
               sqlite_where=text("audience = 'workspace'")),
+        # How often each source is operated by hand: the newest manual
+        # operations on a source in a window, as rows. Through the category
+        # index every operation in the window was fetched from the table to
+        # keep the newest; this leads with the time and carries what that read
+        # selects and filters on, so it stops at the cap without the table.
+        Index("idx_aal_cadence", "occurred_at",
+              postgresql_include=["data_source_id", "workspace_id", "actor_id", "event_type", "audience"],
+              postgresql_where=text("category = 'operations' AND data_source_id IS NOT NULL"),
+              sqlite_where=text("category = 'operations' AND data_source_id IS NOT NULL")),
         Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
         Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),
