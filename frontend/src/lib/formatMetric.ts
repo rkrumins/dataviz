@@ -38,6 +38,14 @@ export function signedPercent(change: number | null | undefined): string | null 
     return `${sign}${change.toFixed(1)}%`
 }
 
+/** A wait in hours, in the unit a person would say it in: `3h`, `2 days`. */
+export function waitPhrase(hours: number | null | undefined): string {
+    if (hours === null || hours === undefined || Number.isNaN(hours)) return '—'
+    if (hours < 1) return 'under an hour'
+    if (hours < 48) return `${Math.round(hours)}h`
+    return `${Math.round(hours / 24)} days`
+}
+
 /** `2026-06-15` → `15 Jun`, or `15 Jun 26` when the year is worth saying. */
 export function shortDate(iso: string, withYear = false): string {
     const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`)

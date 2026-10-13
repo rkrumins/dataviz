@@ -104,7 +104,8 @@ async def test_a_pass_another_process_holds_is_skipped(
 async def test_the_relay_clears_a_backlog_in_one_tick(db_session, monkeypatch):
     """An install whose relay never ran has every event since it was
     installed waiting. One batch per five-second tick would take hours."""
-    for i in range(450):
+    backlog = 2 * outbox_relay._BATCH + 50
+    for i in range(backlog):
         await user_repo.create_outbox_event(
             db_session, event_type="user.logged_in", payload={"user_id": f"usr_{i}"},
         )
@@ -125,7 +126,7 @@ async def test_the_relay_clears_a_backlog_in_one_tick(db_session, monkeypatch):
         outbox_relay.run_relay(_factory(db_session), shutdown, interval=3600),
         timeout=60,
     )
-    assert batches == [200, 200, 50]
+    assert batches == [outbox_relay._BATCH, outbox_relay._BATCH, 50]
 
 
 # ── What the Audit Log and Recent activity show ──────────────────────

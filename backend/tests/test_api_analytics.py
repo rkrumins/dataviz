@@ -2064,6 +2064,8 @@ async def test_every_analytics_endpoint_is_swept(test_client, db_session, _flag_
         "/api/v1/admin/analytics/summary",
         "/api/v1/admin/analytics/workspaces",
         "/api/v1/admin/analytics/workspaces/ws_live",
+        "/api/v1/admin/analytics/data",
+        "/api/v1/admin/analytics/usage",
     })
     urls = [p.replace("{workspace_id}", "ws_live") for p in paths]
     assert len(urls) >= 3, f"router introspection found too little: {urls}"

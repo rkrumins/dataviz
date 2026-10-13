@@ -613,6 +613,11 @@ class AggregationJobResponse(BaseModel):
     # ``history`` of who raised what, from what, to what. The stall window
     # in force is ``timeout_secs`` above.
     live_overrides: Optional[dict] = Field(None, alias="liveOverrides")
+    # Who started the run and the reason they gave — NULL for automation,
+    # and for runs from before this was recorded (``trigger_source`` still
+    # says how those started).
+    triggered_by: Optional[str] = Field(None, alias="triggeredBy")
+    stated_reason: Optional[str] = Field(None, alias="statedReason")
 
     class Config:
         populate_by_name = True

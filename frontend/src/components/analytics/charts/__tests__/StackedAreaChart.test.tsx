@@ -1,8 +1,8 @@
 /**
  * Composition over time, absolute and as a share.
  */
-import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 
 import { StackedAreaChart, type StackedSeries } from '../StackedAreaChart'
 
@@ -105,5 +105,60 @@ describe('StackedAreaChart — reaching the count', () => {
         )
         expect(screen.getByText('750')).toBeInTheDocument()
         expect(screen.getByText('75.0%')).toBeInTheDocument()
+    })
+})
+
+describe('StackedAreaChart — picking a span', () => {
+    // jsdom lays the chart out at its fallback width: 720px, so the plot runs
+    // from x=48 to x=704 and five buckets sit 164px apart.
+    const FIVE = ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05']
+    const at = (i: number) => 48 + i * 164
+
+    function chart(onSelectSpan = vi.fn()) {
+        render(
+            <StackedAreaChart
+                buckets={FIVE} series={[s('a', [1, 2, 3, 4, 5])]} onSelectSpan={onSelectSpan}
+                formatSpan={(first, last) => `${FIVE[first]} to ${FIVE[last]}`}
+            />,
+        )
+        return { svg: screen.getByRole('img'), onSelectSpan }
+    }
+
+    it('hands back the buckets a drag crosses, in order, whichever way it went', () => {
+        const { svg, onSelectSpan } = chart()
+        fireEvent.pointerDown(svg, { clientX: at(3), button: 0, pointerId: 1 })
+        fireEvent.pointerMove(svg, { clientX: at(1), pointerId: 1 })
+        // The span is drawn and named while it is being dragged.
+        expect(screen.getByTestId('chart-span')).toBeInTheDocument()
+        expect(screen.getByText('2026-10-02 to 2026-10-04')).toBeInTheDocument()
+        fireEvent.pointerUp(svg, { clientX: at(1), pointerId: 1 })
+        expect(onSelectSpan).toHaveBeenCalledWith(1, 3)
+        expect(screen.queryByTestId('chart-span')).not.toBeInTheDocument()
+    })
+
+    it('picks one bucket on a click', () => {
+        const { svg, onSelectSpan } = chart()
+        fireEvent.pointerDown(svg, { clientX: at(2) + 10, button: 0, pointerId: 1 })
+        fireEvent.pointerUp(svg, { clientX: at(2) + 10, pointerId: 1 })
+        expect(onSelectSpan).toHaveBeenCalledWith(2, 2)
+    })
+
+    it('lets go of a drag on Esc, and ignores other buttons', () => {
+        const { svg, onSelectSpan } = chart()
+        fireEvent.pointerDown(svg, { clientX: at(0), button: 2, pointerId: 1 })
+        expect(screen.queryByTestId('chart-span')).not.toBeInTheDocument()
+        fireEvent.pointerDown(svg, { clientX: at(0), button: 0, pointerId: 1 })
+        fireEvent.pointerMove(svg, { clientX: at(4), pointerId: 1 })
+        fireEvent.keyDown(window, { key: 'Escape' })
+        fireEvent.pointerUp(svg, { clientX: at(4), pointerId: 1 })
+        expect(onSelectSpan).not.toHaveBeenCalled()
+    })
+
+    it('only reads without a handler', () => {
+        render(<StackedAreaChart buckets={FIVE} series={[s('a', [1, 2, 3, 4, 5])]} />)
+        const svg = screen.getByRole('img')
+        fireEvent.pointerDown(svg, { clientX: at(1), button: 0, pointerId: 1 })
+        expect(screen.queryByTestId('chart-span')).not.toBeInTheDocument()
+        expect(svg).not.toHaveClass('cursor-crosshair')
     })
 })

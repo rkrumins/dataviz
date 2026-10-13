@@ -7,6 +7,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, RefreshCw, RotateCcw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { freshnessService } from '@/services/freshnessService'
 import type { FreshnessRow, RefreshScope } from '@/services/freshnessService'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory, countFailuresByCategory } from './failureGuidance'
@@ -25,8 +26,8 @@ export function BulkRetryBar({
 }) {
     const { notify } = useAppNotifications()
     const [running, setRunning] = useState(false)
-    const [confirming, setConfirming] = useState<null | 'retry' | 'rebuild'>(null)
     const [progress, setProgress] = useState<{ done: number; total: number; errors: number } | null>(null)
+    const [reasonPrompt, askReason] = useReasonPrompt()
 
     const selected = rows.filter(r => selectedIds.includes(r.dataSourceId))
     const failedIds = selected.filter(r => freshnessState(r) === 'failed').map(r => r.dataSourceId)
@@ -40,8 +41,7 @@ export function BulkRetryBar({
         ? Math.round((progress.done / progress.total) * 100)
         : 0
 
-    const run = async (ids: string[], scope: RefreshScope, ok: string) => {
-        setConfirming(null)
+    const run = async (ids: string[], scope: RefreshScope, ok: string, reason?: string) => {
         setRunning(true)
         const slice = ids.slice(0, CAP)
         setProgress({ done: 0, total: slice.length, errors: 0 })
@@ -53,7 +53,9 @@ export function BulkRetryBar({
                 const id = queue.shift()
                 if (!id) break
                 try {
-                    await freshnessService.refreshSource(id, { scope })
+                    await (reason
+                        ? freshnessService.refreshSource(id, { scope }, { reason })
+                        : freshnessService.refreshSource(id, { scope }))
                 } catch {
                     errors += 1
                 }
@@ -74,27 +76,23 @@ export function BulkRetryBar({
         setProgress(null)
     }
 
+    // A rebuild asks why first; the prompt is also its confirmation.
+    const rebuild = async (ids: string[], ok: string, prompt: { title: string; message: string; confirmLabel: string }) => {
+        const answer = await askReason({ ...prompt, confirmIcon: RotateCcw, context: 'refresh', audience: 'workspace' })
+        if (answer) await run(ids, 'rollups', ok, answer.reason)
+    }
+
     const hint = progress
         ? `${progress.done}/${progress.total} queued`
             + (progress.errors > 0 ? ` · ${progress.errors} failed to start` : '')
-        : confirming === 'retry'
-            ? (
-                <>
-                    Retry rebuild on {failedIds.length === 1 ? 'this source' : `${failedIds.length} failed sources`}?
-                    {selected.some(r => ['out_of_memory', 'write_budget'].includes(asFailureCategory(r.lastFailureCategory) ?? '')) && (
-                        <> Free graph-store memory first if these are OOM or would not fit.</>
-                    )}
-                </>
-            )
-            : confirming === 'rebuild'
-                ? `Rebuild lineage on ${rebuildIds.length === 1 ? 'this source' : `${rebuildIds.length} sources`}?`
-                : top
-                    ? <>Mostly {FAILURE_CATEGORY_LABEL[top.category].toLowerCase()}</>
-                    : failedIds.length > 0
-                        ? `${failedIds.length} failed · ready to retry`
-                        : 'Refresh caches or rebuild lineage'
+        : top
+            ? <>Mostly {FAILURE_CATEGORY_LABEL[top.category].toLowerCase()}</>
+            : failedIds.length > 0
+                ? `${failedIds.length} failed · ready to retry`
+                : 'Refresh caches or rebuild lineage'
 
     return (
+        <>
         <AnimatePresence>
             {selectedIds.length > 0 && (
                 <motion.div
@@ -148,91 +146,66 @@ export function BulkRetryBar({
                                     'disabled:opacity-50',
                                 )}
                             >
-                                {running && !confirming
+                                {running
                                     ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                     : <RefreshCw className="w-3.5 h-3.5" />}
                                 Refresh caches
                             </button>
 
                             {failedIds.length > 0 && (
-                                confirming !== 'retry' ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => setConfirming('retry')}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        Retry rebuild
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => void run(
-                                            failedIds,
-                                            'rollups',
-                                            `Retry queued for ${Math.min(failedIds.length, CAP)} source${failedIds.length === 1 ? '' : 's'}.`,
-                                        )}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        {running
-                                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            : <RotateCcw className="w-3.5 h-3.5" />}
-                                        Confirm retry
-                                    </button>
-                                )
+                                <button
+                                    type="button"
+                                    onClick={() => void rebuild(
+                                        failedIds,
+                                        `Retry queued for ${Math.min(failedIds.length, CAP)} source${failedIds.length === 1 ? '' : 's'}.`,
+                                        {
+                                            title: `Retry rebuild on ${failedIds.length === 1 ? 'this source' : `${failedIds.length} failed sources`}?`,
+                                            message: 'This rebuilds aggregated lineage again. It can take a while.'
+                                                + (selected.some(r => ['out_of_memory', 'write_budget'].includes(asFailureCategory(r.lastFailureCategory) ?? ''))
+                                                    ? ' Free graph-store memory first if these are OOM or would not fit.'
+                                                    : ''),
+                                            confirmLabel: 'Retry rebuild',
+                                        },
+                                    )}
+                                    disabled={running}
+                                    className={cn(
+                                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
+                                        'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
+                                        'disabled:opacity-50',
+                                    )}
+                                >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    Retry rebuild
+                                </button>
                             )}
 
                             {rebuildIds.length > 0 && (
-                                confirming !== 'rebuild' ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => setConfirming('rebuild')}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        Rebuild lineage
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => void run(
-                                            rebuildIds,
-                                            'rollups',
-                                            `Rebuild queued for ${Math.min(rebuildIds.length, CAP)} source${rebuildIds.length === 1 ? '' : 's'}.`,
-                                        )}
-                                        disabled={running}
-                                        className={cn(
-                                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
-                                            'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm shadow-indigo-600/20 transition-colors',
-                                            'disabled:opacity-50',
-                                        )}
-                                    >
-                                        {running
-                                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            : <RotateCcw className="w-3.5 h-3.5" />}
-                                        Confirm rebuild
-                                    </button>
-                                )
+                                <button
+                                    type="button"
+                                    onClick={() => void rebuild(
+                                        rebuildIds,
+                                        `Rebuild queued for ${Math.min(rebuildIds.length, CAP)} source${rebuildIds.length === 1 ? '' : 's'}.`,
+                                        {
+                                            title: `Rebuild lineage on ${rebuildIds.length === 1 ? 'this source' : `${rebuildIds.length} sources`}?`,
+                                            message: 'This rebuilds aggregated lineage. It can take a while.',
+                                            confirmLabel: 'Rebuild lineage',
+                                        },
+                                    )}
+                                    disabled={running}
+                                    className={cn(
+                                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-semibold',
+                                        'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors',
+                                        'disabled:opacity-50',
+                                    )}
+                                >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    Rebuild lineage
+                                </button>
                             )}
 
                             <button
                                 type="button"
-                                onClick={() => { setConfirming(null); onClear() }}
+                                onClick={onClear}
                                 disabled={running}
                                 title="Clear selection"
                                 className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
@@ -244,5 +217,7 @@ export function BulkRetryBar({
                 </motion.div>
             )}
         </AnimatePresence>
+        {reasonPrompt}
+        </>
     )
 }

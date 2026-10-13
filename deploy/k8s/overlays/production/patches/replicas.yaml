@@ -33,5 +33,8 @@ spec:
   # reconciler (Postgres advisory xact lock), scheduler (idempotent signals;
   # no lock, so its retry breaker may count a retry twice — it trips one
   # retry early, never late), crash-recovery (per-job exec-lock dedup plus
-  # the shared auto-resume cap).
+  # the shared auto-resume cap), outbox relay (FOR UPDATE SKIP LOCKED
+  # batches), retention sweeps — product events, refresh tokens and the
+  # activity log (advisory xact lock per batch), analytics
+  # warmer (advisory xact lock per pass).
   replicas: 2

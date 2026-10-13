@@ -3,9 +3,14 @@
  * one-click change sends the exact patch, live changes are marked and can
  * be cleared, and the history reads in words.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
+
+const { peopleById } = vi.hoisted(() => ({ peopleById: vi.fn() }))
+vi.mock('@/services/userDirectoryService', () => ({ peopleById }))
+
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { AdjustRunningJob } from './AdjustRunningJob'
 
@@ -66,6 +71,27 @@ describe('AdjustRunningJob', () => {
         expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), {
             reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin', 'writeBatchMax', 'writeBatchTargetS'],
         })
-        expect(screen.getByText(/ops@example.com set the write pacing 1× → 2×/)).toBeInTheDocument()
+        expect(screen.getByRole('list', { name: 'Recent limit changes' }))
+            .toHaveTextContent(/ops@example.com set the write pacing 1× → 2× · just now/)
+    })
+
+    it('shows the person behind a live change by face and name, not by id', async () => {
+        peopleById.mockResolvedValue([{ id: 'usr_ops', displayName: 'Olu Pierce', email: 'olu@example.com', deleted: false }])
+        render(
+            <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+                <AdjustRunningJob job={job({
+                    liveOverrides: {
+                        write_pacing_ratio: 2,
+                        history: [{ at: new Date().toISOString(), by: 'usr_ops', field: 'write_pacing_ratio', from: 1, to: 2 }],
+                    },
+                })} onAdjust={vi.fn()} busy={false} />
+            </QueryClientProvider>,
+        )
+        await userEvent.click(screen.getByRole('button', { name: /Adjust this run/ }))
+        const history = screen.getByRole('list', { name: 'Recent limit changes' })
+        expect(await within(history).findByRole('link', { name: 'Olu Pierce' }))
+            .toHaveAttribute('href', '/admin/users?user=usr_ops')
+        expect(history).toHaveTextContent(/Olu Pierce set the write pacing 1× → 2×/)
+        expect(history).not.toHaveTextContent('usr_ops')
     })
 })

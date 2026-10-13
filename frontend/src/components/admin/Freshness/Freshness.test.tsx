@@ -11,7 +11,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal, getReconciliation, getReconciliationActivity, reconcileNow } = vi.hoisted(() => ({
+const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProviders, listWorkspaces, permissionFn, listJobsGlobal, getReconciliation, getReconciliationActivity, reconcileNow, cancelJob, peopleById } = vi.hoisted(() => ({
     listFleet: vi.fn(),
     refreshSource: vi.fn(),
     getSourceDoc: vi.fn(),
@@ -24,6 +24,8 @@ const { listFleet, refreshSource, getSourceDoc, refreshAll, getBatch, listProvid
     getReconciliation: vi.fn(),
     getReconciliationActivity: vi.fn(),
     reconcileNow: vi.fn(),
+    cancelJob: vi.fn(),
+    peopleById: vi.fn(),
 }))
 
 vi.mock('@/store/auth', () => ({
@@ -52,9 +54,11 @@ vi.mock('@/services/freshnessService', async () => {
 })
 vi.mock('@/services/providerService', () => ({ providerService: { list: listProviders } }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: listWorkspaces } }))
+vi.mock('@/services/userDirectoryService', () => ({ peopleById }))
 vi.mock('@/services/aggregationService', () => ({
     aggregationService: {
         listJobsGlobal,
+        cancelJob,
         // The capacity card reads the fleet sweep; an empty snapshot keeps the
         // page quiet in these tests.
         getFleetCapacity: vi.fn().mockResolvedValue({
@@ -774,9 +778,53 @@ describe('Freshness cockpit', () => {
         expect(screen.getByRole('button', { name: /reconcile this source/i })).toBeInTheDocument()
 
         await user.click(screen.getByRole('button', { name: /rebuild lineage now/i }))
+        // It asks why first, and that prompt is its confirmation: nothing is
+        // queued until it is answered (Enter goes ahead without a reason).
+        expect(refreshSource).not.toHaveBeenCalled()
+        await user.type(await screen.findByLabelText(/why\?/i), '{Enter}')
         await waitFor(() => {
             expect(refreshSource).toHaveBeenCalledWith('ds-1', expect.objectContaining({ scope: 'rollups' }))
         })
+    })
+
+    it('sends the reason typed in the Rebuild lineage prompt beside the body, never in it', async () => {
+        const user = userEvent.setup()
+        getSourceDoc.mockImplementation(async (_id: string, probe?: boolean) => ({
+            ...baseDoc,
+            platformMastered: false,
+            drifted: probe ? true : null,
+            liveFingerprint: probe ? 'live-fp' : null,
+        }))
+        renderDrawer()
+
+        await user.click(await screen.findByRole('button', { name: /probe now/i }))
+        await user.click(await screen.findByRole('button', { name: /rebuild lineage now/i }))
+        await user.type(await screen.findByLabelText(/why\?/i), 'Upstream schema migrated{Enter}')
+
+        await waitFor(() => expect(refreshSource).toHaveBeenCalledWith(
+            'ds-1', expect.objectContaining({ scope: 'rollups' }), { reason: 'Upstream schema migrated' },
+        ))
+        // The body's own ``reason`` is a detector code, not the person's.
+        expect(refreshSource.mock.calls[0][1]).not.toHaveProperty('reason')
+    })
+
+    it('names the person behind a manual refresh in the activity list, not their id', async () => {
+        peopleById.mockResolvedValue([
+            { id: 'usr_ana', displayName: 'Ana Okafor', email: 'ana@example.com', deleted: false },
+        ])
+        getSourceDoc.mockResolvedValue({
+            ...baseDoc,
+            events: [
+                { origin: 'api', outcome: 'accepted', ts: recent, mode: 'manual', actor: 'usr_ana' },
+                { origin: 'reconcile', outcome: 'accepted', ts: recent, mode: 'automatic', actor: 'internal' },
+            ],
+        })
+        renderDrawer()
+
+        expect(await screen.findByText('Ana Okafor')).toBeInTheDocument()
+        expect(screen.queryByText('usr_ana')).not.toBeInTheDocument()
+        // Looked up for the person only — the automatic event names nobody.
+        expect(peopleById).toHaveBeenCalledWith(['usr_ana'])
     })
 
     it('after Probe drift on a versioned source, points to version control without a reconcile fix', async () => {
@@ -870,6 +918,31 @@ describe('Freshness cockpit', () => {
         expect(within(ds2Row).getByText('Recomputing')).toBeInTheDocument()
         expect(within(ds2Row).queryByText(/Computing rollups/)).not.toBeInTheDocument()
         expect(within(ds2Row).queryByText(/62%/)).not.toBeInTheDocument()
+    })
+
+    it('asks why before cancelling a running rebuild, and sends the reason with the cancel', async () => {
+        const user = userEvent.setup()
+        listJobsGlobal.mockResolvedValue({
+            items: [{
+                id: 'job-1', dataSourceId: 'ds-1', status: 'running', triggerSource: 'api',
+                currentPhase: 'computing', progress: 62, totalEdges: 10, processedEdges: 6,
+                createdEdges: 0, batchSize: 1000, resumable: false, retryCount: 0, createdAt: recent,
+            }],
+            total: 1, limit: 100, offset: 0,
+        })
+        listFleet.mockResolvedValue({ total: 1, rows: [{ ...fleet.rows[0], runningJobId: 'job-1' }] })
+        cancelJob.mockResolvedValue({})
+        renderTab()
+
+        await user.click(await screen.findByRole('button', { name: /more actions for orders graph/i }))
+        await user.click(await screen.findByRole('menuitem', { name: 'Cancel job' }))
+        // The menu item used to cancel on the spot; the prompt is its confirmation now.
+        const prompt = await screen.findByRole('dialog')
+        expect(cancelJob).not.toHaveBeenCalled()
+        await user.click(within(prompt).getByRole('button', { name: 'Started by mistake' }))
+        await user.click(within(prompt).getByRole('button', { name: 'Stop rebuild' }))
+
+        await waitFor(() => expect(cancelJob).toHaveBeenCalledWith('ds-1', 'job-1', { reason: 'Started by mistake' }))
     })
 })
 

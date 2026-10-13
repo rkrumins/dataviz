@@ -335,6 +335,13 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "analytics. Values below 365 count as 365, so a year-long chart always has its data.",
         None,
     ),
+    "ACTIVITY_RETENTION_DAYS": (
+        "Days of activity (who did what, where and why) kept in the activity log and the outbox "
+        "it is copied from. `0` keeps everything; values below 365 count as 365. Set the same "
+        "value on the control plane, which deletes, and the web tier, which tells readers how "
+        "far back the log goes.",
+        None,
+    ),
     "WORKER_CONCURRENCY": (
         "Aggregation jobs one worker runs at the same time. Also sizes the worker's graph store "
         "connection pools.",
@@ -474,6 +481,7 @@ RULES = (
     ("backend/insights_service/", "insights"),
     ("backend/app/services/analytics_cache.py", "insights"),
     ("backend/app/services/product_event_gc.py", "insights"),
+    ("backend/app/services/activity_retention.py", "insights"),
     ("backend/app/services/versioning/", "versioning"),
     ("backend/app/services/projection_target.py", "versioning"),
     ("backend/app/config/resilience.py", "resilience"),

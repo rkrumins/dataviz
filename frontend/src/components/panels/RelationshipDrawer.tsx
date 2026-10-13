@@ -432,7 +432,7 @@ function RelationshipPanel({
           )}
 
           <TabsContent value="json">
-            <JsonView data={jsonData} label="Relationship data as JSON" />
+            <JsonView data={jsonData} label="Relationship data" />
           </TabsContent>
         </DrawerBody>
 

@@ -8,7 +8,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
-import type { ProviderFreshnessSummary } from '@/services/freshnessService'
+import { freshnessService, type ProviderFreshnessSummary } from '@/services/freshnessService'
 
 const { useSetProviderHold } = vi.hoisted(() => ({ useSetProviderHold: vi.fn() }))
 
@@ -69,6 +69,24 @@ describe('ProviderHoldDialog', () => {
         await userEvent.click(screen.getByRole('button', { name: /resume now/i }))
 
         await waitFor(() => expect(mutate.mock.calls[0][0]).toEqual({ providerId: 'p1', pausedUntil: null, stopped: false }))
+    })
+
+    it('sends the reason given with the hold', async () => {
+        // The real hook this time, so the assertion is on the request itself.
+        const actual = await vi.importActual<typeof import('./useFreshness')>('./useFreshness')
+        useSetProviderHold.mockImplementation(actual.useSetProviderHold)
+        const setProviderHold = vi.spyOn(freshnessService, 'setProviderHold').mockResolvedValue({
+            scope: 'provider', scopeId: 'p1', pausedUntil: null, stoppedAt: '2026-10-11T00:00:00Z',
+        })
+        renderDialog(BASE)
+
+        await userEvent.click(screen.getByRole('button', { name: 'Incident in progress' }))
+        await userEvent.selectOptions(screen.getByLabelText("Pause this provider's rebuilds for"), 'stop')
+
+        await waitFor(() => expect(setProviderHold).toHaveBeenCalledWith(
+            'p1', { pausedUntil: null, stopped: true }, { reason: 'Incident in progress' },
+        ))
+        setProviderHold.mockRestore()
     })
 
     it('under a fleet hold the row is a read-out naming where to resume', () => {

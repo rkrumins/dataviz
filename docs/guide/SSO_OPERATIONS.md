@@ -609,7 +609,7 @@ host is the problem, which host to add to the avatar image hosts list.
   identity provider or change how a connection is set up.
 - [Users & Access](/guide/users-access) — when you want to manage roles,
   groups and accounts by hand.
-- [The Admin Console](/guide/governance-ops#audit-log) — when you want the
-  wider audit trail of role, group and account changes.
+- [The Admin Console](/guide/governance-ops#activity) — when you want the
+  wider activity log of role, group and account changes.
 - [Troubleshooting](/guide/troubleshooting#someone-has-too-much--too-little-access)
   — when someone has too much or too little access.

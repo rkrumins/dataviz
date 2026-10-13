@@ -203,13 +203,12 @@ do their job; you can always raise it later.
 | --- | --- | --- |
 | **Super Admin** | `super_admin` | The platform owner. Carries `system:admin`, which implies every permission everywhere: every Administration page, every workspace, user accounts, single sign-on and feature switches. Bind sparingly. |
 | **Org Admin** | `org_admin` | Runs every workspace and creates new ones, manages groups, and sees Analytics. Does **not** manage user accounts or single sign-on — in Administration it opens only **Groups**. |
-| **Org Auditor** | `org_auditor` | Read-only across every workspace, with the permissions to read the audit log and every role binding (`system:audit:read`, `system:bindings:read`) and to see Analytics. Can't change anything. |
+| **Org Auditor** | `org_auditor` | Read-only across every workspace, with the permissions to read the activity log — **Administration → Activity** — and every role binding (`system:audit:read`, `system:bindings:read`) and to see Analytics. Can't change anything. |
 | **User** | `user` | The default for anyone without an organization-wide role. No platform-wide access on its own — everything comes from workspace roles. |
 
-> **Note:** Opening **Administration** itself needs `system:admin` or
-> `system:groups:manage`. An **Org Auditor** has neither, so today it can't
-> reach the **Audit Log** page in the app, even though it holds the permission
-> to read the log. See [The Admin Console](/guide/governance-ops#who-can-open-each-page).
+> **Note:** Opening **Administration** itself needs `system:admin`,
+> `system:groups:manage` or `system:audit:read`, so an **Org Auditor** reaches
+> **Activity** and **Telemetry** there. See [The Admin Console](/guide/governance-ops#who-can-open-each-page).
 
 > **Note:** A workspace appears in an **Org Admin**'s or **Org Auditor**'s
 > **Workspaces** list only once they hold a binding into it, directly or
@@ -264,7 +263,7 @@ to *many* people at once.
 1. Open **Administration → Groups** and select **New group**. Give it a name
    and an optional description, then select **Create group**.
 2. On the group's row, select **Manage members**, then **Add**, and pick the
-   people.
+   people. You can say why they're joining; it's optional.
 3. Give the group access in each workspace it should reach: open the
    workspace's **Members** tab, select **Add member**, choose **Group**, pick
    the group and a role, and select **Add to workspace**.
@@ -277,6 +276,11 @@ that access on their next request.
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
 > groups to an invite link, so new people land in them.
+
+Every membership change is recorded in **Administration → Activity**: who added
+or removed whom, and why, if they said. Changes made by single sign-on are
+recorded too, marked as coming from the sign-in. The group's member list shows
+who added each person.
 
 Groups are created and managed here — SCIM provisioning isn't available, so
 the page's **SCIM-synced** count reads 0. To fill groups from your

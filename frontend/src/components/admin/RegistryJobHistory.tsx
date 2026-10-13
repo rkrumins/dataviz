@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useTransition } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-    Loader2, Activity, RotateCcw, Trash2,
+    Loader2, Activity, RotateCcw, Trash2, StopCircle,
     ChevronLeft, ChevronsLeft, ChevronRight, ChevronsRight,
     List, LayoutGrid,
 } from 'lucide-react'
@@ -43,6 +43,9 @@ import { balancedPreset, gentlePreset, type AggregationOverridesValue } from './
 import { TUNING_KNOBS } from './shared/aggregationKnobs'
 import { extendStallPatch } from './job-history/timeLimits'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
+import { usePerson } from '@/hooks/usePerson'
 
 // ── Defaults ─────────────────────────────────────────────────────────
 const DEFAULT_TIMEOUT_SECS = 10800
@@ -272,6 +275,9 @@ export function RegistryJobHistory() {
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [purgeConfirm, setPurgeConfirm] = useState<string | null>(null)
     const [confirmDelete, setConfirmDelete] = useState<AggregationJobResponse | null>(null)
+    const deleteReason = useReasonDraft('delete-run')
+    const [reasonPrompt, askReason] = useReasonPrompt()
+    const startedBy = usePerson(filters.triggeredBy)
     // Retrigger dialog: either job-derived (from a JobRow) or data-source-derived (from grouped card).
     const [retriggerCtx, setRetriggerCtx] = useState<
         | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue; presetReason?: string | null; presetAction?: 'raise-per-query-limit' | null }
@@ -461,6 +467,9 @@ export function RegistryJobHistory() {
         if (filters.triggerSource) {
             chips.push({ key: 'trigger', label: triggerLabel(filters.triggerSource) })
         }
+        if (filters.triggeredBy) {
+            chips.push({ key: 'startedBy', label: `Started by ${startedBy?.displayName ?? filters.triggeredBy}` })
+        }
         for (const s of filters.status ?? []) {
             chips.push({ key: `status-${s}`, label: STATUS_CONFIG[s]?.label ?? s })
         }
@@ -468,13 +477,14 @@ export function RegistryJobHistory() {
         if (filters.dateTo) chips.push({ key: 'dateTo', label: `To ${filters.dateTo}` })
         if (filters.search) chips.push({ key: 'search', label: `"${filters.search}"` })
         return chips
-    }, [filters, workspaces, dataSourceOptions])
+    }, [filters, workspaces, dataSourceOptions, startedBy])
 
     const removeChip = useCallback((key: string) => {
         if (key === 'workspace') updateFilter({ workspaceId: undefined, dataSourceId: undefined })
         else if (key.startsWith('ds-')) updateFilter({ dataSourceId: (filters.dataSourceId ?? []).filter(d => d !== key.replace('ds-', '')) || undefined })
         else if (key === 'mode') updateFilter({ projectionMode: undefined })
         else if (key === 'trigger') updateFilter({ triggerSource: undefined })
+        else if (key === 'startedBy') updateFilter({ triggeredBy: undefined })
         else if (key.startsWith('status-')) toggleStatusFilter(key.replace('status-', ''))
         else if (key === 'dateFrom') updateFilter({ dateFrom: undefined })
         else if (key === 'dateTo') updateFilter({ dateTo: undefined })
@@ -500,10 +510,19 @@ export function RegistryJobHistory() {
         }
     }, [notify, fetchJobs])
 
-    const handleCancel = useCallback((job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled. If automation requested this rebuild it may retry a few more times, then it waits for a person.', 'Could not cancel that job.'),
-        [withAction],
-    )
+    const handleCancel = useCallback(async (job: AggregationJobResponse) => {
+        const answer = await askReason({
+            title: 'Stop this run?',
+            message: `Cancels the aggregation run for ${job.dataSourceLabel ?? job.dataSourceId}.`,
+            confirmLabel: 'Stop run',
+            confirmIcon: StopCircle,
+            context: 'cancel',
+            audience: 'workspace',
+            tone: 'danger',
+        })
+        if (!answer) return
+        await withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id, { reason: answer.reason }), 'Job cancelled. If automation requested this rebuild it may retry a few more times, then it waits for a person.', 'Could not cancel that job.')
+    }, [askReason, withAction])
 
     const handleExtend = useCallback((job: AggregationJobResponse, patch: JobLimitsPatch) =>
         withAction(job.id, () => aggregationService.setJobLimits(job.dataSourceId, job.id, patch),
@@ -553,15 +572,18 @@ export function RegistryJobHistory() {
         })
     }, [defaultTuning])
 
+    const { reset: resetDeleteReason } = deleteReason
     const handleDelete = useCallback((job: AggregationJobResponse) => {
+        resetDeleteReason()
         startTransition(() => setConfirmDelete(job))
-    }, [])
+    }, [resetDeleteReason])
 
     const executeConfirmedDelete = () => {
         if (!confirmDelete) return
         const job = confirmDelete
+        const reason = deleteReason.take()
         setConfirmDelete(null)
-        withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history', 'Could not remove that job from the history.')
+        withAction(job.id, () => aggregationService.deleteJob(job.id, { reason }), 'Job removed from history', 'Could not remove that job from the history.')
     }
 
     /**
@@ -591,7 +613,7 @@ export function RegistryJobHistory() {
 
     const handleConfirmRetrigger = useCallback(async (
         overrides: AggregationOverridesValue,
-        opts?: { purgeFirst?: boolean },
+        opts?: { purgeFirst?: boolean; reason?: string },
     ) => {
         if (!retriggerCtx) return
         const dsId = retriggerCtx.kind === 'job' ? retriggerCtx.job.dataSourceId : retriggerCtx.dataSourceId
@@ -608,8 +630,8 @@ export function RegistryJobHistory() {
         await runDialogAction(
             `retrigger-${dsId}`,
             () => opts?.purgeFirst
-                ? aggregationService.purgeAggregation(dsId, { reaggregate: request })
-                : aggregationService.triggerAggregation(dsId, request, 'manual'),
+                ? aggregationService.purgeAggregation(dsId, { reaggregate: request, reason: opts.reason })
+                : aggregationService.triggerAggregation(dsId, request, 'manual', { reason: opts?.reason }),
             opts?.purgeFirst
                 ? 'Purging rollup edges — the rebuild starts when it finishes'
                 : 'Aggregation triggered',
@@ -619,7 +641,10 @@ export function RegistryJobHistory() {
         )
     }, [retriggerCtx, runDialogAction])
 
-    const handleConfirmResume = useCallback(async (overrides: AggregationOverridesValue) => {
+    const handleConfirmResume = useCallback(async (
+        overrides: AggregationOverridesValue,
+        opts?: { reason?: string },
+    ) => {
         if (!retriggerCtx || retriggerCtx.kind !== 'job') return
         const { job } = retriggerCtx
         await runDialogAction(
@@ -630,17 +655,17 @@ export function RegistryJobHistory() {
                 maxRetries: overrides.maxRetries,
                 timeoutSecs: overrides.timeoutMinutes * 60,
                 tuning: tuningForRequest(overrides.tuning),
-            }),
+            }, { reason: opts?.reason }),
             'Job resumed from checkpoint',
             'Could not resume that job.',
         )
     }, [retriggerCtx, runDialogAction])
 
-    const handlePurge = useCallback(async (job: AggregationJobResponse) => {
+    const handlePurge = useCallback(async (job: AggregationJobResponse, reason?: string) => {
         setPurgeConfirm(null)
         setActionLoading(job.id)
         try {
-            const result = await aggregationService.purgeAggregation(job.dataSourceId)
+            const result = await aggregationService.purgeAggregation(job.dataSourceId, { reason })
             notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
@@ -665,10 +690,22 @@ export function RegistryJobHistory() {
         })
     }, [dsLookup, defaultTuning])
 
+    // The grouped view's menu purges in one click, so it asks here — the
+    // prompt is both the confirmation and the place to say why.
     const handlePurgeDataSource = useCallback(async (dataSourceId: string) => {
+        const answer = await askReason({
+            title: 'Purge aggregated edges?',
+            message: `Removes every materialized edge for ${dsLookup.get(dataSourceId)?.label ?? dataSourceId}. A re-aggregation job starts automatically when the purge completes.`,
+            confirmLabel: 'Purge',
+            confirmIcon: Trash2,
+            context: 'purge',
+            audience: 'workspace',
+            tone: 'danger',
+        })
+        if (!answer) return
         setActionLoading(dataSourceId)
         try {
-            const result = await aggregationService.purgeAggregation(dataSourceId)
+            const result = await aggregationService.purgeAggregation(dataSourceId, { reason: answer.reason })
             notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
@@ -677,7 +714,7 @@ export function RegistryJobHistory() {
         } finally {
             setActionLoading(null)
         }
-    }, [notify, fetchJobs])
+    }, [askReason, dsLookup, notify, fetchJobs])
 
     // "Show all jobs" for a specific data source (switches to flat view with filter)
     const handleShowAllJobs = useCallback((dataSourceId: string) => {
@@ -970,7 +1007,10 @@ export function RegistryJobHistory() {
                 onConfirm={executeConfirmedDelete}
                 onCancel={() => setConfirmDelete(null)}
                 loading={!!actionLoading}
+                reason={deleteReason}
             />
+
+            {reasonPrompt}
 
             {/* Re-trigger / Resume dialog with override knobs */}
             <RetriggerDialog

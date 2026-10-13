@@ -1,16 +1,16 @@
 # The Admin Console
 
 *For Administrators.* **Administration**, in the sidebar, is where you run
-{brand} itself: its health, its look, its switches, its people and its audit
-trail. This page is a map of every Administration page — what it's for, who
+{brand} itself: its health, its look, its switches, its people and its
+activity log. This page is a map of every Administration page — what it's for, who
 can open it, and the tasks you'll do there — with step-by-step help for the
 pages that don't have a guide of their own.
 
 > **Before you start:** **Administration** appears in the sidebar only if you
-> hold `system:admin` (the **Super Admin** role) or `system:groups:manage`
-> (which the **Org Admin** role also carries). **Workspaces**, **Ingestion**
-> and **Semantic Layers** are separate sidebar items — not part of
-> Administration.
+> hold `system:admin` (the **Super Admin** role), `system:groups:manage`
+> (which the **Org Admin** role also carries) or `system:audit:read` (the
+> **Org Auditor** role). **Workspaces**, **Ingestion** and **Semantic Layers**
+> are separate sidebar items — not part of Administration.
 
 ---
 
@@ -24,23 +24,21 @@ so sees them all.
 | Page | Use it to | Who can open it | Help |
 | --- | --- | --- | --- |
 | **Global Overview** | See graph scale across every workspace | Super Admin | [Below](#global-overview) |
+| **Activity** | See who did what across the platform — where, when and why | `system:audit:read` — Org Auditors and Super Admins | [Below](#activity) |
 | **Infrastructure** | Check the live health of every backing service | Super Admin | [Below](#infrastructure) |
 | **Redis & Graph Store** | See how Redis and the default graph store are configured, and test them | Super Admin | [Below](#redis--graph-store) |
 | **Graph store** | See shards, replicas and where every graph lives | Super Admin | [The Graph Store](/guide/graph-store-topology) |
 | **Branding** | Set the product name, logo, colour and support email | Super Admin | [Below](#branding) |
 | **Features** | Turn capabilities on and off for everybody | Super Admin | [Feature Switches](/guide/feature-switches) |
-| **Telemetry** | Find out which help content people miss | `system:audit:read` | [Below](#telemetry) |
+| **Telemetry** | Find out which help content people miss | `system:audit:read` — Org Auditors and Super Admins | [Below](#telemetry) |
 | **Announcements** | Show a banner to everyone | Super Admin | [Below](#announcements) |
 | **User Management** | Invite, add, approve and look after accounts | Super Admin | [Users & Access](/guide/users-access) |
 | **Groups** | Bundle people to grant roles in bulk | `system:groups:manage` — Org Admins and Super Admins | [Users & Access](/guide/users-access#groups) |
 | **Permissions** | See and change what each role grants, and who has access where | Super Admin | [Users & Access](/guide/users-access#permissions) |
 | **SSO** | Connect and run single sign-on | Super Admin | [Single Sign-On](/guide/sso-setup) |
-| **Audit Log** | See who changed roles, access and accounts, and when | `system:audit:read` | [Below](#audit-log) |
 
-> **Note:** The **Org Auditor** role holds `system:audit:read` but not the
-> permission that opens Administration, so today an Org Auditor can't reach
-> **Telemetry** or **Audit Log** in the app. An **Org Admin** sees only
-> **Groups**.
+> **Note:** An **Org Auditor** sees **Activity** and **Telemetry**, and lands
+> on **Activity**. An **Org Admin** sees only **Groups**.
 
 ---
 
@@ -251,7 +249,7 @@ default, and what happens when you turn it off. **Who:** Super Admins.
 **What it's for:** how your help content is working — which pages people find
 helpful, what they searched the documentation for and didn't find, and where
 they abandon guided tours. In short: what to write or fix next. **Who:**
-`system:audit:read` (Super Admins).
+`system:audit:read` (Org Auditors and Super Admins).
 
 It draws on three signals:
 
@@ -317,33 +315,51 @@ were.
 
 ---
 
-## Audit Log
+## Activity
 
-**What it's for:** "who changed this, and when?" for access and accounts —
-sign-ins and sign-outs, failed sign-ins and ended sessions, every change to
-roles, permissions, workspace members, groups and view shares, access
-requests, single sign-on settings, and account changes such as approvals, role
-changes, suspensions, password resets and invites. **Who:** `system:audit:read`
-(Super Admins).
+**What it's for:** "who did this, when, where and why?" — across the whole
+platform. It records sign-ins and access changes; rebuilds, retries, cancels,
+purges and holds on data sources; data sources and providers added, changed or
+removed; version control; group and workspace membership, by hand or from the
+identity provider's sync; and platform settings such as feature switches.
+**Who:** `system:audit:read` (Org Auditors and Super Admins).
 
-1. Open **Administration → Audit Log**.
-2. Choose a **Range**: **Last 24h**, **Last 7d** (the default), **Last 30d** or
-   **All time**.
-3. Choose a **Scope** (see the table below). **Security** is the default.
-4. Narrow it down: select a category card — **Workspace bindings**, **Role
-   lifecycle**, **Permissions** or **User lifecycle** — or type a name, email or
-   user ID into **Who did it** or **Who it affected**. **Clear** resets them.
-5. Read the table — **When**, **What happened**, **Actor**, **Target** and
-   **Workspace** — and select a row for its details, such as the event ID and
-   role. Select **Load more** for older events.
+1. Open **Administration → Activity**.
+2. Choose a range, such as **7d** or **30d**, or **Custom**.
+3. Choose a lens: **Everything** (the default), **Operations**, **Access**,
+   **Identity**, **Data**, **Content**, **Platform** or **Security** (identity
+   and access together, including every refused request).
+4. Narrow it down: type a name, email or user ID into **Person**, and choose
+   whether they **Did it** or **Had it done to them**; pick an action, an
+   outcome (**Succeeded**, **Failed**, **Refused**), whether a reason was
+   given, or search the text. **Clear filters** resets them.
+5. Read the band at the top: events, people active, operations started by
+   hand and the share of changes that said why, each against the period
+   before; what happened by kind; when it happens, by weekday and hour (UTC);
+   and the most active people, the most hands-on data sources — with how often
+   each is touched — the most frequent actions and the reasons people give.
+   Select a person, source or action to filter to it.
+6. Select an event in the timeline for its details: who did it and who it
+   happened to, when, where and why, links to the run, data source, group,
+   view or workspace, the other events from the same request, and the raw
+   event.
 
-**You should now see** only the events that match, newest first.
+**You should now see** only the events that match, newest first, grouped by
+day. New events are offered at the top as **N new events — show**.
+**Export** downloads what's shown as a CSV file, up to 50,000 rows; the export
+itself is recorded.
 
-| Scope | Shows | Hides |
+| If you see… | Do this | Because |
 | --- | --- | --- |
-| **Security** | Sign-ins, sign-outs, failed sign-ins, session revocations, and every role and permission change | Access-denied noise, password-reset and signup chatter, new invites and new access requests |
-| **Activity** | Everything in **Security**, plus password resets, signups, invites and new access requests | Only the access-denied noise |
-| **Everything** | The unfiltered log, including hourly access-denied events — slow on busy systems | Nothing |
+| A data source near the top of **Most hands-on sources** | Select it, then read the reasons people gave | Rebuilding by hand every day or two usually means a schedule is missing or a source keeps failing |
+| **No reason given** on operations | Ask people to say why; the dialogs offer suggestions | A reason is what makes the log answer "why" |
+| **Importing earlier activity** at the top | Nothing — counts grow until it finishes | The first start of an upgraded deployment imports past events, newest first |
+
+Each workspace also has an **Activity** tab with the same view, limited to its
+operations, access and data changes, for that workspace's admins — see
+[Workspace Admin](/guide/workspace-admin). Whenever someone starts, stops or
+destroys work, {brand} asks — optionally — why; the field says who will be able
+to read the answer.
 
 Some history lives elsewhere:
 
@@ -375,7 +391,7 @@ These live outside Administration:
 | --- | --- |
 | **Daily / on alert** | Glance at **Infrastructure**; act on anything **Down** or **Degraded**. |
 | **Weekly** | Check **Ingestion → Job History** for failed aggregation; revoke invite links you no longer need under **Manage links**; clear stale announcements; read **Telemetry** content gaps. |
-| **Monthly** | Review role changes in the **Audit Log**; review roles and groups for drift; sort **User Management** by **Last seen** to find unused accounts. |
+| **Monthly** | Review access changes in **Activity**, and the sources people rebuild by hand most; review roles and groups for drift; sort **User Management** by **Last seen** to find unused accounts. |
 | **Per change** | Announce disruptive work ahead of time; check what depends on a provider before deleting it; check a semantic layer's **Health** before publishing changes. |
 
 ---

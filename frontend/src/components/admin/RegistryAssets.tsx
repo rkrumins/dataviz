@@ -46,6 +46,8 @@ import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import { PRESET_TIMEOUT_MINUTES, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
@@ -149,6 +151,54 @@ const TYPE_COLOURS = [
     'bg-teal-500/10 text-teal-600 border-teal-500/20',
 ]
 
+// ─── AssetPurgeConfirm ────────────────────────────────────────────────────────
+/** The purge confirmation under an asset, with the optional reason. Mounted
+ *  only while a purge is being confirmed, so a long asset list doesn't hold a
+ *  reason (and read the recent ones) per row. */
+function AssetPurgeConfirm({ onCancel, onConfirm }: {
+    onCancel: () => void
+    onConfirm: (opts: { skipReaggregate: boolean; reason?: string }) => void
+}) {
+    const [skipReagg, setSkipReagg] = useState(false)
+    const reason = useReasonDraft('purge')
+    const confirm = () => onConfirm({ skipReaggregate: skipReagg, reason: reason.take() })
+    return (
+        <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                <p className="text-xs text-red-400 leading-relaxed">
+                    This will remove all materialized aggregated edges from the graph for this asset. This cannot be undone.
+                </p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-ink-muted cursor-pointer select-none">
+                <input
+                    type="checkbox"
+                    checked={!skipReagg}
+                    onChange={e => setSkipReagg(!e.target.checked)}
+                    className="rounded border-glass-border"
+                />
+                Re-aggregate automatically after purge (recommended — container-level lineage is empty until aggregation runs)
+            </label>
+            <ReasonField draft={reason} audience="workspace" onSubmit={confirm} onEscape={onCancel} />
+            <div className="flex justify-end gap-2">
+                <button
+                    onClick={onCancel}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                    Cancel
+                </button>
+                <button
+                    onClick={confirm}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25"
+                >
+                    <Trash2 className="w-3 h-3" />
+                    Confirm Purge
+                </button>
+            </div>
+        </div>
+    )
+}
+
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected, catalogId,
@@ -163,14 +213,12 @@ function AssetRow({
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
-    onPurge?: (name: string, opts?: { skipReaggregate?: boolean }) => void
+    onPurge?: (name: string, opts?: { skipReaggregate?: boolean; reason?: string }) => void
     onOpenProfile: (catalogId: string) => void
     boundWorkspaceName?: string
 }) {
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
-    const [purgeLoading, setPurgeLoading] = useState(false)
-    const [purgeSkipReagg, setPurgeSkipReagg] = useState(false)
     const [refreshPending, setRefreshPending] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
     const queryClient = useQueryClient()
@@ -625,47 +673,15 @@ function AssetRow({
                                     </button>
                                 )}
                             </div>
-                            {purgeConfirm && (
-                                <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2" onClick={e => e.stopPropagation()}>
-                                    <div className="flex items-start gap-2">
-                                        <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                                        <p className="text-xs text-red-400 leading-relaxed">
-                                            This will remove all materialized aggregated edges from the graph for this asset. This cannot be undone.
-                                        </p>
-                                    </div>
-                                    <label className="flex items-center gap-2 text-xs text-ink-muted cursor-pointer select-none">
-                                        <input
-                                            type="checkbox"
-                                            checked={!purgeSkipReagg}
-                                            onChange={e => setPurgeSkipReagg(!e.target.checked)}
-                                            className="rounded border-glass-border"
-                                        />
-                                        Re-aggregate automatically after purge (recommended — container-level lineage is empty until aggregation runs)
-                                    </label>
-                                    <div className="flex justify-end gap-2">
-                                        <button
-                                            onClick={() => setPurgeConfirm(false)}
-                                            disabled={purgeLoading}
-                                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            onClick={async () => {
-                                                setPurgeLoading(true)
-                                                try { onPurge!(assetName, { skipReaggregate: purgeSkipReagg }) } finally {
-                                                    setPurgeLoading(false)
-                                                    setPurgeConfirm(false)
-                                                }
-                                            }}
-                                            disabled={purgeLoading}
-                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25"
-                                        >
-                                            {purgeLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                                            Confirm Purge
-                                        </button>
-                                    </div>
-                                </div>
+                            {purgeConfirm && onPurge && (
+                                <AssetPurgeConfirm
+                                    onCancel={() => setPurgeConfirm(false)}
+                                    onConfirm={(opts) => {
+                                        try { onPurge(assetName, opts) } finally {
+                                            setPurgeConfirm(false)
+                                        }
+                                    }}
+                                />
                             )}
                         </div>
                     )}
@@ -1030,7 +1046,10 @@ export function RegistryAssets() {
      * Step 2 of re-aggregate: fan-out trigger calls with the user's overrides.
      * Throws on total failure so the dialog stays open and surfaces the error.
      */
-    const handleConfirmReaggregate = useCallback(async (overrides: AggregationOverridesValue) => {
+    const handleConfirmReaggregate = useCallback(async (
+        overrides: AggregationOverridesValue,
+        opts?: { reason?: string },
+    ) => {
         if (!reaggregateCtx) return
         const { dataSources } = reaggregateCtx
         showLoading('reaggregate', `Triggering aggregation for ${dataSources.length} data source(s)…`)
@@ -1044,7 +1063,7 @@ export function RegistryAssets() {
                     maxRetries: overrides.maxRetries,
                     timeoutSecs,
                     tuning,
-                }, 'manual')
+                }, 'manual', { reason: opts?.reason })
             ))
 
             const succeeded = results.filter(r => r.status === 'fulfilled').length
@@ -1069,7 +1088,7 @@ export function RegistryAssets() {
         }
     }, [reaggregateCtx, notify, showLoading, hideLoading, setSearchParams])
 
-    const handlePurge = useCallback(async (assetName: string, opts?: { skipReaggregate?: boolean }) => {
+    const handlePurge = useCallback(async (assetName: string, opts?: { skipReaggregate?: boolean; reason?: string }) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
         if (!item) return
 

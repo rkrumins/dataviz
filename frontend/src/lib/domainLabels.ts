@@ -73,6 +73,41 @@ export const VIEW_ACTION_LABELS: Record<string, string> = {
     admin_viewed: 'Opened by an admin',
 }
 
+/** Graph stores and catalogues a data source can come from. */
+export const PROVIDER_TYPE_LABELS: Record<string, string> = {
+    falkordb: 'FalkorDB',
+    neo4j: 'Neo4j',
+    datahub: 'DataHub',
+    spanner: 'Spanner',
+    mock: 'Sample data',
+    unknown: 'Unknown',
+}
+
+/** How a versioned graph is kept. */
+export const VERSION_KIND_LABELS: Record<string, string> = {
+    manual: 'Edited here',
+    authoritative: 'Mirrors its source',
+    hybrid: 'Mirrored and edited',
+    blank: 'Modelled from scratch',
+}
+
+/** Who started an aggregation run. */
+export const RUN_ORIGIN_LABELS: Record<string, string> = {
+    byHand: 'By hand',
+    automatic: 'Automatic',
+    onboarding: 'Onboarding',
+    other: 'Other',
+}
+
+/** Where an account stands today. */
+export const PRESENCE_LABELS: Record<string, string> = {
+    active: 'Active this week',
+    seen: 'Seen this week',
+    recent: 'Seen this month',
+    dormant: 'Gone quiet',
+    never: 'Never signed in',
+}
+
 /**
  * Title-case an unknown key so an enum we have not named yet still reads as
  * words rather than as `snake_case`. The fallback, never the plan.
@@ -90,3 +125,7 @@ export const viewTypeLabel = (key: string) => lookup(VIEW_TYPE_LABELS, key)
 export const visibilityLabel = (key: string) => lookup(VISIBILITY_LABELS, key)
 export const signupSourceLabel = (key: string) => lookup(SIGNUP_SOURCE_LABELS, key)
 export const viewActionLabel = (key: string) => lookup(VIEW_ACTION_LABELS, key)
+export const providerTypeLabel = (key: string) => lookup(PROVIDER_TYPE_LABELS, key)
+export const versionKindLabel = (key: string) => lookup(VERSION_KIND_LABELS, key)
+export const runOriginLabel = (key: string) => lookup(RUN_ORIGIN_LABELS, key)
+export const presenceLabel = (key: string) => lookup(PRESENCE_LABELS, key)

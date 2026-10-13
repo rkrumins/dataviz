@@ -76,6 +76,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "SchemaMigrationORM": "platform",
     # events
     "OutboxEventORM": "events",
+    "AuthAuditLogORM": "events",
     # legacy (deprecated)
     "GraphConnectionORM": "legacy",
 }

@@ -152,20 +152,32 @@ describe('pageAllowed', () => {
 
     it('needs BOTH gates for an admin section', () => {
         // `/admin` is a nested route with a guard at each level, so the
-        // section spec on its own is not the door.
-        //
-        // The auditor case is not hypothetical: the seeded `org_auditor`
-        // role (`backend/app/config/rbac_seed.py`) holds
-        // `system:audit:read` and nothing in the parent's anyPerm list,
-        // so it is refused at `/admin` before the audit section is ever
-        // consulted. The palette has to say the same thing.
-        const auditorOnly = ctx({ global: ['system:audit:read'] })
+        // section spec on its own is not the door. A catalogue whose parent
+        // refuses what a section accepts must still be refused at the parent
+        // — the palette has to agree with the route guard.
         const groupsOnly = ctx({ global: ['system:groups:manage'] })
-        const both = ctx({ global: ['system:groups:manage', 'system:audit:read'] })
+        const staleParent: PageAccessContext = {
+            ...ctx({ global: ['system:audit:read'] }),
+            sidebar: {
+                ...DEFAULT_SIDEBAR_PERMISSIONS,
+                admin: { kind: 'anyPerm', perms: ['system:admin'] },
+            },
+        }
 
-        expect(pageAllowed(entry('/admin/audit'), auditorOnly)).toBe(false) // parent gate
         expect(pageAllowed(entry('/admin/audit'), groupsOnly)).toBe(false) // section gate
-        expect(pageAllowed(entry('/admin/audit'), both)).toBe(true)
+        expect(pageAllowed(entry('/admin/audit'), staleParent)).toBe(false) // parent gate
+    })
+
+    it('lets the org_auditor role reach Activity', () => {
+        // The seeded `org_auditor` role (`backend/app/config/rbac_seed.py`)
+        // holds `system:audit:read` and nothing else in the admin area. It
+        // used to be refused at `/admin` before its own section was
+        // consulted; the parent gate now accepts every section permission.
+        const auditorOnly = ctx({ global: ['system:audit:read'] })
+
+        expect(pageAllowed(entry('/admin/audit'), auditorOnly)).toBe(true)
+        expect(pageAllowed(entry('/admin/telemetry'), auditorOnly)).toBe(true)
+        expect(pageAllowed(entry('/admin/users'), auditorOnly)).toBe(false)
     })
 
     it('keeps a groups-only admin out of user management', () => {

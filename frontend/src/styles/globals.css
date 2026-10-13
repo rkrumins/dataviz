@@ -21,6 +21,9 @@
     --nx-bg-overlay: rgba(255, 255, 255, 0.95);
     --nx-bg-glass: rgba(255, 255, 255, 0.72);
     --nx-border-glass: rgba(255, 255, 255, 0.4);
+    /* The ink every `glass-border/NN` divider is drawn in, as raw channels
+       (tailwind.config.js `divider`): dark on light, light on dark. */
+    --nx-divider-rgb: 15 23 42;
     --nx-border-subtle: rgba(0, 0, 0, 0.08);
     
     /* Text */
@@ -93,6 +96,7 @@
     --nx-bg-overlay: rgba(22, 27, 34, 0.95);
     --nx-bg-glass: rgba(30, 35, 45, 0.78);
     --nx-border-glass: rgba(255, 255, 255, 0.06);
+    --nx-divider-rgb: 255 255 255;
     --nx-border-subtle: rgba(255, 255, 255, 0.08);
     
     --nx-text-primary: #e6edf3;

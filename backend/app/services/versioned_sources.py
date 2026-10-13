@@ -118,6 +118,60 @@ def reset_cache() -> None:
     _cache, _cache_at = None, 0.0
 
 
+@dataclass(frozen=True)
+class VersionedGraphRow:
+    """One versioned graph, as analytics counts it."""
+
+    data_source_id: str
+    workspace_id: Optional[str]
+    kind: str
+    created_at: Optional[str]
+    deleted_at: Optional[str]
+
+
+async def versioned_graph_rows(*, timeout_secs: float = 3.0) -> list[VersionedGraphRow]:
+    """Every versioned graph, abandoned ones included, for adoption analytics.
+
+    Uncached: the analytics document that asks is itself cached per epoch and
+    warmed. Bounded instead — a dashboard section must not wait on a slow
+    versioning store — and raises :class:`VersionedLookupUnavailable` on any
+    failure, timeouts included, so the caller can say the section is
+    unavailable rather than report zero adoption.
+    """
+    try:
+        from sqlalchemy import select
+
+        from backend.app.services.versioning.db import get_session_factory
+        from backend.app.services.versioning.models import GraphORM
+
+        async with asyncio.timeout(timeout_secs):
+            async with get_session_factory()() as session:
+                rows = (await session.execute(
+                    select(
+                        GraphORM.data_source_id, GraphORM.workspace_id,
+                        GraphORM.kind, GraphORM.created_at, GraphORM.deleted_at,
+                    )
+                )).all()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise VersionedLookupUnavailable(str(exc)) from exc
+    return [
+        VersionedGraphRow(
+            data_source_id=r[0], workspace_id=r[1], kind=r[2] or "unknown",
+            created_at=_iso(r[3]), deleted_at=_iso(r[4]),
+        )
+        for r in rows if r[0]
+    ]
+
+
+def _iso(value) -> Optional[str]:
+    """graphver keeps real timestamps; analytics compares ISO-8601 text."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 # ── Projector health ─────────────────────────────────────────────────────
 # The set above answers "who masters this source". It does NOT answer "and is
 # that mastering currently working", and for fourteen hours on 2026-08-30 that

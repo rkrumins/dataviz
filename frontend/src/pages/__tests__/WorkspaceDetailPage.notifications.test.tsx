@@ -70,6 +70,7 @@ vi.mock('@/components/admin/workspace/WorkspaceViewsSection', () => ({ default: 
 vi.mock('@/components/admin/workspace/WorkspaceAggregationDashboard', () => ({ WorkspaceAggregationDashboard: () => null }))
 vi.mock('@/components/admin/workspace/WorkspaceOntologyTimeline', () => ({ WorkspaceOntologyTimeline: () => null }))
 vi.mock('@/components/workspaces/WorkspaceMembers', () => ({ WorkspaceMembers: () => null }))
+vi.mock('@/components/activity/ActivityExplorer', () => ({ ActivityExplorer: () => null }))
 vi.mock('@/components/ingestion/profiling/ProfilingBoard', () => ({ ProfilingBoard: () => null }))
 vi.mock('@/components/admin/workspace/useDataSourceDeletion', () => ({
     useDataSourceDeletion: () => ({ target: null, open: vi.fn(), openPermanent: vi.fn(), close: vi.fn(), confirm: vi.fn() }),

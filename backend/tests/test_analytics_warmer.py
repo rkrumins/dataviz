@@ -39,7 +39,8 @@ async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatc
     await analytics_warmer.warm_once(db_session, ttl=900)
 
     for days in analytics_warmer.WARM_WINDOWS:
-        for surface in ("summary", "workspaces"):
+        # Every surface the warmer knows — the Data and Usage tabs included.
+        for surface in ("summary", "workspaces", "data", "usage"):
             key = analytics_cache.document_key(surface, {"days": days})
             assert analytics_cache._memory_get(key) is not None, (
                 f"{surface}/{days}d was not warmed into the key readers use"
@@ -155,3 +156,124 @@ def test_the_warmer_and_the_readers_share_one_grid(monkeypatch):
     monkeypatch.setenv("ANALYTICS_WARM_INTERVAL_SECONDS", "1")
     assert analytics_warmer.interval_seconds() == 30.0
 
+
+# ── Entries that are not analytics documents ─────────────────────────
+
+
+async def test_a_short_ttl_holds_on_every_tier(monkeypatch):
+    """A document cached for a minute must not live five in the in-process
+    tier because it happened to be read back from Redis."""
+    store: dict = {}
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ttl=None):
+        store[key] = value
+        return True
+
+    monkeypatch.setattr(analytics_cache, "_redis_get", _get)
+    monkeypatch.setattr(analytics_cache, "_redis_set", _set)
+
+    async def _build():
+        return {"n": 1}
+
+    await analytics_cache.cached("k:short", _build, ttl=60)
+    analytics_cache.clear()          # another replica: Redis has it, memory does not
+    await analytics_cache.cached("k:short", _build, ttl=60)
+    expires, _ = analytics_cache._memory["k:short"]
+    import time as _time
+    assert expires - _time.monotonic() <= 61
+
+
+async def test_a_redis_only_entry_never_lands_in_process(monkeypatch):
+    """Activity folds hold every person in their span: one copy per worker
+    would be memory nobody budgeted for."""
+    builds = {"n": 0}
+
+    async def _build():
+        builds["n"] += 1
+        return {"big": True}
+
+    assert await analytics_cache.cached("k:fold", _build, memory=False) == {"big": True}
+    assert "k:fold" not in analytics_cache._memory
+    # Without Redis there is nothing to reuse it from, so it is rebuilt.
+    await analytics_cache.cached("k:fold", _build, memory=False)
+    assert builds["n"] == 2
+
+
+async def test_a_warm_pass_builds_every_lens_the_explorer_opens_on(
+    test_client, db_session, monkeypatch,
+):
+    """Each lens, over each leading range, is served what the warmer built —
+    proof that the warmer and the endpoint key the same documents, however
+    the categories in a request are ordered."""
+    from backend.app.db.repositories import activity_repo
+    from backend.app.services.activity import summaries
+
+    await analytics_warmer.warm_once(db_session, ttl=900)
+
+    async def _must_not_build(*_a, **_kw):
+        raise AssertionError("a lens was built again after a warm pass")
+
+    monkeypatch.setattr(activity_repo, "summary", _must_not_build)
+    lenses = [
+        "".join((
+            f"&category={','.join(categories)}" if categories else "",
+            "&includeNoise=true" if noise else "",
+        ))
+        for categories, noise in summaries.LENSES
+    ]
+    assert "&category=identity,access&includeNoise=true" in lenses
+    for days in summaries.WARM_DAYS:
+        for lens in [*lenses, "&category=access,identity&includeNoise=true"]:
+            res = await test_client.get(f"/api/v1/admin/activity/summary?days={days}{lens}")
+            assert res.status_code == 200, (days, lens, res.text)
+            assert "totals" in res.json()
+
+
+def _poison(session) -> None:
+    """Fail the way a timed-out read does on Postgres: the session's
+    transaction is dead, and every statement after it fails too until it is
+    rolled back. (A refused flush does that on any database.)"""
+    from backend.app.db.models import AuthAuditLogORM
+    session.add(AuthAuditLogORM())
+
+
+async def test_a_view_that_breaks_the_session_costs_only_itself(db_session, monkeypatch):
+    from backend.app.db.repositories import activity_repo
+    from backend.app.services.activity import summaries
+
+    real = activity_repo.summary
+    failed = []
+
+    async def _one_times_out(session, f, w, **kw):
+        if f.categories == ("operations",) and w.days == 7:
+            failed.append(f)
+            _poison(session)
+            await session.flush()
+        return await real(session, f, w, **kw)
+
+    monkeypatch.setattr(activity_repo, "summary", _one_times_out)
+    built = await summaries.warm_platform(db_session)
+    assert len(failed) == 1
+    assert built == len(summaries.WARM_DAYS) * len(summaries.LENSES) - 1
+
+
+async def test_a_document_that_breaks_the_session_costs_only_itself(db_session, monkeypatch):
+    real = analytics_repo.platform_summary
+
+    async def _one_times_out(session, **kwargs):
+        if kwargs.get("days") == 7:
+            _poison(session)
+            await session.flush()
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(analytics_repo, "platform_summary", _one_times_out)
+    await analytics_warmer.warm_once(db_session, ttl=900)
+
+    assert analytics_cache._memory_get(
+        analytics_cache.document_key("summary", {"days": 7})) is None
+    for surface, days in (("workspaces", 7), ("usage", 7), ("summary", 14), ("data", 365)):
+        assert analytics_cache._memory_get(
+            analytics_cache.document_key(surface, {"days": days})) is not None, (surface, days)

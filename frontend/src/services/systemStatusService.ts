@@ -167,7 +167,8 @@ export interface ReconciliationSection {
 export interface OutboxSection {
     pending: number
     oldestPendingAgeS: number | null
-    /** null = this process doesn't own the relay (role-based ownership). */
+    /** Whether events are reaching the activity ledger: false once one has
+     *  waited minutes while nothing was recorded. */
     relayAlive: boolean | null
 }
 
