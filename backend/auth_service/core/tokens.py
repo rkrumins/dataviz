@@ -185,6 +185,18 @@ AUTH_TIME_CLAIM = "auth_time"
 #: kind. Signed into both tokens and carried through every rotation.
 AUTH_TIME_PROVEN_CLAIM = "auth_time_proven"
 
+#: On an SSO session's access token: the provider it signed in through
+#: (``idp_providers.id``), from the server's record of the session. Step-up
+#: asks that provider, not whichever of the person's identities was used last.
+SIGNIN_PROVIDER_CLAIM = "idp"
+
+#: Beside it: when that provider last vouched for this session (epoch
+#: seconds) — its sign-in, and for a gateway re-asked on every renewal each
+#: confirmation since. Not ``auth_time``: a gateway may report the company
+#: portal's original login there, hours before it last vouched for the person.
+#: From the server's record of the session, like the provider.
+IDP_VOUCHED_AT_CLAIM = "idp_at"
+
 
 def password_change_pending(payload: dict, account_must_change: bool) -> bool:
     """Whether this session has to change the account's password first.

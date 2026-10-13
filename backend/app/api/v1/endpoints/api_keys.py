@@ -77,7 +77,9 @@ from backend.auth_service.core.password import is_password_set, verify_password
 from backend.auth_service.core.tokens import (
     AUTH_TIME_CLAIM,
     AUTH_TIME_PROVEN_CLAIM,
+    IDP_VOUCHED_AT_CLAIM,
     SIGNIN_CLAIM,
+    SIGNIN_PROVIDER_CLAIM,
     SIGNIN_SSO,
     decode_token,
 )
@@ -103,8 +105,12 @@ MAX_ACTIVE_KEYS = 25
 #: provider to mint a key.
 STEP_UP_SECONDS = 15 * 60
 #: Whether a sign-in the identity provider did not prove fresh may stand in
-#: for one (gateway and portal connections cannot prove one). Off by default.
+#: for one — for portal connections, which can neither prove one nor be asked
+#: (a gateway is asked: ``_sso_step_up``). Off by default.
 SSO_ROUND_TRIP_FLAG = "apiKeySsoRoundTripStepUp"
+#: How long a gateway may take to say whether a company session is live
+#: before a step-up is answered "try again", and how soon to.
+_GATEWAY_RETRY_SECONDS = 30
 _STEP_UP_SCOPE = "stepup"
 _STEP_UP_NEXT = "/me/api-keys"
 _MAX_IDS = 100
@@ -545,6 +551,14 @@ def _fresh(payload: dict, *, proven: bool = False) -> bool:
     return not proven or payload.get(AUTH_TIME_PROVEN_CLAIM) is True
 
 
+def _vouched_recently(payload: dict) -> bool:
+    """The session's provider vouched for it within the step-up window
+    (``IDP_VOUCHED_AT_CLAIM``): for a gateway the browser talks to, a sign-in
+    through it — the gateway's own answer, minutes ago."""
+    vouched_at = payload.get(IDP_VOUCHED_AT_CLAIM)
+    return isinstance(vouched_at, int) and time.time() - vouched_at <= STEP_UP_SECONDS
+
+
 _UNAVAILABLE = (
     "Your sign-in provider can't confirm a fresh sign-in, so API keys can't be created or "
     "rotated here. An administrator can allow it under Administration → Features → "
@@ -553,45 +567,98 @@ _UNAVAILABLE = (
 
 
 async def _sso_step_up(
-    request: Request, user: User, payload: dict, policy: _PolicyValues,
-) -> Optional[HTTPException]:
-    """For a session signed in through an identity provider: ``None`` when it
-    may mint now, else the refusal to raise.
+    request: Request, user: User, payload: dict, policy: _PolicyValues, *,
+    ask_gateway: bool = True,
+) -> tuple[Optional[str], Optional[HTTPException]]:
+    """How a session signed in through an identity provider confirms it is
+    the person: ``(method, None)`` when it does, else ``(None, refusal)``.
 
-    Only a sign-in the provider proves happened in the last few minutes
-    counts — one it re-issued silently from a session it still held proves
-    nothing about who is at the keyboard. Unless the deployment accepts a
-    fresh round trip instead (``SSO_ROUND_TRIP_FLAG``), a provider that cannot
-    prove one — or one that just signed you in without saying when — gets a
-    plain "unavailable" rather than an endless loop of signing in again."""
-    if _fresh(payload, proven=not policy.sso_round_trip):
-        return None
-    url, proves = await _identity_service(request).step_up_target(
-        user.id, next_path=_STEP_UP_NEXT,
+    Only something that happened in the last few minutes counts — a session
+    a provider re-issued silently from one it still held proves nothing about
+    who is at the keyboard — asked of the provider the session came from:
+
+    * ``sso_proven`` — OIDC or SAML said when the person authenticated;
+    * ``gateway_live`` — an Enterprise gateway this server can ask confirms
+      the company session on this request is live, now. It fails closed: a
+      gateway that does not answer mints nothing (503, try again);
+    * ``gateway_sign_in`` — a gateway only the browser talks to vouched for
+      the session by signing it in, minutes ago;
+    * ``sso_round_trip`` — anything else signed in that recently, where the
+      deployment accepts it (``SSO_ROUND_TRIP_FLAG``).
+
+    Otherwise a sign-in the provider can make fresh is asked for
+    (``step_up_required``); a provider that cannot — a portal, without the
+    switch — gets a plain "unavailable" rather than an endless loop of
+    signing in again. ``ask_gateway`` False — the create form, before
+    anything is submitted — takes a gateway that can be asked as confirming
+    without asking it."""
+    if _fresh(payload, proven=True):
+        return "sso_proven", None
+    provider_id = payload.get(SIGNIN_PROVIDER_CLAIM)
+    identity = _identity_service(request)
+    target = await identity.step_up_target(
+        user.id, next_path=_STEP_UP_NEXT, provider_id=provider_id,
     )
-    if policy.sso_round_trip or (proves and not _fresh(payload)):
-        return _refused(
+    if target.confirms == "gateway_live":
+        if not ask_gateway:
+            return "gateway_live", None
+        answer = await identity.confirm_live_session(
+            provider_id, ambient_cookies=dict(request.cookies),
+            ambient_headers=dict(request.headers),
+        )
+        if answer == "confirmed":
+            return "gateway_live", None
+        if answer == "unreachable":
+            return None, HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "gateway_unreachable",
+                    "message": (
+                        "Your company sign-in didn't answer, so it can't confirm it's you "
+                        "right now. Try again in a moment."
+                    ),
+                },
+                headers={"Retry-After": str(_GATEWAY_RETRY_SECONDS)},
+            )
+        return None, _refused(
+            "step_up_required",
+            "Your company sign-in has ended: sign in again, then try again.",
+            method="sso", loginUrl=target.login_url,
+        )
+    if target.confirms == "gateway_sign_in":
+        if _vouched_recently(payload):
+            return "gateway_sign_in", None
+        return None, _refused(
+            "step_up_required",
+            "Confirm it's you: sign in again through your company sign-in, then try again.",
+            method="sso", loginUrl=target.login_url,
+        )
+    if policy.sso_round_trip and _fresh(payload):
+        return "sso_round_trip", None
+    if policy.sso_round_trip or (target.confirms == "proven" and not _fresh(payload)):
+        return None, _refused(
             "step_up_required",
             "Confirm it's you: sign in again with your identity provider, then try again.",
-            method="sso", loginUrl=url,
+            method="sso", loginUrl=target.login_url,
         )
-    return _refused("step_up_unavailable", _UNAVAILABLE, method="sso")
+    return None, _refused("step_up_unavailable", _UNAVAILABLE, method="sso")
 
 
 async def _step_up(
     request: Request, user: User, session: AsyncSession, password: Optional[str],
     policy: _PolicyValues,
-) -> None:
+) -> str:
     """Confirm it is really the account's owner before a key is minted: a
     session left open on a shared machine must not be enough to walk away
-    with a credential that outlives it."""
+    with a credential that outlives it. Returns how it was confirmed
+    (``password``, or a method of ``_sso_step_up``), for the record."""
     payload = _session_claims(request)
     account = await user_repo.get_user_by_id(session, user.id)
     if _step_up_method(payload, account) == "sso":
-        refusal = await _sso_step_up(request, user, payload, policy)
+        method, refusal = await _sso_step_up(request, user, payload, policy)
         if refusal is not None:
             raise refusal
-        return
+        return method
     if not password:
         raise _refused(
             "step_up_required", "Enter your password to confirm it's you.", method="password",
@@ -610,6 +677,7 @@ async def _step_up(
         await accounts.record(_STEP_UP_SCOPE, user.id, RATELIMIT_LOGIN_PER_ACCOUNT)
         raise _refused("step_up_failed", "That password is not right.", method="password")
     await accounts.reset(_STEP_UP_SCOPE, user.id, RATELIMIT_LOGIN_PER_ACCOUNT)
+    return "password"
 
 
 # ── Validation ──────────────────────────────────────────────────────
@@ -941,13 +1009,17 @@ async def get_api_key_options(
     method = _step_up_method(payload, account)
     sign_in_url = None
     if (await _identity_facts(session, {user.id})).get(user.id, (0, None))[0]:
-        sign_in_url, _proves = await _identity_service(request).step_up_target(
-            user.id, next_path=_STEP_UP_NEXT,
-        )
-    available = True
+        sign_in_url = (await _identity_service(request).step_up_target(
+            user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
+        )).login_url
+    available, fresh = True, False
     if method == "sso":
         # Past step-up now, or after signing in again — not "never, here".
-        refusal = await _sso_step_up(request, user, payload, policy)
+        # A gateway that can be asked is asked when the form is submitted.
+        confirmed, refusal = await _sso_step_up(
+            request, user, payload, policy, ask_gateway=False,
+        )
+        fresh = confirmed is not None
         available = refusal is None or refusal.detail["error"] != "step_up_unavailable"
     return ApiKeyOptions(
         policy=Policy(
@@ -955,10 +1027,7 @@ async def get_api_key_options(
             max_lifetime_days=policy.max_lifetime_days,
             sso_sign_in_window_days=policy.sso_window_days,
         ),
-        step_up=StepUp(
-            method=method,
-            fresh=method == "sso" and _fresh(payload, proven=not policy.sso_round_trip),
-        ),
+        step_up=StepUp(method=method, fresh=fresh),
         active_keys=await api_key_repo.count_active_for_user(
             session, user.id, max_lifetime_days=policy.max_lifetime_days,
         ),
@@ -1134,7 +1203,7 @@ async def create_my_api_key(
 
     if await _at_limit():  # before asking anyone to prove anything
         raise _too_many()
-    await _step_up(request, user, session, body.current_password, policy)
+    confirmed_by = await _step_up(request, user, session, body.current_password, policy)
     # Counted again and minted under one lock: two requests racing each
     # other cannot both pass the limit.
     await api_key_repo.hold_principal(session, user.id)
@@ -1155,6 +1224,7 @@ async def create_my_api_key(
         session, "created", key,
         created_by=user.id, permissions=permissions, resources=resources,
         expires_at=expires_at, allowed_cidrs=cidrs, client_ip=_client_ip(request),
+        step_up=confirmed_by,
     )
     await session.commit()
     account, facts = await _owner_and_facts(session, user)
@@ -1244,7 +1314,7 @@ async def rotate_my_api_key(
             )
 
     await _replaceable()  # before asking anyone to prove anything
-    await _step_up(request, user, session, body.current_password, policy)
+    confirmed_by = await _step_up(request, user, session, body.current_password, policy)
     # Everything below decides on the key as it stands under the lock: a
     # revocation racing this rotation either lands first (and is seen) or
     # waits for it (and revokes the old key, which has its successor).
@@ -1289,6 +1359,7 @@ async def rotate_my_api_key(
         session, "rotated", key,
         created_by=user.id, previous_key_id=old.id, grace_seconds=grace,
         renewed=renewing, expires_at=expires_at, client_ip=_client_ip(request),
+        step_up=confirmed_by,
     )
     await session.commit()
     account, facts = await _owner_and_facts(session, user)

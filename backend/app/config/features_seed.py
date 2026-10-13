@@ -479,14 +479,16 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Creating or rotating an API key asks the person to confirm it's them. Through an "
             "identity provider, that means a sign-in the provider proves happened in the last 15 "
-            "minutes — which OIDC and SAML connections report. Gateway and portal connections "
-            "can't prove one; with this on, a sign-in through them in the last 15 minutes is "
-            "accepted instead."
+            "minutes — which OIDC and SAML connections report — or, through an Enterprise "
+            "gateway, the gateway confirming the company session. Portal connections can do "
+            "neither; with this on, a sign-in through one in the last 15 minutes is accepted "
+            "instead."
         ),
         "impact_when_off": (
-            "People whose sign-in goes through a gateway or portal connection can't create or "
-            "rotate API keys; they can still use and revoke the keys they have. People on OIDC "
-            "or SAML connections, and people who sign in with a password, are not affected."
+            "People whose sign-in goes through a portal connection can't create or rotate API "
+            "keys; they can still use and revoke the keys they have. People on OIDC, SAML or "
+            "Enterprise gateway connections, and people who sign in with a password, are not "
+            "affected."
         ),
         "category_id": "auth",
         "type": "boolean",

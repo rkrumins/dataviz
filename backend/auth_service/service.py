@@ -46,7 +46,9 @@ from .core.password import disabled_password_hash
 from .core.tokens import (
     AUTH_TIME_CLAIM,
     AUTH_TIME_PROVEN_CLAIM,
+    IDP_VOUCHED_AT_CLAIM,
     SIGNIN_CLAIM,
+    SIGNIN_PROVIDER_CLAIM,
     SIGNIN_PASSWORD,
     SIGNIN_SSO,
     create_access_token,
@@ -72,6 +74,7 @@ from .interface import (
     SessionTokens,
     SSOAuthError,
     SsoReauthRequired,
+    StepUpTarget,
     User,
 )
 from .providers import ProviderCredentials, get_provider
@@ -448,18 +451,86 @@ class LocalIdentityService:
             )
         return identity
 
-    async def step_up_target(self, user_id: str, *, next_path: str) -> tuple[str, bool]:
-        """Where to send someone to prove it is them again — the identity
-        provider they signed in with most recently, asked for a fresh
-        authentication rather than the warm session it may still hold — and
-        whether that provider can prove one. OIDC (``prompt=login`` with
-        ``max_age``) and SAML (``ForceAuthn``) report when the person
-        authenticated; a gateway or portal connection cannot be made to."""
+    async def step_up_target(
+        self, user_id: str, *, next_path: str, provider_id: Optional[str] = None,
+    ) -> StepUpTarget:
+        """Where to send someone to prove it is them again — the provider
+        their session signed in through (``provider_id``), or for a session
+        that does not say, the one they signed in with most recently — asked
+        for a fresh authentication rather than the warm session it may still
+        hold; and how that provider can confirm it (``STEP_UP_CONFIRMS``).
+
+        OIDC (``prompt=login`` with ``max_age``) and SAML (``ForceAuthn``)
+        report when the person authenticated. A gateway cannot be made to,
+        but can be asked: when the company session reaches this server
+        (server exchange with an ambient token source), now; when only the
+        browser holds it, by signing in through it. A portal can do neither."""
         async with self._session_factory() as session:
-            provider = await self._latest_identity_provider(session, user_id)
-        slug = getattr(provider, "slug", None)
-        proves = getattr(provider, "kind", None) in _PROVES_FRESH_SIGN_IN
-        return _build_reauth_url(slug, next_path=next_path, force=True), proves
+            provider = None
+            if provider_id and self._user_identity_repo is not None:
+                provider = next((
+                    i.provider
+                    for i in await self._user_identity_repo.list_for_user(session, user_id)
+                    if i.provider_id == provider_id
+                ), None)
+            provider = provider or await self._latest_identity_provider(session, user_id)
+        kind = getattr(provider, "kind", None)
+        if kind in _PROVES_FRESH_SIGN_IN:
+            confirms = "proven"
+        elif kind == "backchannel":
+            gateway = await self._gateway(provider.id)
+            confirms = (
+                "gateway_live" if gateway is not None and _ambient_source(gateway.settings)
+                else "gateway_sign_in"
+            )
+        else:
+            confirms = "none"
+        url = _build_reauth_url(getattr(provider, "slug", None), next_path=next_path, force=True)
+        return StepUpTarget(login_url=url, confirms=confirms)
+
+    async def confirm_live_session(
+        self, provider_id: str, *, ambient_cookies: dict, ambient_headers: dict,
+    ) -> str:
+        """Ask the gateway whether the company session on this request is
+        live, for a step-up — the renewal check's question, without its grace
+        window: an unanswered question confirms nothing here, so
+        ``unreachable`` is the caller's to refuse on. Asked whatever the
+        connection's ``liveness_on_refresh``: that trades a call per renewal
+        against how soon a session ends, and a step-up is one call."""
+        gateway = await self._gateway(provider_id)
+        raw = _ambient_token(
+            gateway.settings, cookies=ambient_cookies, headers=ambient_headers,
+        ) if gateway is not None and _ambient_source(gateway.settings) else None
+        if not raw:
+            return "absent"
+
+        from .providers.backchannel import SessionRevokedUpstream
+        try:
+            await asyncio.wait_for(
+                gateway.confirm_still_authenticated(raw), _LIVENESS_DEADLINE_SECONDS,
+            )
+        except SessionRevokedUpstream:
+            return "rejected"
+        except Exception as exc:  # noqa: BLE001 — no answer, whatever the reason
+            logger.warning(
+                "Gateway %s did not confirm a step-up's company session: %s",
+                provider_id, exc,
+            )
+            return "unreachable"
+        return "confirmed"
+
+    async def _gateway(self, provider_id: Optional[str]):
+        """The back-channel provider ``provider_id`` names, or ``None``."""
+        from .providers.backchannel import BackchannelProvider
+        from .providers.registry import ProviderNotFound, get_registry
+
+        if not provider_id:
+            return None
+        try:
+            provider = await get_registry().get(provider_id)
+        except (ProviderNotFound, RuntimeError):
+            return None
+        return provider if isinstance(provider, BackchannelProvider) else None
 
     async def _record_api_key_rejection(
         self, session, key, reason: str, *,
@@ -1153,6 +1224,10 @@ class LocalIdentityService:
             # the provider asserted.
             auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
             refresh_token=successor_token,
+            idp_provider_id=session_provider_id,
+            idp_vouched_at=(
+                outcome.record.idp_checked_at if outcome.record is not None else None
+            ),
         )
         return user, tokens, pending_liveness
 
@@ -1281,8 +1356,16 @@ class LocalIdentityService:
             )
             auth_time = now
         # Whether ``auth_time`` is the provider's own word for a recent
-        # authentication — what step-up for an API key insists on.
-        auth_time_proven = auth_time_asserted and not auth_time_anchored
+        # authentication — what step-up for an API key insists on. Only
+        # OIDC and SAML can be made to authenticate afresh and say when: a
+        # portal reads its time from a payload (by default its ``iat``,
+        # minted on every request), and a gateway reports the company
+        # portal's own login. Neither shows a credential was just presented,
+        # however recent the time it gives.
+        auth_time_proven = (
+            auth_time_asserted and not auth_time_anchored
+            and identity.provider in _PROVES_FRESH_SIGN_IN
+        )
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -1668,6 +1751,10 @@ class LocalIdentityService:
             auth_time=auth_time,
             auth_time_proven=auth_time_proven,
             refresh_token=refresh_token,
+            # A sign-in is the provider vouching for the session, now — as
+            # the session's record says (``idp_checked_at``).
+            idp_provider_id=provider_id,
+            idp_vouched_at=now,
         )
         return user, tokens
 
@@ -1970,20 +2057,7 @@ class LocalIdentityService:
             return
 
         settings = provider.settings
-        if settings.token_source == "header":
-            # Header names are case-insensitive on the wire, and the dict
-            # the refresh route hands us has been through Starlette, which
-            # lower-cases them. The operator's spelling (``X-Corp-Session``)
-            # must keep matching, or every refresh reads "absent" and
-            # revokes a healthy family.
-            wanted = settings.token_source_key.lower()
-            raw = next(
-                (v for k, v in ambient_headers.items()
-                 if k.lower() == wanted),
-                None,
-            )
-        else:
-            raw = ambient_cookies.get(settings.token_source_key)
+        raw = _ambient_token(settings, cookies=ambient_cookies, headers=ambient_headers)
 
         if not raw:
             await self._end_session_upstream(
@@ -2354,6 +2428,8 @@ class LocalIdentityService:
         auth_time: Optional[int] = None,
         auth_time_proven: bool = False,
         refresh_token: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_vouched_at: Optional[int] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
 
@@ -2373,14 +2449,23 @@ class LocalIdentityService:
         token — the successor's identity has to be recorded atomically
         with that consumption — so it passes the token it committed to
         rather than letting a second one be generated here.
+
+        ``idp_provider_id`` and ``idp_vouched_at`` are an SSO session's
+        provider and when it last vouched for the session, from the server's
+        record (``SIGNIN_PROVIDER_CLAIM``) — what step-up asks.
         """
         extra = dict(claims_extra or {})
-        extra.pop(AUTH_TIME_PROVEN_CLAIM, None)
+        for signed_here in (AUTH_TIME_PROVEN_CLAIM, SIGNIN_PROVIDER_CLAIM, IDP_VOUCHED_AT_CLAIM):
+            extra.pop(signed_here, None)
         extra[SIGNIN_CLAIM] = signin
         if auth_time is not None:
             extra[AUTH_TIME_CLAIM] = auth_time
             if auth_time_proven:
                 extra[AUTH_TIME_PROVEN_CLAIM] = True
+        if signin == SIGNIN_SSO and idp_provider_id:
+            extra[SIGNIN_PROVIDER_CLAIM] = idp_provider_id
+            if idp_vouched_at is not None:
+                extra[IDP_VOUCHED_AT_CLAIM] = int(idp_vouched_at)
         if user.must_change_password and signin == SIGNIN_PASSWORD:
             # Carried as a claim rather than looked up per request:
             # ``get_current_user`` already decodes this token to read
@@ -2480,6 +2565,26 @@ def _has_password(orm) -> bool:
 #: Provider kinds that can be made to prove a fresh authentication — see
 #: ``step_up_target``.
 _PROVES_FRESH_SIGN_IN = frozenset({"oidc", "saml2"})
+
+
+def _ambient_source(settings) -> bool:
+    """Whether a gateway's company session reaches this server on a request:
+    server exchange, from a named cookie or header. In browser mode only the
+    browser ever holds it."""
+    return settings.exchange_mode != "browser" and bool(settings.token_source_key)
+
+
+def _ambient_token(settings, *, cookies: dict, headers: dict) -> Optional[str]:
+    """The company session token a gateway reads from a request, or None."""
+    if settings.token_source == "header":
+        # Header names are case-insensitive on the wire, and the dict
+        # the refresh route hands us has been through Starlette, which
+        # lower-cases them. The operator's spelling (``X-Corp-Session``)
+        # must keep matching, or every refresh reads "absent" and
+        # revokes a healthy family.
+        wanted = settings.token_source_key.lower()
+        return next((v for k, v in headers.items() if k.lower() == wanted), None)
+    return cookies.get(settings.token_source_key)
 
 _SELF_SERVICE_REASONS = frozenset({
     "expired", "owner_inactive", "owner_reauth_required", "ip_not_allowed",

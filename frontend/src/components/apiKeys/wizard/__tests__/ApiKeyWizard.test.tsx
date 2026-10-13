@@ -234,6 +234,22 @@ describe('confirming it is you', () => {
         expect(JSON.stringify(parked)).not.toMatch(/password|token/i)
     })
 
+    it('with a gateway it can ask, creates outright — and says plainly when the gateway does not answer', async () => {
+        svc.create
+            .mockRejectedValueOnce(new ApiKeyError(503, 'Your company sign-in didn’t answer, so it can’t confirm it’s you right now. Try again in a moment.', {
+                error: 'gateway_unreachable',
+            }))
+            .mockResolvedValueOnce(CREATED)
+        await wizard({ stepUp: { method: 'sso', fresh: true } })
+        await toReview()
+        expect(screen.queryByLabelText('Your password')).not.toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /^create key$/i }))
+        expect(await screen.findByText(/didn’t answer/)).toBeInTheDocument()
+        expect(window.location.href).toBe('http://localhost/me/api-keys')      // nowhere to go
+        await userEvent.click(screen.getByRole('button', { name: /^create key$/i }))
+        expect(await screen.findByLabelText('Your new API key')).toBeInTheDocument()
+    })
+
     it('comes back to Review with what was chosen, on the way back', async () => {
         svc.list.mockResolvedValue([])
         svc.options.mockResolvedValue(opts({ stepUp: { method: 'sso', fresh: true } }))

@@ -117,6 +117,31 @@ class ApiKeyIdentity:
     status: str = "active"
 
 
+#: How a step-up can confirm that an SSO session is still its person, by the
+#: provider the session signed in through (``StepUpTarget.confirms``):
+#:
+#: * ``proven`` — OIDC or SAML: the provider reports when the person
+#:   authenticated, and can be made to ask again.
+#: * ``gateway_live`` — an Enterprise gateway this server can ask, now,
+#:   whether the company session on the request is still live.
+#: * ``gateway_sign_in`` — a gateway only the browser talks to: a sign-in
+#:   through it is the gateway's answer.
+#: * ``none`` — a portal, which can say neither.
+STEP_UP_CONFIRMS = ("proven", "gateway_live", "gateway_sign_in", "none")
+
+#: What a gateway says when asked about the company session behind a
+#: session (``confirm_live_session``).
+LIVE_SESSION_ANSWERS = ("confirmed", "absent", "rejected", "unreachable")
+
+
+@dataclass(frozen=True)
+class StepUpTarget:
+    """Where to send someone to prove it is them again, and how the provider
+    their session signed in through can confirm it (``STEP_UP_CONFIRMS``)."""
+    login_url: str
+    confirms: str
+
+
 # ── Service protocol ─────────────────────────────────────────────────
 
 @runtime_checkable
@@ -220,6 +245,26 @@ class IdentityService(Protocol):
         with its ``status`` set, for the routes where a key describes or
         revokes itself. A revoked or unknown key is refused regardless.
         """
+        ...
+
+    async def step_up_target(
+        self, user_id: str, *, next_path: str, provider_id: Optional[str] = None,
+    ) -> StepUpTarget:
+        """Where this person signs in again to confirm it is them, returning
+        to ``next_path``, and how that provider can confirm it.
+
+        ``provider_id`` is the provider the session signed in through; without
+        one, the provider they signed in with most recently."""
+        ...
+
+    async def confirm_live_session(
+        self, provider_id: str, *, ambient_cookies: dict, ambient_headers: dict,
+    ) -> str:
+        """Ask the gateway ``provider_id`` names whether the company session
+        on this request is still live — one of ``LIVE_SESSION_ANSWERS``:
+        ``absent`` when the request carries none, ``rejected`` when the
+        gateway says it has ended, ``unreachable`` when it did not answer in
+        time. Never raises for the gateway's sake."""
         ...
 
 

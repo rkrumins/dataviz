@@ -392,6 +392,70 @@ async def test_only_a_sign_in_the_provider_dated_is_proven_and_renewal_keeps_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind, proven", [
+    ("oidc", True), ("saml2", True), ("custom_profile", False), ("backchannel", False),
+])
+async def test_only_a_provider_that_can_be_made_to_ask_again_proves_a_sign_in(
+    svc_and_events, provider, kind, proven,
+):
+    """A portal reads its time from a payload — by default its ``iat``,
+    minted on every request — and a gateway reports the company portal's own
+    login. However recent the time either gives, it does not show that a
+    credential was just presented; an API key is minted for them on other
+    grounds (``api_keys._sso_step_up``)."""
+    import time
+
+    from backend.auth_service.core.tokens import (
+        AUTH_TIME_PROVEN_CLAIM,
+        decode_refresh_token,
+        decode_token,
+    )
+
+    svc, _events = svc_and_events
+    _user, tokens = await svc.complete_sso_login(
+        _identity(provider=kind, auth_time=int(time.time()) - 60), provider_id=provider.id,
+        provider_slug=provider.slug, linking_policy="strict",
+    )
+    assert (AUTH_TIME_PROVEN_CLAIM in decode_token(tokens.access_token)) is proven
+    assert decode_refresh_token(tokens.refresh_token).auth_time_proven is proven
+
+
+@pytest.mark.asyncio
+async def test_a_session_says_which_provider_vouched_for_it_and_when(svc_and_events, provider):
+    """What a step-up asks: the provider this session came from, and when it
+    last vouched for it — signed onto every access token from the session's
+    own record, through renewal, and never taken from the claims handed in."""
+    import time
+
+    from backend.auth_service.core.tokens import (
+        IDP_VOUCHED_AT_CLAIM,
+        SIGNIN_PASSWORD,
+        SIGNIN_PROVIDER_CLAIM,
+        decode_token,
+    )
+
+    svc, _events = svc_and_events
+    before = int(time.time())
+    user, tokens = await svc.complete_sso_login(
+        _identity(auth_time=before - 7200), provider_id=provider.id,
+        provider_slug=provider.slug, linking_policy="strict",
+    )
+    _, renewed = await svc.refresh(tokens.refresh_token)
+    for issued in (tokens, renewed):
+        claims = decode_token(issued.access_token)
+        assert claims[SIGNIN_PROVIDER_CLAIM] == provider.id
+        # The sign-in, not the provider's own (older) authentication time.
+        assert before <= claims[IDP_VOUCHED_AT_CLAIM] <= int(time.time())
+
+    forged = svc._issue_tokens(
+        user, family_id=None, signin=SIGNIN_PASSWORD,
+        claims_extra={SIGNIN_PROVIDER_CLAIM: "idp_elsewhere", IDP_VOUCHED_AT_CLAIM: before},
+    )
+    claims = decode_token(forged.access_token)
+    assert SIGNIN_PROVIDER_CLAIM not in claims and IDP_VOUCHED_AT_CLAIM not in claims
+
+
+@pytest.mark.asyncio
 async def test_reauth_goes_back_to_the_sessions_own_provider(
     svc_and_events, provider, db_session,
 ):

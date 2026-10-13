@@ -363,12 +363,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="apiKeySsoRoundTripStepUp",
         posture="security",
         server_gates=(
-            "POST /me/api-keys and /me/api-keys/{id}/rotate — a session whose identity provider "
-            "cannot prove a fresh sign-in is refused (step_up_unavailable) while off",
+            "POST /me/api-keys and /me/api-keys/{id}/rotate — a session from a portal connection, "
+            "which can neither prove a fresh sign-in nor be asked, is refused "
+            "(step_up_unavailable) while off",
         ),
         still_allowed=(
             "Using, describing and revoking existing keys",
-            "Creating keys after a proven identity-provider sign-in, or with a password",
+            "Creating keys after a proven identity-provider sign-in, a gateway's confirmation, "
+            "or with a password",
         ),
     ),
     # ── Notifications ──────────────────────────────────────────────────────────
