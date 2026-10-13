@@ -50,7 +50,6 @@ import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
-import { usePreferencesStore } from '@/store/preferences'
 import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
@@ -82,7 +81,6 @@ import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
-import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
 import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
 import { searchTextOf } from '@/features/view-filters/tokens'
 import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
@@ -146,10 +144,6 @@ export default function WorkspaceViewsSection({
     const [sort, setSort] = useState<SortOption>('updated')
     const [layout, setLayout] = useState<'grid' | 'list'>('grid')
     const [showActivity, setShowActivity] = useState(false)
-    const timelineCollapsed = usePreferencesStore(s => s.viewActivityCollapsed)
-    const setTimelineCollapsed = usePreferencesStore(s => s.setViewActivityCollapsed)
-    const timelineField = usePreferencesStore(s => s.viewActivityField)
-    const setTimelineField = usePreferencesStore(s => s.setViewActivityField)
     const today = useLocalDay()
     const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
@@ -817,17 +811,6 @@ export default function WorkspaceViewsSection({
                     className="mb-4"
                 />
             )}
-            <ActivityTimeline
-                field={timelineField}
-                onFieldChange={setTimelineField}
-                state={fstate}
-                ctx={resolveCtx}
-                onSelectRule={rule => setFstate(prev => ({ ...prev, [timelineField]: rule }))}
-                collapsed={timelineCollapsed}
-                onCollapsedChange={setTimelineCollapsed}
-                visitFrom={visit?.from}
-                className="mb-4"
-            />
 
             {/* ── Body ───────────────────────────────────────────── */}
             {isLoading ? (

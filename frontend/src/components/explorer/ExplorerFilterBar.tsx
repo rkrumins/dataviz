@@ -2,8 +2,8 @@
  * ExplorerFilterBar — toolbar combining category pills and filter dropdowns.
  *
  * Layout:
- *   [Category pills]                                           [page controls]
- *   [Versioned | External] [Date ▾] [People ▾] | [Workspace ▾] [Source ▾] [Type ▾] [Tag ▾] [Visibility ▾]
+ *   [Category pills] [saved filters]
+ *   [Versioned | External] [Date ▾] [People ▾] | [Workspace ▾] [Source ▾] [Type ▾] [Tag ▾] [Visibility ▾]   [trailing]
  *   [active filter chips … Clear all]
  *
  * It edits one ``ViewFilterState`` (features/view-filters) — the value the page
@@ -61,7 +61,7 @@ interface ExplorerFilterBarProps {
   /** The page's own resolve context, so the counts here resolve "me" and
    *  "since your last visit" exactly as its list does. */
   ctx: ResolveContext
-  /** The page's own controls (sort, layout), at the end of the first row. */
+  /** The page's own control at the end of the filter row (the Explorer's filter palette). */
   trailing?: React.ReactNode
   /** The person's saved filters, after the built-in quick filters. */
   saved?: React.ReactNode
@@ -209,7 +209,6 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
           )
         })}
         {saved}
-        {trailing && <div className="ml-auto flex items-center gap-1.5">{trailing}</div>}
       </div>
 
       <div className="flex items-center gap-1 flex-wrap">
@@ -304,6 +303,7 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
           disableSearch
           panelWidthClassName="w-52"
         />
+        {trailing && <div className="ml-auto flex items-center gap-1.5">{trailing}</div>}
       </div>
 
       <ActiveFilterChips

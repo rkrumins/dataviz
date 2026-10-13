@@ -83,7 +83,7 @@ one click puts the same filters back. A sort you chose is saved with them.
 
 ### Filter by anything from one list
 
-Press **Shift+F**, or click the filter button beside **Sort**, for every filter
+Press **Shift+F**, or click the filter button at the end of the filter row, for every filter
 value in one searchable list: each person, tag, source, workspace, type, date
 period and visibility, with the number of views it would show and a check by
 the ones already on. Type to narrow it — a group's name such as `tag` or
@@ -170,23 +170,6 @@ Each period shows how many views it would show with your other filters. On the
 calendar, a dot under a day marks views created or changed that day; the darker
 the dot, the more of them.
 
-### See when things changed
-
-The **Timeline** above the results is a bar for each of the past 90 days: how
-many views were created, or updated, that day. Switch between **Created** and
-**Updated** at its top. It counts with your other filters, so it answers
-questions such as *when did the finance views last change?*
-
-- **Drag across the bars** to show only views from those days, or **click one
-  bar** for a single day. The Date filter and its chip change to match.
-- **Double-click** the bars, or click **Clear dates**, to remove the dates.
-- **From the keyboard:** Tab to the bars, then use **←** and **→** to move a
-  day at a time (each day's count is read out), **Shift** with the arrows to
-  stretch a range, **Enter** to show it, and **Esc** to let go.
-
-Click **Hide** to fold the timeline away; it stays folded until you show it
-again. It isn't shown under **Deleted**.
-
 ### Who made or changed a view
 
 1. Click **People**. **You** is always first, then everyone who has made or
@@ -209,10 +192,10 @@ views the publisher never opened.
 
 ### What changed since your last visit
 
-When you come back after being away for half an hour or more, a line above the
-results says what changed while you were gone, for example *Since your last
-visit · Tue 14:02 — 4 new · 11 updated*. Both numbers count with your other
-filters.
+When you come back after being away for half an hour or more, a line beside the
+**All Views** heading (above the results in a workspace's Views tab) says what
+changed while you were gone, for example *Since your last visit · Tue 14:02 —
+4 new · 11 updated*. Both numbers count with your other filters.
 
 - Click **4 new** to show only views created since then, or **11 updated** for
   views changed since then (new ones included). Click it again to go back.
@@ -226,7 +209,7 @@ aside while another date filter is on.
 
 ### Change the order and the layout
 
-- **Sort** with the menu on the right of the filter row. **Recently modified**
+- **Sort** with the menu on the right of the **All Views** heading. **Recently modified**
   is the default; you can also sort by **Recently updated data**, **Oldest
   updated data**, **Recently edited (settings)**, **Newest created**, **Oldest
   created**, **Most liked**, **Most opened**, **A → Z** and **Z → A**.
@@ -242,7 +225,6 @@ With no search or filter, the Explorer is arranged in sections:
 
 | Section | What it holds |
 | --- | --- |
-| **Featured Views** | Up to three pinned views, when there are any |
 | **Continue where you left off** | Views you opened recently, with when you visited. Click one to open it straight away |
 | **Trending** | Up to six of the most favourited views. A view nobody has favourited never appears here |
 | **All Views** | Every view you can open, with the total beside the heading. More cards load as you scroll |

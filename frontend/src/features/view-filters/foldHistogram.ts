@@ -2,7 +2,7 @@
  * The activity histogram, from the server's UTC buckets to the reader's own days.
  *
  * The server can only cut time in UTC (it slices its ISO timestamps as text), but
- * the timeline and the calendar show the reader's LOCAL days — the same days the
+ * the Date menu's calendar shows the reader's LOCAL days — the same days the
  * date filter selects. So the server sends small buckets and the client folds each
  * into the local day it starts in. Hour buckets are exact for every whole-hour
  * time zone, DST included; a half-hour zone asks for ten-minute buckets instead,

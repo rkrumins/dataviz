@@ -26,7 +26,7 @@ function whenLabel(iso: string): string {
     : { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
-export function SinceLastVisitBanner({ state, ctx, window, onApply, onMarkSeen, className }: {
+export function SinceLastVisitBanner({ state, ctx, window, onApply, onMarkSeen, className, variant = 'banner' }: {
   state: ViewFilterState
   /** Must carry `visit: window`, so the counts and the list resolve it alike. */
   ctx: ResolveContext
@@ -34,6 +34,9 @@ export function SinceLastVisitBanner({ state, ctx, window, onApply, onMarkSeen, 
   onApply: (next: ViewFilterState) => void
   onMarkSeen: () => void
   className?: string
+  /** `inline` sits in a line of its own neighbours (the Explorer's results
+   *  header) rather than taking a row of the page. */
+  variant?: 'banner' | 'inline'
 }) {
   // A date filter of another kind would make these numbers answer a question
   // nobody asked; the banner steps aside until it is cleared.
@@ -61,8 +64,10 @@ export function SinceLastVisitBanner({ state, ctx, window, onApply, onMarkSeen, 
     <div
       role="status"
       className={cn(
-        'flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-accent-lineage/15',
-        'bg-gradient-to-r from-accent-lineage/10 via-transparent to-transparent px-3 py-2 text-xs text-ink-secondary',
+        'flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-secondary',
+        variant === 'banner'
+          ? 'rounded-xl border border-accent-lineage/15 bg-gradient-to-r from-accent-lineage/10 via-transparent to-transparent px-3 py-2'
+          : 'rounded-lg bg-accent-lineage/[0.06] px-2 py-0.5',
         className,
       )}
     >
@@ -92,7 +97,10 @@ export function SinceLastVisitBanner({ state, ctx, window, onApply, onMarkSeen, 
       <button
         type="button"
         onClick={onMarkSeen}
-        className="ml-auto inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-ink-muted hover:text-ink transition-colors"
+        className={cn(
+          'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-ink-muted hover:text-ink transition-colors',
+          variant === 'banner' && 'ml-auto',
+        )}
       >
         <X className="h-3 w-3" aria-hidden /> Mark as seen
       </button>

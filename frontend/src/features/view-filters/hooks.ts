@@ -12,7 +12,7 @@ import { daysBetween, foldHistogram, grainFor, type HistogramGrain } from './fol
 import type { DateField, ViewFilterState } from './model'
 import { resolveFilters, toQueryParams, type ResolveContext } from './params'
 
-/** How far back the activity strip and the calendar's shading reach. */
+/** How far back the calendar's shading and the day-summed preset counts reach. */
 export const ACTIVITY_DAYS = 90
 
 /** How many views a filter set leaves. */
@@ -60,9 +60,8 @@ function paramsWithout(state: ViewFilterState, ctx: ResolveContext, field: DateF
 
 /**
  * Views per local day over the past `ACTIVITY_DAYS` days, for one date field,
- * counted with every filter except that field's own rule — so the strip shows the
- * whole window to choose from. The timeline and the Date menu ask with the same
- * key, so they share one request and can't disagree.
+ * counted with every filter except that field's own rule — so the calendar shows
+ * the whole window to choose from.
  */
 export function useDayActivity(state: ViewFilterState, ctx: ResolveContext, field: DateField, enabled = true) {
   const params = useMemo(() => paramsWithout(state, ctx, field), [state, ctx, field])

@@ -224,12 +224,6 @@ interface PreferencesState {
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
-  /** The views Activity strip (Explorer and a workspace's Views tab): folded
-   *  away, and which date it counts. */
-  viewActivityCollapsed: boolean
-  setViewActivityCollapsed: (collapsed: boolean) => void
-  viewActivityField: 'created' | 'updated'
-  setViewActivityField: (field: 'created' | 'updated') => void
 
   // Context View display settings — control canvas-side rendering density,
   // zoom, and visual chrome from the header's Display Settings popover.
@@ -475,10 +469,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Explorer density
       explorerDensity: 'comfortable',
       setExplorerDensity: (explorerDensity) => set({ explorerDensity }),
-      viewActivityCollapsed: false,
-      setViewActivityCollapsed: (viewActivityCollapsed) => set({ viewActivityCollapsed }),
-      viewActivityField: 'updated',
-      setViewActivityField: (viewActivityField) => set({ viewActivityField }),
 
       // Context View display settings
       canvasZoom: 1,

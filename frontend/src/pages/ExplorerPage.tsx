@@ -33,7 +33,6 @@ import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcuts
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { usePreferencesStore } from '@/store/preferences'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
-import { ExplorerHero } from '@/components/explorer/ExplorerHero'
 import { ExplorerRecentStrip } from '@/components/explorer/ExplorerRecentStrip'
 import { ExplorerEmptyState } from '@/components/explorer/ExplorerEmptyState'
 import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
@@ -61,7 +60,6 @@ import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/fe
 import { matchesFilterQuery, readFilterState, writeFilterState } from '@/features/view-filters/url'
 import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
-import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
 import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
 import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
 import { VISIT_RULE } from '@/features/view-filters/dateFilter'
@@ -138,10 +136,6 @@ export function ExplorerPage() {
   const { dragging: fileOverPage, dropProps } = useViewFileDrop(openImport, importEnabled)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
-  const timelineCollapsed = usePreferencesStore(s => s.viewActivityCollapsed)
-  const setTimelineCollapsed = usePreferencesStore(s => s.setViewActivityCollapsed)
-  const timelineField = usePreferencesStore(s => s.viewActivityField)
-  const setTimelineField = usePreferencesStore(s => s.setViewActivityField)
 
   // Filter-aware stats for the summary bar, through the SAME mapping the list
   // uses (``toQueryParams``) so the numbers describe the exact population on
@@ -337,8 +331,6 @@ export function ExplorerPage() {
   // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
-
-  const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
   const hasActiveFilters = isAnyFilterActive(filterState)
 
@@ -686,8 +678,9 @@ export function ExplorerPage() {
           onRemoveLastFilter={removeLastFilter}
         />
 
-        {/* ── Unified toolbar: filters, with sort + layout ending the first row
-            so the filter row beneath gets the full width ─────────── */}
+        {/* ── Filters: the quick views and saved filters, then every filter with
+            the palette at its end. How the results are shown sits on their own
+            header below. ───────────────────────────────────────── */}
         <div data-tour="explorer-filters" className="mb-6">
           <ExplorerFilterBar
             state={filterState}
@@ -704,48 +697,17 @@ export function ExplorerPage() {
               />
             )}
             trailing={(
-              <>
-                <button
-                  type="button"
-                  onClick={() => setPaletteOpen(true)}
-                  title="Filter by anything (Shift+F)"
-                  aria-label="Filter by anything"
-                  aria-keyshortcuts="Shift+F"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2 py-1 text-xs font-medium text-ink-muted hover:text-ink hover:border-accent-lineage/40 transition-colors duration-150"
-                >
-                  <ListFilter className="h-3.5 w-3.5" />
-                  <kbd className="text-[10px] font-semibold">⇧F</kbd>
-                </button>
-                <ExplorerSortControl
-                  sort={parsed.sort}
-                  onSortChange={v => setParam('sort', v)}
-                />
-                <div className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
-                  <button
-                    onClick={() => setParam('layout', 'grid')}
-                    title="Grid view"
-                    aria-label="Grid view"
-                    className={cn(
-                      'p-1.5 rounded-md transition-colors duration-150',
-                      layout === 'grid' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
-                    )}
-                  >
-                    <LayoutGrid className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setParam('layout', 'list')}
-                    title="List view (sortable columns)"
-                    aria-label="List view"
-                    className={cn(
-                      'p-1.5 rounded-md transition-colors duration-150',
-                      layout === 'list' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
-                    )}
-                  >
-                    <List className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <DensityToggle />
-              </>
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                title="Filter by anything (Shift+F)"
+                aria-label="Filter by anything"
+                aria-keyshortcuts="Shift+F"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2 py-1 text-xs font-medium text-ink-muted hover:text-ink hover:border-accent-lineage/40 transition-colors duration-150"
+              >
+                <ListFilter className="h-3.5 w-3.5" />
+                <kbd className="text-[10px] font-semibold">⇧F</kbd>
+              </button>
             )}
           />
         </div>
@@ -759,17 +721,6 @@ export function ExplorerPage() {
           )}
         </div>
 
-        {visit && filterState.category !== 'deleted' && (
-          <SinceLastVisitBanner
-            state={filterState}
-            ctx={resolveCtx}
-            window={visit}
-            onApply={setFilterState}
-            onMarkSeen={markSeen}
-            className="mb-4"
-          />
-        )}
-
         {/* ── Headline Banner for Aggregation ───────────────────── */}
         {activeWorkspaceId && filterState.dataSourceId && (
           <AggregationProgressBanner 
@@ -777,11 +728,6 @@ export function ExplorerPage() {
             dataSourceId={filterState.dataSourceId}
             onStatusChange={onAggregationStatus}
           />
-        )}
-
-        {/* ── Featured / Pinned ────────────────────────────────── */}
-        {!hasActiveFilters && pinnedViews.length > 0 && (
-          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} onPreview={openViewPreview} />
         )}
 
         {/* ── Recently Viewed ──────────────────────────────────── */}
@@ -825,26 +771,9 @@ export function ExplorerPage() {
           </section>
         )}
 
-        {/* ── Timeline: when things happened, and a quick way to pick dates.
-            Not for the bin — a deleted view's dates are not what it is looked
-            up by there. ───────────────────────────────────────── */}
-        {filterState.category !== 'deleted' && (
-          <ActivityTimeline
-            field={timelineField}
-            onFieldChange={setTimelineField}
-            state={filterState}
-            ctx={resolveCtx}
-            onSelectRule={rule => setFilterState({ ...filterState, [timelineField]: rule })}
-            collapsed={timelineCollapsed}
-            onCollapsedChange={setTimelineCollapsed}
-            visitFrom={visit?.from}
-            className="mb-6"
-          />
-        )}
-
         {/* ── Results ──────────────────────────────────────────── */}
         <section data-tour="explorer-results">
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mb-4">
             <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
               <Compass className="w-3.5 h-3.5 text-indigo-500" />
             </div>
@@ -854,6 +783,48 @@ export function ExplorerPage() {
             <span className="text-[11px] text-ink-muted tabular-nums" aria-live="polite" aria-atomic="true">
               <span className="sr-only">Showing </span>{totalCount}<span className="sr-only"> view{totalCount === 1 ? '' : 's'}</span>
             </span>
+            {visit && filterState.category !== 'deleted' && (
+              <SinceLastVisitBanner
+                state={filterState}
+                ctx={resolveCtx}
+                window={visit}
+                onApply={setFilterState}
+                onMarkSeen={markSeen}
+                variant="inline"
+                className="ml-1"
+              />
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
+              <ExplorerSortControl
+                sort={parsed.sort}
+                onSortChange={v => setParam('sort', v)}
+              />
+              <div className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
+                <button
+                  onClick={() => setParam('layout', 'grid')}
+                  title="Grid view"
+                  aria-label="Grid view"
+                  className={cn(
+                    'p-1.5 rounded-md transition-colors duration-150',
+                    layout === 'grid' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
+                  )}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setParam('layout', 'list')}
+                  title="List view (sortable columns)"
+                  aria-label="List view"
+                  className={cn(
+                    'p-1.5 rounded-md transition-colors duration-150',
+                    layout === 'list' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
+                  )}
+                >
+                  <List className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <DensityToggle />
+            </div>
           </div>
 
           {/* Results slot with layout-swap crossfade. Each possible

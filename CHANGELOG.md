@@ -44,11 +44,8 @@ marks each source Versioned or External and names its workspace.
 filter with how many views removing just that one would bring back — click one to drop it — instead
 of only offering to clear everything. **Clear all filters** now has an **Undo**.
 
-**Timeline.** Above the results, in the Explorer and the workspace Views tab, a bar for each of the
-past 90 days shows how many views were created or updated that day, counted with your other
-filters. Drag across it to filter by those days, or click one day; the arrow keys, Shift and Enter
-do the same from the keyboard. The Date menu shows how many views each period would show, and its
-calendar marks the busy days with a dot.
+**Counts in the Date menu.** Each period shows how many views it would show, and the calendar
+marks the busy days with a dot.
 
 **Who shaped a view.** Cards and list rows show the faces of whoever created a view, edited it last
 and published its latest data, each person once; hover one for what they did and when, click it to
@@ -70,9 +67,9 @@ the Explorer's quick filters: one click puts it back, and the pill lights up whe
 are on screen. Rename it, point it at the current filters, copy its link, reorder it or delete it
 (with an **Undo**) from its **⋯** menu. Saved filters belong to your account, up to 30 each.
 
-**Since your last visit.** Back after half an hour or more, the Explorer and each workspace's Views
-tab say how many views are new or updated since you were last there, counted with your filters;
-click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
+**Since your last visit.** Back after half an hour or more, the Explorer (beside the **All Views**
+heading) and each workspace's Views tab say how many views are new or updated since you were last
+there, counted with your filters; click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
 since your visit** until **Mark as seen**.
 
 API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
@@ -92,12 +89,20 @@ creates, renames, reorders (`PUT /order`) and deletes the caller's own saved fil
 - **The preview's data-source line names version control.** It said *Managed graph* or *External
   graph* from how the source was first connected, which called many versioned sources external.
 - **Clearing every filter keeps your sort and layout.**
+- **Sort, Grid/List and density sit on the right of the All Views heading,** beside what they
+  change, so the filter row above holds only filters.
 - **The workspace Views tab counts the whole workspace.** Its summary counted only the first 50
   views the page loaded, so in a large workspace every number was short.
 - An invalid `createdAfter` is now refused with a 422 instead of being compared as text.
 - **A version store that goes down is asked again every 30 seconds, not on every request.** The
   versioned-sources lookup kept serving its last answer after a failed refresh but retried on the
   very next call, so with view lists now asking, each request would have waited on a connection.
+
+### Removed
+
+- **Featured Views.** The Explorer's banner of pinned views is gone. Nothing in the app pins a
+  view, it looked only at the first page of results, and the same views were in **All Views**
+  below it, where a pinned view still says **Pinned**.
 
 ### Fixed
 
