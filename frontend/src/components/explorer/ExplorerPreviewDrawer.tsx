@@ -42,7 +42,9 @@ import {
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
-import { CreatorHoverCard } from './CreatorHoverCard'
+import { PersonHoverCard } from './PersonHoverCard'
+import { ContributorTrail } from '@/features/view-filters/components/ContributorTrail'
+import { contributorsOf } from '@/features/view-filters/contributors'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
@@ -66,6 +68,8 @@ interface ExplorerPreviewDrawerProps {
   initialEditMode?: boolean
   /** Called after a successful details save so the host can refetch. */
   onSaved?: () => void
+  /** A person in the Contributors line was clicked: filter to them. */
+  onPickPerson?: (userId: string) => void
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -330,6 +334,7 @@ export function ExplorerPreviewDrawer({
   healthStatus,
   initialEditMode,
   onSaved,
+  onPickPerson,
 }: ExplorerPreviewDrawerProps) {
   const [activityOpen, setActivityOpen] = useState(false)
   const [editMode, setEditMode] = useState(!!initialEditMode)
@@ -590,10 +595,11 @@ export function ExplorerPreviewDrawer({
                       renders as a subtle secondary line so operators can
                       reach out without leaving the drawer. */}
                   {(view.createdByName || view.createdBy) && (
-                    <CreatorHoverCard
+                    <PersonHoverCard
                       userId={view.createdBy ?? null}
                       displayName={view.createdByName ?? null}
                       email={view.createdByEmail ?? null}
+                      avatarId={view.createdByAvatarId}
                     >
                       <div
                         tabIndex={0}
@@ -606,6 +612,7 @@ export function ExplorerPreviewDrawer({
                         <UserAvatar
                           userId={view.createdBy ?? null}
                           name={view.createdByName ?? 'Unknown'}
+                          avatarId={view.createdByAvatarId}
                           shape="palette"
                           className="w-9 h-9 text-[11px] font-bold ring-1 ring-black/[0.06] dark:ring-white/[0.08]"
                         />
@@ -626,9 +633,20 @@ export function ExplorerPreviewDrawer({
                           )}
                         </span>
                       </div>
-                    </CreatorHoverCard>
+                    </PersonHoverCard>
                   )}
 
+                  {/* Everyone else who shaped it — last editor, last data
+                      publisher — at a glance, without opening the dates. Only
+                      when there is someone besides the creator shown above. */}
+                  {contributorsOf(view).length > 1 && (
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted">
+                        Contributors
+                      </span>
+                      <ContributorTrail view={view} onPick={onPickPerson} avatarClassName="h-6 w-6 text-[9px]" />
+                    </div>
+                  )}
 
                   {/* THE DATES, BEHIND ONE DISCLOSURE. Four timestamp rows is
                       the least-read block on the panel and about 150px of a
@@ -704,6 +722,7 @@ export function ExplorerPreviewDrawer({
                               <UserAvatar
                                 userId={view.updatedBy ?? null}
                                 name={view.updatedByName}
+                                avatarId={view.updatedByAvatarId}
                                 shape="palette"
                                 className="w-5 h-5 text-[8px] font-bold"
                               />
@@ -733,6 +752,7 @@ export function ExplorerPreviewDrawer({
                               <UserAvatar
                                 userId={view.dataUpdatedBy ?? null}
                                 name={view.dataUpdatedByName}
+                                avatarId={view.dataUpdatedByAvatarId}
                                 shape="palette"
                                 className="w-5 h-5 text-[8px] font-bold"
                               />

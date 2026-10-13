@@ -20,6 +20,9 @@
  *   this-month | last-month | this-quarter | last-quarter | this-year
  *   YYYY | YYYY-MM | YYYY-MM-DD             one whole year, month or day
  *   A..B | A.. | ..B                        days, both ends included; either may be open
+ *   visit                                   since your last visit — not days but the
+ *                                           instants this browser remembers (see
+ *                                           store/visitWindows), passed in to resolve
  */
 
 export const MAX_ROLLING_DAYS = 3650
@@ -34,6 +37,8 @@ export interface DaySpan { from: string | null; to: string | null }
 
 /** ISO instants: `after` inclusive, `before` exclusive; `null` = unbounded. */
 export interface RuleBounds { after: string | null; before: string | null }
+
+export const VISIT_RULE = 'visit'
 
 function pad(n: number): string {
   return String(n).padStart(2, '0')
@@ -125,12 +130,22 @@ export function ruleDays(rule: string, today: string): DaySpan | null {
 
 export function isValidRule(rule: string | null | undefined): rule is string {
   // Any fixed day works for validation: whether a rule parses never depends on it.
-  return typeof rule === 'string' && ruleDays(rule, '2000-01-01') !== null
+  return rule === VISIT_RULE || (typeof rule === 'string' && ruleDays(rule, '2000-01-01') !== null)
 }
 
-/** The instants a rule covers: [local midnight of its first day, local midnight
- *  after its last). */
-export function ruleBounds(rule: string, today: string): RuleBounds | null {
+/**
+ * The instants a rule covers: [local midnight of its first day, local midnight
+ * after its last). `visit` covers the remembered window; with none (a first
+ * visit, or after "Mark as seen") it covers nothing — an empty range rather than
+ * no range, so the label never claims a filter the list isn't applying.
+ */
+export function ruleBounds(
+  rule: string, today: string, visit?: { from: string; to: string } | null,
+): RuleBounds | null {
+  if (rule === VISIT_RULE) {
+    const never = localMidnight(addDays(today, 1)).toISOString()
+    return visit ? { after: visit.from, before: visit.to } : { after: never, before: never }
+  }
   const span = ruleDays(rule, today)
   if (!span) return null
   return {
@@ -161,6 +176,7 @@ const NAMED_LABELS: Record<string, string> = {
   'this-quarter': 'This quarter',
   'last-quarter': 'Last quarter',
   'this-year': 'This year',
+  [VISIT_RULE]: 'Since your last visit',
 }
 
 /** A rule in words, for triggers and chips: "Past 7 days", "1 Sep → 15 Sep". */

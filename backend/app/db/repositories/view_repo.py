@@ -138,11 +138,13 @@ async def resolve_user_ids(
 ) -> Dict[str, tuple[Optional[str], Optional[str]]]:
     """Resolve a set of user ids to ``{id: (display_name, email)}`` in one query.
 
-    Shared by the single-row (:func:`_to_enriched_response`) and batched
-    (:func:`_batch_enrich_rows`) paths so both resolve a view's creator AND
-    its last modifier from the SAME lookup — no N+1, no second query per row.
-    Exported (not underscored) so the versioning API boundary can reuse the
-    exact same display-name formula when resolving commit/branch/PR actors.
+    The view enrichment paths — single-row (:func:`_to_enriched_response`) and
+    batched (:func:`_batch_enrich_rows`) — use its sibling
+    :func:`_resolve_user_identities`, which also reads the avatar, so each
+    resolves a view's creator, last modifier and data publisher from ONE
+    lookup — no N+1, no second query per row. Exported (not underscored) so the
+    versioning API boundary can reuse the exact same display-name formula when
+    resolving commit/branch/PR actors.
 
     Ids that are NULL, the legacy ``"anonymous"`` sentinel, or reference a
     user record that no longer exists are simply absent from the result;
@@ -160,11 +162,6 @@ async def resolve_user_ids(
         display = f"{first or ''} {last or ''}".strip() or email
         resolved[uid] = (display, email)
     return resolved
-
-
-# Backward-compatible private alias — internal callers below reference the
-# original underscored name; keep it so this diff stays surgical.
-_resolve_user_ids = resolve_user_ids
 
 
 async def _resolve_user_identities(
@@ -287,6 +284,9 @@ def _to_response(
     updated_by_email: Optional[str] = None,
     data_updated_by_name: Optional[str] = None,
     data_updated_by_email: Optional[str] = None,
+    created_by_avatar_id: Optional[str] = None,
+    updated_by_avatar_id: Optional[str] = None,
+    data_updated_by_avatar_id: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
     config_override: Optional[dict] = None,
@@ -341,6 +341,9 @@ def _to_response(
         dataUpdatedBy=getattr(row, 'data_updated_by', None),
         dataUpdatedByName=data_updated_by_name,
         dataUpdatedByEmail=data_updated_by_email,
+        createdByAvatarId=created_by_avatar_id,
+        updatedByAvatarId=updated_by_avatar_id,
+        dataUpdatedByAvatarId=data_updated_by_avatar_id,
         tags=(label.get("tags") or None) if label_override else (json.loads(row.tags) if row.tags else None),
         isPinned=bool(row.is_pinned) if row.is_pinned else False,
         favouriteCount=favourite_count,
@@ -376,16 +379,18 @@ async def _to_enriched_response(
     ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
-    # (dedupes when they're the same principal).
-    user_map = await _resolve_user_ids(session, {
+    # (dedupes when they're the same principal) — avatars included.
+    user_map = await _resolve_user_identities(session, {
         row.created_by, row.updated_by,
         getattr(row, 'data_updated_by', None),
         getattr(row, 'publish_requested_by', None),
     })
-    creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
-    modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
-    publisher_name, publisher_email = user_map.get(
-        getattr(row, 'data_updated_by', None) or "", (None, None))
+    creator_name, creator_email, creator_avatar = user_map.get(
+        row.created_by or "", (None, None, None))
+    modifier_name, modifier_email, modifier_avatar = user_map.get(
+        row.updated_by or "", (None, None, None))
+    publisher_name, publisher_email, publisher_avatar = user_map.get(
+        getattr(row, 'data_updated_by', None) or "", (None, None, None))
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     facts = (await _scope_facts_for(session, [row]))[row.id]
@@ -393,7 +398,7 @@ async def _to_enriched_response(
         row,
         health=_health_for(row, facts),
         publish_requester_name=user_map.get(
-            getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
+            getattr(row, 'publish_requested_by', None) or "", (None, None, None))[0],
         workspace_name=ws_name,
         data_source_name=ds_name,
         context_model_name=cm_name,
@@ -403,6 +408,9 @@ async def _to_enriched_response(
         updated_by_email=modifier_email,
         data_updated_by_name=publisher_name,
         data_updated_by_email=publisher_email,
+        created_by_avatar_id=creator_avatar,
+        updated_by_avatar_id=modifier_avatar,
+        data_updated_by_avatar_id=publisher_avatar,
         favourite_count=fav_count,
         is_favourited=fav,
         config_override=config_override,
@@ -502,8 +510,9 @@ async def _batch_enrich_rows(
     # Scope integrity (existence + active flags) for the whole batch.
     health_map = await _scope_facts_for(session, rows)
 
-    # One users lookup resolves every creator AND modifier id in the batch.
-    user_map = await _resolve_user_ids(session, user_ids)
+    # One users lookup resolves every creator AND modifier id in the batch,
+    # avatars included.
+    user_map = await _resolve_user_identities(session, user_ids)
 
     # Favourite counts: skip the GROUP BY when the caller already has
     # them (popular views computes them from its JOINed subquery).
@@ -530,9 +539,9 @@ async def _batch_enrich_rows(
 
     responses: List[ViewResponse] = []
     for row in rows:
-        creator = user_map.get(row.created_by or "", (None, None))
-        modifier = user_map.get(row.updated_by or "", (None, None))
-        publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None))
+        creator = user_map.get(row.created_by or "", (None, None, None))
+        modifier = user_map.get(row.updated_by or "", (None, None, None))
+        publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None, None))
         responses.append(_to_response(
             row,
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
@@ -544,11 +553,14 @@ async def _batch_enrich_rows(
             updated_by_email=modifier[1],
             data_updated_by_name=publisher[0],
             data_updated_by_email=publisher[1],
+            created_by_avatar_id=creator[2],
+            updated_by_avatar_id=modifier[2],
+            data_updated_by_avatar_id=publisher[2],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
             health=_health_for(row, health_map[row.id]),
             publish_requester_name=user_map.get(
-                getattr(row, 'publish_requested_by', None) or "", (None, None))[0],
+                getattr(row, 'publish_requested_by', None) or "", (None, None, None))[0],
         ))
     return responses
 
@@ -2350,9 +2362,18 @@ async def list_popular_views(
         ws_name = await _get_workspace_name(session, row.workspace_id)
         ds_name = await _get_data_source_name(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id)
-        user_map = await _resolve_user_ids(session, {row.created_by, row.updated_by})
-        creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
-        modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
+        # The data publisher too, in the same lookup: without it this path showed
+        # every trail without its last publisher, unlike the batched one.
+        publisher_id = getattr(row, 'data_updated_by', None)
+        user_map = await _resolve_user_identities(
+            session, {row.created_by, row.updated_by, publisher_id},
+        )
+        creator_name, creator_email, creator_avatar = user_map.get(
+            row.created_by or "", (None, None, None))
+        modifier_name, modifier_email, modifier_avatar = user_map.get(
+            row.updated_by or "", (None, None, None))
+        publisher_name, publisher_email, publisher_avatar = user_map.get(
+            publisher_id or "", (None, None, None))
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
@@ -2363,6 +2384,11 @@ async def list_popular_views(
             created_by_email=creator_email,
             updated_by_name=modifier_name,
             updated_by_email=modifier_email,
+            data_updated_by_name=publisher_name,
+            data_updated_by_email=publisher_email,
+            created_by_avatar_id=creator_avatar,
+            updated_by_avatar_id=modifier_avatar,
+            data_updated_by_avatar_id=publisher_avatar,
             favourite_count=fav_count,
             is_favourited=is_fav,
         ))

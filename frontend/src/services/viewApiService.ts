@@ -131,6 +131,10 @@ export interface View {
     dataUpdatedBy?: string | null
     dataUpdatedByName?: string | null
     dataUpdatedByEmail?: string | null
+    /** Each person's picked avatar illustration, for the contributor trail. */
+    createdByAvatarId?: string | null
+    updatedByAvatarId?: string | null
+    dataUpdatedByAvatarId?: string | null
     /** Whether a versioned graph backs the view's data source (edited here through
      *  drafts and review) or an external one (mastered elsewhere). Null when the
      *  server couldn't tell — the version store was unreachable, or the view has

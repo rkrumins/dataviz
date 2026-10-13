@@ -150,6 +150,23 @@ who changed it last, not everyone who ever did. **Published** is a choice of its
 own because publishing data changes every view on that data source, including
 views the publisher never opened.
 
+### What changed since your last visit
+
+When you come back after being away for half an hour or more, a line above the
+results says what changed while you were gone, for example *Since your last
+visit · Tue 14:02 — 4 new · 11 updated*. Both numbers count with your other
+filters.
+
+- Click **4 new** to show only views created since then, or **11 updated** for
+  views changed since then (new ones included). Click it again to go back.
+- Those views also carry **New since your visit** or **Updated since your
+  visit** across the top of their card, or a dot before their name in list view.
+- **Mark as seen** clears the line and the labels until your next visit.
+
+Your last visit is remembered by this browser, separately for the Explorer and
+for each workspace's Views tab, so another computer has its own. The line steps
+aside while another date filter is on.
+
 ### Change the order and the layout
 
 - **Sort** with the menu on the right of the filter row. **Recently modified**
@@ -193,7 +210,8 @@ you open anything.
 | Heart and number | How many people have favourited it |
 | People and number | How many different people opened it in the last 30 days |
 | Eye and number | How many times it was opened in the last 30 days |
-| Initials | Who created it. Hover for their name and email |
+| Faces | Who shaped it: whoever created it, then whoever edited it last, then whoever published its latest data, each person once. Hover a face for their name and what they did when; click it to show only views by that person |
+| **New since your visit** or **Updated since your visit** | A coloured edge across the top: the view was created, or changed, since you were last here (see below) |
 | Time | When it last changed. Hover to see when its data and its settings last changed |
 
 Hover the people or eye number for the detail: who has opened it (for example
@@ -222,8 +240,10 @@ shows:
 - **What this view is built on**: its workspace, data source (with whether it
   is a versioned or an external graph), graph data provider and semantic
   layer;
-- **Details**: who created it, and under **See all details** when it was
-  created, last updated, and when its data last changed (**Data Updated**);
+- **Details**: who created it; **Contributors**, the faces of whoever else
+  edited it last or published its latest data (click one to show only views by
+  that person); and under **See all details** when it was created, last
+  updated, and when its data last changed (**Data Updated**);
 - **Usage**: how many people opened it in the last 30 days, how often, and
   whether you have.
 

@@ -58,11 +58,15 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 import { isInKeyboardScope } from '@/lib/keyboardScope'
-import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
+import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
 import { readFilterState, writeFilterState } from '@/features/view-filters/url'
 import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
+import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
+import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
+import { VISIT_RULE } from '@/features/view-filters/dateFilter'
+import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
 import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/people'
 import { activeDimensions } from '@/features/view-filters/dimensions'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
@@ -125,6 +129,11 @@ export function ExplorerPage() {
   const currentUser = useAuthStore(s => s.user)
   const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
   const today = useLocalDay()
+  // "Since your last visit": this browser's window for this person here. It
+  // stays put while the page is open, so the banner's counts stay the ones shown.
+  const visitKey = currentUser?.id ? `${currentUser.id}:explorer` : null
+  const visit = useVisitWindow(visitKey)
+  const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
   const { openViewEditor } = useViewEditorModal()
   // A view from another environment: the wizard's Import journey, from the button or a file
   // dropped anywhere on the page.
@@ -145,9 +154,15 @@ export function ExplorerPage() {
   // uses (``toQueryParams``) so the numbers describe the exact population on
   // screen. The committed (URL) search is used rather than the raw input so the
   // endpoint isn't hit on every keystroke.
+  const visitFrom = visit?.from
+  const visitTo = visit?.to
   const resolveCtx = useMemo(
-    () => ({ currentUserId: currentUser?.id ?? null, today }),
-    [currentUser?.id, today],
+    () => ({
+      currentUserId: currentUser?.id ?? null,
+      today,
+      visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+    }),
+    [currentUser?.id, today, visitFrom, visitTo],
   )
   const statsParams = useMemo(
     () => toQueryParams(resolveFilters(filterState, resolveCtx)),
@@ -232,6 +247,25 @@ export function ExplorerPage() {
       })
     }
   }, [filterState, setFilterState, notify])
+
+  // A person clicked in a card's contributor trail joins the People filter —
+  // as "You" when it is you, so the chip and a saved link read the same.
+  const pickPerson = useCallback((userId: string) => {
+    const id = userId === currentUser?.id ? ME : userId
+    if (filterState.contributorIds.includes(id)) return
+    setFilterState({ ...filterState, contributorIds: [...filterState.contributorIds, id] })
+  }, [filterState, setFilterState, currentUser?.id])
+
+  // Seen: the window closes, and a filter on it would now match nothing, so
+  // it goes too.
+  const markSeen = useCallback(() => {
+    if (!visitKey) return
+    markVisitSeen(visitKey)
+    const dropVisit = (rule: string | null) => (rule === VISIT_RULE ? null : rule)
+    if (filterState.created === VISIT_RULE || filterState.updated === VISIT_RULE) {
+      setFilterState({ ...filterState, created: dropVisit(filterState.created), updated: dropVisit(filterState.updated) })
+    }
+  }, [visitKey, markVisitSeen, filterState, setFilterState])
 
   // Debounced URL sync
   const searchSyncTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -700,6 +734,7 @@ export function ExplorerPage() {
             onChange={setFilterState}
             today={today}
             currentUser={me}
+            ctx={resolveCtx}
             trailing={(
               <>
                 <ExplorerSortControl
@@ -744,6 +779,17 @@ export function ExplorerPage() {
             <div className="absolute inset-y-0 w-1/3 rounded-full bg-gradient-to-r from-transparent via-accent-lineage to-transparent animate-[explorer-progress_1.1s_ease-in-out_infinite]" />
           )}
         </div>
+
+        {visit && filterState.category !== 'deleted' && (
+          <SinceLastVisitBanner
+            state={filterState}
+            ctx={resolveCtx}
+            window={visit}
+            onApply={setFilterState}
+            onMarkSeen={markSeen}
+            className="mb-4"
+          />
+        )}
 
         {/* ── Headline Banner for Aggregation ───────────────────── */}
         {activeWorkspaceId && filterState.dataSourceId && (
@@ -812,6 +858,7 @@ export function ExplorerPage() {
             onSelectRule={rule => setFilterState({ ...filterState, [timelineField]: rule })}
             collapsed={timelineCollapsed}
             onCollapsedChange={setTimelineCollapsed}
+            visitFrom={visit?.from}
             className="mb-6"
           />
         )}
@@ -924,6 +971,8 @@ export function ExplorerPage() {
                       isSelected={selectedIds.has(v.id)}
                       density={density}
                       providerInfo={resolveProvider(v.dataSourceId)}
+                      onPickPerson={pickPerson}
+                      visitMark={visitMarkOf(v, visit)}
                       onToggleSelect={() => setSelectedIds(prev => {
                         const next = new Set(prev)
                         if (next.has(v.id)) next.delete(v.id)
@@ -966,6 +1015,8 @@ export function ExplorerPage() {
                   isSelected={selectedIds.has(v.id)}
                   density={density}
                   providerInfo={resolveProvider(v.dataSourceId)}
+                  onPickPerson={pickPerson}
+                  visitMark={visitMarkOf(v, visit)}
                   onToggleSelect={() => setSelectedIds(prev => {
                     const next = new Set(prev)
                     if (next.has(v.id)) next.delete(v.id)
@@ -997,6 +1048,7 @@ export function ExplorerPage() {
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
         initialEditMode={previewEditMode}
         onSaved={() => refetch()}
+        onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}

@@ -1291,6 +1291,12 @@ class ViewResponse(BaseModel):
     data_updated_by: Optional[str] = Field(None, alias="dataUpdatedBy")
     data_updated_by_name: Optional[str] = Field(None, alias="dataUpdatedByName")
     data_updated_by_email: Optional[str] = Field(None, alias="dataUpdatedByEmail")
+    # Each of those people's chosen avatar illustration (UserORM.avatar_id), from
+    # the same lookup as their name, so the contributor trail can show it; None
+    # when they picked none or cannot be resolved.
+    created_by_avatar_id: Optional[str] = Field(None, alias="createdByAvatarId")
+    updated_by_avatar_id: Optional[str] = Field(None, alias="updatedByAvatarId")
+    data_updated_by_avatar_id: Optional[str] = Field(None, alias="dataUpdatedByAvatarId")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")

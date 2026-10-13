@@ -35,6 +35,7 @@ import { cn } from '@/lib/utils'
 import { viewTypeLabel, viewTypeColor, viewTypeIconComponent } from '@/lib/viewUtils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { ViewFilterState } from '@/features/view-filters/model'
+import type { ResolveContext } from '@/features/view-filters/params'
 import { filterChips, clearDimensions } from '@/features/view-filters/dimensions'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { useLiveFacets } from '@/features/view-filters/useLiveFacets'
@@ -57,6 +58,9 @@ interface ExplorerFilterBarProps {
   /** Local `YYYY-MM-DD` the date rules resolve against. */
   today: string
   currentUser: CurrentPerson | null
+  /** The page's own resolve context, so the counts here resolve "me" and
+   *  "since your last visit" exactly as its list does. */
+  ctx: ResolveContext
   /** The page's own controls (sort, layout), at the end of the first row. */
   trailing?: React.ReactNode
 }
@@ -97,12 +101,11 @@ interface SourceRow {
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
-export function ExplorerFilterBar({ state, onChange, today, currentUser, trailing }: ExplorerFilterBarProps) {
+export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, trailing }: ExplorerFilterBarProps) {
   const { workspaceIds, dataSourceId, viewTypes, tags, category, visibility } = state
   const set = (patch: Partial<ViewFilterState>) => onChange({ ...state, ...patch })
 
   const workspaces = useWorkspacesStore(s => s.workspaces)
-  const ctx = useMemo(() => ({ currentUserId: currentUser?.id ?? null, today }), [currentUser?.id, today])
   const { universe, people, counts, sourceKinds, pending } = useLiveFacets(state, ctx)
   const lookups = useFilterLookups(people, today, currentUser?.id)
 

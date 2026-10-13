@@ -122,3 +122,22 @@ describe('describeRule — the words on the trigger and the chips', () => {
     expect(describeRule('2026-09-24', TODAY)).not.toMatch(/2026/)
   })
 })
+
+describe('visit — since your last visit', () => {
+  const WINDOW = { from: '2026-10-09T15:00:00.000Z', to: '2026-10-12T08:00:00.000Z' }
+
+  it('is a rule, named in words', () => {
+    expect(isValidRule('visit')).toBe(true)
+    expect(describeRule('visit', TODAY)).toBe('Since your last visit')
+  })
+
+  it('covers the remembered window exactly — instants, not days', () => {
+    expect(ruleBounds('visit', TODAY, WINDOW)).toEqual({ after: WINDOW.from, before: WINDOW.to })
+  })
+
+  it('covers nothing when there is no window, rather than everything', () => {
+    const { after, before } = ruleBounds('visit', TODAY, null)!
+    expect(after).not.toBeNull()
+    expect(after).toBe(before)
+  })
+})

@@ -51,6 +51,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { usePreferencesStore } from '@/store/preferences'
+import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -67,7 +68,7 @@ import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { useQueryClient } from '@tanstack/react-query'
 import { FilterDropdown } from '@/components/explorer/FilterDropdown'
-import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
+import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
 import { resolveFilters } from '@/features/view-filters/params'
 import { writeFilterState } from '@/features/view-filters/url'
 import { filterChips } from '@/features/view-filters/dimensions'
@@ -82,6 +83,9 @@ import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
 import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
+import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
+import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
+import { VISIT_RULE } from '@/features/view-filters/dateFilter'
 import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
 import { currentPersonOf } from '@/features/view-filters/people'
 import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
@@ -142,9 +146,20 @@ export default function WorkspaceViewsSection({
     const today = useLocalDay()
     const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
+    // "Since your last visit" to this workspace's views, per browser.
+    const visitKey = currentUser?.id ? `${currentUser.id}:ws:${wsId}` : null
+    const visit = useVisitWindow(visitKey)
+    const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
+    const visitFrom = visit?.from
+    const visitTo = visit?.to
     const resolveCtx = useMemo(
-        () => ({ currentUserId: currentUser?.id ?? null, today, scopeWorkspaceId: wsId }),
-        [currentUser?.id, today, wsId],
+        () => ({
+            currentUserId: currentUser?.id ?? null,
+            today,
+            scopeWorkspaceId: wsId,
+            visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+        }),
+        [currentUser?.id, today, wsId, visitFrom, visitTo],
     )
     const filters: ExplorerFilters = useMemo(() => ({
         ...resolveFilters(fstate, resolveCtx),
@@ -389,6 +404,19 @@ export default function WorkspaceViewsSection({
     })
 
     // Shared per-view action props for card + row.
+    // A person in a contributor trail joins the People filter ("You" for you).
+    const pickPerson = (userId: string) => {
+        const id = userId === currentUser?.id ? ME : userId
+        setFstate(prev => (prev.contributorIds.includes(id) ? prev : { ...prev, contributorIds: [...prev.contributorIds, id] }))
+    }
+    // Seen: the window closes, and a filter on it would now match nothing.
+    const markSeen = () => {
+        if (!visitKey) return
+        markVisitSeen(visitKey)
+        const drop = (rule: string | null) => (rule === VISIT_RULE ? null : rule)
+        setFstate(prev => ({ ...prev, created: drop(prev.created), updated: drop(prev.updated) }))
+    }
+
     const actionProps = (v: View) => ({
         onToggleFavourite: () => toggleFavourite(v.id),
         onShare: () => setShareView({ id: v.id, name: v.name, visibility: v.visibility }),
@@ -409,6 +437,8 @@ export default function WorkspaceViewsSection({
         // identical on every card/row, so drop it and give the scope column
         // room for the data source + provider.
         hideWorkspaceInScope: true,
+        onPickPerson: pickPerson,
+        visitMark: visitMarkOf(v, visit),
     })
 
     return (
@@ -758,6 +788,16 @@ export default function WorkspaceViewsSection({
                 onClearAll={clearFilters}
             />
             {!chips.length && <div className="mb-2" />}
+            {visit && (
+                <SinceLastVisitBanner
+                    state={fstate}
+                    ctx={resolveCtx}
+                    window={visit}
+                    onApply={setFstate}
+                    onMarkSeen={markSeen}
+                    className="mb-4"
+                />
+            )}
             <ActivityTimeline
                 field={timelineField}
                 onFieldChange={setTimelineField}
@@ -766,6 +806,7 @@ export default function WorkspaceViewsSection({
                 onSelectRule={rule => setFstate(prev => ({ ...prev, [timelineField]: rule }))}
                 collapsed={timelineCollapsed}
                 onCollapsedChange={setTimelineCollapsed}
+                visitFrom={visit?.from}
                 className="mb-4"
             />
 
@@ -875,6 +916,7 @@ export default function WorkspaceViewsSection({
                 healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
                 initialEditMode={previewEditMode}
                 onSaved={() => refetch()}
+                onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
             />
 
             {/* ── Dialogs (reused from Explorer) ─────────────────── */}

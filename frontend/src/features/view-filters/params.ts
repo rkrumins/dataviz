@@ -40,6 +40,8 @@ export interface ResolveContext {
   today: string
   /** A surface fixed to one workspace (the workspace Views tab). */
   scopeWorkspaceId?: string | null
+  /** The window the `visit` date rule covers (see `useVisitWindow`). */
+  visit?: { from: string; to: string } | null
 }
 
 /** Stands in for a user id when nobody is signed in, so "me" matches nothing
@@ -47,8 +49,8 @@ export interface ResolveContext {
 const NO_USER = '__no_user__'
 
 export function resolveFilters(state: ViewFilterState, ctx: ResolveContext): ResolvedViewFilters {
-  const created = state.created ? ruleBounds(state.created, ctx.today) : null
-  const updated = state.updated ? ruleBounds(state.updated, ctx.today) : null
+  const created = state.created ? ruleBounds(state.created, ctx.today, ctx.visit) : null
+  const updated = state.updated ? ruleBounds(state.updated, ctx.today, ctx.visit) : null
   const me = ctx.currentUserId ?? NO_USER
   return {
     search: state.search,

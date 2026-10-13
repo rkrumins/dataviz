@@ -50,12 +50,22 @@ filters. Drag across it to filter by those days, or click one day; the arrow key
 do the same from the keyboard. The Date menu shows how many views each period would show, and its
 calendar marks the busy days with a dot.
 
+**Who shaped a view.** Cards and list rows show the faces of whoever created a view, edited it last
+and published its latest data, each person once; hover one for what they did and when, click it to
+show only views by that person. The preview lists them as **Contributors**.
+
+**Since your last visit.** Back after half an hour or more, the Explorer and each workspace's Views
+tab say how many views are new or updated since you were last there, counted with your filters;
+click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
+since your visit** until **Mark as seen**.
+
 API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
 `updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
 `/views/facets` takes every list filter plus `fields`, counts each dimension with the OTHER filters
 applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
 `GET /views/count` returns how many views a filter set leaves; `GET /views/histogram` counts views
-created or updated per hour (or ten minutes) over a window, with the same filters.
+created or updated per hour (or ten minutes) over a window, with the same filters. Views carry
+`createdByAvatarId`, `updatedByAvatarId` and `dataUpdatedByAvatarId`.
 
 ### Changed
 
@@ -87,6 +97,8 @@ created or updated per hour (or ten minutes) over a window, with the same filter
   matches.
 - While the version store can't be reached, views carry no Versioned/External label and that filter
   can't be applied; the rest of the Explorer works.
+- Your last visit is remembered by each browser, not your account, so another computer counts from
+  its own last visit.
 
 ---
 

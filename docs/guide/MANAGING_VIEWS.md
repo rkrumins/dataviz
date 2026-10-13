@@ -292,8 +292,10 @@ Each workspace has a **Views** tab for working with its whole collection: open
   **Versioned** or **External**, **Date**, **People** and **Source** (see
   [Narrow the list](/guide/browsing-views#narrow-the-list)). The **Timeline**
   under them shows how many of the workspace's Views were created or updated on
-  each of the past 90 days; drag across it to filter by those days. **Browse in
-  Explorer** opens the Explorer with the same filters.
+  each of the past 90 days; drag across it to filter by those days. After a
+  while away, a line says how many Views are new or updated since your last
+  visit to this workspace. **Browse in Explorer** opens the Explorer with the
+  same filters.
 - **Select several Views** to **Change Visibility**, **Export** or **Delete**
   them together. (Delete is offered only when you may delete every selected
   View.)
