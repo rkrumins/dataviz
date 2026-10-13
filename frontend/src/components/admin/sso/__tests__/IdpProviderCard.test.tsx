@@ -156,14 +156,14 @@ describe('assurance', () => {
             lifecycle: 'live', assurance: 'unverified', assuranceReason: UNSIGNED, settings,
         })
         const before = render(<IdpProviderCard {...noop} provider={live({})} />)
-        expect(screen.getByText(/link itself to an administrator's or break-glass account/i))
+        expect(screen.getByText(/link itself to a Super Admin's or break-glass account/i))
             .toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', { name: /^hide$/i }))
         before.unmount()
 
         // Turning the opt-in on is a new risk: the folded warning opens again.
         render(<IdpProviderCard {...noop} provider={live({ link_admin_accounts: true })} />)
-        expect(screen.getByText(/set to link administrator and break-glass accounts too/i))
+        expect(screen.getByText(/set to link Super Admin and break-glass accounts too/i))
             .toBeInTheDocument()
     })
 

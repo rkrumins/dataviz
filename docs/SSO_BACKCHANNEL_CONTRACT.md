@@ -184,8 +184,9 @@ That changes what we need from you:
   the matching posture, or run Trust unsigned — the one posture that
   accepts both shapes — and accept the Unverified rating (the
   connection can no longer grant platform-admin roles, never links
-  itself to an administrator's account unless the operator allows it,
-  and every login through it is audited as `user.sso_unsigned_accepted`).
+  itself to a Super Admin's or break-glass account unless the operator
+  allows it, and every login through it is audited as
+  `user.sso_unsigned_accepted`).
   The operator's rehearsal states which case your reply was and what
   judged it.
 - **Moving from unsigned to signed replies: keep the subject.** People

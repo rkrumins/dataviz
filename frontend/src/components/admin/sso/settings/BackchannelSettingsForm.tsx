@@ -427,9 +427,9 @@ function VerifyMaterialChooser({
                     even checked, and a bare JSON object is accepted the
                     same way. Anyone who can reach the sign-in page and
                     post a reply can sign in as <strong>any user</strong> —
-                    administrators and break-glass accounts only if they
-                    linked it themselves or <em>Link administrator accounts
-                    too</em> is on under Identity.
+                    Super Admins and break-glass accounts only if they
+                    linked it themselves or <em>Link Super Admin and
+                    break-glass accounts too</em> is on under Identity.
                     Every such login is recorded as{' '}
                     <code>user.sso_unsigned_accepted</code>, the connection
                     is rated <strong>Unverified</strong>, and it becomes

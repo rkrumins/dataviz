@@ -120,6 +120,32 @@ async def test_disabling_local_login_warns_when_admin_lacks_sso(
 
 
 @pytest.mark.asyncio
+async def test_an_org_admin_without_sso_is_named_too(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Org admins lose their password with everyone else, so a switch-off
+    names them beside the Super Admins — each with their role."""
+    await _seed_break_glass(db_session)
+    await _seed_super_admin(
+        db_session, user_id="usr_sa_no_sso",
+        email="sa@example.com", with_identity=False,
+    )
+    await _seed_super_admin(
+        db_session, user_id="usr_oa_no_sso",
+        email="oa@example.com", with_identity=False,
+    )
+    binding = await db_session.get(m.RoleBindingORM, "bnd_usr_oa_no_sso")
+    binding.role_name = "org_admin"
+    await db_session.commit()
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 409, resp.text
+    listed = {a["id"]: a["role"] for a in resp.json()["detail"]["adminsWithoutSso"]}
+    assert listed == {"usr_sa_no_sso": "super_admin", "usr_oa_no_sso": "org_admin"}
+
+
+@pytest.mark.asyncio
 async def test_an_identity_on_a_draft_connection_does_not_count(
     test_client: AsyncClient, db_session: AsyncSession
 ):

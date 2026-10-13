@@ -470,12 +470,12 @@ async def test_reconciler_withholds_platform_roles_from_unsigned_backchannel(
     assert [b.role_name for b in bindings] == []
 
 
-# ── An unverified connection never claims an administrator ───────────
+# ── An unverified connection never claims a Super Admin ──────────────
 #
 # Its claims are whatever the sender wrote, ``email_verified`` included.
-# Linking by email would hand the break-glass Super Admin — or any account
-# holding a platform-admin role — to anyone able to reach the sign-in
-# endpoint with a hand-written payload. Ordinary accounts still link, so an
+# Linking by email would hand the break-glass account or any Super Admin to
+# anyone able to reach the sign-in endpoint with a hand-written payload.
+# Every other account still links — an org admin's included — so an
 # unsigned connection keeps working for the people it was trusted for.
 
 
@@ -490,14 +490,14 @@ def _sso_service(db_session, *, checks_admins=True):
     async def factory():
         yield db_session
 
-    async def is_platform_admin(session, user_id):
-        return user_id in await binding_repo.platform_admin_user_ids(session)
+    async def is_super_admin(session, user_id):
+        return user_id in await binding_repo.super_admin_user_ids(session)
 
     return LocalIdentityService(
         session_factory=factory, user_repo=user_repo,
         user_identity_repo=user_identity_repo,
         refresh_store_factory=make_refresh_store,
-        platform_admin_checker=is_platform_admin if checks_admins else None,
+        super_admin_checker=is_super_admin if checks_admins else None,
     )
 
 
@@ -565,11 +565,10 @@ async def test_an_unverified_connection_cannot_claim_the_break_glass_account(db_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role", ["super_admin", "org_admin"])
-async def test_an_unverified_connection_cannot_claim_a_platform_admin(db_session, role):
+async def test_an_unverified_connection_cannot_claim_a_super_admin(db_session):
     from backend.auth_service.interface import SSOAuthError
     gw = await _gateway_row(db_session, "unsigned-gw")
-    await _local_account(db_session, "boss@corp.example", role=role)
+    await _local_account(db_session, "boss@corp.example", role="super_admin")
 
     with pytest.raises(SSOAuthError) as err:
         await _sso_service(db_session).complete_sso_login(
@@ -577,6 +576,21 @@ async def test_an_unverified_connection_cannot_claim_a_platform_admin(db_session
             linking_policy="strict", assurance=UNVERIFIED,
         )
     assert "unverified_connection" in err.value.deny_reasons
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_links_an_org_admin(db_session):
+    """An org admin runs workspaces, not the platform: no SSO settings, no
+    user management. Their first sign-in through the gateway links their
+    account like anyone else's."""
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    org_admin = await _local_account(db_session, "ops@corp.example", role="org_admin")
+
+    user, _ = await _sso_service(db_session).complete_sso_login(
+        _claims("ops@corp.example", "emp-ops"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED,
+    )
+    assert user.id == org_admin.id
 
 
 @pytest.mark.asyncio
@@ -599,7 +613,7 @@ async def test_the_operator_can_let_an_unverified_connection_link_administrators
     db_session, system, role,
 ):
     """``link_admin_accounts`` on the connection: every existing account
-    links, administrators and break-glass included — the operator's call."""
+    links, Super Admins and break-glass included — the operator's call."""
     gw = await _gateway_row(db_session, "trusted-unsigned-gw")
     admin = await _local_account(
         db_session, "chief@corp.example", system=system, role=role,
@@ -614,8 +628,8 @@ async def test_the_operator_can_let_an_unverified_connection_link_administrators
 
 
 @pytest.mark.asyncio
-async def test_without_an_answer_every_account_counts_as_an_administrator(db_session):
-    """Nothing wired to say who the administrators are: fail closed."""
+async def test_without_an_answer_every_account_counts_as_a_super_admin(db_session):
+    """Nothing wired to say who the Super Admins are: fail closed."""
     from backend.auth_service.interface import SSOAuthError
     gw = await _gateway_row(db_session, "unsigned-gw")
     await _local_account(db_session, "plain@corp.example")

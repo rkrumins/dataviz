@@ -126,12 +126,13 @@ const REASONS: Record<string, Reason> = {
         next: 'Verify it in the IdP, or map a claim that carries verification.',
     },
     unverified_connection: {
-        what: 'This connection is unverified, so it never links itself to an '
-            + "administrator's or break-glass account: its claims, email "
+        what: 'This connection is below Verified, so it never links itself '
+            + "to a Super Admin's or break-glass account: its claims, email "
             + 'included, are whatever the sender wrote.',
         next: 'They sign in with their password and link it from their own '
-            + 'account page — or make the connection Verified (its card says '
-            + 'how).',
+            + 'account page, or the connection is set to Link Super Admin '
+            + 'and break-glass accounts too — or make it Verified (its card '
+            + 'says how).',
     },
     existing_deleted: {
         what: 'The account that email belongs to was deleted.',

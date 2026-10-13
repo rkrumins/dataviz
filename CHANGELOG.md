@@ -26,8 +26,9 @@ sign-on attempt fails. Deployments with no connection keep the single email-and-
 
 **Turning Passwords off needs a ready break-glass account.** The switch is refused until an
 active Super Admin with a password is marked as a system account — the door that survives an
-identity-provider outage. Super Admins without an SSO identity are no longer a hard refusal: the
-confirm lists them by name, each with **Make break-glass**, and **Turn off anyway** proceeds. Both
+identity-provider outage. Administrators without an SSO identity — Super Admins and org admins —
+are no longer a hard refusal: the confirm lists them by name and role, each with **Make
+break-glass**, and **Turn off anyway** proceeds. Both
 checks run on the switch-off only, so saving another switch while passwords are off is never
 blocked by them. The last ready break-glass account cannot be unmarked while passwords are off.
 
@@ -86,7 +87,7 @@ no longer break-glass, including from the command line.
 after (*Passwords turned off — break-glass accounts only*), not only the values after the save. A
 connection edit (`idp.provider.updated`) names the settings that changed — names only, never
 values — and, before → after, whether it was turned on or off, its linking policy, its rating, and
-**Link administrator accounts too**.
+**Link Super Admin and break-glass accounts too**.
 
 **How to get a connection to Verified, and how to trust your corporate CA.** Running Single
 Sign-On → *Getting a connection to Verified* says what decides each connection's rating and walks
@@ -97,18 +98,20 @@ Kubernetes and Helm, rotating it, and what the logs say when it cannot be loaded
 
 ### Security
 
-**An unverified connection can no longer claim an administrator's account.** Its claims —
-`email_verified` included — are whatever the sender wrote, yet under an auto-linking policy
-(**Strict**, the default) a hand-written payload naming an existing account's email linked to
-that account — the break-glass Super Admin among them — for anyone able to reach the sign-in
-endpoint. A connection below verified now never links itself to a system (break-glass) account
-or one holding a platform-admin role (`unsafe_auto_link`, reason `unverified_connection`);
-administrators link it from their own account page. Ordinary accounts still link, new accounts
-are still created, and people already linked still sign in, so an unsigned gateway keeps
-working as before for everyone it was trusted for — the risk its card states (and can now fold
-away once read). An operator who accepts the risk for administrators as well turns on **Link
-administrator accounts too** on the connection — offered on any connection below Verified,
-Unverified or Asserted — and every existing account links as before.
+**An unverified connection can no longer claim a Super Admin's or break-glass account.** Its
+claims — `email_verified` included — are whatever the sender wrote, yet under an auto-linking
+policy (**Strict**, the default) a hand-written payload naming an existing account's email
+linked to that account — the break-glass Super Admin among them — for anyone able to reach the
+sign-in endpoint. A connection below verified now never links itself to a system (break-glass)
+account or one holding `super_admin` (`unsafe_auto_link`, reason `unverified_connection`);
+Super Admins link it from their own account page. Every other account still links — an org
+admin's included, since `org_admin` has neither `system:admin` nor user management — new
+accounts are still created, and people already linked still sign in, so an unsigned gateway
+keeps working as before for everyone it was trusted for: the risk its card states (and can now
+fold away once read). An operator who accepts the risk for Super Admins and break-glass accounts
+as well turns on **Link Super Admin and break-glass accounts too** on the connection — offered
+on any connection below Verified, Unverified or Asserted — and every existing account links as
+before.
 
 ### Fixed
 
@@ -148,12 +151,13 @@ Unverified or Asserted — and every existing account links as before.
   wrong password gets.
 - **Passwords off without a break-glass account** stays off; the new check applies to the next
   switch-off. Check **Break-glass accounts** on the Settings page.
-- **An administrator or break-glass account first signing in through an unverified connection**
+- **A Super Admin or break-glass account first signing in through an unverified connection**
   (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
-  account page instead of being linked automatically. Everyone else links as before; a Verified
-  connection links administrators automatically too. To keep the old behaviour on an unverified
-  connection, turn on **Link administrator accounts too** under its **Identity**. The same holds
-  for an Asserted connection (a portal reading a proxy's header).
+  account page instead of being linked automatically. Everyone else, org admins included, links
+  as before; a Verified connection links Super Admins automatically too. To keep the old
+  behaviour on an unverified connection, turn on **Link Super Admin and break-glass accounts
+  too** under its **Identity**. The same holds for an Asserted connection (a portal reading a
+  proxy's header).
 - **Set `SSO_OUTBOUND_TLS_CA_CERTS` on `aggregation-controlplane` as well as `viz-service`.**
   The outage prober runs there; without the bundle it can never reach a connection behind your
   corporate CA, so it never confirms that connection's outage. A bundle is read once per

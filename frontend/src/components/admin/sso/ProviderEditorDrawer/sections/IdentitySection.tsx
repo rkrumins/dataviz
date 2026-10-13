@@ -110,11 +110,11 @@ export function IdentitySection({
             </fieldset>
 
             {/* Only meaningful below Verified — Unverified or Asserted: a
-                verified one links administrators by the policy above like
-                anyone. */}
+                verified one links Super Admins and break-glass accounts by
+                the policy above like anyone. */}
             {(provider.assurance === 'unverified' || provider.assurance === 'asserted') && (
                 <DangerToggle
-                    title="Link administrator accounts too"
+                    title="Link Super Admin and break-glass accounts too"
                     checked={ed.draft.settings.link_admin_accounts === true}
                     onChange={v => ed.set('settings', {
                         ...ed.draft.settings,
@@ -124,13 +124,14 @@ export function IdentitySection({
                 >
                     This connection is{' '}
                     <strong>{provider.assurance === 'asserted' ? 'Asserted' : 'Unverified'}</strong>,
-                    not Verified, so it never links itself to an
-                    administrator&rsquo;s or a break-glass account — those
-                    people link it from their own account page, and a forged
-                    identity cannot claim one. Turn this on to link{' '}
-                    <strong>every</strong> existing account by the policy
-                    above, administrators included: anyone who can forge what
-                    this connection trusts could then sign in as one of them.
+                    not Verified, so it never links itself to a Super
+                    Admin&rsquo;s or a break-glass account — those people link
+                    it from their own account page, and a forged identity
+                    cannot claim one. Everyone else, org admins included,
+                    links by the policy above. Turn this on to link{' '}
+                    <strong>every</strong> existing account, Super Admins and
+                    break-glass included: anyone who can forge what this
+                    connection trusts could then sign in as one of them.
                 </DangerToggle>
             )}
         </div>

@@ -101,8 +101,9 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'sign in at /login?password=1; Super Admins with a password ' +
                     'can too during a detected outage, and everyone can while an ' +
                     'emergency window is open. Refused with 409 unless a ' +
-                    'break-glass account is ready; Super Admins without an SSO ' +
-                    'identity are listed for you to acknowledge first.',
+                    'break-glass account is ready; administrators (Super Admins ' +
+                    'and org admins) without an SSO identity are listed for you ' +
+                    'to acknowledge first.',
                 confirmOff: true,
                 resultOn:
                     'Passwords are on — anyone can fall back to a password again.',
@@ -175,11 +176,11 @@ function errText(err: unknown, fallback: string): string {
     return err instanceof Error && err.message ? err.message : fallback
 }
 
-type AdminWithoutSso = { id: string; email: string }
+type AdminWithoutSso = { id: string; email: string; role?: 'super_admin' | 'org_admin' }
 
 /** The two refusals the passwords-off confirm answers in place, because
  *  what to do next belongs beside the switch rather than in a toast:
- *  nobody is ready to break the glass, or some Super Admins could not
+ *  nobody is ready to break the glass, or some administrators could not
  *  sign in at all — a warning the operator may acknowledge. */
 type PasswordsOffRefusal =
     | { error: 'no_break_glass_account' }
@@ -787,7 +788,7 @@ function RequireReloginChoice({
     )
 }
 
-/** The would-be-stranded Super Admins, inside the passwords-off confirm:
+/** The would-be-stranded administrators, inside the passwords-off confirm:
  *  no SSO identity, not break-glass — off, they could not sign in at all.
  *  Each can be made break-glass on the spot; "Turn off anyway" below is
  *  the acknowledgement for the rest. */
@@ -802,10 +803,10 @@ function AdminsWithoutSso({
         <div className="mt-2">
             <p className="text-xs text-ink leading-relaxed">
                 {admins.length === 1
-                    ? 'This Super Admin has no single sign-on identity and is ' +
-                      'not a break-glass account, so with passwords off they ' +
-                      'could not sign in until one is linked.'
-                    : `These ${admins.length} Super Admins have no single ` +
+                    ? 'This administrator has no single sign-on identity and ' +
+                      'is not a break-glass account, so with passwords off ' +
+                      'they could not sign in until one is linked.'
+                    : `These ${admins.length} administrators have no single ` +
                       'sign-on identity and are not break-glass accounts, so ' +
                       'with passwords off they could not sign in until one ' +
                       'is linked.'}
@@ -819,6 +820,11 @@ function AdminsWithoutSso({
                         <span className="text-xs text-ink truncate flex-1 min-w-0">
                             {a.email}
                         </span>
+                        {a.role && (
+                            <span className="shrink-0 text-[10px] text-ink-muted">
+                                {a.role === 'org_admin' ? 'Org admin' : 'Super Admin'}
+                            </span>
+                        )}
                         <button
                             type="button"
                             onClick={() => onMake(a)}

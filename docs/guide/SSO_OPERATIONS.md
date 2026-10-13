@@ -159,13 +159,21 @@ line on your screen (it opens again if the cause changes). The **Unverified** or
 **Asserted** pill stays either way.
 
 **Nobody is locked out below Verified.** An Unverified or Asserted connection signs people in
-and links ordinary accounts by email, exactly as a Verified one does. What it never does is
-link itself to an administrator's or a break-glass account — a forged identity cannot claim
-one. Those people link the connection from their own account page once, and sign in through
-it from then on. To link *every* existing account automatically, administrators included,
-turn on **Link administrator accounts too** under the connection's **Identity** (it appears
-whenever the connection is below Verified, and the card says when it is on) — and accept
-that anyone who can forge what the connection trusts could then sign in as an administrator.
+and links existing accounts by email — org admins' included — exactly as a Verified one does.
+What it never does is link itself to a Super Admin's or a break-glass account: a forged identity
+cannot claim the platform. Super Admins link the connection from their own account page once
+(user menu → **Identities** → **Link**), and sign in through it from then on; break-glass
+accounts stay password-only. To link *every* existing account automatically, Super Admins and
+break-glass included, turn on **Link Super Admin and break-glass accounts too** under the
+connection's **Identity** (it appears whenever the connection is below Verified, and the card
+says when it is on) — and accept that anyone who can forge what the connection trusts could then
+sign in as one of them.
+
+**What linking means on such a connection.** Once an account is linked — by email, by the
+person, or through that switch — anyone able to forge a reply naming its subject can sign in as
+it. That is what the Unverified rating says, for every account the connection signs in; the
+lasting fix is to make the connection Verified, below. Until then, Super Admins can keep signing
+in with their password instead of linking.
 Whether an existing account links at all is still the **Account linking** policy's call:
 *Strict* skips accounts that already have another single sign-on identity (choose *Allow
 verified* to stack them), and the gateway's addresses count as verified only while **Treat
@@ -214,8 +222,9 @@ from your proxy can only ever be *Asserted*.
 
 **Once a connection is Verified:**
 
-- administrator and break-glass accounts link automatically, by the linking policy, like
-  everyone else, and **Link administrator accounts too** no longer applies (it disappears);
+- Super Admin and break-glass accounts link automatically, by the linking policy, like
+  everyone else, and **Link Super Admin and break-glass accounts too** no longer applies (it
+  disappears);
 - access mapping rules can grant platform administrator roles through it;
 - the card's warning goes away;
 - people already linked notice nothing: their sign-in, sessions and accounts are unchanged.
@@ -278,9 +287,10 @@ break-glass accounts. Four things make that safe to actually do:
    Admin → Users. **Break-glass accounts** on the Settings page shows whether
    one is ready. It is the door that survives an identity-provider outage.
 
-2. **The lockout warning.** Super Admins who have neither a linked SSO
-   identity nor the system-account mark are listed when you turn the switch
-   off, each with **Make break-glass**. **Turn off anyway** proceeds: they
+2. **The lockout warning.** Administrators — Super Admins and org admins —
+   who have neither a linked SSO identity nor the system-account mark are
+   listed, with their role, when you turn the switch off, each with **Make
+   break-glass**. **Turn off anyway** proceeds: they
    keep their accounts and sign in through a connection from then on (it links
    them by email the first time, where the connection's linking policy
    allows).
@@ -375,7 +385,7 @@ page's **Activity** tab:
 | Sessions kept through it | *Kept … signed in past the daily re-authentication — entra is down*, once per session |
 | Sessions it ended | *Password session opened while SSO was down ended…*, saying whether after a day or because its way in closed |
 | Break-glass accounts | Made or no longer a break-glass account, by whom — or from the server's command line |
-| Settings changes | Which switch moved (*Passwords turned off — break-glass accounts only*); for a connection, which settings changed by name, and before → after whether it is on, its linking policy, its rating and **Link administrator accounts too** |
+| Settings changes | Which switch moved (*Passwords turned off — break-glass accounts only*); for a connection, which settings changed by name, and before → after whether it is on, its linking policy, its rating and **Link Super Admin and break-glass accounts too** |
 
 **When nobody can sign in at all** — no break-glass account ready and every
 admin SSO-only — run this on the host, then sign in at `/login?password=1`:
@@ -540,7 +550,7 @@ Each row explains its code in place. The full vocabulary for linking:
 | `unsafe_auto_link` | An account with that email exists but the linking policy refused it. The specific reasons follow | See the reasons below |
 | `strict_existing_sso` | That account already has an SSO identity, and this connection is **Strict** | Move this connection to *Allow verified*, or have them link it themselves |
 | `email_unverified` | Their IdP did not say the address is verified | Fix it in the IdP, or map a claim that does carry verification |
-| `unverified_connection` | The connection is unverified, and an unverified connection never links itself to an administrator's or break-glass account — its claims, email included, are whatever the sender wrote. Ordinary accounts still link | They sign in with their password and link it from their own account page; or make the connection Verified; or, accepting the risk, turn on **Link administrator accounts too** on the connection (Identity) |
+| `unverified_connection` | The connection is below Verified, and such a connection never links itself to a Super Admin's or break-glass account — its claims, email included, are whatever the sender wrote. Everyone else, org admins included, still links | They sign in with their password and link it from their own account page; or make the connection Verified; or, accepting the risk, turn on **Link Super Admin and break-glass accounts too** on the connection (Identity) |
 | `policy:manual_only` | The connection never links automatically, by design | The person links it from their own account page |
 | `policy:disabled` | Linking is off for this connection | Change the policy, or expect a separate account |
 | `existing_status:pending` | The account exists but was never approved | Approve it under Admin → Users |

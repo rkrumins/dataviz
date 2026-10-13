@@ -432,8 +432,8 @@ function collisionWhy(reasons: string[]): string {
     }
     if (reasons.includes('unverified_connection')) {
         return "This sign-in method can't vouch for who you are, so it never "
-            + "attaches itself to an administrator's account — sign in with "
-            + 'your password and link it from your own account.'
+            + "attaches itself to a Super Admin's or break-glass account — "
+            + 'sign in with your password and link it from your own account.'
     }
     if (reasons.includes('strict_existing_sso')) {
         return 'Your account already has another sign-in method linked, '

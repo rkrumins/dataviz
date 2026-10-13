@@ -105,17 +105,24 @@ async function askToTurnPasswordsOff() {
 }
 
 describe('Super Admins who could not sign in', () => {
-    it('lists them in the confirm, not in a toast', async () => {
+    it('lists them in the confirm, not in a toast, each with their role', async () => {
         svc.updateAuthConfig.mockRejectedValueOnce(refused({
-            error: 'would_lock_out_admin', adminsWithoutSso: [ana, bo],
-            message: 'Some Super Admins have no SSO identity.',
+            error: 'would_lock_out_admin',
+            adminsWithoutSso: [
+                { ...ana, role: 'super_admin' }, { ...bo, role: 'org_admin' },
+            ],
+            message: 'These administrators have no linked SSO identity.',
         }))
         await askToTurnPasswordsOff()
 
         expect(await screen.findByText('ana@corp.example')).toBeInTheDocument()
         expect(screen.getByText('bo@corp.example')).toBeInTheDocument()
-        expect(screen.getByText(/these 2 super admins have no single sign-on identity/i))
+        expect(screen.getByText(/these 2 administrators have no single sign-on identity/i))
             .toBeInTheDocument()
+        // Org admins lose their password too, so they are named beside the
+        // Super Admins rather than discovered after the switch.
+        expect(screen.getByText('ana@corp.example').closest('li')).toHaveTextContent('Super Admin')
+        expect(screen.getByText('bo@corp.example').closest('li')).toHaveTextContent('Org admin')
         expect(screen.getByRole('button', { name: 'Turn off anyway' }))
             .toBeInTheDocument()
         expect(raised()).toHaveLength(0)

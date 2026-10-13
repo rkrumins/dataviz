@@ -17,10 +17,10 @@ The PATCH endpoint guards against operator self-lockout:
     account exists — active, ``super_admin``, with a password. That is the
     door that survives an IdP outage; without one, an all-SSO admin team
     could switch passwords off and be locked out by the next outage.
-  * Warns (409 ``would_lock_out_admin``, with the list) when Super Admins
-    have no SSO identity and are not break-glass: they lose their password
-    until they link one. The admin proceeds by resending with
-    ``acknowledgeAdminsWithoutSso``.
+  * Warns (409 ``would_lock_out_admin``, with the list) when
+    administrators — Super Admins and org admins — have no SSO identity
+    and are not break-glass: they lose their password until they link one.
+    The admin proceeds by resending with ``acknowledgeAdminsWithoutSso``.
   * Refuses any change that would leave ``ssoEnabled`` AND
     ``allowLocalLogin`` both false. The patch is merged with the stored
     row before the check, so the combination is unreachable whether it
@@ -139,7 +139,7 @@ class AuthConfigPatch(BaseModel):
     allow_jit_provisioning: Optional[bool] = Field(default=None, alias="allowJitProvisioning")
     email_first_login: Optional[bool] = Field(default=None, alias="emailFirstLogin")
     expected_version: Optional[int] = Field(default=None, alias="expectedVersion")
-    # Proceed although the listed Super Admins have no SSO identity: they
+    # Proceed although the listed administrators have no SSO identity: they
     # keep their accounts but lose the password until they link one.
     acknowledge_admins_without_sso: bool = Field(
         default=False, alias="acknowledgeAdminsWithoutSso",
@@ -220,17 +220,18 @@ async def get_config(
 
 
 async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
-    """Return the (id, email) of every active super-admin who has no SSO
-    identity on a connection that can sign them in (enabled and
-    published). Once local login is off such an admin has no password
-    door, so turning it off warns about them by name.
+    """Return the id, email and role of every active administrator — Super
+    Admin or org admin — who has no SSO identity on a connection that can
+    sign them in (enabled and published). Once local login is off such an
+    admin has no password door, so turning it off warns about them by name.
 
     System accounts are not counted: the enforcement carves them out
     (they keep password sign-in while the switch is off), so they cannot
     be locked out by it."""
-    user_ids = await binding_repo.super_admin_user_ids(session)
+    user_ids = await binding_repo.platform_admin_user_ids(session)
     if not user_ids:
         return []
+    super_admins = await binding_repo.super_admin_user_ids(session)
     admin_q = await session.execute(
         select(UserORM).where(
             UserORM.id.in_(user_ids),
@@ -251,7 +252,10 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
             )
         )
         if ident.first() is None:
-            offending.append({"id": admin.id, "email": admin.email})
+            offending.append({
+                "id": admin.id, "email": admin.email,
+                "role": "super_admin" if admin.id in super_admins else "org_admin",
+            })
     return offending
 
 
@@ -276,7 +280,7 @@ async def update_config(
     Lockout safeguards:
 
       * Turning ``allowLocalLogin`` off needs a ready break-glass account
-        (409 ``no_break_glass_account``) and, when Super Admins have no
+        (409 ``no_break_glass_account``) and, when administrators have no
         SSO identity, ``acknowledgeAdminsWithoutSso`` (409
         ``would_lock_out_admin`` with the list). Both are checked on the
         transition only, so saving another switch while passwords are
@@ -324,7 +328,7 @@ async def update_config(
                 detail={
                     "error": "would_lock_out_admin",
                     "adminsWithoutSso": offending,
-                    "message": "These Super Admins have no linked SSO "
+                    "message": "These administrators have no linked SSO "
                                "identity and will lose password sign-in.",
                 },
             )

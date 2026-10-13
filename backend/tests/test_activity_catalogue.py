@@ -264,7 +264,7 @@ def test_a_connection_edit_says_what_changed():
         "link_admin_accounts": [False, True],
     }) == (
         "info",
-        "IdP provider 'portal' updated — Link administrator accounts too on;"
+        "IdP provider 'portal' updated — Link Super Admin and break-glass accounts too on;"
         " now Unverified (was verified); settings changed: jwks_url, trust_unsigned",
     )
     assert catalogue.summarize("idp.provider.updated", {

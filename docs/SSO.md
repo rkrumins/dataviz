@@ -340,7 +340,8 @@ The PATCH endpoint refuses lockout scenarios:
   with a password set. It is the door that survives an IdP outage; the
   config `GET` reports `breakGlass {ready, accounts}`.
 * Turning it off also warns (HTTP 409 `would_lock_out_admin`, with
-  `adminsWithoutSso`) when active Super Admins have no SSO identity on an
+  `adminsWithoutSso` — each entry's `role` is `super_admin` or
+  `org_admin`) when active administrators have no SSO identity on an
   enabled, published connection and are not system accounts: they lose
   their password until they link one. Resending the patch with
   `acknowledgeAdminsWithoutSso: true` proceeds; the audit event records
@@ -441,20 +442,25 @@ existed — or inserted out of band — is still refused when it would take
 effect. `super_admin` is refused from *every* provider regardless of
 assurance; admin grants stay manual.
 
-Nor may a provider below `verified` **link itself to an administrator's
-account** — a system (break-glass) account, or one holding a platform-admin
-role (`_link_deny_reasons`, reason `unverified_connection`; who holds one is
-answered by an injected checker, and with none every account counts): its
-claims, the email and `email_verified` included, are whatever the sender
-wrote, so linking by email would hand the break-glass Super Admin to anyone
-able to reach the sign-in endpoint. Ordinary accounts still link, so an
-unsigned connection keeps working for the people its operator trusted it
-for; administrators link it from their own page. An operator who accepts
-the risk for administrators too turns on **Link administrator accounts
-too** on the connection (`link_admin_accounts`, read strictly — only an
-explicit `true` — and never published to the browser; offered in the editor
-for any connection below `verified`, `unverified` or `asserted`): every
-existing account then links by the linking policy, administrators included. The admin card states
+Nor may a provider below `verified` **link itself to a Super Admin's or a
+break-glass account** — one holding `super_admin`, or a system account
+(`_link_deny_reasons`, reason `unverified_connection`; who holds
+`super_admin` is answered by the injected `super_admin_checker`, and with
+none every account counts): its claims, the email and `email_verified`
+included, are whatever the sender wrote, so linking by email would hand the
+platform to anyone able to reach the sign-in endpoint. Every other account
+still links, an org admin's included — `org_admin` runs workspaces but has
+neither `system:admin` nor user management — so an unsigned connection keeps
+working for the people its operator trusted it for; Super Admins link it
+from their own page. An operator who accepts the risk for them too turns on
+**Link Super Admin and break-glass accounts too** on the connection
+(`link_admin_accounts`, read strictly — only an explicit `true` — and never
+published to the browser; offered in the editor for any connection below
+`verified`, `unverified` or `asserted`): every existing account then links
+by the linking policy. Once linked — by email, by the person, or through
+the opt-in — an account on such a connection can be signed into by anyone
+able to forge a reply naming its subject; that is what the rating says, and
+`verified` is the lasting fix. The admin card states
 each weak row's cause and fix (`assurance_explained`), and an admin who has
 read the warning can fold it on their own screen. Raising a connection to
 `verified`, step by step, and what changes when it is:
@@ -937,7 +943,8 @@ Pre-flight:
    IdP.
 
 Administration → SSO → Settings → turn **Passwords** off → confirm. If any
-Super Admin still has no SSO identity, the confirm lists them, each with
+administrator (Super Admin or org admin) still has no SSO identity, the
+confirm lists them, with their role, each with
 **Make break-glass**, and **Turn off anyway** proceeds — they keep their
 accounts and sign in through a connection, linking by email on the first
 sign-in where the connection's linking policy allows it.

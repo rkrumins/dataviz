@@ -271,7 +271,8 @@ def _summary_idp_provider_updated(p: dict) -> str:
     admins = p.get("link_admin_accounts")
     if isinstance(admins, list) and len(admins) == 2:
         parts.append(
-            "Link administrator accounts too " + ("on" if admins[1] else "off"),
+            "Link Super Admin and break-glass accounts too "
+            + ("on" if admins[1] else "off"),
         )
     assurance = p.get("assurance")
     if isinstance(assurance, list) and len(assurance) == 2:

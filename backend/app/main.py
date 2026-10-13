@@ -1056,20 +1056,15 @@ async def lifespan(_app: FastAPI):
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
 
-    # Asked only while passwords are off and an SSO outage is confirmed:
-    # Super Admins may then sign in with a password to support everyone
-    # else. Read-only, on the caller's session — it runs before anyone has
-    # proved who they are, so it must have no side effects.
+    # Asked while passwords are off and an SSO outage is confirmed — Super
+    # Admins may then sign in with a password to support everyone else —
+    # and when a connection below verified would link itself to an existing
+    # account, which is never a Super Admin's. Read-only, on the caller's
+    # session — it runs before anyone has proved who they are, so it must
+    # have no side effects.
     async def _is_super_admin(session, user_id: str) -> bool:
         from backend.app.db.repositories import binding_repo
         return user_id in await binding_repo.super_admin_user_ids(session)
-
-    # Asked when a connection below verified would link itself to an
-    # existing account: never one holding a platform-admin role. Same
-    # constraints as above — read-only, before anyone has proved anything.
-    async def _is_platform_admin(session, user_id: str) -> bool:
-        from backend.app.db.repositories import binding_repo
-        return user_id in await binding_repo.platform_admin_user_ids(session)
 
     async def _fetch_avatar_image(
         url: str, *, provider_id: str | None = None,
@@ -1145,7 +1140,6 @@ async def lifespan(_app: FastAPI):
         session_revoker=_revoke_one_session,
         revocation_checker=_is_session_revoked,
         super_admin_checker=_is_super_admin,
-        platform_admin_checker=_is_platform_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
     )

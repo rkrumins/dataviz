@@ -228,11 +228,10 @@ class LocalIdentityService:
       * ``revocation_checker(sid)`` -> bool — is this sid tombstoned?
         Read by :meth:`session_revoked`.
       * ``super_admin_checker(session, user_id)`` -> bool — does the
-        account hold ``super_admin``? Asked only while passwords are off
-        and an SSO outage is confirmed; see :meth:`_password_door`.
-      * ``platform_admin_checker(session, user_id)`` -> bool — does the
-        account hold a platform-admin role? Asked only when a connection
-        below ``verified`` would link itself to an existing account.
+        account hold ``super_admin``? Asked while passwords are off and an
+        SSO outage is confirmed (see :meth:`_password_door`), and when a
+        connection below ``verified`` would link itself to an existing
+        account.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -256,7 +255,6 @@ class LocalIdentityService:
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         revocation_checker: Optional[Callable[[str], Awaitable[bool]]] = None,
         super_admin_checker: Optional[Callable[..., Awaitable[bool]]] = None,
-        platform_admin_checker: Optional[Callable[..., Awaitable[bool]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
             Callable[..., Awaitable[tuple[bytes, str]]]
@@ -292,7 +290,6 @@ class LocalIdentityService:
         # reason; read-only, with no side effects, because it is asked
         # before anyone has proved who they are.
         self._super_admin_checker = super_admin_checker
-        self._platform_admin_checker = platform_admin_checker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
         # operator's host allowlist — auth_service may not import
@@ -1789,11 +1786,12 @@ class LocalIdentityService:
             session, by_email.id,
         )
         # A connection below verified still links an ordinary account —
-        # its operator chose to trust it for everyone — but never one that
-        # can run the platform: its claims, email_verified included, are
-        # whatever the sender wrote. With nothing to answer "is this an
-        # administrator?", every account is treated as one. The operator
-        # can extend that trust to administrators too, on the connection
+        # an org admin's included: its operator chose to trust it for
+        # everyone — but never one that runs the platform itself, a Super
+        # Admin or a break-glass account: its claims, email_verified
+        # included, are whatever the sender wrote. With nothing to answer
+        # "is this a Super Admin?", every account is treated as one. The
+        # operator can extend that trust to them too, on the connection
         # (``link_admin_accounts``), knowing what it means.
         weak_claim_on_admin = (
             assurance is not None
@@ -1801,8 +1799,8 @@ class LocalIdentityService:
             and not link_admin_accounts
             and (
                 bool(getattr(by_email, "is_system_account", False))
-                or self._platform_admin_checker is None
-                or await self._platform_admin_checker(session, by_email.id)
+                or self._super_admin_checker is None
+                or await self._super_admin_checker(session, by_email.id)
             )
         )
         deny_reasons = self._link_deny_reasons(

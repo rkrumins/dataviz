@@ -1182,7 +1182,7 @@ redirect. New services should NEVER call `fetch()` directly.
 | 403 (permission) | `{"detail":"Missing permission: X"}` | UI shouldn't have shown the action | `auth:access-denied` dispatched; AppLayout modal renders |
 | 401 on `/auth/login` | `"Invalid email or password"` | Wrong password — or SSO-only mode and this account may not use a password (deliberately the same answer) | the login page offers the password step only when `login-context.passwordAccess` allows it |
 | 409 (`last_authenticator`) | `{"error":"last_authenticator","message":…}` | Trying to unlink the only auth method | inline error + offer "set a password" CTA |
-| 409 (`would_lock_out_admin`) | `{"error":…,"adminsWithoutSso":[…]}` | Turning passwords off would leave these Super Admins without a way in | render the list with "Make break-glass" per row, and "Turn off anyway" — resend with `acknowledgeAdminsWithoutSso: true` |
+| 409 (`would_lock_out_admin`) | `{"error":…,"adminsWithoutSso":[{"id","email","role"}…]}` | Turning passwords off would leave these administrators (`super_admin` or `org_admin`) without a way in | render the list with "Make break-glass" per row, and "Turn off anyway" — resend with `acknowledgeAdminsWithoutSso: true` |
 | 409 (`no_break_glass_account`) | `{"error":"no_break_glass_account","message":…}` | Passwords can't be turned off (or the last break-glass account unmarked) until a ready break-glass account exists | point at Admin → Users → Mark as system account, or the host's `reset_admin_password --break-glass` |
 
 ### 7.5 Reacting to `auth:session-lost`

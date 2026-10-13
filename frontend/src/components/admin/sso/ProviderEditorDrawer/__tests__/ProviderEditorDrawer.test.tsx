@@ -315,7 +315,7 @@ describe('linking administrators through an unverified connection', () => {
         const user = userEvent.setup()
         renderDrawer(unverified)
 
-        const toggle = screen.getByRole('checkbox', { name: /link administrator accounts too/i })
+        const toggle = screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i })
         expect(toggle).not.toBeChecked()
         await user.click(toggle)
         await user.click(screen.getByRole('button', { name: /save changes/i }))
@@ -330,7 +330,7 @@ describe('linking administrators through an unverified connection', () => {
             ...unverified,
             settings: { ...unverified.settings, link_admin_accounts: true },
         })
-        await user.click(screen.getByRole('checkbox', { name: /link administrator accounts too/i }))
+        await user.click(screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i }))
         await user.click(screen.getByRole('button', { name: /save changes/i }))
 
         await waitFor(() => expect(updateProvider).toHaveBeenCalled())
@@ -346,13 +346,13 @@ describe('linking administrators through an unverified connection', () => {
             assurance: 'asserted',
             assuranceReason: 'Trusts the header your proxy sets.',
         } as Partial<IdpProvider>)
-        const toggle = screen.getByRole('checkbox', { name: /link administrator accounts too/i })
+        const toggle = screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i })
         expect(toggle.closest('label')).toHaveTextContent(/this connection is asserted, not verified/i)
     })
 
     it('is not offered on a verified connection, which links by policy anyway', () => {
         renderDrawer()
-        expect(screen.queryByRole('checkbox', { name: /link administrator accounts too/i }))
+        expect(screen.queryByRole('checkbox', { name: /link super admin and break-glass accounts too/i }))
             .not.toBeInTheDocument()
     })
 })

@@ -288,9 +288,9 @@ function UnverifiedWarning({ providerId, reason, linksAdmins, onEdit }: {
                 This connection is live and unverified. {reason}{' '}
                 {linksAdmins
                     ? 'It cannot grant admin roles, but it is set to link '
-                        + 'administrator and break-glass accounts too.'
-                    : "It cannot grant admin roles, or link itself to an "
-                        + "administrator's or break-glass account."}{' '}
+                        + 'Super Admin and break-glass accounts too.'
+                    : "It cannot grant admin roles, or link itself to a "
+                        + "Super Admin's or break-glass account."}{' '}
                 <button
                     type="button"
                     onClick={onEdit}
