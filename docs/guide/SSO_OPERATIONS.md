@@ -151,26 +151,74 @@ stored, so it always reflects reality.
 | **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not | No |
 | **Unverified** | We cannot tell a genuine claim from a forged one — an unsigned portal payload, a gateway connection running *Trust unverified sign-ins*, or one with TLS verification switched off (anyone on the network path could answer as the gateway) | No |
 
-**Getting a connection to Verified.** A live, unverified connection carries a
-warning on its card that names the setting to blame, with **Open its settings**
-beside it; once you have read it, **Hide** folds it to one line on your screen
-(it opens again if the cause changes). An unverified connection still links
-ordinary accounts by email, so it keeps working for the people it was trusted
-for, but never an administrator's or a break-glass account — a forged payload
-cannot claim one; administrators link it from their own account page. To link
-*every* existing account automatically, administrators included, turn on
-**Link administrator accounts too** under the connection's **Identity** — it
-appears while the connection is Unverified, and the card says when it is on.
-Whether an existing account links at all is still the **Account linking**
-policy's call: *Strict* skips accounts that already have another single
-sign-on identity (choose *Allow verified* to stack them), and the gateway's
-addresses count as verified only while **Treat the gateway's email addresses as
-verified** is on (the default). For a gateway connection the fix is one of: give it the gateway's
-JWKS URL, public key or shared secret instead of trusting unsigned replies; if
-the corporate cookie reaches this app, run the exchange on the server, which
-the call itself verifies; and mount your corporate CA bundle
-(`SSO_OUTBOUND_TLS_CA_CERTS`) rather than switching TLS verification off. For a
-portal, have it sign its payload as a JWT and give the connection the key.
+### Getting a connection to Verified
+
+A live connection below Verified carries a warning on its card that names its cause and its
+fix, with **Open its settings** beside it; once you have read it, **Hide** folds it to one
+line on your screen (it opens again if the cause changes). The **Unverified** or
+**Asserted** pill stays either way.
+
+**Nobody is locked out below Verified.** An Unverified or Asserted connection signs people in
+and links ordinary accounts by email, exactly as a Verified one does. What it never does is
+link itself to an administrator's or a break-glass account — a forged identity cannot claim
+one. Those people link the connection from their own account page once, and sign in through
+it from then on. To link *every* existing account automatically, administrators included,
+turn on **Link administrator accounts too** under the connection's **Identity** (it appears
+whenever the connection is below Verified, and the card says when it is on) — and accept
+that anyone who can forge what the connection trusts could then sign in as an administrator.
+Whether an existing account links at all is still the **Account linking** policy's call:
+*Strict* skips accounts that already have another single sign-on identity (choose *Allow
+verified* to stack them), and the gateway's addresses count as verified only while **Treat
+the gateway's email addresses as verified** is on (the default).
+
+**What decides the rating:**
+
+| Connection | Verified when | Below it when |
+|---|---|---|
+| OIDC, SAML | Always: the IdP's signature is checked on every sign-in | — |
+| Enterprise gateway, exchange on **our server** | TLS to the gateway is verified (the default): the server asks the gateway itself at every sign-in and renewal | **Skip TLS verification for this connection** is on — *Unverified*, unless the answer arrives as a signed token checked against a pasted public key or shared secret |
+| Enterprise gateway, exchange in **the browser** | **Verify the token with** is a JWKS URL, a pasted public key or a shared secret: the gateway's token is signature-checked and accepted once | It is *Nothing — trust it unverified* (Trust unsigned) — *Unverified*; or TLS verification is off with a JWKS URL, since the key set itself would arrive unverified |
+| Portal (corporate profile) | Its payload is a signed JWT, read from a cookie or browser storage, checked against the key the connection holds | The payload is read from a **header** — *Asserted*: trusted only as far as your proxy strips inbound copies of it; or it is accepted unsigned — *Unverified* |
+| Development sign-in | Never | Always *Unverified*: keep it off wherever real people sign in |
+
+**An Enterprise gateway that trusts unsigned replies**, step by step:
+
+1. **Ask the gateway team for a signed reply.** The translate endpoint returns its answer as a
+   JWT signed with their key, and they give you one of: a JWKS URL (best — keys rotate on
+   their side without you), a PEM public key, or a shared secret for HS256. What to send
+   them is in the [gateway integration contract](/docs/sso-backchannel-contract#when-the-cookie-never-reaches-us-the-browser-side-exchange).
+2. **Keep the same subject.** The signed token must carry the same subject (the claim mapped
+   to the person's ID) as today's replies. Existing people are matched by it; a token
+   naming them differently reads as a new identity, and under *Strict* their account, which
+   already has the old one, is not linked.
+3. **Let the server reach the key set.** An internal JWKS host needs an entry under
+   **Settings → Internal gateways SSO may call** (host **and** port), and, if it is signed
+   by your corporate CA, the [CA bundle](/docs/deployment#corporate-tls-trust-for-sso).
+4. **Switch the connection over.** Under its settings, set **Verify the token with** to the
+   key you were given, and save. Choosing a key replaces *Nothing — trust it unverified*.
+5. **Rehearse** from the card before publishing it to everyone: the verdict states which
+   reply shape arrived (a signed token or bare JSON), what judged it, and the claims — check
+   the subject is the one people already have. The pill turns **Verified**.
+
+If the corporate cookie is set on a parent domain this application shares, there is a second
+way: set **Who redeems the corporate session** to *Our server*, give it the **Gateway URL**
+and an allowlist entry, and the server asks the gateway itself over verified TLS — no
+signature needed.
+
+**A gateway or IdP behind your corporate CA:** mount the
+[CA bundle](/docs/deployment#corporate-tls-trust-for-sso) (`SSO_OUTBOUND_TLS_CA_CERTS`)
+rather than switching TLS verification off; the bundle keeps the connection Verified.
+
+**A portal:** have it sign its payload as a JWT and give the connection the key. A header
+from your proxy can only ever be *Asserted*.
+
+**Once a connection is Verified:**
+
+- administrator and break-glass accounts link automatically, by the linking policy, like
+  everyone else, and **Link administrator accounts too** no longer applies (it disappears);
+- access mapping rules can grant platform administrator roles through it;
+- the card's warning goes away;
+- people already linked notice nothing: their sign-in, sessions and accounts are unchanged.
 
 For a gateway connection's browser exchange, the rehearsal verdict states
 which reply shape arrived (a signed token or bare JSON) and what judged it —
@@ -296,9 +344,38 @@ itself; **Close now** ends it early once the IdP is back. Use it too for an
 outage the checks cannot see: a portal connection, a gateway whose exchange
 runs in the browser, or an IdP that answers the platform but not your users.
 
+**An outage longer than the window.** While it is open, the same card offers
+**Extend**: keep it open for 1, 4, 8 or 24 hours from now (only the choices that
+end later than it does now are offered), with a reason. It is never open more
+than a day ahead, so somebody decides again at least once a day, and there is
+no limit to how many times it is extended. Extend it **before** it lapses: when
+the window closes, everybody who signed in through it is sent back to single
+sign-on at their next renewal — to the sign-in page while the IdP is still down.
+Each person's own emergency session also lasts a day at most, so during a long
+outage people type their password again once a day. Super Admins need no
+window: their way in stays open for as long as the outage is confirmed.
+
 **When it is over.** Password sessions opened during the outage end at their
 next renewal and go back through single sign-on — usually a brief redirect
 that lands people on the page they were on — and never last more than a day.
+People who stayed signed in through the outage meet their daily
+re-authentication at the next renewal; one who has been signed in for more
+than two days in all is sent to sign in again even if the IdP is still down,
+when the emergency window is their way back.
+
+**What the activity log records.** Administration → Activity, and the SSO
+page's **Activity** tab:
+
+| Event | Says |
+|---|---|
+| The outage | *SSO connection 'entra' unreachable…* when it is confirmed, and *…reachable again* when it is over |
+| The window | Opened (for how long, until when, the reason given), extended (to when, from when, the reason), closed early by an admin, or closed by itself at its deadline — each with who did it |
+| Each sign-in through a door | *Signed in with a password through emergency access*, *…while single sign-on was down (Super Admin)*, or *…with a break-glass account's password*; the SSO tab shows the door as the row's reason |
+| A refused password | *Failed password sign-in…: local_login_disabled* — the person was told only "invalid email or password" |
+| Sessions kept through it | *Kept … signed in past the daily re-authentication — entra is down*, once per session |
+| Sessions it ended | *Password session opened while SSO was down ended…*, saying whether after a day or because its way in closed |
+| Break-glass accounts | Made or no longer a break-glass account, by whom — or from the server's command line |
+| Settings changes | Which switch moved (*Passwords turned off — break-glass accounts only*); for a connection, which settings changed by name, and before → after whether it is on, its linking policy, its rating and **Link administrator accounts too** |
 
 **When nobody can sign in at all** — no break-glass account ready and every
 admin SSO-only — run this on the host, then sign in at `/login?password=1`:

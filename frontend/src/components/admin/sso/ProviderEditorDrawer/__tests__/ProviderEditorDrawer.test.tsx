@@ -337,6 +337,19 @@ describe('linking administrators through an unverified connection', () => {
         expect(updateProvider.mock.calls[0][1].settings.link_admin_accounts).toBeNull()
     })
 
+    it('is offered on an Asserted connection too — anything below Verified', () => {
+        // A proxy's header is trusted but not checked, so it gets the same
+        // protection, and the same way out of it.
+        renderDrawer({
+            kind: 'custom_profile',
+            settings: { source: 'header', header_name: 'X-Remote-User' },
+            assurance: 'asserted',
+            assuranceReason: 'Trusts the header your proxy sets.',
+        } as Partial<IdpProvider>)
+        const toggle = screen.getByRole('checkbox', { name: /link administrator accounts too/i })
+        expect(toggle.closest('label')).toHaveTextContent(/this connection is asserted, not verified/i)
+    })
+
     it('is not offered on a verified connection, which links by policy anyway', () => {
         renderDrawer()
         expect(screen.queryByRole('checkbox', { name: /link administrator accounts too/i }))

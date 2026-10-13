@@ -109,9 +109,10 @@ export function IdentitySection({
                 </div>
             </fieldset>
 
-            {/* Only meaningful while the connection is Unverified: a verified
-                one links administrators by the policy above like anyone. */}
-            {provider.assurance === 'unverified' && (
+            {/* Only meaningful below Verified — Unverified or Asserted: a
+                verified one links administrators by the policy above like
+                anyone. */}
+            {(provider.assurance === 'unverified' || provider.assurance === 'asserted') && (
                 <DangerToggle
                     title="Link administrator accounts too"
                     checked={ed.draft.settings.link_admin_accounts === true}
@@ -121,13 +122,15 @@ export function IdentitySection({
                         link_admin_accounts: v ? true : null,
                     })}
                 >
-                    This connection is <strong>Unverified</strong>, so it never
-                    links itself to an administrator&rsquo;s or a break-glass
-                    account — those people link it from their own account
-                    page, and a forged reply cannot claim one. Turn this on to
-                    link <strong>every</strong> existing account by the policy
-                    above, administrators included: anyone who can reach the
-                    sign-in page could then sign in as one of them.
+                    This connection is{' '}
+                    <strong>{provider.assurance === 'asserted' ? 'Asserted' : 'Unverified'}</strong>,
+                    not Verified, so it never links itself to an
+                    administrator&rsquo;s or a break-glass account — those
+                    people link it from their own account page, and a forged
+                    identity cannot claim one. Turn this on to link{' '}
+                    <strong>every</strong> existing account by the policy
+                    above, administrators included: anyone who can forge what
+                    this connection trusts could then sign in as one of them.
                 </DangerToggle>
             )}
         </div>

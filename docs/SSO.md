@@ -400,16 +400,20 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `user.sso_session_expired` | SSO session ended at /refresh: `reason` is `reauth_ceiling` (24h), `idle` or `absolute` |
 | `user.identity.linked` / `user.identity.unlinked` | self-service link/unlink |
 | `user.identity.admin_linked` / `user.identity.admin_unlinked` | admin link/unlink |
-| `idp.provider.{created,updated,deleted}` | IdP provider CRUD |
+| `idp.provider.{created,updated,deleted}` | IdP provider CRUD. `updated` names the settings that changed (`changed_settings` — names only, never values) and carries, before → after, `enabled`, `linking_policy`, `assurance` and `link_admin_accounts` when they changed |
 | `rbac.sso_mapping.{created,deleted}` | Group→target mapping CRUD |
-| `auth.config.updated` | platform posture switch changed |
+| `auth.config.updated` | platform posture saved: the switches as they now are, and `changes` — each switch that moved, before → after |
 | `user.sso_login_failed` | any SSO sign-in failure, keyed by the `ref` the user was shown (`idp_unreachable` when the sign-in could not even start) |
 | `idp.outage.detected` / `idp.outage.resolved` | a connection confirmed down / back up (§1.17) |
-| `auth.config.password_fallback_opened` / `_closed` | the emergency window opened (with deadline and reason) / closed |
+| `auth.config.password_fallback_opened` / `_extended` | the emergency window opened, or an open one extended (`until`, `hours`, `previous_until` when extended; the reason given as `stated_reason`, the activity log's *why*) |
+| `auth.config.password_fallback_closed` / `_expired` | closed early by an admin (`was_until`), or closed by itself at its deadline — recorded once, by the prober's pass |
 | `user.password_fallback_session_ended` | a password session opened during an outage ended at renewal (`fallback_closed` or `expired`) |
+| `user.sso_reauth_deferred` | an SSO session renewed past its daily re-authentication because its IdP is confirmed down — once per session, on the first renewal past the ceiling |
+| `user.system_account_changed` | an account made, or no longer, a break-glass account (`via: "cli"` from `reset_admin_password --break-glass`) |
 
 `user.logged_in` for a password sign-in made while passwords are off carries
-`via`: `break_glass`, `admin_fallback` or `emergency_window`.
+`via`: `break_glass`, `admin_fallback` or `emergency_window`. The activity log
+says which in words, and the SSO activity tab shows it as the row's reason.
 
 ### 1.13 Assurance level
 
@@ -448,10 +452,13 @@ unsigned connection keeps working for the people its operator trusted it
 for; administrators link it from their own page. An operator who accepts
 the risk for administrators too turns on **Link administrator accounts
 too** on the connection (`link_admin_accounts`, read strictly — only an
-explicit `true` — and never published to the browser): every existing
-account then links by the linking policy, administrators included. The admin card states
+explicit `true` — and never published to the browser; offered in the editor
+for any connection below `verified`, `unverified` or `asserted`): every
+existing account then links by the linking policy, administrators included. The admin card states
 each weak row's cause and fix (`assurance_explained`), and an admin who has
-read the warning can fold it on their own screen.
+read the warning can fold it on their own screen. Raising a connection to
+`verified`, step by step, and what changes when it is:
+[Running Single Sign-On → Getting a connection to Verified](/guide/sso-operations#getting-a-connection-to-verified).
 
 ### 1.14 The sign-in page: SSO first, routed by email
 
@@ -599,7 +606,12 @@ the page renders and the server enforces):
 hours: `POST /admin/sso/config/password-fallback {"hours", "reason"}`,
 `DELETE` to close it early. It closes itself, does not bump the config
 `version`, is refused while passwords are already on, and other servers
-pick it up within 30 seconds.
+pick it up within 30 seconds. The same `POST` while it is open **extends**
+it to `hours` from now — so an outage longer than a day is covered without
+it lapsing, and a person decides again at least daily — and is refused
+(409 `would_not_extend`) when that would end it sooner: `DELETE` does that.
+Who opened it stays on the record; the extension is audited with the
+deadline it replaced.
 
 **Sessions.** Signed-in SSO users keep working through an outage: past the
 24-hour re-authentication, a session whose own connection is confirmed down
@@ -1100,9 +1112,10 @@ What an administrator does:
    which connection is down and since when.
 3. If people need to work, **Emergency password access** → choose how long
    (1–24 hours) → **Open for everyone**. Anyone with a password can now use
-   it; the sign-in page says until when. Close it early with **Close
-   now** once the IdP is back — sessions opened through it then go back
-   through single sign-on at their next renewal.
+   it; the sign-in page says until when. Still down when it is due to
+   close? **Extend** it, before it lapses, for up to 24 hours from now.
+   Close it early with **Close now** once the IdP is back — sessions opened
+   through it then go back through single sign-on at their next renewal.
 
 If the outage cannot be detected — a portal connection, a gateway whose
 exchange runs in the browser, or an IdP that answers the server but not

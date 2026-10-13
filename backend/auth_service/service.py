@@ -995,6 +995,25 @@ class LocalIdentityService:
                         "SSO re-authentication deferred: %s is down "
                         "(user=%s, age=%ds)", provider_slug, orm.id, sso_age,
                     )
+                    # Recorded once per session: on the first renewal past
+                    # the ceiling — the token it consumed was minted before
+                    # it — not on each of the renewals it rides through.
+                    consumed_ms = (
+                        outcome.record.mint_ms if outcome.record is not None
+                        else claims.mint_ms
+                    )
+                    if (
+                        not is_replay and self._outbox_emit is not None
+                        and int(consumed_ms / 1000) - auth_time
+                        <= SSO_SESSION_MAX_AGE_SECONDS
+                    ):
+                        await self._outbox_emit(
+                            session, "user.sso_reauth_deferred", {
+                                "user_id": orm.id,
+                                "provider_slug": provider_slug,
+                                "auth_time": auth_time,
+                            },
+                        )
                 else:
                     logger.info(
                         "SSO session expired (user=%s, slug=%s, age=%ds)",

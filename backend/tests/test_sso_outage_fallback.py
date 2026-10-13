@@ -16,6 +16,7 @@ Pins the rules the automatic fallback rests on:
 """
 from __future__ import annotations
 
+import json
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -527,11 +528,14 @@ async def _mint(store, **kwargs):
     return token
 
 
-def _refresh_svc(store, snapshot, *, linked=True, super_admin=False):
+def _refresh_svc(store, snapshot, *, linked=True, super_admin=False, events=None):
     users = _Users(is_super_admin=super_admin)
 
     async def is_super_admin(session, user_id):
         return users.is_super_admin
+
+    async def outbox(session, event_type, payload):
+        events.append((event_type, payload))
 
     return LocalIdentityService(
         session_factory=_NoSession,
@@ -540,6 +544,7 @@ def _refresh_svc(store, snapshot, *, linked=True, super_admin=False):
         refresh_store_factory=lambda s: store,
         super_admin_checker=is_super_admin,
         auth_config_provider=StaticAuthConfigProvider(snapshot),
+        outbox_emit=outbox if events is not None else None,
     )
 
 
@@ -642,6 +647,29 @@ async def test_an_sso_session_rides_through_its_ceiling_while_its_idp_is_down():
 
     user, _tokens = await svc.refresh(rt)
     assert user.id == "usr_1"
+
+
+@pytest.mark.asyncio
+async def test_a_ride_through_is_recorded_once_per_session():
+    """The activity log gets one line per session kept past its daily
+    re-authentication — on the first renewal past the ceiling — not one
+    per renewal it rides through."""
+    store = InMemoryRefreshStore()
+    stale = int(time.time()) - (SSO_SESSION_MAX_AGE_SECONDS + 60)
+    # The token being renewed was minted just before the ceiling.
+    rt = await _mint(
+        store, family_id="fam1", auth_time=stale,
+        mint_ms=(stale + SSO_SESSION_MAX_AGE_SECONDS - 30) * 1000,
+    )
+    events: list[tuple[str, dict]] = []
+    svc = _refresh_svc(store, _snapshot(sso_outage_slugs=("entra",)), events=events)
+
+    _user, tokens = await svc.refresh(rt)
+    _user, _tokens = await svc.refresh(tokens.refresh_token)
+
+    assert [p for t, p in events if t == "user.sso_reauth_deferred"] == [
+        {"user_id": "usr_1", "provider_slug": "entra", "auth_time": stale},
+    ]
 
 
 @pytest.mark.asyncio
@@ -828,6 +856,157 @@ async def test_opening_and_closing_the_window(test_client, db_session):
     assert closed.status_code == 200
     assert closed.json()["passwordFallbackUntil"] is None
     assert len(await _outbox(db_session, "auth.config.password_fallback_closed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_open_window_is_extended_not_replaced(test_client, db_session):
+    """An outage longer than the window: extending it keeps everyone signed
+    in through it, and the log says who extended it, from when to when."""
+    await _enforce(test_client, db_session)
+    first = (await test_client.post(
+        WINDOW, json={"hours": 1, "reason": "Okta outage"},
+    )).json()
+
+    resp = await test_client.post(WINDOW, json={"hours": 8, "reason": "Still down"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    until = datetime.fromisoformat(body["passwordFallbackUntil"])
+    assert timedelta(hours=7, minutes=59) < until - datetime.now(timezone.utc) <= timedelta(hours=8)
+    # Who opened it stays on the card; the latest reason shows.
+    assert body["passwordFallbackBy"] == first["passwordFallbackBy"]
+    assert body["passwordFallbackReason"] == "Still down"
+
+    [opened] = await _outbox(db_session, "auth.config.password_fallback_opened")
+    [extended] = await _outbox(db_session, "auth.config.password_fallback_extended")
+    # ``stated_reason`` is the key the activity log's "why" column reads.
+    assert json.loads(opened.payload)["stated_reason"] == "Okta outage"
+    p = json.loads(extended.payload)
+    assert p["previous_until"] == first["passwordFallbackUntil"]
+    assert p["until"] == body["passwordFallbackUntil"]
+    assert (p["hours"], p["stated_reason"]) == (8, "Still down")
+
+
+@pytest.mark.asyncio
+async def test_extending_never_shortens_a_window(test_client, db_session):
+    await _enforce(test_client, db_session)
+    first = (await test_client.post(WINDOW, json={"hours": 8})).json()
+
+    resp = await test_client.post(WINDOW, json={"hours": 4})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "would_not_extend"
+    assert (await test_client.get(CONFIG)).json()["passwordFallbackUntil"] == (
+        first["passwordFallbackUntil"]
+    )
+    assert await _outbox(db_session, "auth.config.password_fallback_extended") == []
+
+
+@pytest.mark.asyncio
+async def test_closing_is_recorded_only_when_a_window_was_open(test_client, db_session):
+    await _enforce(test_client, db_session)
+    assert (await test_client.delete(WINDOW)).status_code == 200
+    assert await _outbox(db_session, "auth.config.password_fallback_closed") == []
+
+    opened = (await test_client.post(WINDOW, json={"hours": 2})).json()
+    await test_client.delete(WINDOW)
+    [closed] = await _outbox(db_session, "auth.config.password_fallback_closed")
+    assert json.loads(closed.payload)["was_until"] == opened["passwordFallbackUntil"]
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_lapses_is_recorded_once(db_session, monkeypatch):
+    """It closes at its deadline whatever runs; the prober's pass, holding
+    the lock, records that it did — once."""
+    from backend.app.db.repositories import app_auth_config_repo
+
+    async def fake_probe(kind, settings, allow_hosts=frozenset()):
+        return True, "up"
+
+    monkeypatch.setattr(reach, "probe", fake_probe)
+    lapsed = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    await app_auth_config_repo.set_password_fallback(
+        db_session, until=lapsed, by="ops@corp.com", reason="Okta outage",
+    )
+
+    await reach.probe_once(_factory(db_session))
+    await reach.probe_once(_factory(db_session))
+
+    [expired] = await _outbox(db_session, "auth.config.password_fallback_expired")
+    assert json.loads(expired.payload) == {"until": lapsed, "actor": "scheduler"}
+    snap = await app_auth_config_repo.get_snapshot(db_session)
+    assert (snap.password_fallback_until, snap.password_fallback_reason) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_an_open_window_is_left_alone_by_the_prober(db_session, monkeypatch):
+    from backend.app.db.repositories import app_auth_config_repo
+
+    async def fake_probe(kind, settings, allow_hosts=frozenset()):
+        return True, "up"
+
+    monkeypatch.setattr(reach, "probe", fake_probe)
+    until = _window(2)
+    await app_auth_config_repo.set_password_fallback(db_session, until=until)
+
+    await reach.probe_once(_factory(db_session))
+
+    assert await _outbox(db_session, "auth.config.password_fallback_expired") == []
+    snap = await app_auth_config_repo.get_snapshot(db_session)
+    assert snap.password_fallback_until == until
+
+
+@pytest.mark.asyncio
+async def test_a_settings_save_records_what_it_changed(test_client, db_session):
+    """The values after a save cannot say which switch moved; the change,
+    before → after, can."""
+    await _enforce(test_client, db_session)
+    [event] = await _outbox(db_session, "auth.config.updated")
+    payload = json.loads(event.payload)
+    assert payload["changes"] == {"allow_local_login": [True, False]}
+    assert payload["allow_local_login"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_connection_edit_records_what_it_changed(test_client, db_session):
+    """Which settings changed — by name, never by value — and, before →
+    after, the ones an auditor asks about."""
+    row = m.IdpProviderORM(
+        id="idp_portal", slug="portal", display_name="Portal", kind="backchannel",
+        enabled=True, lifecycle="live",
+        settings=idp_provider_repo.encrypt_settings({
+            "exchange_mode": "browser",
+            "browser_exchange_url": "https://portal.corp.example/translate",
+            "jwks_url": "https://portal.corp.example/jwks",
+            "token_source_key": "", "gateway_url": "",
+        }),
+    )
+    db_session.add(row)
+    await db_session.commit()
+
+    resp = await test_client.patch(
+        f"/api/v1/admin/idp-providers/{row.id}",
+        json={"settings": {
+            "jwks_url": "", "trust_unsigned": True, "link_admin_accounts": True,
+        }},
+    )
+    assert resp.status_code == 200, resp.text
+
+    [event] = await _outbox(db_session, "idp.provider.updated")
+    payload = json.loads(event.payload)
+    assert payload["changed_settings"] == [
+        "jwks_url", "link_admin_accounts", "trust_unsigned",
+    ]
+    assert payload["assurance"] == ["verified", "unverified"]
+    assert payload["link_admin_accounts"] == [False, True]
+    assert "enabled" not in payload and "linking_policy" not in payload
+
+
+def test_a_door_sign_in_shows_its_door_in_the_sso_log():
+    from backend.app.api.v1.endpoints.sso_activity import _reason
+
+    assert _reason("user.logged_in", {"provider": "local", "via": "emergency_window"}) == (
+        "emergency_window", None,
+    )
+    assert _reason("user.logged_in", {"provider": "local"}) == (None, None)
 
 
 @pytest.mark.asyncio

@@ -579,6 +579,35 @@ async def create_provider(
     return _to_dto(row)
 
 
+def _what_changed(
+    row, before_settings: dict, before_enabled: bool, before_policy: str,
+) -> dict:
+    """What an edit changed, for the activity log: the setting NAMES that
+    changed — never their values, some are secrets — and, before → after,
+    the changes an auditor asks about: on/off, the linking policy, how far
+    the connection can be trusted, and whether it links administrators."""
+    after_settings = idp_provider_repo.decrypt_settings(row.settings)
+    changed: dict = {
+        "changed_settings": sorted(
+            k for k in set(before_settings) | set(after_settings)
+            if before_settings.get(k) != after_settings.get(k)
+        ),
+    }
+    if bool(row.enabled) != before_enabled:
+        changed["enabled"] = [before_enabled, bool(row.enabled)]
+    if row.linking_policy != before_policy:
+        changed["linking_policy"] = [before_policy, row.linking_policy]
+    was = assurance_explained(row.kind, before_settings)[0]
+    now = assurance_explained(row.kind, after_settings)[0]
+    if was != now:
+        changed["assurance"] = [was, now]
+    links = [before_settings.get("link_admin_accounts") is True,
+             after_settings.get("link_admin_accounts") is True]
+    if links[0] != links[1]:
+        changed["link_admin_accounts"] = links
+    return changed
+
+
 @router.patch(
     "/{provider_id}",
     response_model=ProviderDTO,
@@ -590,19 +619,20 @@ async def update_provider(
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
+    existing = await idp_provider_repo.get_provider(session, provider_id)
+    if existing is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+    # Copied now: the update below may change this very row in place.
+    before_settings = idp_provider_repo.decrypt_settings(existing.settings)
+    before_enabled = bool(existing.enabled)
+    before_policy = existing.linking_policy
     if body.settings is not None:
         # The repo MERGES settings into what is stored, so the whole
         # merged result is what has to be judged — an edit that empties
         # one required field looks harmless as a fragment.
-        existing = await idp_provider_repo.get_provider(session, provider_id)
-        if existing is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
         _assert_settings_usable(
             kind=existing.kind,
-            settings={
-                **idp_provider_repo.decrypt_settings(existing.settings),
-                **body.settings,
-            },
+            settings={**before_settings, **body.settings},
             claim_mapping=(
                 body.claim_mapping
                 if body.claim_mapping is not None
@@ -632,7 +662,10 @@ async def update_provider(
     await user_repo.create_outbox_event(
         session, event_type="idp.provider.updated",
         payload={"provider_id": row.id, "slug": row.slug, "actor_id": admin.id,
-                 "fields": [k for k, v in body.model_dump().items() if v is not None]},
+                 "fields": [k for k, v in body.model_dump().items() if v is not None],
+                 **_what_changed(
+                     row, before_settings, before_enabled, before_policy,
+                 )},
     )
     try:
         await get_registry().invalidate(row.id)

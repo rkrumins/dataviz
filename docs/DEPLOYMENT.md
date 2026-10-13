@@ -461,59 +461,139 @@ Then `./deploy.sh up` starts again from an empty state.
 
 Enterprise sign-in endpoints — a corporate gateway, an internal identity provider, a private
 photo host — usually present certificates signed by the company's own certificate authority.
-By default outbound single sign-on calls trust the public trust store only, so each of those
-calls fails with *certificate verify failed* and a rehearsal of the connection reports
+By default outbound single sign-on calls trust the public roots only, so each of those calls
+fails with *certificate verify failed* and a rehearsal of the connection reports
 `tls_verify_failed`.
 
 Point `SSO_OUTBOUND_TLS_CA_CERTS` at a PEM bundle holding your corporate CA chain. Its CAs
-are trusted **in addition to** the public trust store, so public identity providers (Entra,
-Okta, Google) keep working beside the internal endpoints. Every outbound single sign-on call
-— gateway calls, OIDC discovery, token and key endpoints, SAML metadata imports, avatar
-fetches, the outage prober — uses it from the next request; a bundle mounted after startup
-starts working on its own. The corporate chain alone is enough: there is no need to append
-the public roots to it.
+are trusted **in addition to** the public roots, so public identity providers (Entra, Okta,
+Google) keep working beside the internal endpoints. Every outbound single sign-on call —
+gateway calls, OIDC discovery, token and key endpoints, SAML metadata imports, avatar
+fetches, the outage prober — uses it. The corporate chain alone is enough: there is no need
+to append the public roots to it.
 
-**Docker Compose** — add the variable and a read-only mount to `viz-service` in
-`docker-compose.yml`:
+This is also the way to keep a gateway connection **Verified**: switching a connection's
+TLS verification off instead costs it that rating (see
+[Running Single Sign-On → Getting a connection to Verified](/guide/sso-operations#getting-a-connection-to-verified)).
+
+### 1. Build the bundle
+
+One PEM file holding the certificates of the CAs that sign your internal endpoints: the
+corporate root, and any intermediate (issuing) CAs. Not the servers' own certificates.
+
+- **From your PKI team** — ask for "the CA chain, PEM-encoded". Several files can simply be
+  concatenated into one: `cat corp-root.pem corp-issuing.pem > corp-ca.pem`.
+- **From an endpoint** — list the chain a gateway serves, and copy every certificate after
+  the first (the first is the server's own) into `corp-ca.pem`:
+
+  ```bash
+  openssl s_client -connect gateway.corp.example:443 -servername gateway.corp.example -showcerts </dev/null
+  ```
+
+  If the server does not send its root, add the root from your PKI team.
+
+Check the bundle before deploying it; this must succeed without `-k`:
+
+```bash
+curl --cacert corp-ca.pem -sS -o /dev/null -w '%{http_code}\n' https://gateway.corp.example/
+```
+
+### 2. Set it on both services that make SSO calls
+
+| Service | Why it needs the bundle |
+|---|---|
+| `viz-service` | Sign-in itself: gateway calls, OIDC and SAML, avatars |
+| `aggregation-controlplane` | The [outage prober](/guide/sso-operations#when-your-identity-provider-is-down), which checks every connection once a minute |
+
+Set it on both. With the bundle on `viz-service` alone, sign-in works but the prober can
+never reach a connection behind your corporate CA, so it never sees one healthy and never
+confirms its outage: **Administration → SSO → Settings → Single sign-on status** shows its
+last error instead.
+
+**Docker Compose** — in `docker-compose.yml`, on `viz-service` **and**
+`aggregation-controlplane`:
 
 ```yaml
 services:
-  viz-service:
+  viz-service:            # and the same under aggregation-controlplane
     environment:
       SSO_OUTBOUND_TLS_CA_CERTS: /etc/ssl/corp/ca-bundle.pem
     volumes:
       - ./secrets/corp-ca.pem:/etc/ssl/corp/ca-bundle.pem:ro
 ```
 
-**Kubernetes** — ship the bundle as a Secret and mount it into `viz-service`:
+**Kubernetes (Kustomize or plain manifests)** — ship the bundle as a Secret:
 
 ```bash
-kubectl create secret generic corp-ca --from-file=ca-bundle.pem=corp-ca.pem
+kubectl -n synodic create secret generic corp-ca --from-file=ca-bundle.pem=corp-ca.pem
 ```
+
+Then patch both Deployments, `viz-service` and `aggregation-controlplane`, from your
+overlay — one patch file per Deployment, listed under `patches:` in its `kustomization.yaml`:
 
 ```yaml
-env:
-  - name: SSO_OUTBOUND_TLS_CA_CERTS
-    value: /etc/ssl/corp/ca-bundle.pem
-volumeMounts:
-  - name: corp-ca
-    mountPath: /etc/ssl/corp
-    readOnly: true
-volumes:
-  - name: corp-ca
-    secret:
-      secretName: corp-ca
+# overlays/<env>/patches/sso-ca-viz.yaml — the same again for aggregation-controlplane,
+# with that name in metadata.name and in the container's name
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: viz-service
+  namespace: synodic
+spec:
+  template:
+    spec:
+      containers:
+        - name: viz-service
+          env:
+            - name: SSO_OUTBOUND_TLS_CA_CERTS
+              value: /etc/ssl/corp/ca-bundle.pem
+          volumeMounts:
+            - name: corp-ca
+              mountPath: /etc/ssl/corp
+              readOnly: true
+      volumes:
+        - name: corp-ca
+          secret:
+            secretName: corp-ca
 ```
 
-**Verify:** rehearse the enterprise connection from **Administration → SSO**; the gateway
-and avatar lines stop reporting a trust failure. A path that can't be loaded is logged at
-`ERROR`, naming the variable and the path, and calls fall back to the public trust store —
-never to "no verification".
+**Helm** — the chart has no setting for extra files yet. Apply the same two patches through
+a Helm post-renderer (for example `kustomize`), so they are part of every `helm upgrade`
+rather than lost to the next one.
+
+### 3. Check it
+
+- **Rehearse** the connection from **Administration → SSO**: the gateway and avatar lines stop
+  reporting a trust failure.
+- **Single sign-on status**, on the Settings tab, shows each connection checked within the last
+  few minutes without an error.
+- **The logs.** A path that cannot be loaded is logged at `ERROR` on every call until it can,
+  naming the variable and the path:
+
+  ```
+  SSO_OUTBOUND_TLS_CA_CERTS names '/etc/ssl/corp/ca-bundle.pem', which cannot be loaded (…)
+  ```
+
+  Calls then trust the public roots only — never "no verification" — so endpoints behind your
+  corporate CA keep failing until it is fixed.
+
+### Rotating or renewing the bundle
+
+A bundle is read once per process and kept. A new file at the same path is not re-read, so
+after replacing it — a renewed corporate root, an added issuing CA — restart both services
+(`kubectl -n synodic rollout restart deployment/viz-service deployment/aggregation-controlplane`,
+or `docker compose restart viz-service aggregation-controlplane`). A bundle that could not
+be loaded at all is retried on every call, so mounting a missing one needs no restart.
+Add the new CA before the old one is retired — the file can hold both — and nothing fails
+in between.
+
+### When the bundle is not an option
 
 With `ENV=production`, plain `http://` to these endpoints is refused, so the CA bundle is
-the supported way to reach internal HTTPS endpoints. The per-connection
+the supported way to reach internal HTTPS endpoints. A gateway connection's
 **Skip TLS verification for this connection** setting is the last resort: it accepts any
-certificate on that one connection and costs it its verified rating.
+certificate on that one connection, anyone on the network path can then answer as the
+gateway, and the connection drops to **Unverified**.
 
 ## Subcommand reference
 

@@ -190,6 +190,28 @@ const REASONS: Record<string, Reason> = {
             + 'emergency window may use one. Point them at their single '
             + 'sign-on button.',
     },
+    // ── which door a password came through while passwords are off ───
+    break_glass: {
+        what: 'A break-glass account signed in with its password, as it '
+            + 'always may.',
+        next: 'Expected during an outage or for recovery. Anywhere else, '
+            + 'ask who and why: these accounts are the way in that never '
+            + 'closes.',
+    },
+    admin_fallback: {
+        what: 'A Super Admin signed in with a password because the identity '
+            + 'provider was confirmed down.',
+        next: 'Expected while the outage lasts. The session goes back '
+            + 'through single sign-on at its first renewal after the '
+            + 'outage ends, and within 24 hours regardless.',
+    },
+    emergency_window: {
+        what: 'Signed in with a password through the emergency access an '
+            + 'admin opened.',
+        next: 'Expected while it is open. The session goes back through '
+            + 'single sign-on at its first renewal after it closes, and '
+            + 'within 24 hours regardless.',
+    },
     // ── the redirect sign-in flows ───────────────────────────────────
     idp_error: {
         what: 'The identity provider answered with an error instead of '

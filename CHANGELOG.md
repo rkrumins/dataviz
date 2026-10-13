@@ -58,7 +58,10 @@ ends after five minutes of health. While one lasts:
 Browser reports never count, and when detection is not running nothing opens by itself.
 
 **Emergency password access.** Administration → SSO → Settings opens password sign-in to everyone
-for 1 to 24 hours, with a reason; it closes itself, and **Close now** ends it early. Sessions opened
+for 1 to 24 hours, with a reason; it closes itself, and **Close now** ends it early. While it is
+open, **Extend** keeps it open for up to 24 hours from now — as often as an outage needs, never
+more than a day ahead, so somebody decides again at least daily; extended before it lapses,
+nobody who signed in through it is sent back to a dead identity provider. Sessions opened
 through it, or by a Super Admin during an outage, end at their first renewal once single sign-on
 is back — usually a brief redirect that lands people where they were — and never last more than a
 day. The same page shows **Single sign-on status** (what detection last saw, and when it is not
@@ -68,10 +71,29 @@ running), **Break-glass accounts** and their readiness, and the admins a switch-
 --break-glass` sets a password, marks the account as break-glass, clears its failed sign-in count
 and signs its old sessions out — then sign in at `/login?password=1`.
 
-**Outages and fallback sign-ins in the activity log:** `idp.outage.detected` / `resolved`,
-`auth.config.password_fallback_opened` / `closed`, `user.password_fallback_session_ended`, and
-`via` (`break_glass`, `admin_fallback`, `emergency_window`) on each password sign-in made while
-passwords are off.
+**Outages and fallback sign-ins in the activity log, said as what happened.** An outage
+confirmed and over (`idp.outage.detected` / `resolved`); the emergency window opened, extended,
+closed early or closed by itself at its deadline (`auth.config.password_fallback_opened` /
+`_extended` / `_closed` / `_expired`), with who did it and the reason in the log's *why*; each
+password sign-in made while passwords are off, by its door — *Signed in with a password through
+emergency access*, *…while single sign-on was down (Super Admin)*, *…with a break-glass account's
+password* (`via` on `user.logged_in`; the SSO activity tab shows it as the row's reason); each
+session kept past its daily re-authentication because its IdP was down, once per session
+(`user.sso_reauth_deferred`); each emergency session that ended, and why; and accounts made or
+no longer break-glass, including from the command line.
+
+**Settings changes say what changed.** `auth.config.updated` records which switch moved, before →
+after (*Passwords turned off — break-glass accounts only*), not only the values after the save. A
+connection edit (`idp.provider.updated`) names the settings that changed — names only, never
+values — and, before → after, whether it was turned on or off, its linking policy, its rating, and
+**Link administrator accounts too**.
+
+**How to get a connection to Verified, and how to trust your corporate CA.** Running Single
+Sign-On → *Getting a connection to Verified* says what decides each connection's rating and walks
+an unsigned Enterprise gateway to Verified step by step — including keeping the same subject so
+people already linked are still recognised. Deployment → *Corporate TLS trust for SSO* covers
+building and checking the PEM bundle, setting it on both services that need it for Compose,
+Kubernetes and Helm, rotating it, and what the logs say when it cannot be loaded.
 
 ### Security
 
@@ -85,7 +107,8 @@ administrators link it from their own account page. Ordinary accounts still link
 are still created, and people already linked still sign in, so an unsigned gateway keeps
 working as before for everyone it was trusted for — the risk its card states (and can now fold
 away once read). An operator who accepts the risk for administrators as well turns on **Link
-administrator accounts too** on the connection, and every existing account links as before.
+administrator accounts too** on the connection — offered on any connection below Verified,
+Unverified or Asserted — and every existing account links as before.
 
 ### Fixed
 
@@ -129,7 +152,13 @@ administrator accounts too** on the connection, and every existing account links
   (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
   account page instead of being linked automatically. Everyone else links as before; a Verified
   connection links administrators automatically too. To keep the old behaviour on an unverified
-  connection, turn on **Link administrator accounts too** under its **Identity**.
+  connection, turn on **Link administrator accounts too** under its **Identity**. The same holds
+  for an Asserted connection (a portal reading a proxy's header).
+- **Set `SSO_OUTBOUND_TLS_CA_CERTS` on `aggregation-controlplane` as well as `viz-service`.**
+  The outage prober runs there; without the bundle it can never reach a connection behind your
+  corporate CA, so it never confirms that connection's outage. A bundle is read once per
+  process: after replacing it at the same path, restart both. Deployment → *Corporate TLS trust
+  for SSO* has Compose, Kubernetes and Helm steps.
 - The migration `20261014_1000_sso_fallback` adds three nullable columns to `app_auth_config`
   and the `idp_provider_reachability` table.
 

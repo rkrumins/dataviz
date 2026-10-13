@@ -183,10 +183,17 @@ That changes what we need from you:
   environment sign, give each environment its own connection row with
   the matching posture, or run Trust unsigned — the one posture that
   accepts both shapes — and accept the Unverified rating (the
-  connection can no longer grant platform-admin roles, and every login
-  through it is audited as `user.sso_unsigned_accepted`). The
-  operator's rehearsal states which case your reply was and what
+  connection can no longer grant platform-admin roles, never links
+  itself to an administrator's account unless the operator allows it,
+  and every login through it is audited as `user.sso_unsigned_accepted`).
+  The operator's rehearsal states which case your reply was and what
   judged it.
+- **Moving from unsigned to signed replies: keep the subject.** People
+  already signed in through the connection are matched by the subject
+  your replies carry (`sub`, or whichever claim the operator maps to the
+  person's ID). The signed token must name each person exactly as the
+  unsigned replies did; a different subject reads as a new identity, and
+  an account that already holds the old one is not linked to it.
 - **Expect each token to sign in at most once.** The application burns
   the `jti` (or the token's own hash) on first use, so keep tokens
   short-lived and mint one per call rather than caching an answer.

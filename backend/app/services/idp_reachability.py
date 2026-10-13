@@ -210,6 +210,14 @@ async def probe_once(session_factory) -> int:
         # transition below is decided, and audited, exactly once.
         if not await claim_this_pass(session, _LOCK):
             return 0
+        # The emergency window closes itself at its deadline; this pass,
+        # holding the lock, is what records that it did — once.
+        lapsed = await app_auth_config_repo.close_lapsed_password_fallback(session)
+        if lapsed:
+            await user_repo.create_outbox_event(
+                session, event_type="auth.config.password_fallback_expired",
+                payload={"until": lapsed, "actor": "scheduler"},
+            )
         if not (await app_auth_config_repo.get_snapshot(session)).sso_enabled:
             return 0  # rows go stale, so nothing reads as down
         connections = await _probed_connections(session)
@@ -346,5 +354,5 @@ async def run_idp_reachability_loop(
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval)
         except asyncio.TimeoutError:
-            pass
+            pass  # no shutdown asked for: time for the next pass
     logger.info("IdP reachability loop stopped")

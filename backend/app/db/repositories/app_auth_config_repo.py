@@ -174,3 +174,43 @@ async def set_password_fallback(
     row.password_fallback_reason = reason if until else None
     await session.flush()
     return row
+
+
+async def close_lapsed_password_fallback(
+    session: AsyncSession, now: Optional[datetime] = None,
+) -> Optional[str]:
+    """Clear an emergency window whose deadline has passed; return that
+    deadline, or None when there was nothing to clear.
+
+    The window is already closed at its deadline — sign-in compares the
+    clock — so this only lets the closing be recorded, once. The update
+    is conditional on the deadline read, so an extension saved in
+    between is never undone. An unreadable deadline already reads as
+    closed, and is cleared like a lapsed one."""
+    until = (await session.execute(
+        select(AppAuthConfigORM.password_fallback_until)
+        .where(AppAuthConfigORM.id == _SINGLETON_ID)
+    )).scalar_one_or_none()
+    if not until:
+        return None
+    try:
+        deadline = datetime.fromisoformat(until)
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        if deadline > (now or datetime.now(timezone.utc)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    result = await session.execute(
+        update(AppAuthConfigORM)
+        .where(
+            AppAuthConfigORM.id == _SINGLETON_ID,
+            AppAuthConfigORM.password_fallback_until == until,
+        )
+        .values(
+            password_fallback_until=None,
+            password_fallback_by=None,
+            password_fallback_reason=None,
+        )
+    )
+    return until if result.rowcount else None

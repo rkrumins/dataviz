@@ -28,6 +28,8 @@ The PATCH endpoint guards against operator self-lockout:
 
 ``/password-fallback`` opens (POST) or closes (DELETE) the emergency
 window: password sign-in for everyone for 1–24 hours while SSO is down.
+POST while it is open extends it — never past 24 hours from now, so a
+person re-decides at least daily however long the outage runs.
 """
 from __future__ import annotations
 
@@ -49,6 +51,7 @@ from backend.app.db.repositories import (
 from backend.app.db.repositories.app_auth_config_repo import (
     ConflictingVersion,
 )
+from backend.auth_service.app_auth_config import password_window_open
 from backend.auth_service.core.password import is_password_set
 from backend.auth_service.interface import User
 
@@ -353,6 +356,16 @@ async def update_config(
         }
         if acknowledged:
             payload["admins_without_sso_acknowledged"] = acknowledged
+        # What this save changed, before → after; the four values above are
+        # the state after, which alone cannot say which switch moved.
+        payload["changes"] = {
+            key: [bool(getattr(snap, key)), payload[key]]
+            for key in (
+                "sso_enabled", "allow_local_login",
+                "allow_jit_provisioning", "email_first_login",
+            )
+            if bool(getattr(snap, key)) != payload[key]
+        }
         await user_repo.create_outbox_event(
             session, event_type="auth.config.updated", payload=payload,
         )
@@ -380,6 +393,11 @@ async def open_password_fallback(
     """Open password sign-in to everyone for ``hours`` (1–24), while SSO
     is down. A deadline, so it closes itself; ``DELETE`` closes it early.
 
+    While it is open, the same call extends it to ``hours`` from now — so
+    an outage longer than a day is covered without the window lapsing,
+    and every extension is a person's decision on the record. It never
+    shortens one (``409 would_not_extend``): ``DELETE`` does that.
+
     Sessions opened through it end at their first renewal after it closes
     and are sent back through single sign-on. Other servers pick it up
     within the posture cache's 30 seconds. Refused while passwords are
@@ -394,18 +412,42 @@ async def open_password_fallback(
                 "message": "Passwords are already on for everyone.",
             },
         )
-    until = (datetime.now(timezone.utc) + timedelta(hours=body.hours)).isoformat()
+    now = datetime.now(timezone.utc)
+    deadline = now + timedelta(hours=body.hours)
+    until = deadline.isoformat()
     reason = (body.reason or "").strip() or None
-    await app_auth_config_repo.set_password_fallback(
-        session, until=until, by=admin.email, reason=reason,
-    )
+    payload: dict = {"actor_id": admin.id, "until": until, "hours": body.hours}
+    if password_window_open(snap, now):
+        current = datetime.fromisoformat(snap.password_fallback_until)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if deadline <= current:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "would_not_extend",
+                    "message": "Emergency access is already open for longer "
+                               "than that. Close it to end it sooner.",
+                },
+            )
+        # Who opened it stays on the card; who extended it is in the log.
+        await app_auth_config_repo.set_password_fallback(
+            session, until=until, by=snap.password_fallback_by,
+            reason=reason or snap.password_fallback_reason,
+        )
+        event = "auth.config.password_fallback_extended"
+        payload["previous_until"] = snap.password_fallback_until
+    else:
+        await app_auth_config_repo.set_password_fallback(
+            session, until=until, by=admin.email, reason=reason,
+        )
+        event = "auth.config.password_fallback_opened"
+    if reason:
+        # The activity log's "why" column reads this key.
+        payload["stated_reason"] = reason
     try:
         await user_repo.create_outbox_event(
-            session, event_type="auth.config.password_fallback_opened",
-            payload={
-                "actor_id": admin.id, "until": until,
-                "hours": body.hours, "reason": reason,
-            },
+            session, event_type=event, payload=payload,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -420,15 +462,20 @@ async def close_password_fallback(
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Close the emergency window now."""
+    """Close the emergency window now. Recorded only when one was open."""
+    snap = await app_auth_config_repo.get_snapshot(session)
     await app_auth_config_repo.set_password_fallback(session, until=None)
-    try:
-        await user_repo.create_outbox_event(
-            session, event_type="auth.config.password_fallback_closed",
-            payload={"actor_id": admin.id},
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    if password_window_open(snap):
+        try:
+            await user_repo.create_outbox_event(
+                session, event_type="auth.config.password_fallback_closed",
+                payload={
+                    "actor_id": admin.id,
+                    "was_until": snap.password_fallback_until,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
     await _invalidate_posture_cache(request)
     return await _config_dto(session)
 

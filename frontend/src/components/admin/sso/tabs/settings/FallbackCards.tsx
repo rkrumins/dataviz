@@ -207,9 +207,15 @@ function EmergencyAccessCard({
 
     const until = toUtcDate(cfg.passwordFallbackUntil)
     const open = fallbackOpen(cfg, now)
-    const by = cfg.passwordFallbackBy === 'cli'
-        ? 'the command line on the server'
-        : cfg.passwordFallbackBy
+    const by = cfg.passwordFallbackBy
+    // Extending sets the deadline to the chosen time from now, so only the
+    // choices that end later than it does now are offered.
+    const remainingMs = until ? until.getTime() - now : 0
+    const longer = DURATIONS.map(d => ({
+        ...d, disabled: Number(d.value) * 3_600_000 <= remainingMs,
+    }))
+    const extendBy = longer.find(d => d.value === hours && !d.disabled)?.value
+        ?? longer.find(d => !d.disabled)?.value
 
     async function openWindow() {
         setBusy(true)
@@ -226,6 +232,26 @@ function EmergencyAccessCard({
             )
         } catch (err) {
             notify('error', errText(err, 'Could not open emergency password access.'))
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function extendWindow() {
+        if (!extendBy) return
+        setBusy(true)
+        try {
+            const next = await ssoAdminService.openPasswordFallback(
+                Number(extendBy), reason.trim() || undefined,
+            )
+            onChange(next)
+            setReason('')
+            notify('success',
+                'Extended: anyone can sign in with a password until '
+                + `${clockAt(next.passwordFallbackUntil, Date.now())}.`,
+            )
+        } catch (err) {
+            notify('error', errText(err, 'Could not extend emergency password access.'))
         } finally {
             setBusy(false)
         }
@@ -290,6 +316,45 @@ function EmergencyAccessCard({
                     {busy && <Loader2 className="w-3 h-3 animate-spin" />}
                     Close now
                 </button>
+                {extendBy && (
+                    <div className="mt-4 pt-3 border-t border-glass-border space-y-2">
+                        <p className="text-xs font-semibold text-ink">
+                            Still down? Keep it open longer
+                        </p>
+                        <p className="text-[11px] text-ink-muted leading-relaxed">
+                            Counted from now and never past 24 hours, so
+                            someone decides again at least once a day. People
+                            already signed in carry on.
+                        </p>
+                        <Segmented
+                            options={longer}
+                            value={extendBy}
+                            onChange={setHours}
+                            label="Keep it open for"
+                            size="md"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                            <div className="flex-1 min-w-[14rem]">
+                                <TextField
+                                    mono={false}
+                                    value={reason}
+                                    onChange={e => setReason(e.target.value)}
+                                    placeholder="Reason (optional) — e.g. still down, INC-1234"
+                                    aria-label="Reason for extending"
+                                />
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => void extendWindow()}
+                                disabled={busy}
+                                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500 text-white text-sm font-semibold hover:bg-amber-600 disabled:opacity-50"
+                            >
+                                {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                                Extend
+                            </button>
+                        </div>
+                    </div>
+                )}
             </SsoCard>
         )
     }
@@ -298,7 +363,7 @@ function EmergencyAccessCard({
         <SsoCard
             icon={KeyRound}
             title="Emergency password access"
-            blurb="For when single sign-on is down and people need to work: anyone can sign in with their password until it closes by itself. Opening and closing are audited."
+            blurb="For when single sign-on is down and people need to work: anyone can sign in with their password until it closes by itself. Opening, extending and closing are audited."
         >
             <div className="space-y-3">
                 <Segmented

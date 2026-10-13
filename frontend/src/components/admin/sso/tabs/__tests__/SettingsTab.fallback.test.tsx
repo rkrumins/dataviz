@@ -260,6 +260,36 @@ describe('emergency password access', () => {
         }
     })
 
+    it('extends an open window, offering only the times that end later', async () => {
+        // An outage longer than the window: it is extended before it
+        // lapses, so nobody signed in through it is sent back to a dead IdP.
+        const t0 = Date.now()
+        svc.getAuthConfig.mockResolvedValue(cfg({
+            allowLocalLogin: false,
+            passwordFallbackUntil: new Date(t0 + 3 * 3600_000).toISOString(),
+            passwordFallbackBy: 'admin@corp.example',
+        }))
+        svc.openPasswordFallback.mockResolvedValue(cfg({
+            allowLocalLogin: false,
+            passwordFallbackUntil: new Date(t0 + 8 * 3600_000).toISOString(),
+            passwordFallbackBy: 'admin@corp.example',
+        }))
+        const user = userEvent.setup()
+        page()
+
+        // Three hours left: one more hour from now would shorten it.
+        expect(await screen.findByRole('radio', { name: '1 hour' })).toBeDisabled()
+        await user.click(screen.getByRole('radio', { name: '8 hours' }))
+        await user.type(screen.getByRole('textbox', { name: 'Reason for extending' }), 'Still down')
+        await user.click(screen.getByRole('button', { name: 'Extend' }))
+
+        expect(svc.openPasswordFallback).toHaveBeenCalledWith(8, 'Still down')
+        await waitFor(() => expect(raised().map(n => n.message).join(' '))
+            .toMatch(/^Extended: anyone can sign in with a password until /))
+        // Still open, and still says who opened it.
+        expect(screen.getByText('Opened by admin@corp.example')).toBeInTheDocument()
+    })
+
     it('has nothing to open while passwords are on for everyone', async () => {
         page()
         expect(await screen.findByText(
