@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
-from sqlalchemy import and_, case, select, delete, func, or_, update
+from sqlalchemy import and_, case, literal_column, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -1738,6 +1738,43 @@ async def count_views(session: AsyncSession, **filters) -> int:
     # when a view has many favourites (for favourited_only queries) or other cases.
     query = _apply_view_filters(select(func.count(func.distinct(ViewORM.id))), **filters)
     return (await session.execute(query)).scalar_one() or 0
+
+
+# A histogram bucket is its timestamp's own text cut short: to the hour
+# ("YYYY-MM-DDTHH") or to ten minutes ("YYYY-MM-DDTHH:M"). Every writer of these
+# columns stores datetime.now(timezone.utc).isoformat(), so the cut IS the UTC
+# bucket on any database, with no date arithmetic to port; the client folds the
+# buckets into its reader's own days.
+_HISTOGRAM_CUT = {"hour": 13, "10min": 15}
+
+
+def _histogram_statement(*, field: str, grain: str, after: str, before: str, **filters):
+    """The histogram's single statement — apart from its execution so its SQL can
+    be checked against the Postgres dialect."""
+    ts = ViewORM.created_at if field == "created" else _last_change_expr()
+    # Literal positions keep the SELECT, GROUP BY and ORDER BY text identical,
+    # which Postgres needs to accept the grouping, whatever the driver binds.
+    label = func.substr(ts, literal_column("1"), literal_column(str(_HISTOGRAM_CUT[grain])))
+    return _apply_view_filters(
+        select(label, func.count(func.distinct(ViewORM.id)))
+        .where(ts >= after, ts < before)
+        .group_by(label)
+        .order_by(label),
+        **filters,
+    )
+
+
+async def view_histogram(
+    session: AsyncSession, *, field: str, grain: str, after: str, before: str, **filters,
+) -> List[tuple]:
+    """``[(label, n)]``, ascending and sparse: how many views were created
+    (``field="created"``) or last changed (``"updated"``, the later of a settings
+    edit and a data publish) in each bucket of ``[after, before)``, among exactly
+    the views ``count_views(**filters)`` counts. Bounds are UTC ISO strings."""
+    rows = await session.execute(_histogram_statement(
+        field=field, grain=grain, after=after, before=before, **filters,
+    ))
+    return [(t, n) for t, n in rows.all()]
 
 
 async def list_views_filtered(

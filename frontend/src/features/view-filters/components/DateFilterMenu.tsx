@@ -15,14 +15,19 @@
  *
  * Everything is kept as a rule (see dateFilter.ts), so a bookmarked "Past 7 days"
  * still means the past seven days when it's opened next month.
+ *
+ * Given the other filters, the menu says how many views each preset would show
+ * and shades the calendar's days by activity, counted only while it is open.
  */
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { CalendarRange, Check, ChevronDown, ChevronRight, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { keyboardScopeProps } from '@/lib/keyboardScope'
 import { Segmented } from '@/components/ui/Segmented'
 import { RangeCalendar } from '@/components/analytics/RangeCalendar'
-import type { DateField } from '../model'
+import { EMPTY_FILTERS, type DateField, type ViewFilterState } from '../model'
+import type { ResolveContext } from '../params'
+import { useDateCounts } from '../hooks'
 import {
   DATE_PRESETS, MAX_ROLLING_DAYS, describeRule, formatDay, rangeRule, ruleDays, spanLength,
 } from '../dateFilter'
@@ -39,7 +44,7 @@ function patchOf(field: DateField, rule: string | null): { created?: string | nu
 }
 
 export function DateFilterMenu({
-  created, updated, onChange, today, recentActive, presetCount, className,
+  created, updated, onChange, today, recentActive, counting, className,
 }: {
   created: string | null
   updated: string | null
@@ -48,8 +53,8 @@ export function DateFilterMenu({
   today: string
   /** The Recent pill is on — it already limits creation to the past 7 days. */
   recentActive?: boolean
-  /** Views a preset would show for a field, when known. */
-  presetCount?: (field: DateField, rule: string) => number | undefined
+  /** All the filters, for the counts beside each choice. */
+  counting?: { state: ViewFilterState; ctx: ResolveContext }
   className?: string
 }) {
   const [open, setOpen] = useState(false)
@@ -64,6 +69,18 @@ export function DateFilterMenu({
 
   const rules: Record<DateField, string | null> = { created, updated }
   const current = rules[field]
+
+  const counts = useDateCounts(
+    counting?.state ?? EMPTY_FILTERS,
+    counting?.ctx ?? { currentUserId: null, today },
+    field,
+    open && Boolean(counting),
+  )
+  const presetCount = counting ? counts.presetCount : undefined
+  const dayCounts = counting ? counts.dayCounts : null
+  const heat = useMemo(() => (dayCounts
+    ? { counts: dayCounts, describe: (n: number) => `${n.toLocaleString()} view${n === 1 ? '' : 's'} ${field}` }
+    : undefined), [dayCounts, field])
 
   const openMenu = () => {
     // Open on the field that is set, so the menu shows what is filtering.
@@ -180,7 +197,7 @@ export function DateFilterMenu({
           <div className="grid grid-cols-2 gap-0.5 p-1.5">
             {DATE_PRESETS.map(p => {
               const active = current === p.rule
-              const count = presetCount?.(field, p.rule)
+              const count = presetCount?.(p.rule)
               return (
                 <button
                   key={p.rule}
@@ -250,6 +267,7 @@ export function DateFilterMenu({
                   today={today}
                   maxSpanDays={MAX_ROLLING_DAYS}
                   onSelect={(f, t) => { setCalFrom(f); setCalTo(t) }}
+                  heat={heat}
                 />
                 <div className="mt-2 flex items-center gap-2">
                   <p className="flex-1 text-[11px] font-semibold text-ink" aria-live="polite">

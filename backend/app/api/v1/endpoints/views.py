@@ -29,7 +29,7 @@ from backend.app.api.v1.feature_gate import (
     feature_disabled,
     resolve_enterprise_view_policy,
 )
-from backend.app.api.v1.view_filter_query import ViewFilterQuery, view_filter_query
+from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -71,6 +71,8 @@ from backend.common.models.management import (
     ViewFacetsResponse,
     ViewCatalogStats,
     ViewCountResponse,
+    ViewHistogramBucket,
+    ViewHistogramResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -565,6 +567,82 @@ async def count_views(
         readable=clause,
     )
     return ViewCountResponse(total=total)
+
+
+_HISTOGRAM_FIELDS = ("created", "updated")
+_HISTOGRAM_GRAINS = ("hour", "10min")
+# Bounds the response however busy the catalog is: even at ten minutes, 400
+# days is at most 57,600 buckets.
+_HISTOGRAM_MAX_SPAN = timedelta(days=400)
+
+
+def _window_bound(value: str, name: str) -> str:
+    """A window end in the stored timestamps' shape (``_instant``). An empty value,
+    which a filter reads as "not set", is an error here: a window needs both ends."""
+    bound = _instant(value, name)
+    if bound is None:
+        raise HTTPException(status_code=422, detail=f"{name} must be an ISO date or date-time")
+    return bound
+
+
+# Declared before ``/{view_id}``, like ``/count``. Not single-flighted: the key
+# would hold the caller, every filter and the window — which follows the
+# reader's own midnights — so concurrent requests would almost never share one,
+# and the work is one GROUP BY over the filtered views in one window.
+@router.get("/histogram", response_model=ViewHistogramResponse)
+async def get_view_histogram(
+    field: str = Query(..., description="created | updated (the later of a settings edit and a data publish)."),
+    after: str = Query(..., description="Window start, inclusive: ISO date (midnight UTC) or date-time."),
+    before: str = Query(..., description="Window end, exclusive; at most 400 days after ``after``."),
+    grain: str = Query("hour", description="Bucket size: hour | 10min (UTC)."),
+    f: ViewFilterQuery = Depends(view_filter_query),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewHistogramResponse:
+    """How many views were created, or last changed, in each UTC hour (or ten
+    minutes) of ``[after, before)`` — among exactly the views ``/views/count``
+    counts for the same filters, which apply too (ANDed).
+
+    UTC because the server cuts its stored timestamps as text; the client folds
+    the buckets into its reader's local days, which hour buckets land on exactly
+    in every whole-hour time zone and ten-minute ones in the half-hour zones.
+    """
+    if field not in _HISTOGRAM_FIELDS:
+        raise HTTPException(status_code=422, detail="field must be one of: created, updated")
+    if grain not in _HISTOGRAM_GRAINS:
+        raise HTTPException(status_code=422, detail="grain must be one of: hour, 10min")
+    start, end = _window_bound(after, "after"), _window_bound(before, "before")
+    span = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    if span <= timedelta(0):
+        raise HTTPException(status_code=422, detail="after must be earlier than before")
+    if span > _HISTOGRAM_MAX_SPAN:
+        raise HTTPException(
+            status_code=422, detail="after and before can be at most 400 days apart",
+        )
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    rows = await view_repo.view_histogram(
+        session,
+        field=field,
+        grain=grain,
+        after=start,
+        before=end,
+        **f.repo_kwargs(),
+        source_kind_sets=await _source_kind_filter_sets(session, f),
+        created_by_not=created_by_not,
+        ids_in=ids_in,
+        user_id=_user_id(user),
+        readable=clause,
+    )
+    return ViewHistogramResponse(
+        field=field,
+        grain=grain,
+        after=start,
+        before=end,
+        total=sum(n for _, n in rows),
+        buckets=[ViewHistogramBucket(t=t, n=n) for t, n in rows],
+    )
 
 
 @router.get("/", response_model=ViewListResponse)

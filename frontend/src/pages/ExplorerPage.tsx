@@ -62,6 +62,7 @@ import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/featur
 import { readFilterState, writeFilterState } from '@/features/view-filters/url'
 import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
+import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
 import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/people'
 import { activeDimensions } from '@/features/view-filters/dimensions'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
@@ -135,6 +136,10 @@ export function ExplorerPage() {
   const { dragging: fileOverPage, dropProps } = useViewFileDrop(openImport, importEnabled)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
+  const timelineCollapsed = usePreferencesStore(s => s.viewActivityCollapsed)
+  const setTimelineCollapsed = usePreferencesStore(s => s.setViewActivityCollapsed)
+  const timelineField = usePreferencesStore(s => s.viewActivityField)
+  const setTimelineField = usePreferencesStore(s => s.setViewActivityField)
 
   // Filter-aware stats for the summary bar, through the SAME mapping the list
   // uses (``toQueryParams``) so the numbers describe the exact population on
@@ -793,6 +798,22 @@ export function ExplorerPage() {
               ))}
             </div>
           </section>
+        )}
+
+        {/* ── Timeline: when things happened, and a quick way to pick dates.
+            Not for the bin — a deleted view's dates are not what it is looked
+            up by there. ───────────────────────────────────────── */}
+        {filterState.category !== 'deleted' && (
+          <ActivityTimeline
+            field={timelineField}
+            onFieldChange={setTimelineField}
+            state={filterState}
+            ctx={resolveCtx}
+            onSelectRule={rule => setFilterState({ ...filterState, [timelineField]: rule })}
+            collapsed={timelineCollapsed}
+            onCollapsedChange={setTimelineCollapsed}
+            className="mb-6"
+          />
         )}
 
         {/* ── Results ──────────────────────────────────────────── */}

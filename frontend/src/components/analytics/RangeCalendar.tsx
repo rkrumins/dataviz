@@ -16,11 +16,16 @@
  * Python's `weekday()`. Everything here is UTC, matching the day buckets the
  * server slices with `substr(created_at, 1, 10)` — a calendar that quietly
  * used local midnight would offer people a day the server has no data for.
+ *
+ * `heat` shades the days by activity — a dot under each, darker with more — so a
+ * range can be picked around the days something happened. Without it the
+ * calendar is exactly as it was.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { useChartTheme } from './charts/chartTheme'
 
 const DAY_MS = 86_400_000
 
@@ -29,6 +34,19 @@ const DAY_MS = 86_400_000
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
 
 interface Month { y: number; m: number }
+
+/** Activity per day, keyed like the calendar's days, and how a count reads aloud
+ *  ("12 views updated"). */
+export interface CalendarHeat {
+    counts: ReadonlyMap<string, number>
+    describe: (n: number) => string
+}
+
+/** Four steps, 0 for none. Square-root scaled, so one busy day doesn't leave
+ *  every other day at the faintest step. */
+function heatLevel(n: number, max: number): number {
+    return n > 0 ? Math.min(4, Math.ceil(Math.sqrt(n / max) * 4)) : 0
+}
 
 function ms(iso: string): number {
     return Date.parse(`${iso}T00:00:00Z`)
@@ -100,13 +118,14 @@ function useTwoUp(): boolean {
 }
 
 export function RangeCalendar({
-    from, to, today, maxSpanDays, onSelect,
+    from, to, today, maxSpanDays, onSelect, heat,
 }: {
     from: string
     to: string
     today: string
     maxSpanDays: number
     onSelect: (from: string, to: string) => void
+    heat?: CalendarHeat
 }) {
     const twoUp = useTwoUp()
     const panes = twoUp ? 2 : 1
@@ -229,12 +248,12 @@ export function RangeCalendar({
             >
                 <MonthGrid
                     month={left} lo={lo} hi={hi} today={today} focus={focus}
-                    isBlocked={isBlocked} onPick={pick} onHover={setHover}
+                    isBlocked={isBlocked} onPick={pick} onHover={setHover} heat={heat}
                 />
                 {twoUp && (
                     <MonthGrid
                         month={right} lo={lo} hi={hi} today={today} focus={focus}
-                        isBlocked={isBlocked} onPick={pick} onHover={setHover}
+                        isBlocked={isBlocked} onPick={pick} onHover={setHover} heat={heat}
                     />
                 )}
             </div>
@@ -261,7 +280,7 @@ function NavButton({
 }
 
 function MonthGrid({
-    month, lo, hi, today, focus, isBlocked, onPick, onHover,
+    month, lo, hi, today, focus, isBlocked, onPick, onHover, heat,
 }: {
     month: Month
     lo: string
@@ -271,7 +290,10 @@ function MonthGrid({
     isBlocked: (day: string) => boolean
     onPick: (day: string) => void
     onHover: (day: string | null) => void
+    heat?: CalendarHeat
 }) {
+    const { ramp } = useChartTheme()
+    const max = useMemo(() => Math.max(1, ...(heat?.counts.values() ?? [])), [heat])
     return (
         <div>
             <div className="grid grid-cols-7 mb-1" aria-hidden>
@@ -288,6 +310,11 @@ function MonthGrid({
                     const isEnd = day === lo || day === hi
                     const blocked = isBlocked(day)
                     const weekday = i % 7
+                    const n = heat?.counts.get(day) ?? 0
+                    const level = heatLevel(n, max)
+                    const dayName = new Date(ms(day)).toLocaleDateString(undefined, {
+                        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+                    })
                     return (
                         <span
                             key={day}
@@ -320,9 +347,7 @@ function MonthGrid({
                                 tabIndex={day === focus ? 0 : -1}
                                 disabled={blocked}
                                 aria-pressed={isEnd}
-                                aria-label={new Date(ms(day)).toLocaleDateString(undefined, {
-                                    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
-                                })}
+                                aria-label={n > 0 && heat ? `${dayName}, ${heat.describe(n)}` : dayName}
                                 onClick={() => onPick(day)}
                                 onMouseEnter={() => onHover(day)}
                                 onFocus={() => onHover(day)}
@@ -344,6 +369,17 @@ function MonthGrid({
                                 )}
                             >
                                 {Number(day.slice(8, 10))}
+                                {/* The lightest ramp step is left out: at 4px it
+                                    would barely show. On a cap the dot takes the
+                                    cap's white text colour instead. */}
+                                {level > 0 && (
+                                    <span
+                                        aria-hidden
+                                        data-heat={level}
+                                        className="pointer-events-none absolute bottom-[3px] left-1/2 h-1 w-1 -translate-x-1/2 rounded-full"
+                                        style={{ backgroundColor: isEnd ? 'currentColor' : ramp[level] }}
+                                    />
+                                )}
                             </button>
                         </span>
                     )

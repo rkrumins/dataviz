@@ -290,7 +290,9 @@ Each workspace has a **Views** tab for working with its whole collection: open
 - **Recent activity** shows what changed across the workspace.
 - **Filter the list** with the same controls as the Explorer: search,
   **Versioned** or **External**, **Date**, **People** and **Source** (see
-  [Narrow the list](/guide/browsing-views#narrow-the-list)). **Browse in
+  [Narrow the list](/guide/browsing-views#narrow-the-list)). The **Timeline**
+  under them shows how many of the workspace's Views were created or updated on
+  each of the past 90 days; drag across it to filter by those days. **Browse in
   Explorer** opens the Explorer with the same filters.
 - **Select several Views** to **Change Visibility**, **Export** or **Delete**
   them together. (Delete is offered only when you may delete every selected

@@ -4,10 +4,16 @@
  * saved filter keeps: a preset must store the RULE ("7d"), switching the clock must
  * carry a lone rule across, and the menu must give its keys back on Escape.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
+
+vi.mock('../api', () => ({ getViewHistogram: vi.fn(), getViewCount: vi.fn() }))
+
+import { getViewCount, getViewHistogram } from '../api'
 import { DateFilterMenu } from '../components/DateFilterMenu'
+import { EMPTY_FILTERS } from '../model'
 
 // The calendar asks `matchMedia` whether there's room for two months; jsdom has none.
 beforeAll(() => {
@@ -22,11 +28,19 @@ const TODAY = '2026-10-12'
 
 function setup(props: Partial<React.ComponentProps<typeof DateFilterMenu>> = {}) {
   const onChange = vi.fn()
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const utils = render(
-    <DateFilterMenu created={null} updated={null} onChange={onChange} today={TODAY} {...props} />,
+    <QueryClientProvider client={qc}>
+      <DateFilterMenu created={null} updated={null} onChange={onChange} today={TODAY} {...props} />
+    </QueryClientProvider>,
   )
   return { onChange, ...utils }
 }
+
+/** A UTC hour bucket inside a LOCAL day, so the fold lands on that day in any zone. */
+const bucket = (month: number, day: number, n: number) => ({
+  t: new Date(2026, month - 1, day, 12).toISOString().slice(0, 13), n,
+})
 
 describe('DateFilterMenu', () => {
   it('stores a preset as its rule, on the Updated clock by default, and closes', async () => {
@@ -87,5 +101,32 @@ describe('DateFilterMenu', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog', { name: 'Filter by date' })).toBeNull()
     expect(document.activeElement).toBe(trigger)
+  })
+
+  it('counts each preset without its own rule, and asks separately for the older ones', async () => {
+    vi.mocked(getViewHistogram).mockResolvedValue({
+      field: 'updated', grain: 'hour', after: '', before: '', total: 9,
+      buckets: [bucket(10, 12, 2), bucket(10, 10, 3), bucket(8, 1, 4)],
+    })
+    vi.mocked(getViewCount).mockResolvedValue({ total: 42 })
+    const user = userEvent.setup()
+    setup({
+      updated: '7d',
+      counting: { state: { ...EMPTY_FILTERS, updated: '7d', tags: ['pii'] }, ctx: { currentUserId: 'u_me', today: TODAY } },
+    })
+    await user.click(screen.getByRole('button', { name: /Updated · Past 7 days/ }))
+    const preset = (label: string) => screen.getByText(label).closest('button')!.textContent
+    await waitFor(() => expect(preset('Today')).toBe('Today2'))
+    expect(preset('Past 7 days')).toBe('Past 7 days5')
+    expect(preset('Past 90 days')).toBe('Past 90 days9')
+    await waitFor(() => expect(preset('This year')).toBe('This year42'))
+
+    const [, params] = vi.mocked(getViewHistogram).mock.calls[0]
+    expect(params.updatedAfter).toBeUndefined()
+    expect(params.tags).toEqual(['pii'])
+
+    // The calendar shades the same days.
+    await user.click(screen.getByRole('button', { name: /Custom range/ }))
+    expect(screen.getByRole('button', { name: /October 10, 2026, 3 views updated/ })).toBeTruthy()
   })
 })

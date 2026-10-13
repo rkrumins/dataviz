@@ -44,11 +44,18 @@ marks each source Versioned or External and names its workspace.
 filter with how many views removing just that one would bring back — click one to drop it — instead
 of only offering to clear everything. **Clear all filters** now has an **Undo**.
 
+**Timeline.** Above the results, in the Explorer and the workspace Views tab, a bar for each of the
+past 90 days shows how many views were created or updated that day, counted with your other
+filters. Drag across it to filter by those days, or click one day; the arrow keys, Shift and Enter
+do the same from the keyboard. The Date menu shows how many views each period would show, and its
+calendar marks the busy days with a dot.
+
 API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
 `updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
 `/views/facets` takes every list filter plus `fields`, counts each dimension with the OTHER filters
 applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
-`GET /views/count` returns how many views a filter set leaves.
+`GET /views/count` returns how many views a filter set leaves; `GET /views/histogram` counts views
+created or updated per hour (or ten minutes) over a window, with the same filters.
 
 ### Changed
 

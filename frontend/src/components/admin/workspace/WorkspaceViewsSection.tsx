@@ -50,6 +50,7 @@ import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
+import { usePreferencesStore } from '@/store/preferences'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -80,6 +81,7 @@ import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
+import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
 import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
 import { currentPersonOf } from '@/features/view-filters/people'
 import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
@@ -133,6 +135,10 @@ export default function WorkspaceViewsSection({
     const [sort, setSort] = useState<SortOption>('updated')
     const [layout, setLayout] = useState<'grid' | 'list'>('grid')
     const [showActivity, setShowActivity] = useState(false)
+    const timelineCollapsed = usePreferencesStore(s => s.viewActivityCollapsed)
+    const setTimelineCollapsed = usePreferencesStore(s => s.setViewActivityCollapsed)
+    const timelineField = usePreferencesStore(s => s.viewActivityField)
+    const setTimelineField = usePreferencesStore(s => s.setViewActivityField)
     const today = useLocalDay()
     const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
@@ -701,6 +707,7 @@ export default function WorkspaceViewsSection({
                     updated={fstate.updated}
                     onChange={patch => patchFilters(patch)}
                     today={today}
+                    counting={{ state: fstate, ctx: resolveCtx }}
                 />
                 <PeopleFilterMenu
                     ids={fstate.contributorIds}
@@ -751,6 +758,16 @@ export default function WorkspaceViewsSection({
                 onClearAll={clearFilters}
             />
             {!chips.length && <div className="mb-2" />}
+            <ActivityTimeline
+                field={timelineField}
+                onFieldChange={setTimelineField}
+                state={fstate}
+                ctx={resolveCtx}
+                onSelectRule={rule => setFstate(prev => ({ ...prev, [timelineField]: rule }))}
+                collapsed={timelineCollapsed}
+                onCollapsedChange={setTimelineCollapsed}
+                className="mb-4"
+            />
 
             {/* ── Body ───────────────────────────────────────────── */}
             {isLoading ? (

@@ -109,6 +109,27 @@ calendar days. A bookmarked list keeps the period, not the dates: a bookmark of
 *Past 7 days* still shows the past seven days when you open it next month. With
 **Recent** on as well, the list shows views that match both.
 
+Each period shows how many views it would show with your other filters. On the
+calendar, a dot under a day marks views created or changed that day; the darker
+the dot, the more of them.
+
+### See when things changed
+
+The **Timeline** above the results is a bar for each of the past 90 days: how
+many views were created, or updated, that day. Switch between **Created** and
+**Updated** at its top. It counts with your other filters, so it answers
+questions such as *when did the finance views last change?*
+
+- **Drag across the bars** to show only views from those days, or **click one
+  bar** for a single day. The Date filter and its chip change to match.
+- **Double-click** the bars, or click **Clear dates**, to remove the dates.
+- **From the keyboard:** Tab to the bars, then use **←** and **→** to move a
+  day at a time (each day's count is read out), **Shift** with the arrows to
+  stretch a range, **Enter** to show it, and **Esc** to let go.
+
+Click **Hide** to fold the timeline away; it stays folded until you show it
+again. It isn't shown under **Deleted**.
+
 ### Who made or changed a view
 
 1. Click **People**. **You** is always first, then everyone who has made or

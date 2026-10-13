@@ -222,6 +222,7 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, trailin
           onChange={patch => set(patch)}
           today={today}
           recentActive={category === 'recently-added'}
+          counting={{ state, ctx }}
         />
 
         {/* People — who created or last edited a view */}

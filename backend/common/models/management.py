@@ -1422,6 +1422,27 @@ class ViewCountResponse(BaseModel):
     total: int
 
 
+class ViewHistogramBucket(BaseModel):
+    """Views in one UTC bucket: ``t`` is ``YYYY-MM-DDTHH`` (hour) or
+    ``YYYY-MM-DDTHH:M`` (ten minutes, M the first digit of the minutes)."""
+    t: str
+    n: int
+
+
+class ViewHistogramResponse(BaseModel):
+    """``GET /views/histogram`` — views created or changed per bucket of a window.
+
+    ``after`` / ``before`` echo the window as normalised (UTC); buckets are
+    sparse and ascending, and ``total`` is their sum.
+    """
+    field: Literal["created", "updated"]
+    grain: Literal["hour", "10min"]
+    after: str
+    before: str
+    total: int
+    buckets: List[ViewHistogramBucket]
+
+
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 

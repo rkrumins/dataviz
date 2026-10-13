@@ -167,6 +167,7 @@ tests/test_versioning_read_only_queries.py
 tests/test_view_bundle_schema.py
 tests/test_view_facets_live.py
 tests/test_view_filters_api.py
+tests/test_view_histogram.py
 tests/test_view_layer_rule_validation.py
 tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
