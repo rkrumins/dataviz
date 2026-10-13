@@ -226,6 +226,23 @@ def test_a_storage_that_cannot_be_built_falls_back_instead_of_raising(caplog):
     )
 
 
+async def test_a_storage_without_counters_still_builds_and_limits(monkeypatch):
+    """Limits counted on every request use sliding-window counters where the
+    storage has them. One without them keeps the moving window rather than
+    failing to build — the same rule as above."""
+    from backend.auth_service import ratelimit
+
+    def _unsupported(_storage):
+        raise NotImplementedError("no sliding-window counters in this storage")
+
+    monkeypatch.setattr(ratelimit, "SlidingWindowCounterRateLimiter", _unsupported)
+    limiter = AccountRateLimiter("async+memory://", {})
+    assert limiter._counter is limiter._limiter
+    assert await limiter.consume("apikey", "hash", "1/minute")
+    assert not await limiter.consume("apikey", "hash", "1/minute")
+    assert await limiter.retry_after_seconds("apikey", "hash", "1/minute", consumed=True) >= 1
+
+
 def test_the_fallback_never_logs_credentials(caplog):
     """The failure path is the one guaranteed to run in a broken prod.
 

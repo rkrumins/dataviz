@@ -15,7 +15,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from backend.app.db.models import (
+    CatalogItemORM,
     PermissionORM,
+    ProviderORM,
     RoleBindingORM,
     RoleORM,
     RolePermissionORM,
@@ -192,7 +194,7 @@ async def test_a_deleted_selected_view_admits_nothing(db_session):
     assert not claims.key_scope.selects_view("v_b_other", "ws_b")
 
 
-async def test_an_org_level_owner_reaches_every_workspace_without_any_shortcut(db_session):
+async def test_an_org_level_owner_reaches_every_workspace_without_listing_them(db_session):
     await _world(db_session)
     db_session.add(RoleBindingORM(
         subject_type="user", subject_id=OWNER, role_name="super_admin",
@@ -201,12 +203,32 @@ async def test_an_org_level_owner_reaches_every_workspace_without_any_shortcut(d
     await db_session.commit()
     claims = await _claims(db_session, views="write", data="write")
     assert claims.global_perms == ()
-    assert set(claims.ws_perms) == {"ws_a", "ws_b", "ws_c"}
-    assert claims.key_scope.org_wide
+    # The role reaches every workspace — present and future — as a shortcut
+    # narrowed to the key, never a list of every workspace on the platform.
+    assert set(claims.ws_perms) == {"ws_a", "ws_b"}  # the owner's own bindings
+    assert claims.key_scope.org_wide and claims.key_scope.org_unrestricted
+    assert claims.key_scope.org_perms == claims.key_scope.permissions
+    for ws in ("ws_c", "ws_created_tomorrow"):
+        assert has_permission(claims, "workspace:view:edit", workspace_id=ws)
+        assert has_permission(claims, "workspace:datasource:manage", workspace_id=ws)
+    assert has_permission_any_workspace(claims, "workspace:datasource:read")
     # No administration through a key, however powerful its owner.
     assert not has_permission(claims, "system:admin")
     assert not has_permission(claims, "workspace:admin", workspace_id="ws_c")
     assert not has_permission_any_workspace(claims, "system:org-admin")
+
+
+async def test_a_key_on_selected_resources_takes_no_shortcut_from_its_owner(db_session):
+    await _world(db_session)
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=OWNER, role_name="super_admin",
+        scope_type="global", scope_id=None,
+    ))
+    await db_session.commit()
+    claims = await _claims(db_session, views="read", resources={"workspaces": ["ws_c"]})
+    assert claims.key_scope.org_perms == frozenset()
+    assert has_permission(claims, "workspace:view:read", workspace_id="ws_c")
+    assert not has_permission(claims, "workspace:view:read", workspace_id="ws_a")
 
 
 async def test_an_org_viewer_owner_gives_a_write_key_only_reads(db_session):
@@ -224,6 +246,54 @@ async def test_an_org_viewer_owner_gives_a_write_key_only_reads(db_session):
     claims = await _claims(db_session, views="write")
     assert has_permission(claims, "workspace:view:read", workspace_id="ws_c")
     assert not has_permission(claims, "workspace:view:edit", workspace_id="ws_c")
+
+
+async def test_a_selection_key_lists_only_the_ontologies_and_catalog_entries_it_covers(
+    db_session,
+):
+    """Ontologies and catalog entries are filtered lists: a key sees those of
+    the data sources it covers — whole workspaces, named sources, and the
+    sources its views render — never the rest of its owner's."""
+    from backend.app.services import workspace_visibility as visibility
+
+    await _world(db_session)
+    db_session.add(ProviderORM(
+        id="prov", name="prov", provider_type="mock", permitted_workspaces="[]",
+    ))
+    db_session.add(WorkspaceDataSourceORM(
+        id="ds_a2", workspace_id="ws_a", provider_id="prov", is_primary=True,
+    ))
+    await db_session.flush()
+    for ds in ("ds_a", "ds_a2", "ds_b"):
+        row = await db_session.get(WorkspaceDataSourceORM, ds)
+        row.ontology_id, row.catalog_item_id = f"ont_{ds[3:]}", f"cat_{ds[3:]}"
+        db_session.add(CatalogItemORM(
+            id=f"cat_{ds[3:]}", provider_id="prov", name=ds, permitted_workspaces="[]",
+        ))
+    db_session.add(CatalogItemORM(
+        id="cat_shared", provider_id="prov", name="shared", permitted_workspaces='["ws_a"]',
+    ))
+    (await _view(db_session, "v_b_other")).data_source_id = "ds_b"
+    await db_session.commit()
+
+    async def visible(resources="all"):
+        claims = await _claims(db_session, views="read", data="read", resources=resources)
+        return (
+            await visibility.compute_visible_ontology_ids(db_session, claims),
+            await visibility.compute_visible_catalog_ids(db_session, claims),
+        )
+
+    assert await visible() == (
+        {"ont_a", "ont_a2", "ont_b"}, {"cat_a", "cat_a2", "cat_b", "cat_shared"},
+    )
+    assert await visible({"dataSources": ["ds_a"]}) == ({"ont_a"}, {"cat_a"})
+    # A whole workspace: its sources, and what is shared with it.
+    assert await visible({"workspaces": ["ws_a"]}) == (
+        {"ont_a", "ont_a2"}, {"cat_a", "cat_a2", "cat_shared"},
+    )
+    # A view: the source it renders — or, naming none, its workspace's primary.
+    assert await visible({"views": ["v_b_other"]}) == ({"ont_b"}, {"cat_b"})
+    assert await visible({"views": ["v_a_ws"]}) == ({"ont_a2"}, {"cat_a2"})
 
 
 # ── Identity paths, honoured and scoped ────────────────────────────

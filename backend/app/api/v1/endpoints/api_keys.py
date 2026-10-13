@@ -12,20 +12,24 @@ Mounted three ways:
     expired or used from an address it does not allow, so whoever finds a
     leaked key can always end it.
 ``/api/v1/admin/api-keys`` (and ``/admin/users/{id}/api-keys/revoke-all``)
-    The inventory for auditors, and revocation for user administrators.
+    The inventory for auditors — its counts, one key in detail, a CSV export
+    — and revocation, with a note to the owner, for user administrators.
 
 Another person's key id answers 404 everywhere a person manages their own:
 the reads filter on the owner in SQL (``api_key_repo``).
 """
 from __future__ import annotations
 
+import csv
+import io
 import ipaddress
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -44,6 +48,7 @@ from backend.app.auth.dependencies import (
     requires,
 )
 from backend.app.config.feature_wiring import fail_safe_default
+from backend.app.db import engine as db_engine
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
     ApiKeyORM,
@@ -56,6 +61,7 @@ from backend.app.db.models import (
 )
 from backend.app.db.repositories import (
     api_key_repo,
+    api_key_usage_repo,
     notification_repo,
     outbox_event_repo,
     user_repo,
@@ -69,6 +75,7 @@ from backend.auth_service.core.config import RATELIMIT_LOGIN_PER_ACCOUNT
 from backend.auth_service.core.password import is_password_set, verify_password
 from backend.auth_service.core.tokens import (
     AUTH_TIME_CLAIM,
+    AUTH_TIME_PROVEN_CLAIM,
     SIGNIN_CLAIM,
     SIGNIN_SSO,
     decode_token,
@@ -94,11 +101,20 @@ MAX_ACTIVE_KEYS = 25
 #: How recently an SSO session must have authenticated at its identity
 #: provider to mint a key.
 STEP_UP_SECONDS = 15 * 60
+#: Whether a sign-in the identity provider did not prove fresh may stand in
+#: for one (gateway and portal connections cannot prove one). Off by default.
+SSO_ROUND_TRIP_FLAG = "apiKeySsoRoundTripStepUp"
 _STEP_UP_SCOPE = "stepup"
 _STEP_UP_NEXT = "/me/api-keys"
 _MAX_IDS = 100
 _MAX_CIDRS = 20
 _PICKER_MAX = 50
+#: Days of usage on a key in a list (its sparkline), and in its detail.
+_USAGE_LIST_DAYS = 14
+_USAGE_DETAIL_DAYS = 30
+#: Rows the CSV export writes at most, read in pages of this many.
+_EXPORT_MAX = 10_000
+_EXPORT_PAGE = 500
 
 #: How a stored refusal reads as a status a person sees.
 _STATUS_BY_REFUSAL = {
@@ -140,10 +156,11 @@ class _Expiry(_Model):
     """Every key's expiry is a choice made out loud: a date, or "never"."""
     expires_at: Optional[str] = Field(None, alias="expiresAt", max_length=40)
     never_expires: bool = Field(False, alias="neverExpires")
-    current_password: Optional[str] = Field(None, alias="currentPassword", max_length=1024)
 
 
-class CreateApiKeyRequest(_Expiry):
+class KeyDraft(_Expiry):
+    """A key as someone has described it, before it exists — what creating
+    one takes, and what a preview of it takes."""
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     name: str = Field(..., min_length=1, max_length=80)
     description: Optional[str] = Field(None, max_length=500)
@@ -154,11 +171,48 @@ class CreateApiKeyRequest(_Expiry):
     )
 
 
+class CreateApiKeyRequest(KeyDraft):
+    current_password: Optional[str] = Field(None, alias="currentPassword", max_length=1024)
+
+
 class RotateApiKeyRequest(_Expiry):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    #: How long the old key keeps working beside the new one.
+    #: How long the old key keeps working beside the new one. Ignored when the
+    #: old key no longer works (renewing it): there is nothing to keep.
     grace_seconds: Literal[0, 3600, 86400, 604800] = Field(0, alias="graceSeconds")
     #: Neither expiry field set: the new key lives as long as the old one did.
+    current_password: Optional[str] = Field(None, alias="currentPassword", max_length=1024)
+
+
+class UpdateApiKeyRequest(_Model):
+    """What a key is called and what it is for — never what it may do."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    name: Optional[str] = Field(None, min_length=1, max_length=80)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class UsageSummary(_Model):
+    """A key's use over the last 30 days, and per day for the last 14."""
+    requests_30d: int = Field(0, alias="requests30d")
+    writes_30d: int = Field(0, alias="writes30d")
+    refused_30d: int = Field(0, alias="refused30d")
+    errors_30d: int = Field(0, alias="errors30d")
+    #: Requests per UTC day, oldest first, today last.
+    daily14: List[int] = Field(default_factory=lambda: [0] * _USAGE_LIST_DAYS)
+
+
+class UsageDay(_Model):
+    day: str
+    requests: int = 0
+    writes: int = 0
+    refused: int = 0
+    errors: int = 0
+
+
+class KeyRef(_Model):
+    id: str
+    name: str
+    prefix: str
 
 
 class ApiKeyDTO(_Model):
@@ -184,7 +238,10 @@ class ApiKeyDTO(_Model):
     revoked_at: Optional[str] = Field(None, alias="revokedAt")
     revoked_by: Optional[str] = Field(None, alias="revokedBy")
     revoked_reason: Optional[str] = Field(None, alias="revokedReason")
+    #: What an administrator said when revoking it, if anything.
+    revoked_note: Optional[str] = Field(None, alias="revokedNote")
     rotated_from: Optional[str] = Field(None, alias="rotatedFrom")
+    usage: UsageSummary = Field(default_factory=UsageSummary)
 
 
 class CreatedApiKey(_Model):
@@ -216,10 +273,31 @@ class EffectiveAccess(_Model):
     workspaces: List[WorkspaceAccess]
     views: List[ResourceAccess] = Field(default_factory=list)
     data_sources: List[ResourceAccess] = Field(default_factory=list, alias="dataSources")
+    #: Set when the key reaches every workspace through its owner's
+    #: organisation-wide role: what it may do in all of them, rather than a
+    #: list of every workspace on the platform.
+    every_workspace: Optional[Access] = Field(None, alias="everyWorkspace")
 
 
 class ApiKeyDetail(ApiKeyDTO):
     effective_access: EffectiveAccess = Field(alias="effectiveAccess")
+    #: Requests per UTC day for the last 30 days, oldest first.
+    usage_days: List[UsageDay] = Field(default_factory=list, alias="usageDays")
+    #: The key this one replaced, and the key that replaced it.
+    replaces: Optional[KeyRef] = None
+    replaced_by: Optional[KeyRef] = Field(None, alias="replacedBy")
+
+
+class ApiKeyPreview(_Model):
+    """A key as it would be if created now — nothing is created."""
+    permissions: dict
+    resources: Union[Literal["all"], dict]
+    allowed_cidrs: List[str] = Field(default_factory=list, alias="allowedCidrs")
+    #: When it would stop working, in UTC; ``None``: never.
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+    effective_access: EffectiveAccess = Field(alias="effectiveAccess")
+    active_keys: int = Field(alias="activeKeys")
+    max_active_keys: int = Field(MAX_ACTIVE_KEYS, alias="maxActiveKeys")
 
 
 class StepUp(_Model):
@@ -241,6 +319,16 @@ class ApiKeyOptions(_Model):
     active_keys: int = Field(alias="activeKeys")
     #: Every workspace the person can reach, with what they can do there.
     workspaces: List[WorkspaceAccess]
+    #: The address this request came from, as the server sees it — what a
+    #: key limited to "this address" would be limited to.
+    client_ip: Optional[str] = Field(None, alias="clientIp")
+    #: Where someone who signs in through an identity provider signs in again
+    #: — to resume paused keys.
+    sso_sign_in_url: Optional[str] = Field(None, alias="ssoSignInUrl")
+    #: False when this session cannot confirm it is you and the deployment
+    #: does not accept a round trip instead: minting will be refused with
+    #: ``step_up_unavailable`` until it can.
+    step_up_available: bool = Field(True, alias="stepUpAvailable")
 
 
 class PickerItem(_Model):
@@ -279,14 +367,45 @@ class AdminApiKeyList(_Model):
     total: int
 
 
+class AdminApiKeyDetail(AdminApiKeyDTO):
+    effective_access: EffectiveAccess = Field(alias="effectiveAccess")
+    usage_days: List[UsageDay] = Field(default_factory=list, alias="usageDays")
+    replaces: Optional[KeyRef] = None
+    replaced_by: Optional[KeyRef] = Field(None, alias="replacedBy")
+
+
+class StatusCounts(_Model):
+    active: int = 0
+    paused: int = 0
+    owner_inactive: int = Field(0, alias="ownerInactive")
+    expired: int = 0
+    revoked: int = 0
+
+
+class AdminApiKeyStats(_Model):
+    total: int = 0
+    by_status: StatusCounts = Field(alias="byStatus")
+    expiring_soon: int = Field(0, alias="expiringSoon")
+    never_expires: int = Field(0, alias="neverExpires")
+    unused90: int = 0
+    revoked30d: int = 0
+
+
+class AdminRevokeRequest(_Model):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    #: Shown to the owner with the notice, and kept on the key.
+    note: Optional[str] = Field(None, max_length=500)
+
+
 # ── Policy and status ───────────────────────────────────────────────
 
 
 class _PolicyValues:
-    def __init__(self, enabled: bool, max_lifetime_days, sso_window_days):
+    def __init__(self, enabled: bool, max_lifetime_days, sso_window_days, sso_round_trip=False):
         self.enabled = enabled
         self.max_lifetime_days = max_lifetime_days
         self.sso_window_days = sso_window_days
+        self.sso_round_trip = sso_round_trip
 
 
 async def _policy(session: AsyncSession) -> _PolicyValues:
@@ -295,6 +414,7 @@ async def _policy(session: AsyncSession) -> _PolicyValues:
         enabled=bool(values.get(ENABLED_FLAG, fail_safe_default(ENABLED_FLAG))),
         max_lifetime_days=api_key_auth._days(values.get(MAX_LIFETIME_FLAG, "none")),
         sso_window_days=api_key_auth._days(values.get(SSO_WINDOW_FLAG, "30")),
+        sso_round_trip=values.get(SSO_ROUND_TRIP_FLAG, fail_safe_default(SSO_ROUND_TRIP_FLAG)) is True,
     )
 
 
@@ -327,7 +447,35 @@ def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str
     return _STATUS_BY_REFUSAL.get(reason, reason)
 
 
-def _fields(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> dict:
+async def _usage(
+    session: AsyncSession, key_ids, *, days: int = _USAGE_DETAIL_DAYS,
+) -> dict[str, dict[str, tuple[int, int, int, int]]]:
+    return await api_key_usage_repo.by_day(session, key_ids, days=days)
+
+
+def _summary(per_day: dict[str, tuple[int, int, int, int]]) -> UsageSummary:
+    totals = [sum(day[i] for day in per_day.values()) for i in range(4)]
+    return UsageSummary(
+        requests_30d=totals[0], writes_30d=totals[1],
+        refused_30d=totals[2], errors_30d=totals[3],
+        daily14=[
+            per_day.get(day, (0, 0, 0, 0))[0]
+            for day in api_key_usage_repo.last_days(_USAGE_LIST_DAYS)
+        ],
+    )
+
+
+def _usage_days(per_day: dict[str, tuple[int, int, int, int]]) -> list[UsageDay]:
+    return [
+        UsageDay(day=day, **dict(zip(("requests", "writes", "refused", "errors"),
+                                     per_day.get(day, (0, 0, 0, 0)))))
+        for day in api_key_usage_repo.last_days(_USAGE_DETAIL_DAYS)
+    ]
+
+
+def _fields(
+    key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues, usage=None,
+) -> dict:
     expiry = api_keys.effective_expiry(key, max_lifetime_days=policy.max_lifetime_days)
     return dict(
         id=key.id, name=key.name, description=key.description,
@@ -341,7 +489,9 @@ def _fields(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> dic
         last_used_at=key.last_used_at, last_used_ip=key.last_used_ip,
         last_used_user_agent=key.last_used_user_agent,
         revoked_at=key.revoked_at, revoked_by=key.revoked_by,
-        revoked_reason=key.revoked_reason, rotated_from=key.rotated_from,
+        revoked_reason=key.revoked_reason, revoked_note=key.revoked_note,
+        rotated_from=key.rotated_from,
+        usage=_summary((usage or {}).get(key.id, {})),
     )
 
 
@@ -376,13 +526,52 @@ def _step_up_method(payload: dict, account: Optional[UserORM]) -> str:
     return "sso"
 
 
-def _fresh(payload: dict) -> bool:
+def _fresh(payload: dict, *, proven: bool = False) -> bool:
+    """The session authenticated at its identity provider within the
+    step-up window — and, with ``proven``, the provider itself asserted when
+    (``AUTH_TIME_PROVEN_CLAIM``), rather than the sign-in standing in for it."""
     auth_time = payload.get(AUTH_TIME_CLAIM)
-    return isinstance(auth_time, (int, float)) and time.time() - auth_time <= STEP_UP_SECONDS
+    if not isinstance(auth_time, (int, float)) or time.time() - auth_time > STEP_UP_SECONDS:
+        return False
+    return not proven or payload.get(AUTH_TIME_PROVEN_CLAIM) is True
+
+
+_UNAVAILABLE = (
+    "Your sign-in provider can't confirm a fresh sign-in, so API keys can't be created or "
+    "rotated here. An administrator can allow it under Administration → Features → "
+    "Authentication."
+)
+
+
+async def _sso_step_up(
+    request: Request, user: User, payload: dict, policy: _PolicyValues,
+) -> Optional[HTTPException]:
+    """For a session signed in through an identity provider: ``None`` when it
+    may mint now, else the refusal to raise.
+
+    Only a sign-in the provider proves happened in the last few minutes
+    counts — one it re-issued silently from a session it still held proves
+    nothing about who is at the keyboard. Unless the deployment accepts a
+    fresh round trip instead (``SSO_ROUND_TRIP_FLAG``), a provider that cannot
+    prove one — or one that just signed you in without saying when — gets a
+    plain "unavailable" rather than an endless loop of signing in again."""
+    if _fresh(payload, proven=not policy.sso_round_trip):
+        return None
+    url, proves = await _identity_service(request).step_up_target(
+        user.id, next_path=_STEP_UP_NEXT,
+    )
+    if policy.sso_round_trip or (proves and not _fresh(payload)):
+        return _refused(
+            "step_up_required",
+            "Confirm it's you: sign in again with your identity provider, then try again.",
+            method="sso", loginUrl=url,
+        )
+    return _refused("step_up_unavailable", _UNAVAILABLE, method="sso")
 
 
 async def _step_up(
     request: Request, user: User, session: AsyncSession, password: Optional[str],
+    policy: _PolicyValues,
 ) -> None:
     """Confirm it is really the account's owner before a key is minted: a
     session left open on a shared machine must not be enough to walk away
@@ -390,16 +579,10 @@ async def _step_up(
     payload = _session_claims(request)
     account = await user_repo.get_user_by_id(session, user.id)
     if _step_up_method(payload, account) == "sso":
-        if _fresh(payload):
-            return
-        raise _refused(
-            "step_up_required",
-            "Confirm it's you: sign in again with your identity provider, then try again.",
-            method="sso",
-            loginUrl=await _identity_service(request).step_up_url(
-                user.id, next_path=_STEP_UP_NEXT,
-            ),
-        )
+        refusal = await _sso_step_up(request, user, payload, policy)
+        if refusal is not None:
+            raise refusal
+        return
     if not password:
         raise _refused(
             "step_up_required", "Enter your password to confirm it's you.", method="password",
@@ -537,7 +720,9 @@ def _checked_expiry(
                 f"Keys here must expire within {policy.max_lifetime_days} days.",
             )
         expires = cap
-    return expires.isoformat()
+    # Stored in UTC whatever offset it was given in: expiries are compared as
+    # text, and only one offset compares correctly.
+    return expires.astimezone(timezone.utc).isoformat()
 
 
 def _checked_cidrs(cidrs: List[str]) -> list[str]:
@@ -551,7 +736,31 @@ def _checked_cidrs(cidrs: List[str]) -> list[str]:
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    return request.client.host if request.client else None
+    return api_keys.client_address(request.client.host if request.client else None)
+
+
+async def _validated_draft(
+    session: AsyncSession, user: User, body: KeyDraft, policy: _PolicyValues,
+) -> tuple[dict, object, Optional[str], list[str]]:
+    """The permissions, resources, expiry and networks a key described by
+    ``body`` would have — or the 422 saying why it can't. Shared by create
+    and preview, so a preview never says yes to what create refuses."""
+    owner = await permission_service.resolve(session, user.id, sid="")
+    permissions = _checked_permissions(body.permissions)
+    resources = await _checked_resources(session, user, owner, body.resources)
+    expires_at = _checked_expiry(body, policy)
+    cidrs = _checked_cidrs(body.allowed_cidrs)
+    return permissions, resources, expires_at, cidrs
+
+
+def _too_many() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "too_many_api_keys",
+            "message": f"You can have {MAX_ACTIVE_KEYS} active keys. Revoke one you no longer use.",
+        },
+    )
 
 
 # ── Effective access ────────────────────────────────────────────────
@@ -589,19 +798,19 @@ async def _workspace_names(session: AsyncSession, ids) -> dict[str, str]:
 
 
 async def _effective_access(
-    session: AsyncSession, key: ApiKeyORM, owner_user: User,
+    session: AsyncSession, owner_user, scope: permission_service.KeyScope,
 ) -> EffectiveAccess:
-    """What this key can do right now: its owner's live access, narrowed by
-    the key — per workspace, and per view and data source it names."""
-    claims = await permission_service.resolve_for_api_key(
-        session, key.user_id, api_key_service.scope_of(key),
-    )
+    """What a key with ``scope`` can do right now: its owner's live access,
+    narrowed by the key — per workspace, and per view and data source it
+    names. ``owner_user`` needs only an ``id``."""
+    claims = await permission_service.resolve_for_api_key(session, owner_user.id, scope)
     scope = claims.key_scope
     names = await _workspace_names(session, claims.ws_perms)
     workspaces = [
         WorkspaceAccess(id=ws, name=names.get(ws, ws), **_access(_perms_in(claims, ws)))
         for ws in sorted(claims.ws_perms, key=lambda w: names.get(w, w).lower())
     ]
+    every = Access(**_access(set(scope.org_perms))) if scope.org_perms else None
     views: list[ResourceAccess] = []
     if scope.view_ids:
         rows = {v.id: v for v in (await session.execute(
@@ -638,7 +847,9 @@ async def _effective_access(
                 id=dsid, name=(ds.label or ds.graph_name or ds.id) if ds else None,
                 workspace_id=ds.workspace_id if ds else None, level=level,
             ))
-    return EffectiveAccess(workspaces=workspaces, views=views, data_sources=sources)
+    return EffectiveAccess(
+        workspaces=workspaces, views=views, data_sources=sources, every_workspace=every,
+    )
 
 
 # ── Records ─────────────────────────────────────────────────────────
@@ -662,12 +873,32 @@ async def _record(session: AsyncSession, verb: str, key: ApiKeyORM, **payload) -
 
 async def _revoke(
     session: AsyncSession, key: ApiKeyORM, *, by: str, reason: str,
+    note: Optional[str] = None, **extra,
 ) -> bool:
-    revoked = await api_key_repo.revoke(session, key.id, by=by, reason=reason)
+    await api_key_repo.hold_principal(session, key.user_id)
+    revoked = await api_key_repo.revoke(session, key.id, by=by, reason=reason, note=note)
     if revoked:
-        await _record(session, "revoked", key, revoked_by=by, reason=reason)
+        await _record(
+            session, "revoked", key, revoked_by=by, reason=reason,
+            **({"note": note} if note else {}), **extra,
+        )
     api_key_service.forget(key.id)
     return revoked
+
+
+async def _ref(session: AsyncSession, key_id: Optional[str]) -> Optional[KeyRef]:
+    other = await api_key_repo.get(session, key_id) if key_id else None
+    return KeyRef(id=other.id, name=other.name, prefix=other.token_prefix) if other else None
+
+
+async def _lineage(session: AsyncSession, key: ApiKeyORM) -> tuple[Optional[KeyRef], Optional[KeyRef]]:
+    """The key this one replaced, and the key that replaced it."""
+    successor = await api_key_repo.successor_of(session, key.id)
+    return (
+        await _ref(session, key.rotated_from),
+        KeyRef(id=successor.id, name=successor.name, prefix=successor.token_prefix)
+        if successor else None,
+    )
 
 
 # ── Your own keys ───────────────────────────────────────────────────
@@ -687,34 +918,58 @@ async def get_api_key_options(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Everything the create form needs: the deployment's policy, how this
-    session confirms it is you, and what you can reach in each workspace."""
+    session confirms it is you (and whether it can), what you can reach in
+    each workspace, and the address you are calling from."""
     policy = await _policy(session)
     owner_claims = await permission_service.resolve(session, user.id, sid="")
     org_wide, reachable = _owner_reach(owner_claims)
-    if org_wide:
-        reachable = set(await _all_workspace_ids(session))
-    names = await _workspace_names(session, reachable)
+    names = (
+        await _all_workspace_names(session) if org_wide
+        else await _workspace_names(session, reachable)
+    )
     payload = _session_claims(request)
     account = await user_repo.get_user_by_id(session, user.id)
+    method = _step_up_method(payload, account)
+    sign_in_url = None
+    if (await _identity_facts(session, {user.id})).get(user.id, (0, None))[0]:
+        sign_in_url, _proves = await _identity_service(request).step_up_target(
+            user.id, next_path=_STEP_UP_NEXT,
+        )
+    available = True
+    if method == "sso":
+        # Past step-up now, or after signing in again — not "never, here".
+        refusal = await _sso_step_up(request, user, payload, policy)
+        available = refusal is None or refusal.detail["error"] != "step_up_unavailable"
     return ApiKeyOptions(
         policy=Policy(
             enabled=policy.enabled,
             max_lifetime_days=policy.max_lifetime_days,
             sso_sign_in_window_days=policy.sso_window_days,
         ),
-        step_up=StepUp(method=_step_up_method(payload, account), fresh=_fresh(payload)),
-        active_keys=await api_key_repo.count_active_for_user(session, user.id),
+        step_up=StepUp(
+            method=method,
+            fresh=method == "sso" and _fresh(payload, proven=not policy.sso_round_trip),
+        ),
+        active_keys=await api_key_repo.count_active_for_user(
+            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+        ),
         workspaces=[
-            WorkspaceAccess(id=ws, name=names.get(ws, ws), **_access(_perms_in(owner_claims, ws)))
-            for ws in sorted(reachable, key=lambda w: names.get(w, w).lower())
-            if ws in names
+            WorkspaceAccess(id=ws, name=names[ws], **_access(_perms_in(owner_claims, ws)))
+            for ws in sorted(names, key=lambda w: names[w].lower())
         ],
+        client_ip=_client_ip(request),
+        sso_sign_in_url=sign_in_url,
+        step_up_available=available,
     )
 
 
-async def _all_workspace_ids(session: AsyncSession) -> list[str]:
-    from backend.app.db.repositories import workspace_repo
-    return await workspace_repo.list_workspace_ids(session)
+async def _all_workspace_names(session: AsyncSession) -> dict[str, str]:
+    """Every live workspace's name, without spelling the ids out — for an
+    organisation-wide owner, whose reach is every workspace."""
+    rows = (await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.deleted_at.is_(None))
+    )).all()
+    return dict(rows)
 
 
 @router.get("/resources", response_model=List[PickerItem])
@@ -780,16 +1035,45 @@ async def search_api_key_resources(
 
 @router.get("", response_model=List[ApiKeyDTO])
 async def list_my_api_keys(
+    history: Literal["recent", "all"] = Query("recent"),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Your keys, newest first — revoked and expired ones too, as history."""
+    """Your keys, newest first: those still in date, and those that ended in
+    the last 90 days — or, with ``history=all``, every one you have had."""
     owner, facts = await _owner_and_facts(session, user)
     policy = await _policy(session)
-    return [
-        ApiKeyDTO(**_fields(key, owner, facts, policy))
-        for key in await api_key_repo.list_for_user(session, user.id)
-    ]
+    keys = await api_key_repo.list_for_user(session, user.id, history=history == "all")
+    usage = await _usage(session, [k.id for k in keys])
+    return [ApiKeyDTO(**_fields(key, owner, facts, policy, usage)) for key in keys]
+
+
+@router.post("/preview", response_model=ApiKeyPreview)
+@limiter.limit("30/minute")
+async def preview_my_api_key(
+    request: Request,
+    body: KeyDraft,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What a key described like this would be able to do, were it created
+    now. Validated exactly as creating it is; nothing is created, and no
+    proof that it is you is needed to look."""
+    policy = await _policy(session)
+    permissions, resources, expires_at, cidrs = await _validated_draft(
+        session, user, body, policy,
+    )
+    scope = permission_service.key_scope_from_profile(
+        "preview", kind=api_keys.KIND_PERSONAL, permissions=permissions, resources=resources,
+    )
+    return ApiKeyPreview(
+        permissions=permissions, resources=resources, allowed_cidrs=cidrs,
+        expires_at=expires_at,
+        effective_access=await _effective_access(session, user, scope),
+        active_keys=await api_key_repo.count_active_for_user(
+            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+        ),
+    )
 
 
 @router.get("/{key_id}", response_model=ApiKeyDetail)
@@ -798,15 +1082,20 @@ async def get_my_api_key(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """One of your keys, and what it can do right now."""
+    """One of your keys: what it can do right now, how much it has been used,
+    and what it replaced or was replaced by."""
     key = await api_key_repo.get_for_user(session, user.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
     owner, facts = await _owner_and_facts(session, user)
     policy = await _policy(session)
+    usage = await _usage(session, [key.id])
+    replaces, replaced_by = await _lineage(session, key)
     return ApiKeyDetail(
-        **_fields(key, owner, facts, policy),
-        effective_access=await _effective_access(session, key, user),
+        **_fields(key, owner, facts, policy, usage),
+        effective_access=await _effective_access(session, user, api_key_service.scope_of(key)),
+        usage_days=_usage_days(usage.get(key.id, {})),
+        replaces=replaces, replaced_by=replaced_by,
     )
 
 
@@ -824,20 +1113,23 @@ async def create_my_api_key(
     policy = await _policy(session)
     if not policy.enabled:
         raise _refused("api_keys_disabled", "API keys are turned off for this deployment.")
-    owner = await permission_service.resolve(session, user.id, sid="")
-    permissions = _checked_permissions(body.permissions)
-    resources = await _checked_resources(session, user, owner, body.resources)
-    expires_at = _checked_expiry(body, policy)
-    cidrs = _checked_cidrs(body.allowed_cidrs)
-    if await api_key_repo.count_active_for_user(session, user.id) >= MAX_ACTIVE_KEYS:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "too_many_api_keys",
-                "message": f"You can have {MAX_ACTIVE_KEYS} active keys. Revoke one you no longer use.",
-            },
-        )
-    await _step_up(request, user, session, body.current_password)
+    permissions, resources, expires_at, cidrs = await _validated_draft(
+        session, user, body, policy,
+    )
+
+    async def _at_limit() -> bool:
+        return await api_key_repo.count_active_for_user(
+            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+        ) >= MAX_ACTIVE_KEYS
+
+    if await _at_limit():  # before asking anyone to prove anything
+        raise _too_many()
+    await _step_up(request, user, session, body.current_password, policy)
+    # Counted again and minted under one lock: two requests racing each
+    # other cannot both pass the limit.
+    await api_key_repo.hold_principal(session, user.id)
+    if await _at_limit():
+        raise _too_many()
 
     generated = api_keys.generate(api_keys.KIND_PERSONAL)
     key = await api_key_repo.create(
@@ -860,6 +1152,52 @@ async def create_my_api_key(
     return CreatedApiKey(key=ApiKeyDTO(**_fields(key, account, facts, policy)), token=generated.token)
 
 
+@router.patch("/{key_id}", response_model=ApiKeyDTO)
+async def update_my_api_key(
+    key_id: str,
+    body: UpdateApiKeyRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Rename a key, or say what it is for. What it may do, where it reaches
+    and when it expires stay as they were made: change those by rotating it
+    or making a new one."""
+    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    if key.revoked_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "api_key_revoked", "message": "A revoked key is a record; it can't be changed."},
+        )
+    fields = body.model_fields_set
+    if not ({"name", "description"} & fields):
+        raise _invalid("Nothing to change: send a name or a description.")
+    name = body.name.strip() if "name" in fields and body.name is not None else key.name
+    if not name:
+        raise _invalid("A key needs a name.")
+    description = (
+        (body.description or "").strip() or None
+        if "description" in fields else key.description
+    )
+    changes = {
+        field: {"from": before, "to": after}
+        for field, before, after in (
+            ("name", key.name, name), ("description", key.description, description),
+        )
+        if before != after
+    }
+    if changes:
+        await api_key_repo.update_details(session, key.id, name=name, description=description)
+        await _record(session, "updated", key, changes=changes)
+        await session.commit()
+        await session.refresh(key)
+    owner, facts = await _owner_and_facts(session, user)
+    policy = await _policy(session)
+    usage = await _usage(session, [key.id])
+    return ApiKeyDTO(**_fields(key, owner, facts, policy, usage))
+
+
 @router.post("/{key_id}/rotate", response_model=CreatedApiKey)
 @limiter.limit("5/minute")
 async def rotate_my_api_key(
@@ -871,26 +1209,52 @@ async def rotate_my_api_key(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Replace a key with a new token that can do exactly the same, keeping
-    the old one working for a grace period while you swap it over."""
-    old = await api_key_repo.get_for_user(session, user.id, key_id)
-    if old is None:
-        raise HTTPException(status_code=404, detail="API key not found")
-    if old.revoked_at:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"error": "api_key_revoked", "message": "A revoked key cannot be rotated. Create a new one."},
-        )
+    the old one working for a grace period while you swap it over — or, for
+    a key that has expired, renew it: a new token, nothing to keep."""
     policy = await _policy(session)
     if not policy.enabled:
         raise _refused("api_keys_disabled", "API keys are turned off for this deployment.")
+    old = await api_key_repo.get_for_user(session, user.id, key_id)
+    if old is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    async def _replaceable() -> None:
+        if old.revoked_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "api_key_revoked", "message": "A revoked key cannot be rotated. Create a new one."},
+            )
+        if await api_key_repo.has_successor(session, old.id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "api_key_rotated",
+                    "message": "This key was already replaced. Rotate its replacement instead.",
+                },
+            )
+
+    await _replaceable()  # before asking anyone to prove anything
+    await _step_up(request, user, session, body.current_password, policy)
+    # Everything below decides on the key as it stands under the lock: a
+    # revocation racing this rotation either lands first (and is seen) or
+    # waits for it (and revokes the old key, which has its successor).
+    await api_key_repo.hold_principal(session, user.id)
+    await session.refresh(old)
+    await _replaceable()
+    old_expiry = api_keys.effective_expiry(old, max_lifetime_days=policy.max_lifetime_days)
+    renewing = old_expiry is not None and old_expiry <= _now()
+    if renewing and await api_key_repo.count_active_for_user(
+        session, user.id, max_lifetime_days=policy.max_lifetime_days,
+    ) >= MAX_ACTIVE_KEYS:
+        raise _too_many()
+    grace = 0 if renewing else body.grace_seconds
     created = api_keys.parse_instant(old.created_at)
-    old_expiry = api_keys.parse_instant(old.expires_at)
+    stored_expiry = api_keys.parse_instant(old.expires_at)
     expires_at = _checked_expiry(
         body, policy,
-        default_lifetime=(old_expiry - created) if old_expiry and created else None,
+        default_lifetime=(stored_expiry - created) if stored_expiry and created else None,
         default_never=old.expires_at is None,
     )
-    await _step_up(request, user, session, body.current_password)
 
     generated = api_keys.generate(old.kind)
     key = await api_key_repo.create(
@@ -904,18 +1268,17 @@ async def rotate_my_api_key(
         expires_at=expires_at, created_ip=_client_ip(request),
         created_user_agent=request.headers.get("user-agent"), rotated_from=old.id,
     )
-    if body.grace_seconds:
+    if grace:
         await api_key_repo.set_expiry(
-            session, old.id, (_now() + timedelta(seconds=body.grace_seconds)).isoformat(),
+            session, old.id, (_now() + timedelta(seconds=grace)).isoformat(),
         )
-        api_key_service.forget(old.id)
     else:
         await api_key_repo.revoke(session, old.id, by=user.id, reason="rotated")
-        api_key_service.forget(old.id)
+    api_key_service.forget(old.id)
     await _record(
         session, "rotated", key,
-        created_by=user.id, previous_key_id=old.id, grace_seconds=body.grace_seconds,
-        expires_at=expires_at, client_ip=_client_ip(request),
+        created_by=user.id, previous_key_id=old.id, grace_seconds=grace,
+        renewed=renewing, expires_at=expires_at, client_ip=_client_ip(request),
     )
     await session.commit()
     account, facts = await _owner_and_facts(session, user)
@@ -926,6 +1289,7 @@ async def rotate_my_api_key(
 @router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_my_api_key(
     key_id: str,
+    request: Request,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -933,7 +1297,7 @@ async def revoke_my_api_key(
     key = await api_key_repo.get_for_user(session, user.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
-    await _revoke(session, key, by=user.id, reason="owner")
+    await _revoke(session, key, by=user.id, reason="owner", client_ip=_client_ip(request))
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -982,7 +1346,7 @@ async def revoke_this_key(
     """Revoke the key making this request — for whoever finds one where it
     should not be. Works whatever the key's state, short of already revoked."""
     _context, key = await _this_key(request, session)
-    await _revoke(session, key, by=key.user_id, reason="self")
+    await _revoke(session, key, by=key.user_id, reason="self", client_ip=_client_ip(request))
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -999,45 +1363,243 @@ def _owner_dto(owner: UserORM) -> Owner:
     )
 
 
+_Status = Literal["active", "paused", "owner_inactive", "expired", "revoked"]
+_Focus = Literal["expiring_soon", "never_expires", "unused", "recently_revoked"]
+_Sort = Literal["created", "lastUsed", "expires", "name"]
+
+
+class _InventoryFilters:
+    """The inventory's filters, as the list, its counts and its export take them."""
+
+    def __init__(
+        self,
+        owner_id: Optional[str] = Query(None, alias="ownerId", max_length=128),
+        status_filter: Optional[_Status] = Query(None, alias="status"),
+        focus: Optional[_Focus] = Query(None),
+        unused_days: Optional[int] = Query(None, alias="unusedDays", ge=1, le=3650),
+        q: Optional[str] = Query(None, max_length=200),
+        sort: _Sort = Query("created"),
+        order: Literal["asc", "desc"] = Query("desc"),
+    ):
+        self.owner_id = owner_id
+        self.status = status_filter
+        self.focus = focus
+        self.unused_days = unused_days
+        self.q = q
+        self.sort = sort
+        self.order = order
+
+    def query(self, policy: _PolicyValues) -> dict:
+        return dict(
+            owner_id=self.owner_id, status=self.status, focus=self.focus,
+            unused_days=self.unused_days, search=self.q, sort=self.sort, order=self.order,
+            max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
+        )
+
+
 @admin_router.get(
     "", response_model=AdminApiKeyList,
     dependencies=[Depends(requires("system:audit:read"))],
 )
 async def list_api_keys(
-    owner_id: Optional[str] = Query(None, alias="ownerId", max_length=128),
-    status_filter: Optional[Literal["active", "expired", "revoked"]] = Query(None, alias="status"),
-    unused_days: Optional[int] = Query(None, alias="unusedDays", ge=1, le=3650),
-    q: Optional[str] = Query(None, max_length=200),
+    filters: _InventoryFilters = Depends(),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=100_000),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Every key on the platform, with its owner — filter to one person, a
-    status, or keys nobody has used in a while."""
-    rows, total = await api_key_repo.list_all(
-        session, owner_id=owner_id, status=status_filter, unused_days=unused_days,
-        search=q, limit=limit, offset=offset,
-    )
+    status, keys expiring soon, never expiring or nobody has used in a while,
+    and sort by when they were made, last used or expire."""
     policy = await _policy(session)
+    rows, total = await api_key_repo.list_all(
+        session, **filters.query(policy), limit=limit, offset=offset,
+    )
     facts = await _identity_facts(session, {owner.id for _key, owner in rows})
+    usage = await _usage(session, [key.id for key, _owner in rows])
     return AdminApiKeyList(
         items=[
-            AdminApiKeyDTO(**_fields(key, owner, facts, policy), owner=_owner_dto(owner))
+            AdminApiKeyDTO(**_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner))
             for key, owner in rows
         ],
         total=total,
     )
 
 
+@admin_router.get(
+    "/stats", response_model=AdminApiKeyStats,
+    dependencies=[Depends(requires("system:audit:read"))],
+)
+async def api_key_stats(
+    owner_id: Optional[str] = Query(None, alias="ownerId", max_length=128),
+    q: Optional[str] = Query(None, max_length=200),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The inventory's counts — by status, and the ones worth a look — over
+    the same owner and search the list is showing."""
+    policy = await _policy(session)
+    counts = await api_key_repo.stats(
+        session, owner_id=owner_id, search=q,
+        max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
+    )
+    return AdminApiKeyStats(
+        total=counts["total"],
+        by_status=StatusCounts(
+            active=counts["active"], paused=counts["paused"],
+            owner_inactive=counts["owner_inactive"], expired=counts["expired"],
+            revoked=counts["revoked"],
+        ),
+        expiring_soon=counts["expiring_soon"], never_expires=counts["never_expires"],
+        unused90=counts["unused"], revoked30d=counts["recently_revoked"],
+    )
+
+
+_CSV_COLUMNS = (
+    "id", "name", "prefix", "owner_id", "owner_email", "status", "views", "data",
+    "publish", "reaches", "networks", "created_at", "expires_at", "last_used_at",
+    "last_used_ip", "requests_30d", "revoked_at", "revoked_reason",
+)
+
+
+def _cell(value) -> str:
+    """A value as a CSV cell a spreadsheet shows as text: a leading ``=``,
+    ``+``, ``-``, ``@``, tab or CR would otherwise run as a formula when an
+    auditor opens the file — and key names are whatever their owners typed."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def _reaches(resources) -> str:
+    if resources == "all" or not isinstance(resources, dict):
+        return "everything"
+    parts = []
+    for key, label in (("workspaces", "workspace"), ("views", "view"), ("dataSources", "data source")):
+        count = len(resources.get(key) or [])
+        if count:
+            parts.append(f"{count} {label}{'' if count == 1 else 's'}")
+    return ", ".join(parts) or "nothing"
+
+
+@admin_router.get(
+    "/export.csv", dependencies=[Depends(requires("system:audit:read"))],
+)
+async def export_api_keys(
+    filters: _InventoryFilters = Depends(),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The inventory as a CSV — the credential report auditors ask for — with
+    the list's filters and order, up to 10,000 keys. Read a page at a time,
+    each in a short session of its own, so a large download never holds a
+    connection open between pages."""
+    policy = await _policy(session)
+    query = filters.query(policy)
+    _rows, total = await api_key_repo.list_all(session, **query, limit=1, offset=0)
+
+    async def stream():
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(_CSV_COLUMNS)
+        yield out.getvalue()
+        for offset in range(0, min(total, _EXPORT_MAX), _EXPORT_PAGE):
+            async with db_engine.get_async_session() as page_session:
+                rows, _ = await api_key_repo.list_all(
+                    page_session, **query, limit=_EXPORT_PAGE, offset=offset,
+                )
+                facts = await _identity_facts(page_session, {o.id for _k, o in rows})
+                usage = await _usage(page_session, [k.id for k, _o in rows])
+            out.seek(0)
+            out.truncate()
+            for key, owner in rows:
+                fields = _fields(key, owner, facts, policy, usage)
+                profile = fields["permissions"]
+                writer.writerow([_cell(v) for v in (
+                    key.id, key.name, key.token_prefix, owner.id, owner.email,
+                    fields["status"], profile.get("views"), profile.get("data"),
+                    "yes" if profile.get("publish") else "no",
+                    _reaches(fields["resources"]), " ".join(fields["allowed_cidrs"]),
+                    key.created_at, fields["expires_at"], key.last_used_at,
+                    key.last_used_ip, fields["usage"].requests_30d,
+                    key.revoked_at, key.revoked_reason,
+                )])
+            yield out.getvalue()
+
+    stamp = _now().strftime("%Y%m%d")
+    return StreamingResponse(
+        stream(), media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="api-keys-{stamp}.csv"',
+            "X-Total-Count": str(min(total, _EXPORT_MAX)),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@admin_router.get(
+    "/{key_id}", response_model=AdminApiKeyDetail,
+    dependencies=[Depends(requires("system:audit:read"))],
+)
+async def get_api_key(key_id: str, session: AsyncSession = Depends(get_db_session)):
+    """One key in detail: whose it is, what it can do right now, how much it
+    has been used, and what it replaced or was replaced by."""
+    key = await api_key_repo.get(session, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    owner = await user_repo.get_user_by_id(session, key.user_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    policy = await _policy(session)
+    facts = await _identity_facts(session, {owner.id})
+    usage = await _usage(session, [key.id])
+    replaces, replaced_by = await _lineage(session, key)
+    return AdminApiKeyDetail(
+        **_fields(key, owner, facts, policy, usage), owner=_owner_dto(owner),
+        effective_access=await _effective_access(session, owner, api_key_service.scope_of(key)),
+        usage_days=_usage_days(usage.get(key.id, {})),
+        replaces=replaces, replaced_by=replaced_by,
+    )
+
+
 async def _tell_owner(
     session: AsyncSession, owner_id: str, admin_id: str, *,
-    title: str, body: str, resource_id: str,
+    title: str, body: str, resource_id: str, note: Optional[str] = None,
 ) -> None:
+    if note:
+        body = f"{body} The administrator said: “{note}”"
     await notification_repo.notify(
         session, user_ids=[owner_id], kind="api_key_revoked_by_admin",
         title=title, body=body, link="/me/api-keys", actor_id=admin_id,
         resource_type="api_key", resource_id=resource_id,
     )
+
+
+async def _admin_revoke(
+    session: AsyncSession, key_id: str, admin: User, note: Optional[str],
+) -> None:
+    key = await api_key_repo.get(session, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    note = (note or "").strip() or None
+    if await _revoke(session, key, by=admin.id, reason="admin", note=note):
+        await _tell_owner(
+            session, key.user_id, admin.id, resource_id=key.id, note=note,
+            title="An administrator revoked one of your API keys",
+            body=(
+                f"“{key.name}” ({key.token_prefix}…) no longer works. "
+                "Create a new key if you still need one."
+            ),
+        )
+    await session.commit()
+
+
+@admin_router.post("/{key_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_revoke_api_key_with_note(
+    key_id: str,
+    body: Optional[AdminRevokeRequest] = Body(None),
+    admin: User = Depends(requires("system:users:manage")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Revoke someone's key, optionally telling them why."""
+    await _admin_revoke(session, key_id, admin, body.note if body else None)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @admin_router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1046,37 +1608,32 @@ async def admin_revoke_api_key(
     admin: User = Depends(requires("system:users:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    key = await api_key_repo.get(session, key_id)
-    if key is None:
-        raise HTTPException(status_code=404, detail="API key not found")
-    if await _revoke(session, key, by=admin.id, reason="admin"):
-        await _tell_owner(
-            session, key.user_id, admin.id, resource_id=key.id,
-            title="An administrator revoked one of your API keys",
-            body=(
-                f"“{key.name}” ({key.token_prefix}…) no longer works. "
-                "Create a new key if you still need one."
-            ),
-        )
-    await session.commit()
+    await _admin_revoke(session, key_id, admin, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @admin_users_router.post("/{user_id}/api-keys/revoke-all")
 async def admin_revoke_all_api_keys(
     user_id: str,
+    body: Optional[AdminRevokeRequest] = Body(None),
     admin: User = Depends(requires("system:users:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Revoke every key a person holds — the step to take beside ending their
     sessions, which does not touch keys."""
-    keys = await api_key_repo.revoke_all_for_user(session, user_id, by=admin.id, reason="admin")
+    note = ((body.note if body else None) or "").strip() or None
+    keys = await api_key_repo.revoke_all_for_user(
+        session, user_id, by=admin.id, reason="admin", note=note,
+    )
     for key in keys:
-        await _record(session, "revoked", key, revoked_by=admin.id, reason="admin")
+        await _record(
+            session, "revoked", key, revoked_by=admin.id, reason="admin",
+            **({"note": note} if note else {}),
+        )
         api_key_service.forget(key.id)
     if keys:
         await _tell_owner(
-            session, user_id, admin.id, resource_id=user_id,
+            session, user_id, admin.id, resource_id=user_id, note=note,
             title="An administrator revoked your API keys",
             body=(
                 f"All {len(keys)} of your API keys were revoked. "

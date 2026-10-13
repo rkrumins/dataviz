@@ -3205,6 +3205,8 @@ class ApiKeyORM(Base):
     revoked_at = Column(Text, nullable=True)
     revoked_by = Column(Text, nullable=True)
     revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self
+    # What an administrator told the owner when revoking it, if anything.
+    revoked_note = Column(Text, nullable=True)
     # The key this one replaced, when minted by a rotation.
     rotated_from = Column(Text, nullable=True)
 
@@ -3212,6 +3214,13 @@ class ApiKeyORM(Base):
         UniqueConstraint("token_hash", name="uq_api_keys_token_hash"),
         Index("idx_api_keys_user", "user_id"),
         Index("idx_api_keys_expires_at", "expires_at"),
+        # The admin inventory's order, and its "unused for 90 days" filter.
+        Index("idx_api_keys_created_at", "created_at"),
+        Index(
+            "idx_api_keys_live_last_used", "last_used_at",
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
         CheckConstraint(
             "kind IN ('personal', 'service')", name="ck_api_keys_kind",
         ),
@@ -3219,6 +3228,26 @@ class ApiKeyORM(Base):
 
     def __repr__(self) -> str:
         return f"<ApiKey id={self.id!r} user={self.user_id!r} prefix={self.token_prefix!r}>"
+
+
+class ApiKeyUsageORM(Base):
+    """Requests made with one API key on one day (UTC) — counted in memory
+    by each API process and added here every half minute, never written per
+    request (``api_key_usage``). No foreign key: a key deleted with its owner
+    must not fail the batch a late count arrives in; the housekeeping sweep
+    drops orphans and anything older than 90 days."""
+    __tablename__ = "api_key_usage"
+
+    key_id = Column(Text, primary_key=True)
+    day = Column(Text, primary_key=True)                # YYYY-MM-DD, UTC
+    requests = Column(Integer, nullable=False, default=0)
+    # Of which: changed something; refused as a key (401, 403 or 429 on the
+    # key's own account); failed otherwise (any other 4xx or 5xx).
+    writes = Column(Integer, nullable=False, default=0)
+    refused = Column(Integer, nullable=False, default=0)
+    errors = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("idx_api_key_usage_day", "day"),)
 
 
 # ------------------------------------------------------------------ #

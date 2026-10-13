@@ -501,6 +501,7 @@ _ACCOUNT_ACTIVITY_TYPES = (
     "user.reactivated",
     "identity.api_key.created",
     "identity.api_key.rotated",
+    "identity.api_key.updated",
     "identity.api_key.revoked",
     "identity.api_key.misuse",
 )

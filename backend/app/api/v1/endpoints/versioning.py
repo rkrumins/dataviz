@@ -1517,8 +1517,12 @@ async def merge_preview(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    # The draft must be this graph's, and the caller's to read: a preview
+    # shows what it would change.
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         return await svc.preview_merge(graph_id=graph_id, branch_id=branch_id)
 
@@ -1529,6 +1533,8 @@ async def branch_view_changes(
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """What this draft changes in views, beside its graph changes: the views it creates (imports
@@ -1540,6 +1546,7 @@ async def branch_view_changes(
     from backend.app.db.models import ViewORM
     from backend.app.services import draft_views, view_access
 
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
     changes = [c for c in await draft_views.changes_on(session, branch_id) if c["workspaceId"] == ws_id]
     visible = changes
     if rbac_flag("RBAC_ENFORCE_VIEWS") and changes:
@@ -3075,11 +3082,20 @@ async def fork_graph(
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
 async def open_pull_request(
     ws_id: str, graph_id: str,
+    request: Request,
     body: Optional[OpenPrRequest] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),       # read can propose
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    # A fork's pull request lands in its parent: an API key must cover the
+    # parent's data source too, not only the fork's.
+    parent_id = _meta.get("fork_parent_graph_id")
+    if parent_id:
+        parent = await svc.get_graph(parent_id) or {}
+        await api_key_auth.hold_to_data_source(
+            request, parent.get("data_source_id"), parent.get("workspace_id"),
+        )
     with _domain_errors():
         pr_id = await svc.open_pr(
             source_graph_id=graph_id, actor=user.id,

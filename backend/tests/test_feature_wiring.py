@@ -230,6 +230,10 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
         of the product hides from that reader. Reasonable in a single-company deployment
         and wrong anywhere else, so it cannot be a default: the deployment shape is the
         one thing the code cannot know.
+      * ``apiKeySsoRoundTripStepUp`` — ON lets a sign-in no identity provider vouched for
+        mint an API key: a gateway that re-signs someone in silently from a session it still
+        holds proves nothing about who is at the keyboard. Whether gateway users need keys
+        badly enough to accept that is the operator's call, not a default.
     """
     # A single-select ladder has no "off" rung to ship on, so the boolean
     # question this test asks does not apply to it.
@@ -241,7 +245,7 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
     # happened to declare the flags in.
     assert off_by_default == [
         "analyticsPublicEnabled", "analyticsShowEmailAddresses",
-        "analyticsWorkspaceVisibility", "signupEnabled",
+        "analyticsWorkspaceVisibility", "apiKeySsoRoundTripStepUp", "signupEnabled",
     ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "
@@ -373,9 +377,13 @@ def test_dependencies_point_at_real_flags():
 def test_a_flag_that_widens_access_fails_closed():
     """The posture rule, pinned. `signupEnabled` decides whether a stranger may create an
     account; `semanticLayerNonAdminEditing` decides whether a non-admin may write;
-    `apiKeysEnabled` decides whether a bearer credential is honoured at all. If we cannot
+    `apiKeysEnabled` decides whether a bearer credential is honoured at all, and
+    `apiKeySsoRoundTripStepUp` whether a sign-in nobody proved may mint one. If we cannot
     read any of them, we must assume the admin wanted the NARROWER world."""
-    for key in ("signupEnabled", "semanticLayerNonAdminEditing", "apiKeysEnabled"):
+    for key in (
+        "signupEnabled", "semanticLayerNonAdminEditing", "apiKeysEnabled",
+        "apiKeySsoRoundTripStepUp",
+    ):
         assert FEATURE_WIRING[key].posture == "security"
         assert FEATURE_WIRING[key].fail_safe_default is False
 

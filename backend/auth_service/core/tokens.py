@@ -177,6 +177,14 @@ SIGNIN_SSO = "sso"
 #: key — is allowed on a session that may have been open for hours.
 AUTH_TIME_CLAIM = "auth_time"
 
+#: Beside ``auth_time``: present (true) only when the identity provider itself
+#: asserted that instant at sign-in — not when it said nothing and the sign-in
+#: stood in for it, nor when what it said was too old to use. Only a proven
+#: instant shows a credential was really presented recently; a provider that
+#: re-signs someone in silently from a warm session proves nothing of the
+#: kind. Signed into both tokens and carried through every rotation.
+AUTH_TIME_PROVEN_CLAIM = "auth_time_proven"
+
 
 def password_change_pending(payload: dict, account_must_change: bool) -> bool:
     """Whether this session has to change the account's password first.
@@ -273,6 +281,9 @@ class RefreshClaims:
     # rather than refused, so deploying the cutoff does not sign the
     # whole estate out on the way in.
     mint_ms: int = 0
+    # Whether ``auth_time`` was asserted by the identity provider (see
+    # ``AUTH_TIME_PROVEN_CLAIM``). Family-invariant, like ``auth_time``.
+    auth_time_proven: bool = False
 
 
 def create_refresh_token(
@@ -281,6 +292,7 @@ def create_refresh_token(
     extra: dict | None = None,
     *,
     auth_time: int | None = None,
+    auth_time_proven: bool = False,
     idp_exp: int | None = None,
     jti: str | None = None,
     expires_at_epoch: int | None = None,
@@ -327,8 +339,11 @@ def create_refresh_token(
         "mat": minted_ms,
         "exp": expires_at,
     }
+    proven = auth_time is not None and bool(auth_time_proven)
     if auth_time is not None:
         payload["auth_time"] = int(auth_time)
+    if proven:
+        payload[AUTH_TIME_PROVEN_CLAIM] = True
     if idp_exp is not None:
         payload["idp_exp"] = int(idp_exp)
     # ``fam`` and ``mat`` are as load-bearing here as ``aud`` is: the
@@ -336,7 +351,7 @@ def create_refresh_token(
     # the revocation cutoff and the idle ceiling.
     payload.update({
         k: v for k, v in _safe_extra(extra).items()
-        if k not in ("fam", "mat")
+        if k not in ("fam", "mat", AUTH_TIME_PROVEN_CLAIM)
     })
     token = _encode(payload)
     claims = RefreshClaims(
@@ -347,6 +362,7 @@ def create_refresh_token(
         auth_time=int(auth_time) if auth_time is not None else None,
         idp_exp=int(idp_exp) if idp_exp is not None else None,
         mint_ms=minted_ms,
+        auth_time_proven=proven,
     )
     return token, claims
 
@@ -407,6 +423,7 @@ def decode_refresh_token(
     return RefreshClaims(
         sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
         idp_exp=idp_exp, mint_ms=mint_ms,
+        auth_time_proven=auth_time is not None and payload.get(AUTH_TIME_PROVEN_CLAIM) is True,
     )
 
 

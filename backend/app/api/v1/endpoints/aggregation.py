@@ -17,6 +17,7 @@ import asyncio
 import json as _json
 import logging
 import os
+import time
 from typing import List, Optional
 
 import httpx
@@ -24,6 +25,7 @@ from fastapi import (
     APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response, status,
 )
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import (
@@ -874,6 +876,10 @@ async def get_job(
 
 # ── SSE: GET /data-sources/{ds_id}/aggregation-jobs/{job_id}/events ──
 
+#: How long a stream opened with an API key runs before the client must
+#: reconnect — and so present the key, and have it checked, again.
+_KEY_STREAM_SECONDS = 300
+
 
 @router.get(
     "/data-sources/{ds_id}/aggregation-jobs/{job_id}/events",
@@ -899,6 +905,27 @@ async def stream_job_events(
     has ``id:`` (sequence), ``event:`` (type), and ``data:`` (JSON
     envelope) lines, terminated by a blank line.
     """
+    # The consumer subscribes by job alone, so the job must be shown to
+    # belong to the data source the caller was checked against first — or
+    # read access to one source would stream any job on the platform. Its
+    # own short session: a stream can run for minutes and must not hold a
+    # pooled connection while it does.
+    from backend.app.db import engine as db_engine
+    from backend.app.services.aggregation.models import AggregationJobORM
+    async with db_engine.get_async_session() as lookup:
+        owning = (await lookup.execute(
+            select(AggregationJobORM.data_source_id).where(AggregationJobORM.id == job_id)
+        )).scalar_one_or_none()
+    if owning != ds_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # A key's access is checked when the stream opens; ending it after a few
+    # minutes makes the client reconnect (``Last-Event-ID`` resumes it),
+    # which checks the key again — so a revoked key stops listening.
+    deadline = (
+        time.monotonic() + _KEY_STREAM_SECONDS
+        if getattr(request.state, "auth_method", None) == "api_key" else None
+    )
+
     # The consumer subscribes via ``broker.JobScope`` (single-job
     # scope) — separate type from the ``schemas.JobScope`` that
     # carries workspace_id/data_source_id on event envelopes. They
@@ -919,8 +946,18 @@ async def stream_job_events(
         from_seq = None
 
     async def _frames():
+        events = consumer.stream(broker_scope, from_seq).__aiter__()
         try:
-            async for event in consumer.stream(broker_scope, from_seq):
+            while True:
+                try:
+                    if deadline is None:
+                        event = await events.__anext__()
+                    else:
+                        event = await asyncio.wait_for(
+                            events.__anext__(), timeout=max(0.0, deadline - time.monotonic()),
+                        )
+                except (StopAsyncIteration, asyncio.TimeoutError):
+                    return
                 if await request.is_disconnected():
                     return
                 payload = event.model_dump_json()
@@ -944,6 +981,13 @@ async def stream_job_events(
                 f"event: error\n"
                 f"data: {{\"detail\": \"stream error\"}}\n\n"
             ).encode("utf-8")
+        finally:
+            close = getattr(events, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001 — already ending
+                    pass
 
     return StreamingResponse(
         _frames(),

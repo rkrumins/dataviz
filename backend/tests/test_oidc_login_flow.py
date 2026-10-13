@@ -355,6 +355,43 @@ async def test_a_recent_auth_time_is_kept_as_asserted(svc_and_events, provider):
 
 
 @pytest.mark.asyncio
+async def test_only_a_sign_in_the_provider_dated_is_proven_and_renewal_keeps_it(
+    svc_and_events, provider,
+):
+    """Minting an API key over SSO needs a sign-in the provider says happened
+    just now. Its own recent date proves one; no date, or one too old to
+    use, does not — and renewing the session carries the answer forward,
+    never upgrades it."""
+    import time
+
+    from backend.auth_service.core.tokens import (
+        AUTH_TIME_PROVEN_CLAIM,
+        decode_refresh_token,
+        decode_token,
+    )
+
+    svc, _events = svc_and_events
+    _user, tokens = await svc.complete_sso_login(
+        _identity(auth_time=int(time.time()) - 60), provider_id=provider.id,
+        provider_slug=provider.slug, linking_policy="strict",
+    )
+    _, renewed = await svc.refresh(tokens.refresh_token)
+    for issued in (tokens, renewed):
+        assert decode_token(issued.access_token)[AUTH_TIME_PROVEN_CLAIM] is True
+        assert decode_refresh_token(issued.refresh_token).auth_time_proven is True
+
+    for subject, auth_time in (("sub-undated", None), ("sub-stale", int(time.time()) - 2 * 86400)):
+        _user, tokens = await svc.complete_sso_login(
+            _identity(external_id=subject, email=f"{subject}@example.com", auth_time=auth_time),
+            provider_id=provider.id, provider_slug=provider.slug, linking_policy="strict",
+        )
+        _, renewed = await svc.refresh(tokens.refresh_token)
+        for issued in (tokens, renewed):
+            assert AUTH_TIME_PROVEN_CLAIM not in decode_token(issued.access_token), subject
+            assert not decode_refresh_token(issued.refresh_token).auth_time_proven, subject
+
+
+@pytest.mark.asyncio
 async def test_reauth_goes_back_to_the_sessions_own_provider(
     svc_and_events, provider, db_session,
 ):

@@ -21,7 +21,12 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.advisory import claim_this_pass
-from backend.app.db.repositories import api_key_repo, notification_repo, outbox_event_repo
+from backend.app.db.repositories import (
+    api_key_repo,
+    api_key_usage_repo,
+    notification_repo,
+    outbox_event_repo,
+)
 from backend.auth_service.core.api_keys import parse_instant
 
 logger = logging.getLogger(__name__)
@@ -83,7 +88,8 @@ async def run_sweeper(
     *,
     interval: float = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
-    """Background loop: remind until ``shutdown`` is set. A failed pass is
+    """Background loop until ``shutdown`` is set: remind owners of keys about
+    to expire, and drop usage counts past their retention. A failed pass is
     logged and retried on the next tick."""
     logger.info("API key housekeeping started (interval=%.0fs)", interval)
     while not shutdown.is_set():
@@ -93,6 +99,7 @@ async def run_sweeper(
                     reminded = await remind_once(session)
                     if reminded:
                         logger.info("Sent %d API key expiry reminder(s)", reminded)
+                    await api_key_usage_repo.prune(session)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

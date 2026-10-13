@@ -31,12 +31,13 @@ import json
 import logging
 from typing import Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     CatalogItemORM,
     ProviderORM,
+    ViewORM,
     WorkspaceDataSourceORM,
 )
 from backend.app.services.permission_service import PermissionClaims
@@ -46,15 +47,64 @@ logger = logging.getLogger(__name__)
 
 
 def _is_unrestricted(claims: PermissionClaims) -> bool:
-    """``None`` filter when the caller is a platform-tier admin."""
+    """``None`` filter when the caller is a platform-tier admin — or an API
+    key over everything that such an admin owns."""
+    key = claims.key_scope
     return (
         "system:admin" in claims.global_perms
         or "system:org-admin" in claims.global_perms
+        or (key is not None and key.org_unrestricted)
     )
 
 
 def _user_workspace_ids(claims: PermissionClaims) -> set[str]:
     return set(claims.ws_perms.keys())
+
+
+def _acl_workspace_ids(claims: PermissionClaims) -> set[str]:
+    """The workspaces a catalogue row's ``permitted_workspaces`` is matched
+    against. For an API key limited to a selection, only the workspaces it
+    covers whole: a key on one data source does not see what is shared with
+    the rest of that data source's workspace."""
+    key = claims.key_scope
+    if key is not None and not key.all_resources:
+        return set(key.workspaces) & _user_workspace_ids(claims)
+    return _user_workspace_ids(claims)
+
+
+def _key_sources(claims: PermissionClaims):
+    """For an API key limited to a selection, the data sources whose
+    ontology, catalog entry and provider it may see: those in the workspaces
+    it covers whole, those it names, and those its views render — a view
+    without a source of its own renders its workspace's primary. ``None``
+    for every other caller."""
+    key = claims.key_scope
+    if key is None or key.all_resources:
+        return None
+    clauses = []
+    if key.workspaces:
+        clauses.append(WorkspaceDataSourceORM.workspace_id.in_(sorted(key.workspaces)))
+    if key.data_source_ids:
+        clauses.append(WorkspaceDataSourceORM.id.in_(sorted(key.data_source_ids)))
+    views = sorted(key.view_workspaces)  # the selected views that still exist
+    if views:
+        clauses.append(WorkspaceDataSourceORM.id.in_(
+            select(ViewORM.data_source_id).where(ViewORM.id.in_(views))
+        ))
+        clauses.append(and_(
+            WorkspaceDataSourceORM.is_primary.is_(True),
+            WorkspaceDataSourceORM.workspace_id.in_(
+                select(ViewORM.workspace_id).where(
+                    ViewORM.id.in_(views), ViewORM.data_source_id.is_(None),
+                )
+            ),
+        ))
+    return or_(*clauses) if clauses else false()
+
+
+def _in_reach(stmt, claims: PermissionClaims):
+    clause = _key_sources(claims)
+    return stmt if clause is None else stmt.where(clause)
 
 
 def _parse_permitted(raw: Optional[str]) -> list[str]:
@@ -99,12 +149,13 @@ async def compute_visible_ontology_ids(
     # Tombstoned data sources must not keep granting visibility: without the
     # deleted_at filter a deleted source still projects its ontology/provider/
     # catalog item into the caller's readable set (RBAC leak).
-    stmt = (
+    stmt = _in_reach(
         select(WorkspaceDataSourceORM.ontology_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .where(WorkspaceDataSourceORM.ontology_id.is_not(None))
-        .distinct()
+        .distinct(),
+        claims,
     )
     result = await session.execute(stmt)
     return {row[0] for row in result.all() if row[0] is not None}
@@ -125,11 +176,12 @@ async def compute_visible_provider_ids(
     # Two contributors: providers referenced by the user's data sources,
     # and providers whose ``permitted_workspaces`` overlaps the user's
     # workspaces (per-row ACL). Both unioned.
-    via_data_sources_stmt = (
+    via_data_sources_stmt = _in_reach(
         select(WorkspaceDataSourceORM.provider_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
-        .distinct()
+        .distinct(),
+        claims,
     )
     visible: set[str] = {
         row[0] for row in (await session.execute(via_data_sources_stmt)).all()
@@ -142,10 +194,11 @@ async def compute_visible_provider_ids(
     permitted_rows = await session.execute(
         select(ProviderORM.id, ProviderORM.permitted_workspaces)
     )
+    acl_ws_ids = _acl_workspace_ids(claims)
     for prov_id, permitted_raw in permitted_rows.all():
         if prov_id in visible:
             continue
-        if _permitted_overlaps(_parse_permitted(permitted_raw), user_ws_ids):
+        if _permitted_overlaps(_parse_permitted(permitted_raw), acl_ws_ids):
             visible.add(prov_id)
     return visible
 
@@ -185,12 +238,13 @@ async def compute_visible_catalog_ids(
     user_ws_ids = _user_workspace_ids(claims)
     if not user_ws_ids:
         return set()
-    via_data_sources_stmt = (
+    via_data_sources_stmt = _in_reach(
         select(WorkspaceDataSourceORM.catalog_item_id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .where(WorkspaceDataSourceORM.catalog_item_id.is_not(None))
-        .distinct()
+        .distinct(),
+        claims,
     )
     visible: set[str] = {
         row[0] for row in (await session.execute(via_data_sources_stmt)).all()
@@ -200,10 +254,11 @@ async def compute_visible_catalog_ids(
     permitted_rows = await session.execute(
         select(CatalogItemORM.id, CatalogItemORM.permitted_workspaces)
     )
+    acl_ws_ids = _acl_workspace_ids(claims)
     for item_id, permitted_raw in permitted_rows.all():
         if item_id in visible:
             continue
-        if _permitted_overlaps(_parse_permitted(permitted_raw), user_ws_ids):
+        if _permitted_overlaps(_parse_permitted(permitted_raw), acl_ws_ids):
             visible.add(item_id)
     return visible
 
@@ -234,11 +289,12 @@ async def compute_visible_data_source_ids(
     user_ws_ids = _user_workspace_ids(claims)
     if not user_ws_ids:
         return set()
-    rows = await session.execute(
+    rows = await session.execute(_in_reach(
         select(WorkspaceDataSourceORM.id)
         .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
-        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
-    )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None)),
+        claims,
+    ))
     return {row[0] for row in rows.all() if row[0] is not None}
 
 

@@ -37,7 +37,7 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
-from backend.app.services import api_key_service
+from backend.app.services import api_key_service, api_key_usage
 from backend.app.services.feature_flags import feature_flags
 from backend.auth_service.core import api_keys
 from backend.auth_service.ratelimit import reset_account_limiter_for_tests
@@ -145,17 +145,36 @@ def reached_the_handler():
 _GRAPHS = {
     gid: {
         "graph_id": gid, "workspace_id": ws, "tenant_id": None, "data_source_id": ds,
-        "kind": "source", "base_ontology_id": None, "fork_parent_graph_id": None,
+        "kind": "source", "base_ontology_id": None, "fork_parent_graph_id": parent,
         "fork_base_commit_seq": None, "main_head_commit_seq": 1,
         "created_by": OTHER, "created_at": "2026-01-01T00:00:00+00:00",
     }
-    for gid, ws, ds in (("g_a", "ws_a", "ds_a"), ("g_a2", "ws_a", "ds_a2"))
+    for gid, ws, ds, parent in (
+        ("g_a", "ws_a", "ds_a", None), ("g_a2", "ws_a", "ds_a2", None),
+        # A fork of g_a2 whose own data source is ds_a.
+        ("g_fork", "ws_a", "ds_a", "g_a2"),
+    )
 }
+#: Each draft, and the graph it belongs to.
+_BRANCHES = {"br_a": "g_a", "br_a2": "g_a2"}
 
 
 class _FakeVersioning:
     async def get_graph(self, graph_id):
         return _GRAPHS.get(graph_id)
+
+    async def get_graph_by_data_source(self, _data_source_id):
+        reached_the_handler()
+
+    async def assert_branch_readable(self, *, graph_id, branch_id, viewer):
+        if _BRANCHES.get(branch_id) != graph_id:
+            raise ValueError("unknown graph/branch")
+
+    async def preview_merge(self, **_kwargs):
+        reached_the_handler()
+
+    async def open_pr(self, **_kwargs):
+        reached_the_handler()
 
 
 class _FakeImports:
@@ -202,6 +221,7 @@ async def api_key_app(db_session, monkeypatch):
     )
     api_key_service.reset_for_tests()
     api_key_auth.reset_for_tests()
+    api_key_usage.recorder.reset()
     reset_account_limiter_for_tests()
     try:
         await world(db_session)
@@ -213,4 +233,5 @@ async def api_key_app(db_session, monkeypatch):
         app.state.identity_service = previous
         api_key_service.reset_for_tests()
         api_key_auth.reset_for_tests()
+        api_key_usage.recorder.reset()
         reset_account_limiter_for_tests()

@@ -51,7 +51,7 @@ places every table by area and schema.
 
 | Domain | Owned tables | Notes |
 |---|---|---|
-| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens`, `api_keys` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. |
+| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens`, `api_keys`, `api_key_usage` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. |
 | **workspace** | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` | Tenancy boundary — `workspace_id` is THE tenant identifier. |
 | **provider** | `providers`, `catalog_items` | Pure infrastructure — no tenant data, no PII. |
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |

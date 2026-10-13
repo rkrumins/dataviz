@@ -70,11 +70,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reaches_every_workspace(claims: PermissionClaims) -> bool:
+    """Global admin — or an API key over everything whose owner's
+    organisation-wide role gives it permissions in every workspace
+    (``KeyScope.org_perms``), which its claims do not list one by one."""
+    key = claims.key_scope
+    return has_permission(claims, "system:admin") or bool(key is not None and key.org_perms)
+
+
 def _can_read_workspace(claims: PermissionClaims, ws_id: str) -> bool:
     """A user can read a workspace if they hold any binding into it
-    (any non-empty permission entry under that ws_id) OR are global
-    admin. Used for list filtering and the GET-by-id check."""
-    if has_permission(claims, "system:admin"):
+    (any non-empty permission entry under that ws_id) OR reach every
+    workspace. Used for list filtering and the GET-by-id check."""
+    if _reaches_every_workspace(claims):
         return True
     return bool(claims.ws_perms.get(ws_id))
 
@@ -113,7 +121,7 @@ async def list_workspaces(
     the whole estate just to show ten rows.
     """
     enforce = rbac_flag("RBAC_ENFORCE_WORKSPACES")
-    unrestricted = not enforce or has_permission(claims, "system:admin")
+    unrestricted = not enforce or _reaches_every_workspace(claims)
 
     if limit is None:
         workspaces = await workspace_repo.list_workspaces(session)

@@ -64,6 +64,33 @@ def test_the_identity_provider_check_runs_wherever_the_api_does():
             assert "runs_scheduler" not in ast.unparse(node.test)
 
 
+def test_api_key_usage_is_flushed_wherever_the_api_runs_and_before_the_pool_goes():
+    """Each process counts its own keys' requests in memory, so every one
+    must write them: gated on the scheduler role, the web replicas' counts
+    would never reach the table. And the last flush must come before the
+    database pool closes, or the last half minute of use is lost."""
+    from backend.app import main
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(main.lifespan)))
+    parents = {child: node for node in ast.walk(tree)
+               for child in ast.iter_child_nodes(node)}
+
+    def calls(name):
+        return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and name in (getattr(n.func, "id", None), getattr(n.func, "attr", None))]
+
+    started = calls("run_flusher")
+    assert started, "the API key usage flusher is no longer started here"
+    node = started[0]
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.If):
+            assert "runs_scheduler" not in ast.unparse(node.test)
+    final = [n for n in calls("flush") if "_usage_recorder" in ast.unparse(n.func)]
+    assert final, "nothing writes what is still counted at shutdown"
+    assert final[0].lineno < max(n.lineno for n in calls("close_db"))
+
+
 # ── One process at a time ────────────────────────────────────────────
 
 async def test_claiming_is_free_off_postgres(db_session):

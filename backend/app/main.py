@@ -1671,6 +1671,16 @@ async def lifespan(_app: FastAPI):
         name="idp-health",
     )
 
+    # API key usage: counted in this process's memory on every key request
+    # and added to ``api_key_usage`` every half minute. Every process that
+    # serves the API counts, so every one flushes — not gated on a role.
+    from .services import api_key_usage as _api_key_usage
+    _app.state._api_key_usage_shutdown = asyncio.Event()
+    _app.state._api_key_usage_task = asyncio.create_task(
+        _api_key_usage.run_flusher(_app.state._api_key_usage_shutdown),
+        name="api-key-usage",
+    )
+
     # Everything startup built lives as long as the process: take it out of
     # the garbage collector's reach. A full collection otherwise walks this
     # whole heap (~300k objects, 140-180ms on the event loop), and a request
@@ -1820,6 +1830,27 @@ async def lifespan(_app: FastAPI):
                 await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Stop the API key usage flusher, then write what is still counted:
+    # before the pool goes, or the last half minute of usage is lost.
+    _usage_shutdown = getattr(_app.state, "_api_key_usage_shutdown", None)
+    _usage_task = getattr(_app.state, "_api_key_usage_task", None)
+    if _usage_shutdown is not None:
+        _usage_shutdown.set()
+    if _usage_task is not None and not _usage_task.done():
+        try:
+            await asyncio.wait_for(_usage_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _usage_task.cancel()
+            try:
+                await _usage_task
+            except (asyncio.CancelledError, Exception):
+                pass
+    try:
+        from .services.api_key_usage import recorder as _usage_recorder
+        await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — shutting down either way
+        logger.warning("Final API key usage flush failed: %s", exc)
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the

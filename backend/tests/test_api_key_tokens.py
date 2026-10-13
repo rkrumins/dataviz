@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import Headers
 
-from backend.app.db.models import UserIdentityORM, UserORM
+from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
 from backend.app.db.repositories import api_key_repo
 from backend.auth_service.core import api_keys
 
@@ -93,14 +93,50 @@ def test_anything_else_in_authorization_is_not_a_key(header):
     assert api_keys.bearer_api_key(headers) is None
 
 
+# ── Addresses ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("raw, address", [
+    ("203.0.113.9", "203.0.113.9"),
+    (" 203.0.113.9 ", "203.0.113.9"),
+    ("::ffff:203.0.113.9", "203.0.113.9"),       # IPv4 behind a dual-stack socket
+    ("2001:DB8::1", "2001:db8::1"),
+    ("203.0.113.9, 10.0.0.1", None),             # a forwarded-for list, unparsed
+    ("unknown", None),
+    ("<b>evil</b>", None),
+    ("", None),
+    (None, None),
+])
+def test_only_an_address_is_ever_recorded_as_one(raw, address):
+    """What a proxy passes on reaches notifications and the audit log only
+    as the canonical text of an address — or not at all."""
+    assert api_keys.client_address(raw) == address
+
+
+def test_refused_keys_are_budgeted_per_address_and_per_ipv6_host():
+    assert api_keys.address_bucket("203.0.113.9") == "203.0.113.9"
+    assert api_keys.address_bucket("::ffff:203.0.113.9") == "203.0.113.9"
+    # One IPv6 host may rotate through its whole /64 at will.
+    assert (
+        api_keys.address_bucket("2001:db8:1:2::5")
+        == api_keys.address_bucket("2001:db8:1:2:ffff::9")
+        == "2001:db8:1:2::/64"
+    )
+    assert api_keys.address_bucket("2001:db8:1:3::5") != api_keys.address_bucket("2001:db8:1:2::5")
+    assert api_keys.address_bucket(None) == api_keys.address_bucket("garbage") == "unknown"
+
+
 # ── Rows ────────────────────────────────────────────────────────────
 
 
-async def _user(session, user_id: str, *, email: str | None = None) -> UserORM:
+async def _user(
+    session, user_id: str, *, email: str | None = None, password: bool = False,
+    status: str = "active",
+) -> UserORM:
     row = UserORM(
         id=user_id, email=email or f"{user_id}@example.com",
-        password_hash="x-disabled-password-x", first_name="A", last_name="B",
-        status="active",
+        password_hash="not-a-real-hash" if password else "x-disabled-password-x",
+        first_name="A", last_name="B", status=status,
     )
     session.add(row)
     await session.flush()
@@ -196,7 +232,7 @@ async def test_last_used_is_written_once_per_window(db_session):
 
 
 async def test_the_inventory_filters_by_status_and_owner(db_session):
-    await _user(db_session, "usr_inv", email="inv@example.com")
+    await _user(db_session, "usr_inv", email="inv@example.com", password=True)
     past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     _, active = await _key(db_session, "usr_inv", name="active one")
     _, expired = await _key(db_session, "usr_inv", name="expired one", expires_at=past)
@@ -214,3 +250,80 @@ async def test_the_inventory_filters_by_status_and_owner(db_session):
     assert await ids(owner_id="usr_inv") == {active.id, expired.id, revoked.id}
     assert await ids(search="inv@example") == {active.id, expired.id, revoked.id}
     assert await ids(search="expired") == {expired.id}
+
+
+async def test_the_per_person_limit_counts_keys_still_in_date(db_session):
+    await _user(db_session, "usr_count", password=True)
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    await _key(db_session, "usr_count")
+    _, old = await _key(db_session, "usr_count")
+    old.created_at = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    await _key(db_session, "usr_count", expires_at=past)
+    _, revoked = await _key(db_session, "usr_count")
+    await api_key_repo.revoke(db_session, revoked.id, by="usr_count", reason="owner")
+    await db_session.flush()
+    assert await api_key_repo.count_active_for_user(db_session, "usr_count") == 2
+    # A key past the deployment's maximum lifetime is not in date either.
+    assert await api_key_repo.count_active_for_user(
+        db_session, "usr_count", max_lifetime_days=30,
+    ) == 1
+
+
+_SHOWN = {None: "active", "owner_reauth_required": "paused"}
+
+
+async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets(db_session):
+    """``status_expr`` filters and counts the administrators' inventory;
+    ``lifecycle_refusal`` decides each request. For every kind of owner,
+    key and policy, they agree."""
+    now = datetime.now(timezone.utc)
+
+    def ago(days: float) -> str:
+        return (now - timedelta(days=days)).isoformat()
+
+    owners = {
+        "usr_pw": {}, "usr_nopw": {}, "usr_off": {"status": "suspended"}, "usr_deleted": {},
+        "usr_sso_fresh": {}, "usr_sso_stale": {}, "usr_sso_never": {},
+    }
+    passwords = {"usr_pw", "usr_off", "usr_deleted", "usr_sso_stale"}
+    users = {}
+    for uid, extra in owners.items():
+        users[uid] = await _user(db_session, uid, password=uid in passwords, **extra)
+    users["usr_deleted"].deleted_at = ago(1)
+    last_login = {"usr_sso_fresh": ago(1), "usr_sso_stale": ago(40), "usr_sso_never": None}
+    for uid, last in last_login.items():
+        db_session.add(UserIdentityORM(
+            user_id=uid, provider_id="idp_x", external_id=f"sub-{uid}", last_login_at=last,
+        ))
+    keys = []
+    for uid in owners:
+        for expires_at, created_at, revoked in (
+            (None, None, False),
+            ((now + timedelta(days=5)).isoformat(), None, False),
+            (ago(1), None, False),
+            (None, ago(40), False),              # past a 30-day maximum lifetime
+            (ago(1), None, True),
+        ):
+            _, row = await _key(db_session, uid, expires_at=expires_at)
+            row.created_at = created_at or row.created_at
+            row.revoked_at = ago(0) if revoked else None
+            keys.append(row)
+    await db_session.flush()
+
+    seen = set()
+    for cap, window in ((None, 30), (30, 30), (30, None), (None, None)):
+        base, status = api_key_repo._inventory(now, cap, window)
+        in_sql = dict((await db_session.execute(
+            base.with_only_columns(ApiKeyORM.id, status)
+        )).all())
+        for key in keys:
+            refusal = api_keys.lifecycle_refusal(
+                key, users[key.user_id],
+                identity_count=int(key.user_id in last_login),
+                idp_last_login_at=last_login.get(key.user_id),
+                now=now, sso_signin_window_days=window, max_lifetime_days=cap,
+            )
+            shown = _SHOWN.get(refusal, refusal)
+            assert in_sql[key.id] == shown, (key.user_id, cap, window, key.expires_at)
+            seen.add(shown)
+    assert seen == {"active", "paused", "owner_inactive", "expired", "revoked"}

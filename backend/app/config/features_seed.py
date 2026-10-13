@@ -473,6 +473,35 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 4,
         "deprecated": False,
     },
+    {
+        "key": "apiKeySsoRoundTripStepUp",
+        "name": "Accept a fresh sign-in round trip for API keys",
+        "description": (
+            "Creating or rotating an API key asks the person to confirm it's them. Through an "
+            "identity provider, that means a sign-in the provider proves happened in the last 15 "
+            "minutes — which OIDC and SAML connections report. Gateway and portal connections "
+            "can't prove one; with this on, a sign-in through them in the last 15 minutes is "
+            "accepted instead."
+        ),
+        "impact_when_off": (
+            "People whose sign-in goes through a gateway or portal connection can't create or "
+            "rotate API keys; they can still use and revoke the keys they have. People on OIDC "
+            "or SAML connections, and people who sign in with a password, are not affected."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Off is the safer choice: a provider that signs someone back in silently from a "
+            "session it still holds proves nothing about who is at the keyboard, so on an "
+            "unlocked machine anyone could mint a key. Turn it on only if your gateway or "
+            "portal users need keys and you accept that."
+        ),
+        "sort_order": 5,
+        "deprecated": False,
+    },
     # ── Lineage ────────────────────────────────────────────────────────────────
     {
         "key": "versioningEnabled",

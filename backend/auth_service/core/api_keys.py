@@ -213,6 +213,36 @@ def lifecycle_refusal(
     return None
 
 
+def client_address(raw: Optional[str]) -> Optional[str]:
+    """A client address as the canonical text of an IP address — an
+    IPv4-mapped IPv6 address as its IPv4 form — or ``None`` for anything
+    that is not one. What comes off a request (or out of a forwarded-for
+    header a proxy passed on) is only ever recorded, compared or shown in
+    this form, so it can never carry text into a notification or the audit
+    log."""
+    if not raw:
+        return None
+    try:
+        address = ipaddress.ip_address(str(raw).strip())
+    except ValueError:
+        return None
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return str(address)
+
+
+def address_bucket(client_ip: Optional[str]) -> str:
+    """The bucket a client address's budget of refused keys is counted in:
+    the address itself, or for IPv6 its /64 — one host's allocation, which
+    it can rotate through freely."""
+    address = client_address(client_ip)
+    if address is None:
+        return "unknown"
+    if ":" in address:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return address
+
+
 def address_allowed(client_ip: Optional[str], raw_cidrs: Optional[str]) -> bool:
     """Whether a key restricted to networks was presented from one of them.
     A key with no restriction allows every address; a restricted key and an
@@ -242,6 +272,8 @@ def address_allowed(client_ip: Optional[str], raw_cidrs: Optional[str]) -> bool:
 
 __all__ = [
     "KIND_PERSONAL",
+    "address_bucket",
+    "client_address",
     "KIND_SERVICE",
     "TOKEN_LENGTH",
     "GeneratedKey",

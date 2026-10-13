@@ -172,14 +172,6 @@ async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
     return members, views
 
 
-async def list_workspace_ids(session: AsyncSession) -> List[str]:
-    """Every workspace id, nothing else. ``list_workspaces`` also counts
-    members and views and resolves identities, which a caller that only needs
-    to know which workspaces exist should not pay for."""
-    result = await session.execute(select(WorkspaceORM.id))
-    return [row[0] for row in result.all()]
-
-
 async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     result = await session.execute(
         _ws_query().order_by(WorkspaceORM.created_at)

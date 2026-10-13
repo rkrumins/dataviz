@@ -43,6 +43,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "RevokedRefreshJtiORM": "identity",
     "RefreshTokenORM": "identity",
     "ApiKeyORM": "identity",
+    "ApiKeyUsageORM": "identity",
     # workspace
     "WorkspaceORM": "workspace",
     "WorkspaceDataSourceORM": "workspace",

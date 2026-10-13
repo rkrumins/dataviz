@@ -45,6 +45,7 @@ from .core import api_keys
 from .core.password import disabled_password_hash
 from .core.tokens import (
     AUTH_TIME_CLAIM,
+    AUTH_TIME_PROVEN_CLAIM,
     SIGNIN_CLAIM,
     SIGNIN_PASSWORD,
     SIGNIN_SSO,
@@ -407,14 +408,19 @@ class LocalIdentityService:
                 reason = _api_key_refusal(
                     row, now=now, client_ip=client_ip, policy=policy,
                 )
-                if reason is not None and not (
-                    allow_inactive and reason in _SELF_SERVICE_REASONS
-                ):
-                    refusal = ApiKeyRejected(reason, key_id=row.key.id)
+                if reason is not None:
+                    # Recorded even where the key is let through to describe
+                    # or revoke itself: a key presented from outside its
+                    # networks is a key in someone else's hands, whatever
+                    # they ask it.
                     await self._record_api_key_rejection(
                         session, row.key, reason,
                         client_ip=client_ip, user_agent=user_agent,
                     )
+                if reason is not None and not (
+                    allow_inactive and reason in _SELF_SERVICE_REASONS
+                ):
+                    refusal = ApiKeyRejected(reason, key_id=row.key.id)
                 else:
                     roles = await self._user_repo.get_user_roles(session, row.owner.id)
                     claims = None
@@ -442,13 +448,18 @@ class LocalIdentityService:
             )
         return identity
 
-    async def step_up_url(self, user_id: str, *, next_path: str) -> str:
-        """Where to send someone to prove it is them again: the identity
+    async def step_up_target(self, user_id: str, *, next_path: str) -> tuple[str, bool]:
+        """Where to send someone to prove it is them again — the identity
         provider they signed in with most recently, asked for a fresh
-        authentication rather than the warm session it may still hold."""
+        authentication rather than the warm session it may still hold — and
+        whether that provider can prove one. OIDC (``prompt=login`` with
+        ``max_age``) and SAML (``ForceAuthn``) report when the person
+        authenticated; a gateway or portal connection cannot be made to."""
         async with self._session_factory() as session:
-            slug = await self._latest_identity_slug(session, user_id)
-        return _build_reauth_url(slug, next_path=next_path, force=True)
+            provider = await self._latest_identity_provider(session, user_id)
+        slug = getattr(provider, "slug", None)
+        proves = getattr(provider, "kind", None) in _PROVES_FRESH_SIGN_IN
+        return _build_reauth_url(slug, next_path=next_path, force=True), proves
 
     async def _record_api_key_rejection(
         self, session, key, reason: str, *,
@@ -776,6 +787,7 @@ class LocalIdentityService:
             user_id=claims.sub,
             family_id=claims.family_id,
             auth_time=claims.auth_time,
+            auth_time_proven=claims.auth_time_proven,
             # Family-invariant, like auth_time: the upstream credential's
             # expiry does not move because we rotated, and dropping it
             # here would make rotation a way to shed the ceiling.
@@ -863,6 +875,7 @@ class LocalIdentityService:
                     user_id=claims.sub,
                     family_id=claims.family_id,
                     auth_time=auth_time,
+                    auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
                     idp_exp=claims.idp_exp,
                     jti=outcome.successor.successor_jti,
                     expires_at_epoch=outcome.successor.successor_exp,
@@ -1135,6 +1148,10 @@ class LocalIdentityService:
             signin=SIGNIN_SSO if (session_provider_id or auth_time) else SIGNIN_PASSWORD,
             claims_extra=claims_extra,
             auth_time=auth_time,
+            # Proven only for the instant the token vouched for: if the
+            # server's record says otherwise, its instant was not the one
+            # the provider asserted.
+            auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
             refresh_token=successor_token,
         )
         return user, tokens, pending_liveness
@@ -1263,6 +1280,9 @@ class LocalIdentityService:
                 SSO_SESSION_MAX_AGE_SECONDS / 3600,
             )
             auth_time = now
+        # Whether ``auth_time`` is the provider's own word for a recent
+        # authentication — what step-up for an API key insists on.
+        auth_time_proven = auth_time_asserted and not auth_time_anchored
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -1634,6 +1654,7 @@ class LocalIdentityService:
             # session against a gateway it never came from.
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=auth_time,
+                auth_time_proven=auth_time_proven,
                 idp_provider_id=provider_id,
                 idp_exp=getattr(identity, "upstream_expires_at", None),
             )
@@ -1645,6 +1666,7 @@ class LocalIdentityService:
             signin=SIGNIN_SSO,
             claims_extra=claims_extra,
             auth_time=auth_time,
+            auth_time_proven=auth_time_proven,
             refresh_token=refresh_token,
         )
         return user, tokens
@@ -2225,6 +2247,12 @@ class LocalIdentityService:
     async def _latest_identity_slug(
         self, session, user_id: str,
     ) -> Optional[str]:
+        provider = await self._latest_identity_provider(session, user_id)
+        return getattr(provider, "slug", None) if provider is not None else None
+
+    async def _latest_identity_provider(self, session, user_id: str):
+        """The provider of the identity the person signed in with most
+        recently, or ``None``."""
         if self._user_identity_repo is None:
             return None
         identities = await self._user_identity_repo.list_for_user(session, user_id)
@@ -2235,8 +2263,7 @@ class LocalIdentityService:
         )
         if not identities:
             return None
-        provider = getattr(identities[0], "provider", None)
-        return getattr(provider, "slug", None) if provider is not None else None
+        return getattr(identities[0], "provider", None)
 
     async def _latest_identity_provider_id(
         self, session, user_id: str,
@@ -2258,6 +2285,7 @@ class LocalIdentityService:
         user_id: str,
         family_id: Optional[str],
         auth_time: Optional[int],
+        auth_time_proven: bool = False,
         idp_provider_id: Optional[str] = None,
         idp_exp: Optional[int] = None,
     ) -> str:
@@ -2276,7 +2304,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
-            idp_exp=idp_exp,
+            auth_time_proven=auth_time_proven, idp_exp=idp_exp,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(
@@ -2324,6 +2352,7 @@ class LocalIdentityService:
         signin: str,
         claims_extra: Optional[dict] = None,
         auth_time: Optional[int] = None,
+        auth_time_proven: bool = False,
         refresh_token: Optional[str] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
@@ -2346,9 +2375,12 @@ class LocalIdentityService:
         rather than letting a second one be generated here.
         """
         extra = dict(claims_extra or {})
+        extra.pop(AUTH_TIME_PROVEN_CLAIM, None)
         extra[SIGNIN_CLAIM] = signin
         if auth_time is not None:
             extra[AUTH_TIME_CLAIM] = auth_time
+            if auth_time_proven:
+                extra[AUTH_TIME_PROVEN_CLAIM] = True
         if user.must_change_password and signin == SIGNIN_PASSWORD:
             # Carried as a claim rather than looked up per request:
             # ``get_current_user`` already decodes this token to read
@@ -2374,6 +2406,7 @@ class LocalIdentityService:
         )
         refresh = refresh_token or create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
+            auth_time_proven=auth_time_proven,
         )[0]
         return SessionTokens(
             access_token=access,
@@ -2444,6 +2477,10 @@ def _has_password(orm) -> bool:
 
 #: Why a key may still describe or revoke itself. Whoever holds a leaked key
 #: can always end it; only a key already revoked (or never ours) is refused.
+#: Provider kinds that can be made to prove a fresh authentication — see
+#: ``step_up_target``.
+_PROVES_FRESH_SIGN_IN = frozenset({"oidc", "saml2"})
+
 _SELF_SERVICE_REASONS = frozenset({
     "expired", "owner_inactive", "owner_reauth_required", "ip_not_allowed",
 })

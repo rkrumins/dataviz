@@ -358,6 +358,19 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Owners who sign in with a password are not affected",
         ),
     ),
+    # Widens who may mint a key: when it cannot be read, assume it is off.
+    "apiKeySsoRoundTripStepUp": FeatureWiring(
+        key="apiKeySsoRoundTripStepUp",
+        posture="security",
+        server_gates=(
+            "POST /me/api-keys and /me/api-keys/{id}/rotate — a session whose identity provider "
+            "cannot prove a fresh sign-in is refused (step_up_unavailable) while off",
+        ),
+        still_allowed=(
+            "Using, describing and revoking existing keys",
+            "Creating keys after a proven identity-provider sign-in, or with a password",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

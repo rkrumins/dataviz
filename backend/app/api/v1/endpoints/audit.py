@@ -56,7 +56,7 @@ _AUDIT_PREFIXES = (
     "auth.",             # config.updated
     "idp.",              # provider.created / updated / deleted
     "sso.",              # backchannel_host_allowed / backchannel_host_withdrawn
-    "identity.api_key.",  # created / rotated / revoked / expiring / rejected / misuse
+    "identity.api_key.",  # created / rotated / updated / revoked / expiring / rejected / misuse
 )
 
 
@@ -307,6 +307,13 @@ def _summary_api_key_revoked(p: dict) -> str:
     return f"API key {_api_key_label(p)} revoked {how}".rstrip()
 
 
+def _summary_api_key_updated(p: dict) -> str:
+    renamed = ((p.get("changes") or {}).get("name") or {}).get("to")
+    if renamed:
+        return f"API key {_api_key_label(p)} renamed to “{renamed}”"
+    return f"API key {_api_key_label(p)} description changed"
+
+
 def _summary_api_key_refused(p: dict) -> str:
     return (
         f"API key {_api_key_label(p)} refused from {p.get('client_ip') or '?'}: "
@@ -443,8 +450,12 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
     "identity.api_key.rotated": (
-        "info", lambda p: f"API key {_api_key_label(p)} created by rotating another",
+        "info", lambda p: (
+            f"API key {_api_key_label(p)} created by "
+            + ("renewing an expired one" if p.get("renewed") else "rotating another")
+        ),
     ),
+    "identity.api_key.updated": ("info", _summary_api_key_updated),
     "identity.api_key.expiring": (
         "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
     ),

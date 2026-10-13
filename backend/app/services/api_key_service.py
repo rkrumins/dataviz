@@ -5,18 +5,21 @@ as the claims resolver and the rejection hook of ``validate_api_key``.
 
 **Claims are cached per key, for at most 30 seconds.** Resolving them reads
 the owner's bindings, groups and memberships, and an integration calling
-hundreds of times a minute must not repeat that on every call. Thirty
-seconds is the ceiling, not the usual delay: each cached entry is registered
-as a session of the owner, so anything that already ends a person's sessions
-on a change to what they may do — a role or group change, a removed
-membership, a suspension — also drops the cached claims of their keys, and
-the next request resolves them afresh. The key itself (revoked? expired?)
-is never cached; that is read on every request.
+hundreds of times a minute must not repeat that on every call. So a change to
+what the owner may do — a role or group change, a removed membership —
+reaches their keys within 30 seconds. What must be immediate is read on
+every request instead: the key itself (revoked? expired?), its owner's
+status (suspended?) and the owner's sign-in facts (paused?).
+
+The cache is deliberately not tied to the owner's sessions: registering each
+entry as one kept the owner's session index alive for as long as a key was
+busy, so it grew with every browser session they ever had and slowed every
+later revocation of them.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,8 +36,8 @@ from backend.app.services.revocation_service import get_revocation_service
 logger = logging.getLogger(__name__)
 
 CLAIMS_TTL_SECONDS = 30
-#: Bounds memory by keys in use. Cleared wholesale when full: the cost is one
-#: re-resolution per key, not a correctness problem.
+#: Bounds memory by keys in use. Expired entries go first; cleared wholesale
+#: only if every entry is live: the cost is one re-resolution per key.
 _CACHE_MAX = 10_000
 
 
@@ -42,29 +45,18 @@ _CACHE_MAX = 10_000
 class _Entry:
     expires_at: float
     claims: PermissionClaims
-    sid: str
 
 
 _claims_cache: dict[str, _Entry] = {}
-#: One registered session per key per process, renewed only once it has been
-#: ended. A fresh one per refresh would add a member to the owner's session
-#: index every thirty seconds for as long as the key is busy.
-_registered_sids: dict[str, str] = {}
+#: One resolution per key at a time in this process: when an entry expires
+#: (or after a deploy) the requests arriving together wait for one answer
+#: rather than each reading the owner's bindings.
+_resolving: dict[str, asyncio.Future] = {}
 
 
 def reset_for_tests() -> None:
     _claims_cache.clear()
-    _registered_sids.clear()
-
-
-async def _ended(sid: str) -> bool:
-    """Whether the owner's sessions were ended since this entry registered.
-    An unreachable store is not a verdict: the TTL is the floor."""
-    try:
-        return await get_revocation_service().is_revoked(sid)
-    except Exception as exc:  # noqa: BLE001 — fail-open by design
-        logger.warning("Revocation store unavailable for %s: %s", sid, exc)
-        return False
+    _resolving.clear()
 
 
 def scope_of(key: ApiKeyORM) -> permission_service.KeyScope:
@@ -78,28 +70,48 @@ def scope_of(key: ApiKeyORM) -> permission_service.KeyScope:
 
 async def claims_for_key(session: AsyncSession, key: ApiKeyORM) -> PermissionClaims:
     """The claims for a request made with ``key`` — see the module docstring."""
-    now = time.monotonic()
-    entry = _claims_cache.get(key.id)
-    if entry is not None and entry.expires_at > now:
-        if not await _ended(entry.sid):
+    while True:
+        entry = _claims_cache.get(key.id)
+        if entry is not None and entry.expires_at > time.monotonic():
             return entry.claims
-        _registered_sids.pop(key.id, None)
+        pending = _resolving.get(key.id)
+        if pending is None:
+            break
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            if not pending.cancelled():
+                raise
+            # The request resolving them went away: resolve them here.
 
-    sid = _registered_sids.get(key.id) or f"apk_{key.id}_{secrets.token_hex(6)}"
-    # Registered before resolving, so a change that ends the owner's
-    # sessions while the claims are being read still reaches this entry.
+    pending = asyncio.get_running_loop().create_future()
+    _resolving[key.id] = pending
     try:
-        await get_revocation_service().record_session(key.user_id, sid)
-    except Exception as exc:  # noqa: BLE001 — the TTL still bounds staleness
-        logger.warning("Could not register API key %s for invalidation: %s", key.id, exc)
-    claims = await permission_service.resolve_for_api_key(
-        session, key.user_id, scope_of(key),
-    )
-    if len(_claims_cache) >= _CACHE_MAX:
-        _claims_cache.clear()
-    _registered_sids[key.id] = sid
-    _claims_cache[key.id] = _Entry(time.monotonic() + CLAIMS_TTL_SECONDS, claims, sid)
+        claims = await permission_service.resolve_for_api_key(
+            session, key.user_id, scope_of(key),
+        )
+    except asyncio.CancelledError:
+        pending.cancel()
+        raise
+    except Exception as exc:
+        pending.set_exception(exc)
+        pending.exception()  # retrieved: no "never retrieved" warning when nobody waits
+        raise
+    finally:
+        _resolving.pop(key.id, None)
+    _remember(key.id, claims)
+    pending.set_result(claims)
     return claims
+
+
+def _remember(key_id: str, claims: PermissionClaims) -> None:
+    now = time.monotonic()
+    if len(_claims_cache) >= _CACHE_MAX:
+        for stale in [k for k, e in _claims_cache.items() if e.expires_at <= now]:
+            del _claims_cache[stale]
+        if len(_claims_cache) >= _CACHE_MAX:
+            _claims_cache.clear()
+    _claims_cache[key_id] = _Entry(now + CLAIMS_TTL_SECONDS, claims)
 
 
 def forget(key_id: str) -> None:

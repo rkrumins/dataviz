@@ -10,15 +10,18 @@ it, and the answer is kept on ``request.state`` — in this order:
 
 1. API keys are switched on (Administration → Features), and authorization
    enforcement is intact. A key is never honoured with RBAC switched off.
-2. The address is not over its budget of refused keys — checked before the
-   lookup, so a client replaying a bad key stops costing a database read.
+2. The address is not over its budget of unknown or malformed keys, and
+   the key is within its own rate limit — both before the lookup, so a
+   client replaying a bad key, or a busy one being told to slow down, costs
+   no database read. A key that exists but is refused (revoked, expired) is
+   charged to its own budget, not its address: one integration looping on
+   a dead key must not lock out the healthy ones behind the same NAT.
 3. The identity service validates the key, its owner and the deployment
    policy (``validate_api_key``).
 4. The endpoint is on the key surface (``api_key_surface``).
 5. A key whose permissions are all read-only only reads.
 6. Every view and data source the request names is one the key covers, and
    lives in the workspace the path names (the resource fence).
-7. The key is within its own rate limit.
 
 What it leaves behind: the user and claims for the dependencies to return,
 the key's id on ``request.state`` for the access log, and in
@@ -40,7 +43,13 @@ from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db import engine as db_engine
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims
-from backend.auth_service.core.api_keys import bearer_api_key
+from backend.auth_service.core.api_keys import (
+    address_bucket,
+    bearer_api_key,
+    client_address,
+    hash_token,
+    looks_valid,
+)
 from backend.auth_service.core.config import (
     RATELIMIT_API_KEY,
     RATELIMIT_API_KEY_FAILURES_PER_IP,
@@ -216,11 +225,15 @@ async def _policy() -> ApiKeyPolicy:
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    return request.client.host if request.client and request.client.host else None
+    return client_address(request.client.host if request.client else None)
 
 
-async def _too_many(scope: str, identity: str, limit: str) -> HTTPException:
-    retry = await get_account_limiter().retry_after_seconds(scope, identity, limit)
+async def _too_many(
+    scope: str, identity: str, limit: str, *, consumed: bool = False,
+) -> HTTPException:
+    retry = await get_account_limiter().retry_after_seconds(
+        scope, identity, limit, consumed=consumed,
+    )
     return HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail={
@@ -241,24 +254,34 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
     policy = await _policy()
 
     limiter = get_account_limiter()
-    ip = _client_ip(request) or "unknown"
-    if not await limiter.check(_FAILURE_SCOPE, ip, RATELIMIT_API_KEY_FAILURES_PER_IP):
-        raise await _too_many(_FAILURE_SCOPE, ip, RATELIMIT_API_KEY_FAILURES_PER_IP)
+    client_ip = _client_ip(request)
+    address = address_bucket(client_ip)
+    if not await limiter.check(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP):
+        raise await _too_many(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
+    if not looks_valid(token):
+        await limiter.record(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
+        raise api_key_errors.invalid_key(*_REFUSALS["malformed"])
+    # Every request a key makes counts against its own budget — refused
+    # ones included — keyed by its hash, which is one-to-one with the key.
+    bucket = hash_token(token)
+    if not await limiter.consume(_KEY_SCOPE, bucket, RATELIMIT_API_KEY):
+        raise await _too_many(_KEY_SCOPE, bucket, RATELIMIT_API_KEY, consumed=True)
 
     rule = api_key_surface.rule_for(request)
     itself = rule is not None and rule.level == api_key_surface.SELF
     try:
         identity = await _identity_service(request).validate_api_key(
             token,
-            client_ip=_client_ip(request),
+            client_ip=client_ip,
             user_agent=request.headers.get("user-agent"),
             policy=policy,
             allow_inactive=itself,
         )
     except ApiKeyRejected as exc:
-        await limiter.record(_FAILURE_SCOPE, ip, RATELIMIT_API_KEY_FAILURES_PER_IP)
         if exc.key_id:
             request.state.api_key_id = exc.key_id
+        else:
+            await limiter.record(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
         code, message = _REFUSALS.get(exc.reason, _REFUSALS["unknown"])
         raise api_key_errors.invalid_key(code, message)
     except ApiKeyLookupUnavailable:
@@ -268,8 +291,6 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
     if itself:
         # Describing or ending itself: no scope to hold it to, and allowed
         # to every key — a read-only one included.
-        if not await limiter.consume(_KEY_SCOPE, identity.key_id, RATELIMIT_API_KEY):
-            raise await _too_many(_KEY_SCOPE, identity.key_id, RATELIMIT_API_KEY)
         return ApiKeyContext(
             key_id=identity.key_id, user=identity.user,
             claims=identity.claims if identity.status == "active" else None,
@@ -297,9 +318,6 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
         )
 
     await _fence(request, rule, scope, reads=reads)
-
-    if not await limiter.consume(_KEY_SCOPE, identity.key_id, RATELIMIT_API_KEY):
-        raise await _too_many(_KEY_SCOPE, identity.key_id, RATELIMIT_API_KEY)
 
     return ApiKeyContext(
         key_id=identity.key_id,
@@ -388,7 +406,8 @@ async def _fence(request: Request, rule, scope, *, reads: bool) -> None:
     workspace_id = path.get("ws_id") or path.get("workspace_id")
 
     view_ids = [v for v in (path.get("view_id"),) if v]
-    ds_ids = [d for d in (path.get("ds_id"), path.get("data_source_id")) if d]
+    path_ds_ids = [d for d in (path.get("ds_id"), path.get("data_source_id")) if d]
+    ds_ids = list(path_ds_ids)
     query_view = query.get("viewId")
     query_ds = query.get("dataSourceId")
     # On a filtered list these are filters, not targets: the handler narrows
@@ -412,8 +431,11 @@ async def _fence(request: Request, rule, scope, *, reads: bool) -> None:
     # Reading a view's data is reading the data source it renders — the
     # read-only path a person who can open the view has, through the data
     # plane's capability gate (on ``RESOURCE`` routes; the surface test holds
-    # every one that takes ``dataSourceId`` to that gate). Not a whole-source
-    # export: that is more than a view's reach.
+    # every one that takes ``dataSourceId`` to that gate). Only ever for the
+    # ``dataSourceId`` the gate pins to the view: a data source named in the
+    # path is a route about that source itself — its jobs, its pull
+    # requests — which a view of it does not open. Not a whole-source export
+    # either: that is more than a view's reach.
     through_view = (
         view_at.get(query_view, _NOWHERE).data_source_id
         if reads and rule.level == api_key_surface.RESOURCE
@@ -425,7 +447,9 @@ async def _fence(request: Request, rule, scope, *, reads: bool) -> None:
         where = ds_at.get(ds_id, _NOWHERE).workspace_id
         if workspace_id and where and where != workspace_id:
             raise _not_in_workspace("Data source", ds_id)
-        if scope.selects_data_source(ds_id, where) or ds_id == through_view:
+        if scope.selects_data_source(ds_id, where):
+            continue
+        if ds_id == through_view and ds_id == query_ds and ds_id not in path_ds_ids:
             continue
         raise api_key_errors.out_of_scope("This API key does not cover this data source.")
 

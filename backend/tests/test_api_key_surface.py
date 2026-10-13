@@ -212,6 +212,55 @@ def test_a_filtered_route_names_no_single_resource_in_its_path():
     assert not wrong, wrong
 
 
+async def test_a_view_never_opens_a_route_naming_its_data_source_in_the_path(monkeypatch):
+    """A covered view vouches for its own data source only as the
+    ``dataSourceId`` the capability gate pins to it. A data source named in
+    the path is a route about that source itself — its jobs, readiness, pull
+    requests — and every one of them refuses a key holding only a view of it,
+    however the request also names the pair."""
+    import dataclasses
+
+    from fastapi import HTTPException
+
+    from backend.app.auth import api_key_auth
+    from backend.app.services.permission_service import key_scope_from_profile
+
+    places = {
+        ("view", "v_1"): api_key_auth._Place("ws_1", "ds_1"),
+        ("data_source", "ds_1"): api_key_auth._Place("ws_1"),
+    }
+
+    async def _locate(kind, ids):
+        return {i: places.get((kind, i), api_key_auth._NOWHERE) for i in ids}
+
+    monkeypatch.setattr(api_key_auth, "_locate", _locate)
+    scope = dataclasses.replace(
+        key_scope_from_profile(
+            "apk_surface", kind="personal", permissions={"views": "read", "data": "read"},
+            resources={"views": ["v_1"]},
+        ),
+        view_workspaces={"v_1": "ws_1"},
+    )
+    checked = []
+    for method, path, _route, dependant, rule in _eligible():
+        names = _path_names(dependant)
+        if not names & {"ds_id", "data_source_id"}:
+            continue
+        values = {name: "ds_1" if name in ("ds_id", "data_source_id")
+                  else "ws_1" if name in ("ws_id", "workspace_id") else "x"
+                  for name in names}
+        request = type("Request", (), {
+            "path_params": values,
+            "query_params": {"viewId": "v_1", "dataSourceId": "ds_1"},
+        })()
+        with pytest.raises(HTTPException) as refused:
+            await api_key_auth._fence(request, rule, scope, reads=method == "GET")
+        assert refused.value.status_code == 403, f"{method} {path}"
+        assert refused.value.detail["error"] == "api_key_out_of_scope", f"{method} {path}"
+        checked.append(f"{method} {path}")
+    assert len(checked) >= 10, checked
+
+
 # ── The reviewed snapshot ───────────────────────────────────────────
 
 

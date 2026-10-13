@@ -29,7 +29,7 @@ import os
 from typing import Optional
 
 from limits import RateLimitItem, parse
-from limits.aio.strategies import MovingWindowRateLimiter
+from limits.aio.strategies import MovingWindowRateLimiter, SlidingWindowCounterRateLimiter
 from limits.storage import storage_from_string
 
 logger = logging.getLogger(__name__)
@@ -249,6 +249,19 @@ class AccountRateLimiter:
             self._storage = storage_from_string(_FALLBACK_URI)
             self.backend = "memory (FELL BACK)"
         self._limiter = MovingWindowRateLimiter(self._storage)
+        # Limits counted on every request (``consume``) use two counters per
+        # bucket rather than one timestamp per request: an API key allowed
+        # 1,200 a minute would otherwise hold 1,200 entries in the store the
+        # session revocation list lives in. A storage without counters keeps
+        # the moving window — construction must not fail, as above.
+        try:
+            self._counter = SlidingWindowCounterRateLimiter(self._storage)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Account rate-limit storage %s has no sliding-window counters (%s); "
+                "per-request limits use the moving window.", self.backend, exc,
+            )
+            self._counter = self._limiter
 
     async def check(self, scope: str, identity: str, limit: str) -> bool:
         """True when another attempt is allowed. Does not consume one.
@@ -269,7 +282,7 @@ class AccountRateLimiter:
         check and the record in one round trip, for limits counted on every
         request rather than on failures. Fails open, like ``check``."""
         try:
-            return await self._limiter.hit(parse(limit), _bucket_key(scope, identity))
+            return await self._counter.hit(parse(limit), _bucket_key(scope, identity))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Account rate-limit consume failed (%s): %s", scope, exc)
             return True
@@ -301,12 +314,14 @@ class AccountRateLimiter:
             logger.warning("Account rate-limit reset failed (%s): %s", scope, exc)
 
     async def retry_after_seconds(
-        self, scope: str, identity: str, limit: str,
+        self, scope: str, identity: str, limit: str, *, consumed: bool = False,
     ) -> int:
-        """Seconds until the window frees up, for the ``Retry-After`` header."""
+        """Seconds until the window frees up, for the ``Retry-After`` header.
+        ``consumed``: the limit is one counted by ``consume``."""
         try:
             item: RateLimitItem = parse(limit)
-            reset_at, _ = await self._limiter.get_window_stats(
+            strategy = self._counter if consumed else self._limiter
+            reset_at, _ = await strategy.get_window_stats(
                 item, _bucket_key(scope, identity),
             )
             import time

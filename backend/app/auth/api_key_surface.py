@@ -210,6 +210,10 @@ SURFACE: dict[tuple[str, str], Rule] = {
     **_entries("freshness", RESOURCE, "refresh_data_source"),
 
     # ── Workspaces, semantic layers, catalog: what the data means ────
+    # Not here: where a semantic layer or catalog entry is used across the
+    # platform (adoption, coverage ranking, impact, source mappings,
+    # assignments, bindings) — governance reads that name other workspaces'
+    # data sources, past whatever the key is limited to.
     **_entries("workspaces", FILTERED, "list_workspaces", "get_workspace"),
     **_entries("workspaces", WORKSPACE, "list_data_sources"),
     **_entries(
@@ -219,15 +223,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
     **_entries(
         "ontologies", FILTERED,
         "list_ontologies", "get_ontology", "export_ontology",
-        "get_ontology_adoption", "get_ontology_coverage_ranking",
-        "get_ontology_impact", "get_ontology_source_mappings",
-        "get_ontology_assignments",
     ),
-    **_entries(
-        "catalog", FILTERED,
-        "list_catalog_items", "list_catalog_bindings", "get_catalog_item",
-        "get_catalog_item_impact",
-    ),
+    **_entries("catalog", FILTERED, "list_catalog_items", "get_catalog_item"),
 
     # ── The key itself ──────────────────────────────────────────────
     **_entries("api_keys", SELF, "describe_this_key", "revoke_this_key"),

@@ -551,6 +551,16 @@ def has_permission(
     if "system:admin" in claims.global_perms:
         return True
 
+    # 1b. An API key over everything, owned by someone with an
+    #     organisation-wide role: what that role gives them everywhere,
+    #     narrowed to the key (``KeyScope.org_perms``).
+    if (
+        workspace_id is not None
+        and claims.key_scope is not None
+        and permission in claims.key_scope.org_perms
+    ):
+        return True
+
     # 2. Phase 5: org-admin shortcut for workspace-scoped checks. An
     #    org_admin has every workspace power in every workspace
     #    without per-ws bindings; ``MyAccessPage`` surfaces this as
@@ -619,6 +629,8 @@ def has_permission_any_workspace(
         permission.endswith(":read")
         and "system:org-viewer" in claims.global_perms
     ):
+        return True
+    if claims.key_scope is not None and permission in claims.key_scope.org_perms:
         return True
     for ws_id in claims.ws_perms.keys():
         if has_permission(claims, permission, workspace_id=ws_id):
@@ -691,6 +703,16 @@ class KeyScope:
     #: everything, so workspace-tier reads span every workspace without the
     #: list being spelled out.
     org_wide: bool = False
+    #: For such a key: its permissions that the owner holds in EVERY workspace
+    #: through that role. Honoured for any workspace by ``has_permission``,
+    #: as the role itself is for the owner — never written out per workspace,
+    #: which on a large estate cost every claims refresh hundreds of
+    #: milliseconds and built lists no database would take.
+    org_perms: frozenset[str] = frozenset()
+    #: …and that role is unrestricted (``system:admin``/``system:org-admin``)
+    #: rather than read-only (``system:org-viewer``) — whether catalogue
+    #: visibility is filtered at all, exactly as it is for the owner.
+    org_unrestricted: bool = False
 
     @property
     def view_permissions(self) -> frozenset[str]:
@@ -772,6 +794,11 @@ class KeyScope:
         )
 
 
+#: A workspace id nothing is ever bound to: what a permission check answers
+#: for it is what an organisation-wide role answers for every workspace.
+_EVERY_WORKSPACE = "\x00every-workspace"
+
+
 def key_scope_from_profile(
     key_id: str, *, kind: str, permissions: dict, resources,
 ) -> KeyScope:
@@ -816,7 +843,9 @@ async def resolve_for_api_key(
     per-workspace grants, each narrowed to the key's profile and to the
     workspaces its selection touches. No global permission survives: a key
     is never an administrator of anything, and code that reads
-    ``global_perms`` directly therefore cannot hand it a shortcut.
+    ``global_perms`` directly therefore cannot hand it a shortcut. What an
+    organisation-wide role gives a key over everything stays a shortcut too
+    (``KeyScope.org_perms``), narrowed to the key, as it is for the owner.
 
     Per workspace, view permissions are kept only if views there are in reach
     (the workspace is selected, or a selected view lives in it), and data
@@ -830,7 +859,6 @@ async def resolve_for_api_key(
         WorkspaceDataSourceORM,
         view_is_live,
     )
-    from backend.app.db.repositories import workspace_repo
 
     owner = await resolve(session, user_id, sid="")
 
@@ -856,11 +884,17 @@ async def resolve_for_api_key(
         {"system:admin", "system:org-admin", "system:org-viewer"}
         & set(owner.global_perms)
     )
-    if scope.all_resources:
-        candidates = (
-            set(await workspace_repo.list_workspace_ids(session))
-            if org_wide_shortcut else set(owner.ws_perms)
+    org_perms: frozenset[str] = frozenset()
+    if scope.all_resources and org_wide_shortcut:
+        # What the role gives the owner everywhere, narrowed to the key: asked
+        # of a workspace nobody is bound to, only the shortcut can answer.
+        org_perms = frozenset(
+            p for p in scope.permissions
+            if has_permission(owner, p, workspace_id=_EVERY_WORKSPACE)
         )
+    if scope.all_resources:
+        # The owner's own bindings — what their role adds is ``org_perms``.
+        candidates = set(owner.ws_perms)
     else:
         candidates = (
             set(scope.workspaces)
@@ -889,6 +923,10 @@ async def resolve_for_api_key(
         data_source_ids=scope.data_source_ids,
         view_workspaces=view_workspaces, data_source_workspaces=ds_workspaces,
         org_wide=scope.all_resources and org_wide_shortcut,
+        org_perms=org_perms,
+        org_unrestricted=scope.all_resources and bool(
+            {"system:admin", "system:org-admin"} & set(owner.global_perms)
+        ),
     )
     return PermissionClaims(
         sid="", global_perms=(), ws_perms=ws_perms, key_scope=resolved_scope,

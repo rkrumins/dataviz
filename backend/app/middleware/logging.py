@@ -9,6 +9,8 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from backend.app.services import api_key_usage
+
 logger = logging.getLogger("synodic.access")
 
 
@@ -18,7 +20,15 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         start = time.perf_counter()
-        response = await call_next(request)
+        status_code = 500  # what a request that raised is answered with
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        finally:
+            # A key's usage counts every request it made — refused, failed
+            # or raised included (``api_key_id`` is only ever a key the
+            # platform knows).
+            api_key_usage.record_request(request, status_code)
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
 
         req_id = getattr(request.state, "request_id", "unknown")
