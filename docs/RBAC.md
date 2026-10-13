@@ -401,17 +401,26 @@ one of its data sources is.
 
 - **No global permission survives.** `global_perms` is empty, so no shortcut, fail-closed
   permission or administration check is reachable with a key. An owner holding an
-  organisation-wide shortcut gets every workspace on a key that covers everything, and
-  `build_read_scope` takes its organisation-wide branch rather than an `IN` list.
+  organisation-wide shortcut, on a key that covers everything, gets `KeyScope.org_perms`:
+  the key's permissions the owner holds in every workspace through that role.
+  `has_permission` honours them for any workspace, as it honours the shortcut for the owner,
+  so the workspaces are never listed (an organisation of 10,000 workspaces cost every claims
+  refresh 112 ms and built `IN` lists past what asyncpg takes). `build_read_scope` takes its
+  organisation-wide branch, the workspace list and lookup reach every workspace, and
+  catalogue visibility is unfiltered only when the role is (`org_unrestricted`).
 - **The selection rides on the claims.** `PermissionClaims.key_scope` (`KeyScope`) is never
   serialized and is kept by `with_ws`. `view_access` checks it on every identity path —
   creator, explicit grant, enterprise tier — so a workspace viewer with an editor grant on
   one view can edit that view with a key limited to it, and nothing else in the workspace.
   Sharing (`can_manage_grants`) is never open to a key; changing visibility needs the key's
   publish.
-- **Revocation.** Claims are cached per key for 30 seconds under a pseudo-session registered
-  for the owner, so `revoke_all_user_sessions` — which every narrowing mutation below calls —
-  drops them, and the next request re-resolves.
+- **How fast changes reach a key.** Revocation, expiry, the owner's suspension and the SSO
+  pause are read from the database on every request, so they take effect on the next one.
+  The claims themselves are cached per key for 30 seconds (`CLAIMS_TTL_SECONDS`, one
+  resolution in flight per key), so a role or grant the owner loses reaches their keys
+  within that window. The cache never touches the owner's sessions: an earlier version
+  registered it as one, which kept the owner's session index growing for as long as a key
+  was busy.
 
 ## 403 body
 

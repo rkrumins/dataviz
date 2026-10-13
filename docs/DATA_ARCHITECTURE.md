@@ -25,11 +25,11 @@ The management database is accessed through the SQLAlchemy 2.0 async ORM, and it
 
 ## Where every table belongs
 
-The ORM maps 88 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+The ORM maps 90 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
 
 | Area | Schema | Tables | Examples |
 |---|---|---|---|
-| Identity and sessions | `public` | 9 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites` |
+| Identity and sessions | `public` | 11 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites`, `api_keys`, `api_key_usage` |
 | Access control | `public` | 8 | `roles`, `permissions`, `role_bindings`, `groups`, `resource_grants`, `access_requests` |
 | Single sign-on | `public` | 4 | `idp_providers`, `idp_group_role_mappings`, `sso_backchannel_hosts`, `app_auth_config` |
 | Workspaces and data sources | `public` | 3 | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` |

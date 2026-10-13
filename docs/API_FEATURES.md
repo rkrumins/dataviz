@@ -225,6 +225,7 @@ feature open to anyone who knows the URL.
 | API keys | `apiKeysEnabled` | On | Every request made with an API key is refused `401 api_keys_disabled`; `POST /me/api-keys` and `/me/api-keys/{id}/rotate` refuse `403 api_keys_disabled` | Security: unreadable means refused. Listing and revoking keys stay available |
 | Longest an API key may live | `apiKeyMaxLifetime` | `none` | A ladder (`none`, `365`, `180`, `90`, `30` days): a key older than the maximum is refused as expired, and new keys must expire within it | Applies to keys that already exist |
 | Pause keys of people who stop signing in | `apiKeySsoSignInWindow` | `30` | A ladder (`14`, `30`, `90` days, `off`): a key whose owner has an SSO identity and has not signed in through it within the window is refused `401 owner_reauth_required` until they do | Owners without an SSO identity are not affected |
+| Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from an SSO session need a sign-in the identity provider dated within 15 minutes (`auth_time_proven`); a provider that cannot date one is refused `403 step_up_unavailable`. On: any SSO sign-in within 15 minutes is accepted | Security: unreadable means off. Password sessions are not affected |
 
 ### Lineage
 

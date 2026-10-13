@@ -19,12 +19,26 @@ through an identity provider and have no password included. A key reaches everyt
 can, or only chosen workspaces, views and data sources, and may read, or read and change, views
 (with or without publishing to everyone) and data. On anything it reaches it may do what its owner
 may do there at that moment, never more: access taken from a person is taken from their keys
-within 30 seconds. Creating or rotating a key asks for the password, or for a sign-in through the
-identity provider in the last 15 minutes. The key is shown once. It expires — 30 days unless its
-owner chooses otherwise, never only where the deployment allows it — and can be limited to
-networks. **Rotate** makes a new token with the same access and keeps the old one working for up
-to a week; **Revoke** ends it at once. Expand a key to see what it can do right now, per workspace,
-view and data source.
+within 30 seconds.
+
+**Made in five guided steps.** **Purpose** starts from the job — *Read data for reporting*, *Load
+data and signal refreshes*, *Publish views from CI* or *Custom* — and names the key; **Reach**
+recommends the narrowest choice; **Permissions** says what each level lets a script do;
+**Safety** sets the expiry (shown as a date; never only where the deployment allows it) and
+networks, offering the address you are calling from; **Review** shows how exposed the key would be
+and what it could do right now, checked by the server exactly as creating it is
+(`POST /me/api-keys/preview`, which creates nothing). Creating, rotating or renewing a key asks for
+the password, or for a sign-in the identity provider dated within the last 15 minutes. The key is
+shown once, with snippets for cURL, Python, JavaScript and `.env`, and the page waits for its first
+call.
+
+**Every key, at a glance.** Each key is a card: its status, what it reaches, when it expires,
+when and from where it was last used, and its requests per day over two weeks. Open one for what it
+can do right now per workspace, view and data source, 30 days of use with refusals and errors, and
+the key it replaced or was replaced by. **Edit** renames a key or says what it is for; **Rotate**
+makes a new token with the same access and keeps the old one working for up to a week (a key is
+replaced once); **Renew** gives an expired key a fresh token; **Revoke** ends it at once. Ended keys
+stay listed for 90 days.
 
 **Scripts send one header.** `Authorization: Bearer nxpat_…` replaces the cookie jar, the CSRF
 header and renewal. `GET /api/v1/api-keys/self` says what a key is and when it stops working;
@@ -37,15 +51,20 @@ call, and every other route answers `403 api_key_not_allowed`.
 they haven't signed in there for 30 days, and resume at their next sign-in, so the keys of someone
 who has left stop without anyone remembering them. A suspended account's keys stop at once.
 
-**Administration → API keys** lists every key with its owner, what it reaches and when it was last
-used, filters to keys nobody has used for 90 days, and revokes one key or all of a person's.
-Seeing the list needs `system:audit:read`; revoking needs `system:users:manage`. Three switches
-under **Administration → Features → Authentication** govern keys: **API keys**, **Longest an API
-key may live** and **Pause keys of people who stop signing in**.
+**Administration → API keys** opens on counts that filter the list — active, expiring within 7
+days, never expiring, unused for 90 days, paused — with tabs for every status, search by key or
+owner, and sorting by name, last use, expiry or creation. Open a key for its owner, access, usage
+and lineage; revoke it with a note its owner sees, or all of a person's; **Export CSV** downloads
+the list as filtered, up to 10,000 keys. The access drawer on **Administration → Users** links to
+a person's keys. Seeing keys needs `system:audit:read`; revoking needs `system:users:manage`. Four
+switches under **Administration → Features → Authentication** govern keys: **API keys**, **Longest
+an API key may live**, **Pause keys of people who stop signing in** and **Accept a fresh sign-in
+round trip for API keys** — off by default, it lets people on gateway and portal connections, which
+can't date a sign-in, make keys.
 
 **Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
-administrator revokes it, and when a revoked key is presented again or a key is used from a network
-it isn't limited to.
+administrator revokes it (with their note), and when a revoked key is presented again or a key is
+used from a network it isn't limited to — even when it only asks about itself.
 
 ### Changed
 
@@ -62,19 +81,32 @@ it isn't limited to.
   the data source — so it reached any view on the platform. The view must now be live, in the
   import's workspace, and editable by the caller (`create_import`, `complete_import_upload`).
 - **Everything a key does is attributed.** Audit events written during a key's request carry the
-  key's id, and the access log records `authMethod=api_key` with it. Creating, rotating and
-  revoking keys, and keys refused or misused, are on the Audit Log and on the owner's **Recent
+  key's id, and the access log records `authMethod=api_key` with it. Creating, renaming, rotating
+  and revoking keys, and keys refused or misused, are on the Audit Log and on the owner's **Recent
   activity**.
+- **A job's event stream belongs to its data source.** `GET /admin/data-sources/{ds}/aggregation-jobs/{job}/events`
+  streamed any job named in the path, whatever data source the caller was checked against. A job
+  of another data source is now `404`.
+- **A draft is reached through its own graph.** A merge preview and a draft's view changes
+  (`/versioning/graphs/{graph}/branches/{branch}/merge-preview`, `/view-changes`) did not check that
+  the draft belonged to the graph in the path, or that the caller could read it. Both now do.
+- **Signing in through an identity provider proves when.** The session records whether the
+  provider itself dated the sign-in (`auth_time_proven`), and keeps that through every renewal. A
+  sign-in it re-issued silently, or dated too long ago to use, does not count as a fresh one.
 
 ### Upgrading
 
-- **Run the upgrade job.** Migration `20261012_1000_api_keys` adds the `api_keys` table.
+- **Run the upgrade job.** Migrations `20261012_1000_api_keys` and `20261013_1000_api_key_usage`
+  add the `api_keys` and `api_key_usage` tables.
 - **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
   Features → Authentication**; people can still see and revoke their keys while it is off.
 - **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and
-  `RATELIMIT_API_KEY_FAILURES_PER_IP` (120 failed lookups a minute per address). Behind a proxy,
-  `FORWARDED_ALLOW_IPS` must name it, or a key limited to networks sees the proxy's address.
-- The control plane runs one more hourly sweep, for expiry reminders.
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` (120 lookups of unknown keys a minute per address).
+- **Name your proxies.** Behind a proxy, `FORWARDED_ALLOW_IPS` must name exactly it: too narrow and
+  a key limited to networks sees the proxy's address; as wide as the shipped Compose and
+  Kubernetes settings (every private range) and a client inside them can claim any address.
+- The control plane runs one more hourly sweep, for expiry reminders and to drop usage counts
+  older than 90 days. Every API process writes its keys' usage counts every 30 seconds.
 
 ### Known limitations
 
@@ -89,6 +121,10 @@ it isn't limited to.
 - **Signing out everywhere, changing a password and End sessions leave keys working**, by design:
   revoke a key you no longer trust.
 - The refresh audit (`refresh_events`) and graph commits record a key's owner, not the key.
+- **Usage counts are best-effort.** A process that stops abruptly loses up to its last 30 seconds
+  of counts, and a streamed response is counted when it starts.
+- **Gateway and portal sign-ins can't make keys** unless an administrator turns on **Accept a fresh
+  sign-in round trip for API keys**.
 - `publish_view_library.py` still signs in with a password.
 
 ---

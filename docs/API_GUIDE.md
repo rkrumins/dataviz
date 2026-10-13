@@ -717,7 +717,9 @@ in [Single Sign-On](/guide/sso-setup).
 | CSRF and origin checks | `backend/auth_service/csrf.py` | `CSRFMiddleware` |
 | API keys on a request: checks, scope fence | `backend/app/auth/api_key_auth.py` | `authenticate`, `_REFUSALS` |
 | Which routes a key may call | `backend/app/auth/api_key_surface.py` | `SURFACE` |
-| Creating, rotating and revoking keys; the key describing itself | `backend/app/api/v1/endpoints/api_keys.py` | `create_my_api_key`, `rotate_my_api_key`, `describe_this_key` |
+| Creating, previewing, renaming, rotating and revoking keys; the key describing itself | `backend/app/api/v1/endpoints/api_keys.py` | `create_my_api_key`, `preview_my_api_key`, `update_my_api_key`, `rotate_my_api_key`, `describe_this_key` |
+| Every key: counts, filters, detail, revoking with a note, CSV export | `backend/app/api/v1/endpoints/api_keys.py`, `backend/app/db/repositories/api_key_repo.py` | `api_key_stats`, `list_api_keys`, `export_api_keys`, `status_expr` |
+| Counting each key's requests per day | `backend/app/services/api_key_usage.py` | `record_request`, `UsageRecorder.flush` |
 | Session lifetimes and sign-in limits | `backend/auth_service/core/config.py` | `JWT_EXPIRY_MINUTES`, `SESSION_ABSOLUTE_MAX_HOURS`, `RATELIMIT_LOGIN_PER_ACCOUNT` |
 | Router mounts and URL prefixes | `backend/app/api/v1/api.py` | `api_router` |
 | Explorer switch, error handlers, body and time limits | `backend/app/main.py` | `_DOCS_ENABLED`, `_feature_disabled_handler`, `_provider_busy_handler`, `_BodySizeLimitMiddleware`, `_TimeoutMiddleware` |

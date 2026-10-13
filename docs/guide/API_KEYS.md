@@ -16,48 +16,74 @@ can. If your own access shrinks, so does the key's, on its next request.
 ## Creating a key
 
 Open **Account → API keys** (or **API keys** in the menu under your avatar),
-and choose **Create key**.
+and choose **Create key**. Five short steps follow; every choice can be
+changed on the way, and **Back** never loses what you filled in.
 
-1. **Name it** after where it will be used — "nightly lineage sync" is more
-   use to you in six months than "test".
-2. **Choose what it can reach.**
-   - **Selected views & data sources** — the narrowest, and the default. The
-     pickers list everything you can reach, including views shared with you or
-     published to everyone, and say whether *you* can edit or only read each.
-   - **Selected workspaces** — everything in those workspaces.
-   - **Everything I can access** — every workspace, view and data source you
-     can reach, now and later.
-3. **Choose what it can do there.**
-   - **Views**: none, read, or read & write (create, edit, delete).
-   - **Publish views to everyone**: only with read & write on views.
-   - **Data**: none, read (the data, and the semantic layer and catalog entry
-     that explain it), or read & write (change data, propose and publish
-     changes, start refreshes).
-4. **Choose when it expires.** 30 days is chosen for you. Your administrator
-   may set a maximum; "Never" is only offered when they have not.
-5. **Optionally, limit it to networks** — addresses or ranges such as
-   `203.0.113.0/24`. From anywhere else the key is refused.
-6. **Confirm it's you.** With a password, type it. If you sign in through an
-   identity provider, you are asked to sign in again unless you did in the
-   last 15 minutes; what you filled in is waiting when you come back.
+1. **Purpose** — pick the job closest to yours. Each sets sensible access and
+   a lifetime to start from:
 
-The key is shown **once**. Copy it into a secrets manager before you close the
-dialog — it is not stored anywhere you can see it again. If you lose it,
-[rotate](#rotating-a-key) it.
+   | Starting point | Views | Data | Reach | Expires |
+   | --- | --- | --- | --- | --- |
+   | **Read data for reporting** | read | read | what you pick | 90 days |
+   | **Load data and signal refreshes** | — | read & write | what you pick | 30 days |
+   | **Publish views from CI** | read & write, publish | read | whole workspaces | 90 days |
+   | **Custom** | read | — | what you pick | 30 days |
+
+   A starting point you can't give a key — you don't hold that access in any
+   workspace — is greyed out, with the reason. Then name the key after where
+   it will be used ("nightly lineage sync" is more use in six months than
+   "test"), and say what it is for.
+2. **Reach** — **Selected views & data sources** (recommended, and the
+   narrowest), **Selected workspaces**, or **Everything I can access** (every
+   workspace, view and data source you reach, now and later). The pickers list
+   everything you can reach, including views shared with you or published to
+   everyone, and say whether *you* can edit or only read each.
+3. **Permissions** — for **Views** and for **Data**: no access, read, or read
+   & write. Each level says what a script holding the key could do. **Publish
+   views to everyone** needs read & write on views. When the key asks for more
+   than you have on something — write access to a view you can only read —
+   the step says so: the key will only read it.
+4. **Safety** — when it expires (the date is shown; **Never** only where your
+   administrator allows it), and optionally the networks it may be used from,
+   such as `203.0.113.0/24`. **Add this address** adds the one you are calling
+   from now, as the server sees it.
+5. **Review** — everything the key will be able to do, how exposed it would
+   be if it leaked, and what it can do *right now* across your workspaces,
+   views and data sources — worked out by the server exactly as creating it
+   would be. Then confirm it's you, and create it.
+
+The key is shown **once**, with ready-to-paste snippets for cURL, Python,
+JavaScript and a `.env` file. Copy it into a secrets manager and tick **I've
+stored it somewhere safe** — it is not stored anywhere you can see it again.
+The page then waits for the key's first call and says when it arrives. If you
+lose a key, [rotate](#rotating-or-renewing-a-key) it.
 
 > **Tip:** Make one key per integration, each limited to what that
 > integration needs. A key that reads one view is a small loss if it leaks; a
 > key that writes everything is not.
 
+### Confirming it's you
+
+Creating, rotating or renewing a key asks you to prove you are at the
+keyboard — a session left open on a shared machine must not be enough to walk
+away with a credential.
+
+- **With a password**, type it.
+- **Through an identity provider**, you need to have signed in there within
+  the last 15 minutes, and the provider must say when. OIDC and SAML
+  connections do. If it has been longer, **Sign in again** takes you to your
+  provider and brings you back to the review, with everything you chose still
+  there — never the key itself, which doesn't exist yet.
+- **Gateway and portal connections** can't say when you signed in, so keys
+  can't be created through them unless your administrator has turned on
+  **Accept a fresh sign-in round trip for API keys**. The review step tells you
+  when that is the case.
+
 ### What it can do, before and after
 
-Expand a key on the page to see **what it can do right now**: per workspace,
-and per view and data source it names. This is your access today narrowed by
-the key — so if you lose a role, it shows the key losing it too.
-
-When the key asks for more than you have on something — write access to a
-view you can only read — the form says so before you create it. The key will
-only read that view.
+Open a key to see **what it can do right now**: per workspace, and per view
+and data source it names. This is your access today narrowed by the key — so
+if you lose a role, it shows the key losing it too.
 
 ---
 
@@ -102,7 +128,14 @@ reference marks every operation a key may call.
 A key limited to particular data sources must **name** one with
 `dataSourceId`; it cannot rely on a workspace's default data source. A key
 limited to views reads a view's data through `viewId`, read-only, exactly as
-you can open a view's data without being able to change it.
+you can open a view's data without being able to change it — but not the
+routes about that data source itself, such as its jobs or pull requests,
+which need the data source. A pull request from a fork lands in the graph it
+was forked from, so it needs that graph's data source too.
+
+A key's job event stream ends after five minutes. Reconnect with the last
+event's id in `Last-Event-ID` and it carries on where it stopped; the key is
+checked again each time.
 
 ### When a key is refused
 
@@ -141,17 +174,33 @@ have leaked.
 
 ---
 
-## Rotating a key
+## Keeping a key current
 
-**Rotate** makes a new token that can do exactly what the old one does. Choose
-how long the old token keeps working beside it — not at all, an hour, a day or
-a week — so you can swap the new one in without a gap. The new token is shown
-once, like a new key.
+**Edit** renames a key or changes what it says it is for. What it may do,
+where it reaches and when it expires are fixed when it is made: to change
+those, rotate it or make a new key.
+
+### Rotating or renewing a key
+
+**Rotate** makes a new token that can do exactly what the old one does.
+Choose how long the old token keeps working beside it — not at all, an hour,
+a day or a week — and the dialog says when that is, so you can swap the new
+one in everywhere first. A key can be replaced once: rotate its replacement
+next time.
+
+**Renew** is for a key that has expired: it makes a new token with the same
+access as the old one, starting from what your access is *today*. There is no
+old token left to keep working, and a renewed key counts towards your 25 like
+a new one. An expired key that something is still calling says so, so you know
+to renew it.
+
+The new token is shown once, like a new key. The old key and its replacement
+point to each other.
 
 ## Revoking a key
 
-**Revoke** stops a key at once, permanently. Revoked keys stay on the page as
-a record.
+**Revoke** stops a key at once, permanently. Keys that have ended stay under
+**Expired and revoked** for 90 days, as a record.
 
 Whoever holds a key can also revoke it — even a paused or expired one — so if
 you find a key where it should not be, end it:
@@ -164,23 +213,45 @@ curl -X DELETE -H "Authorization: Bearer nxpat_…" https://your-host/api/v1/api
 
 ## What is recorded
 
-Creating, rotating and revoking a key are on your account's activity, and on
-the audit log administrators read, as is a revoked key being used again or a
-key being used from a network it does not allow — those also tell you in your
-inbox. Everything a key changes is recorded as you, marked with the key. A
-week before a key expires, you get a reminder.
+Each key's card shows its requests per day for the last two weeks, and the
+key's own page the last 30 days: how many requests, how many changed
+something, and how many were refused or failed. Counts are added every half
+minute.
+
+Creating, renaming, rotating and revoking a key are on your account's
+activity, and on the audit log administrators read, as is a revoked key being
+used again or a key being used from a network it does not allow — those also
+tell you in your inbox. Everything a key changes is recorded as you, marked
+with the key. A week before a key expires, you get a reminder.
+
+## Network limits behind a proxy
+
+A key limited to networks is checked against the address the API server sees
+you calling from. Behind a load balancer or proxy that address comes from the
+`X-Forwarded-For` header, which the server believes only from the proxies
+`FORWARDED_ALLOW_IPS` names. The shipped Compose and Kubernetes settings
+believe every private address range, so anything inside one of them could
+claim to be anywhere. Ask your administrator to name exactly your proxies
+before you rely on a network limit.
 
 ## For administrators
 
-**Administration → API keys** lists every key, its owner, what it can reach
-and when it was last used; filter to keys nobody has used for 90 days. With
-permission to manage users you can revoke one key, or every key a person
-holds — ending someone's sessions does not touch their keys.
+**Administration → API keys** opens on counts — active, expiring within 7
+days, never expiring, unused for 90 days, paused — each of which filters the
+list. Tabs narrow it by status, the search finds a key by name or prefix or
+its owner by email, and the columns sort by name, last use, expiry or
+creation. Open a key for its owner, what it can do right now, its usage and
+the keys it replaced. With permission to manage users you can revoke one key —
+optionally with a note its owner sees — or every key a person holds; ending
+someone's sessions does not touch their keys. **Export CSV** downloads the list
+as filtered and sorted, up to 10,000 keys. The access drawer on
+**Administration → Users** links to each person's keys.
 
-Three switches in **Administration → Features → Authentication** govern keys:
+Four switches in **Administration → Features → Authentication** govern keys:
 **API keys** (the switch for all of them at once), **Longest an API key may
-live**, and **Pause keys of people who stop signing in**. See
-[Feature Switches](/guide/feature-switches).
+live**, **Pause keys of people who stop signing in**, and **Accept a fresh
+sign-in round trip for API keys** (see [Confirming it's
+you](#confirming-its-you)). See [Feature Switches](/guide/feature-switches).
 
 ---
 

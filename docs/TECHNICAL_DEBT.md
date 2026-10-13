@@ -678,6 +678,24 @@ Trace operations wait for the backend before updating
 (`frontend/src/hooks/useUnifiedTrace.ts:338`–`:399`). This is perceived latency,
 not correctness. Listed so it is not rediscovered as a bug.
 
+### 3.6 Forwarded client addresses are believed from every private range
+
+**Evidence:** the Compose file and the Kubernetes configmap set
+`FORWARDED_ALLOW_IPS` to every RFC1918 range and loopback
+(`docker-compose.yml:316`, `deploy/k8s/base/configmaps/common-config.yaml:95`),
+so the API server believes `X-Forwarded-For` from any peer inside them. A client
+that can reach the API from such an address chooses the address the platform
+sees: the per-address rate limits, the "last used from" on API keys and
+sessions, and an API key's network limit all trust it. Narrowed from `*` before
+the pentest (`docs/security/PENTEST_SCOPE.md`), not to the proxies themselves,
+because those differ per deployment.
+
+**Recommendation.** Leave the default; say it where it matters. The
+[Security Overview](SECURITY_OVERVIEW.md#api-keys) and the
+[API keys guide](guide/API_KEYS.md#network-limits-behind-a-proxy) tell operators to
+name exactly their proxies before relying on a key's network limit. Revisit if
+a deployment template gains a known ingress address to default to.
+
 ---
 
 ## 4. The failure mode this codebase actually has

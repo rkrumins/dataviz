@@ -315,8 +315,16 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   without a database lookup. Only its SHA-256 hash is stored, and the token is shown once. It
   is accepted only in the `Authorization: Bearer` header — never in a URL — and never logged.
 - **Minting needs a fresh sign-in.** Creating or rotating a key asks for the password, or for
-  a sign-in through the identity provider in the last 15 minutes. A person may hold 25 active
-  keys.
+  a sign-in through the identity provider in the last 15 minutes that the provider itself
+  dated. A provider that signs someone back in silently from a session it still holds proves
+  nothing about who is at the keyboard, so a sign-in it did not date is not enough: OIDC
+  (`prompt=login` with `max_age`) and SAML (`ForceAuthn`) connections date theirs, and the
+  sign-in page asks them to. Gateway and portal connections cannot, so their users cannot make
+  keys unless an administrator accepts a fresh round trip instead. The proof is a signed
+  `auth_time_proven` claim beside `auth_time` in both session tokens, carried through every
+  renewal and never settable from outside the sign-in. A person may hold 25 keys still in
+  date; rotations and renewals take a per-person lock, so two at once can neither pass the
+  limit nor leave a revoked key with a live replacement, and a key can be replaced only once.
 - **Narrower than its owner, never wider.** A key reaches everything its owner can, or chosen
   workspaces, views and data sources; and none, read, or read & write on views (with
   publishing) and on data. On anything, it may do what its owner may do there *now*, narrowed
@@ -326,7 +334,12 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   control, data-source signals and jobs — and everything else answers
   `403 api_key_not_allowed`. A request naming a workspace, view or data source outside the
   key's limits answers `403 api_key_out_of_scope`, or `404` across workspaces; a read-only key
-  asking to change something answers `403 api_key_read_only`.
+  asking to change something answers `403 api_key_read_only`. A view opens reads of the data
+  it renders, never the routes about that data source itself (its jobs, readiness or pull
+  requests). A fork's pull request needs the parent graph's data source too, and a draft is
+  reached only through its own graph. The ontologies and catalog entries a key lists are
+  those of the data sources it covers. A key's job event stream ends after five minutes, and
+  the client's reconnect (with `Last-Event-ID`) checks the key again.
 - **Checked on every request.** A revoked or expired key, a suspended owner, or a key used
   from a network it isn't limited to is refused with `401`. So is the key of a person who signs
   in through an identity provider and hasn't for a set time (30 days by default): the key
@@ -337,9 +350,18 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   an `Authorization` header to a cross-site request without the API's consent — but a write
   still passes the Origin check.
 - **Limits and outages.** Each key is limited to `RATELIMIT_API_KEY` requests (1,200 a minute
-  by default; `429` with `Retry-After`), and failed lookups to `RATELIMIT_API_KEY_FAILURES_PER_IP`
-  per client address. If the database can't be reached the answer is `503`, never "invalid
-  key".
+  by default, a sliding window; `429` with `Retry-After`), counted before the key is looked up,
+  so a client told to slow down costs no database read. Tokens nobody issued count against
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` per client address (an IPv6 client per /64); a key that
+  exists but is refused — revoked, expired — is charged to its own budget instead, so one
+  integration looping on a dead key cannot lock out the healthy ones behind the same NAT. If
+  the database can't be reached the answer is `503`, never "invalid key".
+- **Network limits are as strong as the proxy setting.** A key limited to networks is checked
+  against the client address the API server sees, which behind a proxy comes from
+  `X-Forwarded-For` — believed only from the peers `FORWARDED_ALLOW_IPS` names. The shipped
+  Compose and Kubernetes settings trust every private range, so a client inside one of them
+  can claim any address. Name exactly your proxies there before relying on a key's network
+  limit. Recorded and notified addresses are only ever a parsed IP address, never header text.
 - **Not ended with sessions.** Sign Out, **Sign out everywhere**, password changes and **End
   sessions** leave keys working; suspension stops them at once. To stop a key, revoke it: its
   owner on **Account → API keys**, an administrator one key or all of a person's on
@@ -348,15 +370,20 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
 **How to configure it.** Under **Administration → Features → Authentication**: **API keys**
 (`apiKeysEnabled`, on by default) refuses every key at once; **Longest an API key may live**
 (`apiKeyMaxLifetime`, no maximum by default) also shortens keys that already exist; **Pause keys
-of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default). Keys are refused
-with `503` while RBAC enforcement is switched off. Behind a proxy, set `FORWARDED_ALLOW_IPS` so
-that per-key network limits and recorded addresses see the real client.
+of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default); **Accept a fresh
+sign-in round trip for API keys** (`apiKeySsoRoundTripStepUp`, off by default) lets people on
+gateway and portal connections make keys with a sign-in their provider did not date. Keys are
+refused with `503` while RBAC enforcement is switched off. Behind a proxy, set
+`FORWARDED_ALLOW_IPS` to exactly your proxies, so that per-key network limits and recorded
+addresses see the real client.
 
 **Where in the code.** `backend/auth_service/core/api_keys.py` (`generate`, `hash_token`,
 `lifecycle_refusal`), `backend/auth_service/service.py` (`validate_api_key`),
 `backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py`
 (`SURFACE`), `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`),
-`backend/auth_service/csrf.py` (`_dispatch_api_key`), `backend/app/api/v1/endpoints/api_keys.py`.
+`backend/auth_service/csrf.py` (`_dispatch_api_key`), `backend/app/api/v1/endpoints/api_keys.py`
+(`_sso_step_up`), `backend/app/db/repositories/api_key_repo.py` (`status_expr`,
+`hold_principal`), `backend/app/services/api_key_usage.py`.
 
 ## Who can do what
 
