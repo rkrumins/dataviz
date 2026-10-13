@@ -84,6 +84,7 @@ vi.mock('../steps/BasicsStep', () => ({
       <div data-testid="basics-step">
         <span data-testid="basics-tags">{formData.tags.join(',')}</span>
         <button onClick={() => updateFormData({ tags: [] })}>stub-clear-tags</button>
+        <button onClick={() => updateFormData({ tags: [...formData.tags, 'added'] })}>stub-add-tag</button>
       </div>
     )
   },
@@ -312,15 +313,17 @@ describe('ViewWizard — submit (edit path)', () => {
 
 describe('ViewWizard — tags and description (edit path)', () => {
   // The wizard read a view's tags off a converted copy that had none, so it opened every view
-  // with no tags; saved only a non-empty list, so a cleared one stayed; and never sent the
-  // description at all.
+  // with no tags; saved only a non-empty list, so a cleared one stayed and an added tag
+  // replaced the rest; and never sent the description at all.
   const tagged = () => ({
     ...makeView(baseConfig({ layers: [], assignments: {} })),
     description: 'Quarterly numbers',
     tags: ['finance', 'pii'],
   })
 
-  it('opens with the view\'s tags and saves them back with its description', async () => {
+  it('opens with the view\'s tags, and leaves them alone when they weren\'t changed', async () => {
+    // Left out, the view keeps its own: tags set elsewhere since, or a draft's staged
+    // import's (which a draft's read shows), are never written over.
     renderWizard(tagged())
 
     await waitFor(() => expect(screen.getByTestId('basics-tags').textContent).toBe('finance,pii'))
@@ -328,9 +331,21 @@ describe('ViewWizard — tags and description (edit path)', () => {
     fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
 
     await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
-    expect(updateViewMock.mock.calls[0][1]).toMatchObject({
-      tags: ['finance', 'pii'], description: 'Quarterly numbers',
-    })
+    const body = updateViewMock.mock.calls[0][1]
+    expect(body.tags).toBeUndefined()
+    expect(body.description).toBe('Quarterly numbers')
+  })
+
+  it('saves an added tag with the ones already there', async () => {
+    renderWizard(tagged())
+
+    await waitFor(() => expect(screen.getByTestId('basics-tags').textContent).toBe('finance,pii'))
+    fireEvent.click(screen.getByRole('button', { name: 'stub-add-tag' }))
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    expect(updateViewMock.mock.calls[0][1].tags).toEqual(['finance', 'pii', 'added'])
   })
 
   it('saves a cleared list as empty, not as no change', async () => {
