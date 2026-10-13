@@ -38,3 +38,6 @@ data:
   # The activity sweep runs on the control plane, but this tier tells readers
   # how far back the log goes, so it MUST match controlplane-config's value.
   ACTIVITY_RETENTION_DAYS: "730"
+  # Aggregation runs are pruned on the control plane, and this tier says how
+  # far back they reach, so it MUST match controlplane-config's value too.
+  AGGREGATION_JOB_RETENTION_DAYS: "90"

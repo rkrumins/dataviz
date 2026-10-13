@@ -200,6 +200,8 @@ export function DataTab({
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <KpiCard
                         label="Time to first build" metric="firstBuild" icon={Clock} accent="cyan"
+                        caveat={coverage.jobsKeptDays === null ? undefined
+                            : `Aggregation runs are kept for ${coverage.jobsKeptDays} days, and each source's latest runs whatever their age: a source connected earlier may have lost the run that built it first.`}
                         value={waitPhrase(onboarding.firstBuild.medianHours)}
                         sub={onboarding.firstBuild.measured
                             ? `middle of ${exact(onboarding.firstBuild.measured)} · slowest tenth ${waitPhrase(onboarding.firstBuild.p90Hours)}`

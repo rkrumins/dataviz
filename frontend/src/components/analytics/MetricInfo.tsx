@@ -38,12 +38,14 @@ const PANEL_WIDTH = 288
 const GUTTER = 12
 
 export function MetricInfo({
-    metric, definition, className,
+    metric, definition, caveat, className,
 }: {
     /** Key into `METRICS`. Ignored when `definition` is passed. */
     metric?: keyof typeof METRICS
     /** An inline definition, for one-off numbers not worth a shared entry. */
     definition?: MetricDefinition
+    /** A caveat known only from the data, in place of the definition's. */
+    caveat?: string
     className?: string
 }) {
     const [open, setOpen] = useState(false)
@@ -181,9 +183,9 @@ export function MetricInfo({
                         </span>
                     )}
 
-                    {def.caveat && (
+                    {(caveat ?? def.caveat) && (
                         <span className="mt-2.5 block rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-900 dark:text-amber-100">
-                            {def.caveat}
+                            {caveat ?? def.caveat}
                         </span>
                     )}
                 </span>

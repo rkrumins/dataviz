@@ -27,6 +27,9 @@ data:
   AGGREGATION_API_PORT: "8091"
   WORKER_CONCURRENCY: {{ .Values.config.aggregation.workerConcurrency | quote }}
   AGGREGATION_JOB_TIMEOUT_SECS: {{ .Values.config.aggregation.jobTimeoutSecs | quote }}
+  # Pruned to by the control plane, reported by the web tier: one ConfigMap,
+  # so how far back runs reach is the same answer on both.
+  AGGREGATION_JOB_RETENTION_DAYS: {{ .Values.config.aggregation.jobRetentionDays | quote }}
   MAX_CONCURRENT_PER_GRAPH: {{ .Values.config.aggregation.maxConcurrentPerGraph | quote }}
   STATS_SCHEDULER_TICK_SECS: {{ .Values.config.stats.schedulerTickSecs | quote }}
   STATS_WORKER_CONCURRENCY: {{ .Values.config.stats.workerConcurrency | quote }}

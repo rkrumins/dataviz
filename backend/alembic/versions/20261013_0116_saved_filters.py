@@ -13,7 +13,7 @@ installed at head already has it from 0001_baseline's create_all — hence the
 guarded DDL; this migration covers existing Postgres.
 
 Revision ID: 20261013_0116_saved_filters
-Revises: 20261011_1000_activity_pulse
+Revises: 20261013_1000_activity_cadence
 Create Date: 2026-10-13 01:16:12.676178+00:00
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20261013_0116_saved_filters"
-down_revision: Union[str, None] = "20261011_1000_activity_pulse"
+down_revision: Union[str, None] = "20261013_1000_activity_cadence"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

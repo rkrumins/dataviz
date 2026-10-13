@@ -300,7 +300,7 @@ async def test_no_runtime_error_no_response_returned_under_repeated_timeouts():
 
 
 async def test_sse_path_bypasses_timeout():
-    """SSE bypass: long-lived /events streams must not be cancelled."""
+    """SSE bypass: an aggregation job's progress feed must not be cancelled."""
 
     completed = asyncio.Event()
 
@@ -314,9 +314,25 @@ async def test_sse_path_bypasses_timeout():
 
     mw = _TimeoutMiddleware(long_stream_app)
     sink = _Sink()
-    await mw(_http_scope("/api/v1/views/events"), _Receiver(), sink)
+    await mw(_http_scope("/api/v1/admin/data-sources/ds_1/aggregation-jobs/job_1/events"), _Receiver(), sink)
 
     assert completed.is_set(), "SSE stream was cut off by the timeout middleware"
+    assert sink.terminal_chunks == 1
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/admin/activity/events",
+    "/api/v1/admin/workspaces/ws_1/activity/events",
+])
+async def test_a_read_whose_path_ends_in_events_keeps_its_deadline(path):
+    """Streams are named one by one. A path ending in ``/events`` used to be
+    taken for one, which left the activity log's event lists — paged reads
+    like any other — without a deadline."""
+    mw = _TimeoutMiddleware(_slow_before_start_app(delay=2.0))
+    assert not mw._is_sse_path(path)
+    sink = _Sink()
+    await mw(_http_scope(path), _Receiver(), sink)
+    assert sink.status == 504
     assert sink.terminal_chunks == 1
 
 
@@ -338,6 +354,11 @@ async def test_streamed_export_bypasses_timeout():
 
     await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    # The activity log's CSV, platform-wide and one workspace's.
+    for path in ("/api/v1/admin/activity/export.csv", "/api/v1/admin/workspaces/ws_1/activity/export.csv"):
+        await mw(_http_scope(path), _Receiver(), sink := _Sink())
+        assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
     await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1/download"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1

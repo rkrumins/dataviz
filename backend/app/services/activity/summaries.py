@@ -1,11 +1,12 @@
 """The activity insight band: one way to build it, for a reader and the warmer.
 
-The band is folded from whole days. Closed days — and the whole comparison
-period — are folded once, kept in Redis until the next UTC midnight moves
-every window on, and shared by every window over the same days; a request
-reads only yesterday and today. That fold is the page's cold cost, and it is
-the same for everyone who opens the explorer through one of its lenses, so
-the analytics warmer pays it ahead of them (:func:`warm_platform`).
+The band is folded from whole days. Each day that is over is folded once and
+kept in Redis, and every span — a window, a zoom into it, the period before
+either — is the sum of its days, itself kept until the next UTC midnight
+moves the windows on; a request reads only yesterday and today. Folding the
+days is the page's cold cost, the same for everyone who opens the explorer
+through one of its lenses, so the analytics warmer pays it ahead of them
+(:func:`warm_platform`) — and with it the cost of any zoom inside them.
 
 Only the database layer and the cache are imported, so the control plane —
 which runs the warmer and holds no auth secrets — can import this.
@@ -36,6 +37,10 @@ SUMMARY_TTL_SECONDS = 60.0
 #: How long a fold of closed days is kept: the span is day-aligned, so it is
 #: asked for until the next UTC midnight moves every window on.
 FOLD_TTL_SECONDS = 26 * 3600.0
+#: How long a day's fold is kept after it was last read. A day that is over
+#: never changes, so this only bounds memory: the days of the views people
+#: open are read at least daily and stay; a day nobody reads goes.
+DAY_TTL_SECONDS = 3 * 24 * 3600.0
 #: The explorer's leading ranges, warmed for the platform view.
 WARM_DAYS = (7, 30, 90)
 #: The explorer's lenses, as the filter each one's requests carry (``LENSES``
@@ -75,17 +80,10 @@ async def summary(
     scope = workspace_id or "all"
     selection = selection_key(f)
 
-    async def _reuse(span: str, build):
-        # Redis only: a fold holds every person and target in its span, too
-        # large to keep a copy of in every worker.
-        return await analytics_cache.cached(
-            f"activity:fold:v3:p{catalogue.PROJECTION_VERSION}:{scope}:{selection}:{span}",
-            build, ttl=FOLD_TTL_SECONDS, memory=False,
-        )
-
     async def _build() -> dict[str, Any]:
         doc = await activity_repo.summary(
-            session, f, window, reuse=_reuse, kept_from=activity_retention.horizon(),
+            session, f, window, folds=_Folds(scope, selection),
+            kept_from=activity_retention.horizon(),
         )
         doc["generatedAt"] = datetime.now(timezone.utc).isoformat()
         return await name_summary(session, doc)
@@ -94,6 +92,30 @@ async def summary(
         f"activity:v3:{scope}:{selection}:d{window.days}:{window.start[:10]}:{window.end[:10]}",
         _build, ttl=ttl,
     )
+
+
+class _Folds:
+    """One selection's folds, in Redis only: a fold holds every person and
+    target in its days, too large to keep a copy of in every worker."""
+
+    def __init__(self, scope: str, selection: str) -> None:
+        self._key = f"activity:fold:v4:p{catalogue.PROJECTION_VERSION}:{scope}:{selection}"
+
+    async def span(self, key, build):
+        return await analytics_cache.cached(
+            f"{self._key}:{key}", build, ttl=FOLD_TTL_SECONDS, memory=False,
+        )
+
+    async def days(self, days):
+        kept = await analytics_cache.get_many(
+            [f"{self._key}:{d}" for d in days], ttl=DAY_TTL_SECONDS,
+        )
+        return {d: fold for d, fold in zip(days, kept) if fold is not None}
+
+    async def keep(self, folds):
+        await analytics_cache.put_many(
+            {f"{self._key}:{d}": fold for d, fold in folds.items()}, ttl=DAY_TTL_SECONDS,
+        )
 
 
 async def name_summary(session: AsyncSession, doc: dict[str, Any]) -> dict[str, Any]:

@@ -64,9 +64,6 @@ _TOP_WORKSPACES = 6
 #: Sources listed as the biggest movers.
 _TOP_MOVERS = 8
 
-#: How long aggregation jobs are kept, which bounds "time to first build".
-JOB_RETENTION_DAYS = 90
-
 #: A source counts as "under version control" through any of these kinds.
 VERSION_KINDS = ("manual", "authoritative", "hybrid", "blank")
 
@@ -324,6 +321,8 @@ async def platform_data(
     scope: Optional["ViewerScope"] = None,
 ) -> dict:
     """Growth, onboarding and version-control adoption over one window."""
+    from backend.app.services.aggregation.reconciler import retention_days as job_retention_days
+
     now = now or datetime.now(timezone.utc)
     w = build_window(days, start=start, end=end, now=now)
 
@@ -389,7 +388,9 @@ async def platform_data(
         "bucket": w.granularity,
         "coverage": {
             "entitiesSince": coverage[:10] if coverage else None,
-            "jobsKeptDays": JOB_RETENTION_DAYS,
+            # How far back runs reach, which bounds "time to first build":
+            # the prune's own setting, never a copy of its default.
+            "jobsKeptDays": job_retention_days(),
         },
         "growth": {
             "buckets": w.buckets,

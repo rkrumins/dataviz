@@ -53,6 +53,7 @@ config:
   adminEmail: admin@synodic.local
   aggregation:
     jobTimeoutSecs: "7200"
+    jobRetentionDays: "90"               # finished runs; 0 keeps everything
     workerConcurrency: "4"
     maxConcurrentPerGraph: "2"
   stats:
