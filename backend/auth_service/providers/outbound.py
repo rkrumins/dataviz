@@ -353,6 +353,30 @@ async def fetch_metadata(
         return resp
 
 
+async def fetch_status(
+    url: str, *, timeout: float,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> int:
+    """GET *url* once with redirects off and return only the status code.
+
+    For reachability probes, where any answer proves the server is up: an
+    IdP's single sign-on URL asked for nothing answers with a redirect to
+    its login page or a 400, and ``fetch_metadata`` would read either as a
+    failure. Same pre-flight check; the body is never read.
+    ``allow_hosts`` and ``verify`` as for :func:`request_json` — an
+    Enterprise gateway is internal, reachable only through the operator's
+    allowlist and its row's TLS setting.
+    """
+    await _assert_fetchable_off_loop(url, allow_hosts=allow_hosts)
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
+    ) as client:
+        async with client.stream("GET", url) as resp:
+            return resp.status_code
+
+
 #: Back-channel identity responses are a user object, not a document.
 #: Separate from ``MAX_METADATA_BYTES`` so tightening one does not
 #: silently retune the other.

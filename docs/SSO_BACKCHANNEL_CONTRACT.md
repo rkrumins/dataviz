@@ -251,6 +251,20 @@ from the last time you actually answered — not from the last time we
 tried. A brief outage is invisible; a sustained one ends sessions rather
 than extending them.
 
+An outage is also **detected and announced**. Once a minute, one of the
+application's servers sends a request to your gateway URL carrying no
+session handle and none of the headers configured for the legs, and reads
+any answer below 500 as "up" — a 401 or a 405 is exactly right. A 5xx, a
+timeout or a refused connection, sustained for three minutes after your
+gateway was last seen answering, is read as an outage: the sign-in page
+says your service can't be reached, people whose sessions end are sent
+there rather than to you, the application's administrators can sign in
+with a password, and they can open password sign-in to everyone while you
+recover. It is over after five minutes of answers. That is one more reason
+not to answer 401 during an outage: it reads as healthy, so nobody is told.
+(In the browser-side exchange shape the server never calls your gateway,
+so nothing is probed.)
+
 ---
 
 ## 4. What each leg sends and expects
@@ -388,7 +402,8 @@ What the application never does:
 The application re-confirms the session on every renewal, which happens
 once per access-token lifetime — a few minutes by default, and a
 deployment setting. So: roughly one leg-1 call per signed-in person per
-renewal interval, plus one full exchange per sign-in.
+renewal interval, plus one full exchange per sign-in, plus one request a
+minute with no handle to tell whether you are up (§3).
 
 If you have an endpoint that *validates* a handle without minting a new
 token, say so — it is cheaper for this purpose and we would rather call

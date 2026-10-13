@@ -67,7 +67,7 @@ export interface SsoProviderSummary {
     id: string
     slug: string
     displayName: string
-    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile' | 'backchannel'
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
@@ -101,16 +101,31 @@ export interface SsoProviderSummary {
     }
 }
 
+/** Who may sign in with a password right now. ``administrators`` is a
+ *  confirmed SSO outage with passwords otherwise off: break-glass accounts
+ *  and Super Admins with a password. ``break_glass`` is the system
+ *  accounts alone. */
+export type PasswordAccess = 'everyone' | 'administrators' | 'break_glass'
+
 /** What the login page needs to pick its shape.
  *
- *  ``allowLocalLogin`` off means the password form must not render at all
- *  — the server refuses it, so offering it is offering a dead control.
+ *  ``allowLocalLogin`` on means everyone may use a password right now —
+ *  the switch is on, or an administrator opened the emergency window.
  *  ``emailFirstLogin`` on means route by email domain instead of showing
- *  every provider as a button. */
+ *  every provider as a button.
+ *
+ *  The last three are absent from a server that predates them; the page
+ *  reads them through ``loginShape``, which treats absence as no outage,
+ *  no window, and ``allowLocalLogin`` deciding who may use a password. */
 export interface LoginContext {
     allowLocalLogin: boolean
     emailFirstLogin: boolean
     providers: SsoProviderSummary[]
+    passwordAccess?: PasswordAccess
+    /** Connections the server has confirmed unreachable, by slug. */
+    ssoOutage?: { since: string; providers: string[] } | null
+    /** When the emergency password window closes, while it is open. */
+    passwordFallbackUntil?: string | null
 }
 
 /** Sources whose payload only JavaScript can reach — cookie and header

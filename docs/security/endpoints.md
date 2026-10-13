@@ -210,6 +210,8 @@
 | `POST` | `/api/v1/admin/roles/{role_name}/preview-update` | system:admin | enforced |
 | `GET` | `/api/v1/admin/sso/config` | system:admin | n/a |
 | `PATCH` | `/api/v1/admin/sso/config` | system:admin | enforced |
+| `DELETE` | `/api/v1/admin/sso/config/password-fallback` | system:admin | enforced |
+| `POST` | `/api/v1/admin/sso/config/password-fallback` | system:admin | enforced |
 | `GET` | `/api/v1/admin/stats-polling` | system:admin | n/a |
 | `GET` | `/api/v1/admin/system/status` | system:admin | n/a |
 | `GET` | `/api/v1/admin/telemetry/summary` | system:audit:read | n/a |

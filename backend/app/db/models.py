@@ -1999,6 +1999,36 @@ class IdpProviderORM(Base):
         return f"<IdpProvider id={self.id!r} slug={self.slug!r} kind={self.kind!r}>"
 
 
+class IdpProviderReachabilityORM(Base):
+    """Whether each connection's identity provider answers, as the
+    scheduler-role prober last saw it (``services/idp_reachability.py``).
+
+    Its own table rather than columns on ``idp_providers``: it is written
+    every minute by one process and read with the posture snapshot, and
+    neither should touch a provider row's ``updated_at`` or its editors'
+    concurrency. Timestamps are ISO-8601 text like the rest of the SSO
+    tables. Which of these rows add up to a confirmed outage is decided in
+    one place, ``idp_reachability.outage_confirmed``.
+    """
+    __tablename__ = "idp_provider_reachability"
+
+    provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Last success. An outage can only be confirmed for a connection this
+    # prober has seen working, so a probe that can never succeed from
+    # where it runs is not mistaken for an identity provider that is down.
+    last_ok_at = Column(Text, nullable=True)
+    # Start of the current run of failures; NULL while healthy.
+    unreachable_since = Column(Text, nullable=True)
+    # Start of the current run of successes inside a confirmed outage —
+    # the outage ends once this is old enough, not at the first success.
+    recovering_since = Column(Text, nullable=True)
+    checked_at = Column(Text, nullable=False, default=_now)
+    detail = Column(Text, nullable=True)
+
+
 # ------------------------------------------------------------------ #
 # sso_backchannel_hosts  (which internal addresses SSO may reach)      #
 # ------------------------------------------------------------------ #
@@ -2216,6 +2246,14 @@ class AppAuthConfigORM(Base):
     # Email-first login (Home Realm Discovery). Off by default: it changes
     # what every user sees, and a wrong domain mapping strands them.
     email_first_login = Column(Boolean, nullable=False, default=False)
+    # Emergency password access for everyone, opened by an admin — or the
+    # host's reset script — while single sign-on is down. A deadline rather
+    # than a switch, so it closes itself; NULL is closed. Not part of the
+    # optimistic ``version``: opening it in an incident must not make the
+    # Settings page's next save fail.
+    password_fallback_until = Column(Text, nullable=True)
+    password_fallback_by = Column(Text, nullable=True)
+    password_fallback_reason = Column(Text, nullable=True)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(Text, nullable=False, default=_now)
     updated_by = Column(Text, nullable=True)

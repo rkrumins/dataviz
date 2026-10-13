@@ -13,9 +13,11 @@
  * enabled switch looks like a switch, and each glyph carries a real
  * tooltip (HoverTip) rather than the browser's one-second title chrome.
  */
+import { useState } from 'react'
 import { motion } from 'framer-motion'
 import {
-    FlaskConical, Loader2, Pencil, Rocket, ShieldAlert, Trash2,
+    ChevronDown, ChevronUp, FlaskConical, Loader2, Pencil, Rocket, ShieldAlert,
+    Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { IdpProvider, IdpHealth } from '@/services/ssoAdminService'
@@ -227,11 +229,87 @@ function EnabledSwitch({ provider, onToggle, disabled, pending }: {
     )
 }
 
+/** Where an admin's "hide" of the unverified warning is kept: in this
+ *  browser, per connection, and against the reason it was hidden for — so
+ *  hiding "Trust unsigned is on" does not also hide a later "TLS
+ *  verification is off". Never shared: each admin decides for themselves,
+ *  and the Unverified pill stays on the card regardless. */
+const HIDDEN_WARNING_KEY = 'nx_sso_unverified_hidden:'
+
+function readHidden(providerId: string): string | null {
+    try {
+        return window.localStorage.getItem(HIDDEN_WARNING_KEY + providerId)
+    } catch {
+        return null
+    }
+}
+
+/** The live-and-unverified warning, which an admin who has read it can
+ *  fold to one line and open again. */
+function UnverifiedWarning({ providerId, reason, onEdit }: {
+    providerId: string
+    reason: string
+    onEdit: () => void
+}) {
+    const [hiddenFor, setHiddenFor] = useState(() => readHidden(providerId))
+    const setHidden = (hide: boolean) => {
+        try {
+            if (hide) window.localStorage.setItem(HIDDEN_WARNING_KEY + providerId, reason)
+            else window.localStorage.removeItem(HIDDEN_WARNING_KEY + providerId)
+        } catch {
+            // storage unavailable — the fold still holds for this view
+        }
+        setHiddenFor(hide ? reason : null)
+    }
+
+    if (hiddenFor === reason) {
+        return (
+            <button
+                type="button"
+                onClick={() => setHidden(false)}
+                className="mt-3 inline-flex items-center gap-1.5 text-[11px] text-ink-muted hover:text-ink"
+            >
+                <ShieldAlert className="w-3 h-3 shrink-0 text-amber-500" />
+                Unverified connection — warning hidden
+                <ChevronDown className="w-3 h-3" />
+                <span className="sr-only">Show the warning</span>
+            </button>
+        )
+    }
+    return (
+        <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg border border-amber-500/25 bg-amber-500/5">
+            <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
+            <p className="flex-1 text-[11px] text-ink-muted">
+                This connection is live and unverified. {reason} It cannot
+                grant privileged roles, and it never links itself to an
+                existing account.{' '}
+                <button
+                    type="button"
+                    onClick={onEdit}
+                    className="font-medium text-accent-lineage hover:underline"
+                >
+                    Open its settings
+                </button>
+            </p>
+            <button
+                type="button"
+                onClick={() => setHidden(true)}
+                className="shrink-0 inline-flex items-center gap-1 text-[11px] text-ink-muted hover:text-ink"
+            >
+                Hide
+                <ChevronUp className="w-3 h-3" />
+            </button>
+        </div>
+    )
+}
+
 export function IdpProviderCard({
-    provider, health, healthUnavailable, busy, pending, index,
+    provider, primary, health, healthUnavailable, busy, pending, index,
     onEdit, onRehearse, onPublish, onToggleEnabled, onDelete,
 }: {
     provider: IdpProvider
+    /** The connection the sign-in page leads with. */
+    primary?: boolean
     health?: IdpHealth
     /** The status read itself failed — distinct from "never probed". */
     healthUnavailable?: boolean
@@ -285,6 +363,13 @@ export function IdpProviderCard({
                             {provider.displayName}
                         </span>
                         <StatusChip provider={provider} />
+                        {primary && (
+                            <HoverTip label="The sign-in page leads with this connection, and email addresses that match no domain go here. It is the first enabled, published connection in priority order.">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/30">
+                                    Primary
+                                </span>
+                            </HoverTip>
+                        )}
                         <AssurancePill
                             level={provider.assurance}
                             reason={provider.assuranceReason}
@@ -362,16 +447,16 @@ export function IdpProviderCard({
 
             {/* An unverified connection that is LIVE is the combination
                 worth interrupting for — it is serving real sign-ins on
-                claims nothing has vouched for. */}
+                claims nothing has vouched for. The server's reason names
+                which setting is to blame and what to change, so the way
+                out is one click away rather than a guess. */}
             {!isDraft && provider.assurance === 'unverified' && (
-                <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg border border-amber-500/25 bg-amber-500/5">
-                    <ShieldAlert className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
-                    <p className="text-[11px] text-ink-muted">
-                        This connection is live and unverified — anyone who can
-                        write its payload can sign in as anyone. Privileged roles
-                        cannot be mapped from it.
-                    </p>
-                </div>
+                <UnverifiedWarning
+                    providerId={provider.id}
+                    reason={provider.assuranceReason
+                        || 'Anyone who can write its payload can sign in as anyone.'}
+                    onEdit={onEdit}
+                />
             )}
         </motion.div>
     )

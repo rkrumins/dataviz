@@ -1,6 +1,9 @@
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X } from 'lucide-react'
+import {
+    Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X,
+    ArrowLeft, ChevronDown, Clock, CloudOff, KeyRound,
+} from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import {
@@ -26,6 +29,15 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { useFeature } from '@/store/features'
+import {
+    loginNotice,
+    loginShape,
+    openingStep,
+    passwordAudience,
+    primaryConnection,
+    routeTarget,
+    type LoginStep,
+} from './loginShape'
 
 
 // Redirect-based SSO (oidc / saml2 / custom, and custom_profile rows
@@ -45,9 +57,9 @@ import { useFeature } from '@/store/features'
  * in with".
  *
  * The page states both themes explicitly rather than leaning on a
- * semantic token (see the inputs above: `bg-white/50 dark:bg-black/20`),
- * so these match that. A fill as well as a border, because this sits
- * directly under the password field and reads as a peer control.
+ * semantic token (see the inputs: `bg-white/50 dark:bg-black/20`), so
+ * these match that. A fill as well as a border, because it reads as a
+ * peer of the fields and buttons around it.
  */
 const SSO_BUTTON = [
     'group relative flex items-center justify-center w-full h-12',
@@ -71,6 +83,37 @@ const SSO_BUTTON_DEV = [
     'focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500/50',
 ].join(' ')
 
+/** The primary connection — the one Enter goes to — drawn as the page's
+ *  main action: filled with the accent, so single sign-on reads as the
+ *  way in rather than one option among several. Also the email-first
+ *  "Continue", which is the main action when nothing sits above it. */
+const SSO_BUTTON_HERO = [
+    'group relative flex items-center justify-center w-full h-12',
+    'rounded-xl text-sm font-semibold text-white transition-all duration-200',
+    'bg-accent-lineage shadow-lg shadow-accent-lineage/25',
+    'hover:brightness-110 hover:shadow-accent-lineage/30',
+    'hover:-translate-y-px active:translate-y-0',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+].join(' ')
+
+/** The dev-login button and the dev ``custom`` kind are offered when this
+ *  is set — read in one place, because it also decides the page's shape. */
+function devLoginEnabled(): boolean {
+    return (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
+        .toString()
+        .toLowerCase() === 'true'
+}
+
+/** The steps slide the way the person is going: forward into the
+ *  password, back out of it. 0 — the first paint — only fades. Under
+ *  reduced motion the app's MotionConfig drops the slide and keeps the
+ *  fade. */
+const STEP_MOTION = {
+    enter: (dir: number) => ({ opacity: 0, x: 24 * dir }),
+    center: { opacity: 1, x: 0 },
+    exit: (dir: number) => ({ opacity: 0, x: -24 * dir }),
+}
+
 /**
  * What to call the connection.
  *
@@ -89,7 +132,13 @@ const SSO_BUTTON_DEV = [
 function ssoName(p: SsoProviderSummary): string {
     const chosen = p.displayName?.trim()
     if (chosen) return chosen
-    return p.slug
+    return presentSlug(p.slug)
+}
+
+/** The slug as a name — also what an outage notice falls back to for a
+ *  connection the catalog no longer lists. */
+function presentSlug(slug: string): string {
+    return slug
         .split(/[-_.]+/)
         .filter(Boolean)
         .map(w => w[0].toUpperCase() + w.slice(1))
@@ -131,10 +180,19 @@ function useReturnPath(): string | null {
  * other "Continue with" button. Most connections have no uploaded icon,
  * so the initial in a tinted tile stands in: still an anchor for the eye,
  * still identifiable at a glance when two connections are listed.
+ *
+ * ``onAccent`` is the filled primary button, where an accent-coloured
+ * initial would vanish into the fill and a dark logo would too — so the
+ * initial goes white, and an uploaded logo gets a white tile of its own.
  */
-function SsoMark({ p }: { p: SsoProviderSummary }) {
+function SsoMark({ p, onAccent = false }: { p: SsoProviderSummary; onAccent?: boolean }) {
     if (p.buttonIcon) {
-        return (
+        return onAccent ? (
+            <span aria-hidden="true"
+                  className="flex items-center justify-center w-7 h-7 shrink-0 rounded-lg bg-white">
+                <img src={p.buttonIcon} alt="" className="w-5 h-5 object-contain" />
+            </span>
+        ) : (
             <img src={p.buttonIcon} alt="" aria-hidden
                  className="w-5 h-5 shrink-0 object-contain" />
         )
@@ -142,7 +200,12 @@ function SsoMark({ p }: { p: SsoProviderSummary }) {
     return (
         <span
             aria-hidden="true"
-            className="flex items-center justify-center w-7 h-7 shrink-0 rounded-lg bg-gradient-to-br from-violet-500/20 to-indigo-500/10 text-[11px] font-bold text-accent-lineage"
+            className={cn(
+                "flex items-center justify-center w-7 h-7 shrink-0 rounded-lg text-[11px] font-bold",
+                onAccent
+                    ? "bg-white/20 text-white"
+                    : "bg-gradient-to-br from-violet-500/20 to-indigo-500/10 text-accent-lineage",
+            )}
         >
             {ssoName(p).charAt(0).toUpperCase()}
         </span>
@@ -154,7 +217,8 @@ function SsoButtons({
     failed,
     onPortalError,
     onGatewaySignIn,
-    showDivider = true,
+    hero = null,
+    heading = null,
 }: {
     providers: SsoProviderSummary[] | null
     failed: boolean
@@ -162,10 +226,12 @@ function SsoButtons({
     /** The gateway flow lives with the page, not here: its refusals
      *  open the collision modal, whose state the page owns. */
     onGatewaySignIn: (p: SsoProviderSummary) => Promise<void>
-    /** "Or sign in with" only makes sense when there is something above
-     *  to be an alternative *to*. On an SSO-only deployment with a single
-     *  provider these buttons are the whole page. */
-    showDivider?: boolean
+    /** The primary connection, drawn first and filled. One of
+     *  ``providers``; the rest follow in catalog order. */
+    hero?: SsoProviderSummary | null
+    /** Drawn above the buttons, and only when there are buttons — a
+     *  divider with nothing under it reads as a missing section. */
+    heading?: ReactNode
 }) {
     const navigate = useNavigate()
     const returnPath = useReturnPath()
@@ -202,10 +268,7 @@ function SsoButtons({
     }
 
     const next = encodeURIComponent(returnPath ?? '/dashboard')
-    const customEnabled =
-        (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
-            .toString()
-            .toLowerCase() === 'true'
+    const customEnabled = devLoginEnabled()
 
     if (failed) {
         // Not silence: on an SSO-only deployment the buttons are the only
@@ -230,8 +293,8 @@ function SsoButtons({
     }
 
     if (providers === null) {
-        // While the catalog is loading, render nothing — the password
-        // form is the dependable fallback.
+        // The page renders this only once the catalog has arrived; null
+        // is the catalog still loading, and there is nothing to draw.
         return null
     }
 
@@ -240,70 +303,79 @@ function SsoButtons({
         return null
     }
 
+    const ordered = hero
+        ? [hero, ...providers.filter((p) => p.id !== hero.id)]
+        : providers
+
     return (
-        <div className={cn(
-            "space-y-3",
-            showDivider && "mt-6 pt-6 border-t border-black/10 dark:border-white/10",
-        )}>
-            {showDivider && (
-                <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
-                    Or sign in with
-                </p>
-            )}
-            {(providers ?? []).map((p) => (
-                isGatewayProvider(p) ? (
+        <div className="space-y-3">
+            {heading}
+            {ordered.map((p) => {
+                const isHero = p.id === hero?.id
+                const busy = busySlug === p.slug
+                const glyph = cn(
+                    "w-4 h-4 transition-transform duration-200",
+                    isHero ? "text-white/80" : "text-ink-muted",
+                )
+                const spinner = (
+                    <div className={cn(
+                        "w-3.5 h-3.5 border-2 rounded-full animate-spin",
+                        isHero ? "border-white/30 border-t-white" : "border-ink-muted/30 border-t-ink",
+                    )} />
+                )
+                return isGatewayProvider(p) ? (
                     <button
                         key={p.id}
                         type="button"
-                        disabled={busySlug === p.slug}
+                        disabled={busy}
                         onClick={() => { void signInViaGateway(p) }}
                         className={cn(
-                            SSO_BUTTON,
-                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                            isHero ? SSO_BUTTON_HERO : SSO_BUTTON,
+                            busy && "opacity-70 cursor-not-allowed",
                         )}
                     >
                         <span className="absolute left-3 flex items-center">
-                            <SsoMark p={p} />
+                            <SsoMark p={p} onAccent={isHero} />
                         </span>
                         <span className="px-12 truncate">{ssoLabel(p)}</span>
                         <span className="absolute right-3.5 flex items-center">
-                            {busySlug === p.slug
-                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
-                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                            {busy
+                                ? spinner
+                                : <ChevronRight className={cn(glyph, "group-hover:translate-x-0.5")} />}
                         </span>
                     </button>
                 ) : needsBrowserPayload(p) ? (
                     <button
                         key={p.id}
                         type="button"
-                        disabled={busySlug === p.slug}
+                        disabled={busy}
                         onClick={() => { void signInWithPortal(p) }}
                         className={cn(
-                            SSO_BUTTON,
-                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                            isHero ? SSO_BUTTON_HERO : SSO_BUTTON,
+                            busy && "opacity-70 cursor-not-allowed",
                         )}
                     >
                         {/* Mark and affordance are pinned to the edges so
                             the label stays optically centred however long
                             the provider's name is. */}
                         <span className="absolute left-3 flex items-center">
-                            <SsoMark p={p} />
+                            <SsoMark p={p} onAccent={isHero} />
                         </span>
                         <span className="px-12 truncate">{ssoLabel(p)}</span>
                         <span className="absolute right-3.5 flex items-center">
-                            {busySlug === p.slug
-                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
-                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                            {busy
+                                ? spinner
+                                : <ChevronRight className={cn(glyph, "group-hover:translate-x-0.5")} />}
                         </span>
                     </button>
                 ) : (
                     <a
                         key={p.id}
                         href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
-                        className={p.kind === 'custom' ? SSO_BUTTON_DEV : SSO_BUTTON}
+                        className={isHero ? SSO_BUTTON_HERO : p.kind === 'custom' ? SSO_BUTTON_DEV : SSO_BUTTON}
                     >
                         <span className="absolute left-3 flex items-center">
-                            <SsoMark p={p} />
+                            <SsoMark p={p} onAccent={isHero} />
                         </span>
                         <span className="px-12 truncate">{ssoLabel(p)}</span>
                         {/* ExternalLink rather than a chevron when the
@@ -316,12 +388,12 @@ function SsoButtons({
                             hand-off there was simply false. */}
                         <span className="absolute right-3.5 flex items-center">
                             {leavesForIdp(p)
-                                ? <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
-                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                                ? <ExternalLink className={cn(glyph, "group-hover:-translate-y-px group-hover:translate-x-0.5")} />
+                                : <ChevronRight className={cn(glyph, "group-hover:translate-x-0.5")} />}
                         </span>
                     </a>
                 )
-            ))}
+            })}
             {/* Dev-login button is always offered when the env flag is
                 set, even if no ``custom`` provider exists yet — clicking
                 it lands on /dev-login which guides the operator. */}
@@ -358,6 +430,11 @@ function collisionWhy(reasons: string[]): string {
         return 'This connection never links accounts by itself — you make '
             + 'the link from your own account.'
     }
+    if (reasons.includes('unverified_connection')) {
+        return "This sign-in method can't vouch for who you are, so it never "
+            + 'attaches itself to an existing account — you make the link '
+            + 'from your own account.'
+    }
     if (reasons.includes('strict_existing_sso')) {
         return 'Your account already has another sign-in method linked, '
             + 'and this connection only links accounts that have none.'
@@ -385,12 +462,18 @@ function collisionNeedsAdmin(reasons: string[]): boolean {
  *  the link-by-password recovery path instead of the cryptic
  *  ``sso_error=1`` page, and says *which* rule refused the link when
  *  the server told us. */
-function CollisionModal({ email, reasons, onClose }: {
+function CollisionModal({ email, reasons, canUsePassword, onClose, onUsePassword }: {
     email: string
     reasons: string[]
+    /** False while passwords are not for everyone: signing in with one
+     *  to make the link would be refused, so the recovery path is the
+     *  administrator instead. */
+    canUsePassword: boolean
     onClose: () => void
+    /** Close onto the password step, the address already filled in. */
+    onUsePassword: () => void
 }) {
-    const needsAdmin = collisionNeedsAdmin(reasons)
+    const needsAdmin = collisionNeedsAdmin(reasons) || !canUsePassword
     return (
         <>
         <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/60" />
@@ -413,7 +496,7 @@ function CollisionModal({ email, reasons, onClose }: {
                                 ' Ask your administrator how to proceed.'
                             ) : (
                                 <>
-                                    {' '}Sign in with your password below, then open{' '}
+                                    {' '}Sign in with your password, then open{' '}
                                     <Link
                                         to="/me/identities"
                                         className="text-accent-lineage font-semibold hover:underline"
@@ -426,7 +509,7 @@ function CollisionModal({ email, reasons, onClose }: {
                             )}
                         </p>
                         <button
-                            onClick={onClose}
+                            onClick={needsAdmin ? onClose : onUsePassword}
                             className="mt-4 px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:brightness-110"
                         >
                             {needsAdmin ? 'Close' : 'Sign in with password'}
@@ -446,9 +529,12 @@ function CollisionModal({ email, reasons, onClose }: {
  *  the reference, which is the only thing that lets an admin find the
  *  reason. Without this the whole correlation chain dead-ends: the ref was
  *  minted, audited and put in the URL, and then shown to nobody. */
-function SsoFailureBanner({ reference, onDismiss }: {
+function SsoFailureBanner({ reference, onDismiss, onUsePassword }: {
     reference: string | null
     onDismiss: () => void
+    /** Present when everyone may use a password and the page is not
+     *  already asking for one: the way past a provider that just failed. */
+    onUsePassword?: () => void
 }) {
     const [copied, setCopied] = useState(false)
 
@@ -472,7 +558,7 @@ function SsoFailureBanner({ reference, onDismiss }: {
             <div className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
                 <div className="flex-1 min-w-0">
-                    <p className="text-red-300">
+                    <p className="text-red-700 dark:text-red-300">
                         Sign-in through your identity provider didn't complete.
                     </p>
                     {reference && (
@@ -489,6 +575,15 @@ function SsoFailureBanner({ reference, onDismiss }: {
                                 {copied ? 'copied' : reference}
                             </button>
                         </div>
+                    )}
+                    {onUsePassword && (
+                        <button
+                            type="button"
+                            onClick={onUsePassword}
+                            className="mt-2 text-xs font-semibold text-accent-lineage hover:underline"
+                        >
+                            Use your password instead
+                        </button>
                     )}
                 </div>
                 <button
@@ -566,6 +661,240 @@ function AlreadySignedIn({ email }: { email: string }) {
     )
 }
 
+/** A rule with a word in it — "or continue with email", "or". Both
+ *  halves name both themes, like the buttons do. */
+function Divider({ label }: { label: string }) {
+    return (
+        <div className="flex items-center gap-3">
+            <span aria-hidden="true" className="h-px flex-1 bg-black/10 dark:bg-white/10" />
+            <span className="text-[11px] uppercase tracking-widest whitespace-nowrap text-ink-muted">
+                {label}
+            </span>
+            <span aria-hidden="true" className="h-px flex-1 bg-black/10 dark:bg-white/10" />
+        </div>
+    )
+}
+
+// The border names both themes, like the buttons': `border-white/40` on
+// the light card drew no edge at all, and the field read as loose text.
+const FIELD = 'input pl-10 h-12 bg-white/50 dark:bg-black/20 border-black/10 dark:border-white/10'
+const FIELD_LABEL = 'text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1'
+const FIELD_ICON = 'absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors'
+
+function EmailField({ value, onChange, autoFocus = false }: {
+    value: string
+    onChange: (value: string) => void
+    autoFocus?: boolean
+}) {
+    return (
+        <div className="space-y-2">
+            <label className={FIELD_LABEL} htmlFor="email">
+                Email
+            </label>
+            <div className="relative group">
+                <div className={FIELD_ICON}>
+                    <AtSign className="w-4 h-4" />
+                </div>
+                <input
+                    id="email"
+                    type="email"
+                    autoComplete="username"
+                    placeholder="you@company.com"
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className={FIELD}
+                    autoFocus={autoFocus}
+                    required
+                />
+            </div>
+        </div>
+    )
+}
+
+function PasswordField({ value, onChange, autoFocus = false }: {
+    value: string
+    onChange: (value: string) => void
+    autoFocus?: boolean
+}) {
+    return (
+        <div className="space-y-2">
+            <label className={FIELD_LABEL} htmlFor="password">
+                Password
+            </label>
+            <div className="relative group">
+                <div className={FIELD_ICON}>
+                    <Lock className="w-4 h-4" />
+                </div>
+                <input
+                    id="password"
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="••••••••"
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className={FIELD}
+                    autoFocus={autoFocus}
+                    required
+                />
+            </div>
+        </div>
+    )
+}
+
+/** Who is signing in, on the password step: the address from the first
+ *  step, settled, with the way back to change it. */
+function EmailChip({ email, onChange }: { email: string; onChange: () => void }) {
+    return (
+        <div className="flex items-center gap-3 h-12 pl-2 pr-1.5 rounded-xl border bg-white/50 dark:bg-black/20 border-black/10 dark:border-white/10">
+            <span
+                aria-hidden="true"
+                className="flex items-center justify-center w-8 h-8 shrink-0 rounded-full bg-gradient-to-br from-accent-lineage to-accent-lineage/70 text-xs font-bold text-white"
+            >
+                {email.charAt(0).toUpperCase()}
+            </span>
+            <span className="flex-1 min-w-0 truncate text-sm font-medium text-ink">{email}</span>
+            <button
+                type="button"
+                onClick={onChange}
+                aria-label="Change email"
+                className="shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
+            >
+                Change
+            </button>
+        </div>
+    )
+}
+
+/** The store's error — a refused password, or a refused portal sign-in. */
+function ErrorBanner({ error }: { error: string | null }) {
+    return (
+        <AnimatePresence mode="wait">
+            {error && (
+                <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-500 text-sm"
+                >
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <p>{error}</p>
+                </motion.div>
+            )}
+        </AnimatePresence>
+    )
+}
+
+function EnterWorkspace({ busy }: { busy: boolean }) {
+    return (
+        <button
+            type="submit"
+            disabled={busy}
+            className={cn(
+                "w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2",
+                busy ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
+            )}
+        >
+            {busy ? (
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+                <>
+                    Enter Workspace
+                    <ChevronRight className="w-4 h-4" />
+                </>
+            )}
+        </button>
+    )
+}
+
+/** "Continue" under the email field, relabelled once the address is known
+ *  to route somewhere. Beside a primary connection it is the second way
+ *  in and drawn like the other connections; with nothing above it — email
+ *  first — it is the page's main action, and filled. */
+function ContinueButton({ routed, busy, filled }: {
+    routed: SsoProviderSummary | null
+    busy: boolean
+    filled: boolean
+}) {
+    return (
+        <button
+            type="submit"
+            disabled={busy}
+            className={cn(
+                filled ? SSO_BUTTON_HERO : SSO_BUTTON,
+                busy && "opacity-70 cursor-not-allowed",
+            )}
+        >
+            {routed && (
+                <span className="absolute left-3 flex items-center">
+                    <SsoMark p={routed} onAccent={filled} />
+                </span>
+            )}
+            <span className="px-12 truncate">{routed ? ssoLabel(routed) : 'Continue'}</span>
+            <span className="absolute right-3.5 flex items-center">
+                {busy ? (
+                    <div className={cn(
+                        "w-3.5 h-3.5 border-2 rounded-full animate-spin",
+                        filled ? "border-white/30 border-t-white" : "border-ink-muted/30 border-t-ink",
+                    )} />
+                ) : (
+                    <ChevronRight className={cn(
+                        "w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5",
+                        filled ? "text-white/80" : "text-ink-muted",
+                    )} />
+                )}
+            </span>
+        </button>
+    )
+}
+
+/** Amber, above the steps: what is different today — an outage, the
+ *  emergency window — and what to do about it, without alarm. */
+function Notice({ icon: Icon, children }: { icon: typeof Clock; children: ReactNode }) {
+    return (
+        <div
+            role="status"
+            className="mb-5 flex items-start gap-2.5 p-3 rounded-xl text-sm bg-amber-500/10 border border-amber-500/20 text-amber-800 dark:text-amber-200"
+        >
+            <Icon className="w-4 h-4 shrink-0 mt-0.5" />
+            <div className="min-w-0">{children}</div>
+        </div>
+    )
+}
+
+/** What a notice offers to do about it: open the password step. */
+function NoticeAction({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold hover:underline"
+        >
+            {children}
+            <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+    )
+}
+
+/** The connections an outage names, as people know them: the catalog's
+ *  names, in a sentence. */
+function outageNames(slugs: string[], providers: SsoProviderSummary[] | null): string {
+    const names = slugs.map((slug) => {
+        const p = providers?.find((x) => x.slug === slug)
+        return p ? ssoName(p) : presentSlug(slug)
+    })
+    if (names.length === 0) return 'your single sign-on provider'
+    if (names.length === 1) return names[0]
+    return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/** When the emergency window closes, in the reader's own clock. */
+function closingTime(iso: string): string | null {
+    const at = new Date(iso)
+    return Number.isNaN(at.getTime())
+        ? null
+        : at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 // ``isGatewayProvider`` and ``gatewaySignInBody`` used to live here;
 // they now come from ``services/gatewayFlow`` so the silent recovery
 // and self-service identity linking run the same composition.
@@ -580,12 +909,31 @@ function AlreadySignedIn({ email }: { email: string }) {
 export function LoginPage() {
     const signupEnabled = useFeature('signupEnabled')
     const brand = useBrand()
-    const [email, setEmail] = useState('')
-    const [password, setPassword] = useState('')
     const navigate = useNavigate()
     const [params] = useSearchParams()
     const returnPath = useReturnPath()
     const afterSignIn = returnPath ?? '/'
+
+    // The collision modal's one state, fed from BOTH arrival paths: the
+    // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
+    // carries no reasons) and a refused fetch-based gateway sign-in
+    // (whose 401 detail does).
+    const errorCode = params.get('error_code')
+    const collisionEmail = params.get('email')
+    const [collision, setCollision] = useState<{
+        email: string
+        reasons: string[]
+    } | null>(() => (
+        errorCode === 'unsafe_auto_link' && collisionEmail
+            ? { email: collisionEmail, reasons: [] }
+            : null
+    ))
+    // Pre-filled with the address a collision names, so the password
+    // step its modal opens already knows who is signing in.
+    const [email, setEmail] = useState(() => (
+        errorCode === 'unsafe_auto_link' && collisionEmail ? collisionEmail : ''
+    ))
+    const [password, setPassword] = useState('')
 
     const {
         login, error, clearError, isLoading, isAuthenticated, status, user,
@@ -593,10 +941,16 @@ export function LoginPage() {
     } = useAuthStore()
 
     // The page's shape is a function of the platform posture, not a fixed
-    // layout. See ``pageShape`` below.
+    // layout. See ``loginShape``.
     const [context, setContext] = useState<LoginContext | null>(null)
     const [contextFailed, setContextFailed] = useState(false)
-    const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
+    // The last address the server was asked to route, with its answer —
+    // kept together, so an answer about what was typed a moment ago never
+    // labels what is typed now.
+    const [resolved, setResolved] = useState<{
+        email: string
+        provider: SsoProviderSummary | null
+    } | null>(null)
     // Landed here because a silent re-sign-in just failed? Say so from
     // the first paint — the user was working, their corporate session
     // expired, and the automatic recovery could not renew it. Without a
@@ -615,9 +969,23 @@ export function LoginPage() {
             + (failure.hold ? '' : ' This page will try again shortly.')
         )
     })
-    // Escape hatch out of the email-first flow. Never shown when local
-    // login is off — there would be nothing to escape to.
-    const [forcePassword, setForcePassword] = useState(false)
+    // The step the person moved to. Until they move, the page shows the
+    // one the posture opens on — see ``openingStep``.
+    const [chosenStep, setChosenStep] = useState<LoginStep | null>(null)
+    // Which way the steps slide: 1 into the password, -1 back out of it,
+    // 0 for the first paint.
+    const [direction, setDirection] = useState(0)
+    // The address came with the person into the password step — typed on
+    // the first step, or named by a collision — so it is shown settled,
+    // as a chip, rather than as a field to fill in again.
+    const [emailSettled, setEmailSettled] = useState(false)
+    // Where Enter is taking the person, while it does.
+    const [routing, setRouting] = useState<SsoProviderSummary | null>(null)
+    // Enter arrived before the debounce had routed the address: asking now.
+    const [resolving, setResolving] = useState(false)
+    // Enter found nowhere to route and the password is not for everyone:
+    // the buttons are the way in, and the page says so — never an error.
+    const [chooseHint, setChooseHint] = useState(false)
     // "Other ways to sign in" disclosure, for the postures that tuck the
     // full button row away.
     const [showAllProviders, setShowAllProviders] = useState(false)
@@ -631,6 +999,7 @@ export function LoginPage() {
     }, [])
 
     const providers = context?.providers ?? null
+    const outageSlugs = context?.ssoOutage?.providers
 
     // Silent sign-in: on an internal deployment the user is already
     // authenticated — by the corporate portal, or by the workstation
@@ -670,8 +1039,11 @@ export function LoginPage() {
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
         // The operator's opt-out: the connection still works, but only
-        // when somebody presses its button.
-        const eligible = (p: SsoProviderSummary) => p.config?.autoSignIn !== false
+        // when somebody presses its button. And a connection the server has
+        // confirmed down: the attempt could only time out, and the outage
+        // notice already says why.
+        const eligible = (p: SsoProviderSummary) =>
+            p.config?.autoSignIn !== false && !outageSlugs?.includes(p.slug)
         let candidates = providers.filter(
             (p) => (needsBrowserPayload(p) || isGatewayProvider(p)) && eligible(p),
         )
@@ -753,34 +1125,15 @@ export function LoginPage() {
                 + 'did not work.',
             )
         })
-    }, [providers, isAuthenticated, loginWithBrowserProfile,
+    }, [providers, outageSlugs, isAuthenticated, loginWithBrowserProfile,
         loginWithBackchannel, navigate, clearError, afterSignIn, autoRound])
 
-    // The collision modal's one state, fed from BOTH arrival paths: the
-    // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
-    // carries no reasons) and a refused fetch-based gateway sign-in
-    // (whose 401 detail does).
-    const errorCode = params.get('error_code')
-    const collisionEmail = params.get('email')
-    const [collision, setCollision] = useState<{
-        email: string
-        reasons: string[]
-    } | null>(() => (
-        errorCode === 'unsafe_auto_link' && collisionEmail
-            ? { email: collisionEmail, reasons: [] }
-            : null
-    ))
     // ``sso_error=1`` is set on every SSO failure; ``ref`` correlates it to
     // the audit event. The collision case has its own modal, so this banner
     // covers everything else — which is the majority.
     const [showSsoFailure, setShowSsoFailure] = useState(
         params.get('sso_error') === '1' && errorCode !== 'unsafe_auto_link',
     )
-    useEffect(() => {
-        if (errorCode === 'unsafe_auto_link' && collisionEmail) {
-            setEmail(collisionEmail)
-        }
-    }, [errorCode, collisionEmail])
 
     // The gateway sign-in flow, owned by the page because its refusal
     // can open the collision modal. Errors are shown, not thrown — the
@@ -827,72 +1180,115 @@ export function LoginPage() {
         clearError()
     }, [clearError])
 
-    // Debounced so it fires once the address looks finished, not on every
-    // keystroke. A miss HERE is silent — it fires mid-typing. The submit
-    // path speaks on a miss instead (see handleSubmit).
+    // ── What shape is this page? ─────────────────────────────────────
     //
-    // Gated on the posture: without this it fired on every deployment,
-    // including the ~99% with email-first off, where the endpoint can only
-    // ever answer null.
+    // Single sign-on leads wherever a connection exists: the primary as
+    // the main button, the address as the other way in, and the password
+    // behind a step of its own — so Enter after an address goes to a
+    // connection instead of tripping a required password field. A
+    // deployment with no connections keeps the single-step form, and so
+    // does a context read that never arrived: a page with a form the
+    // server might refuse still beats a page with nothing on it.
+    const shape = loginShape(context, contextFailed, devLoginEnabled())
+    // Who the password is for right now — everyone, administrators during
+    // an outage, or break-glass accounts — read from the posture, with
+    // the same fail-open as the shape.
+    const audience = passwordAudience(context)
+    const everyone = audience === 'everyone'
+    const notice = loginNotice(context)
     const emailFirst = context?.emailFirstLogin ?? false
+    // Break-glass: with passwords off, the deployment's system account
+    // still needs its door. `?password=1` opens the password step without
+    // advertising it on the page — opening it grants nothing, because the
+    // server refuses every account it does not let use a password.
+    const breakGlass = params.get('password') === '1'
+    const step = chosenStep ?? openingStep(context, breakGlass)
+    const view = routing ? 'routing' : step
+
+    // Debounced so it fires once the address looks finished, not on every
+    // keystroke. A miss HERE is silent — it fires mid-typing, and Enter
+    // still has the primary connection to go to. Only where there is a
+    // connection to route to, and only on the step that asks for the
+    // address.
+    const canResolve = shape === 'sso' && (providers?.length ?? 0) > 0
+        && step === 'identify'
     useEffect(() => {
-        if (!emailFirst || !email.includes('@')) { setRouted(null); return }
+        if (!canResolve || !email.includes('@')) return
         let cancelled = false
         const timer = setTimeout(() => {
             authService.resolveEmailDomain(email)
-                .then((r) => { if (!cancelled) setRouted(r.provider) })
-                .catch(() => { if (!cancelled) setRouted(null) })
+                .then((r) => {
+                    if (!cancelled) setResolved({ email, provider: r.provider ?? null })
+                })
+                // A failed lookup (rate-limited, offline) answers nothing
+                // about the address: Enter asks again.
+                .catch(() => {})
         }, 400)
         return () => { cancelled = true; clearTimeout(timer) }
-    }, [email, emailFirst])
+    }, [email, canResolve])
+    const routed = resolved?.email === email ? resolved.provider : null
+
+    // Back from the identity provider, the browser may restore this page
+    // exactly as it was left — mid-hand-off, saying "Taking you to…".
+    useEffect(() => {
+        const restored = (e: PageTransitionEvent) => {
+            if (e.persisted) setRouting(null)
+        }
+        window.addEventListener('pageshow', restored)
+        return () => window.removeEventListener('pageshow', restored)
+    }, [])
 
     useDocumentTitle('Sign in')
 
-    // ── What shape is this page? ─────────────────────────────────────
-    //
-    // Previously fixed: password form, divider, every provider as a
-    // button — regardless of configuration. That meant an SSO-only
-    // deployment led with a control the server always refuses, and
-    // email-first routing appeared *below* the password form it was meant
-    // to replace, so it removed neither the button row nor the topology
-    // disclosure it existed to remove.
-    //
-    // Fails open on a context read that never arrived: local login on,
-    // email-first off. A page with a form the server might refuse still
-    // beats a page with nothing on it.
-    const allowLocal = context?.allowLocalLogin ?? true
-    // Break-glass: with passwords off the form is hidden, and the
-    // deployment's system account still needs its door. `?password=1`
-    // reveals the local form without advertising it on the page —
-    // revealing it grants nothing, because the server refuses every
-    // account that is not marked as a system account.
-    const breakGlass = params.get('password') === '1'
-    const showPasswordForm = breakGlass
-        || (allowLocal && (!emailFirst || forcePassword))
-    // Email-first leads with the routed provider and tucks the button row
-    // behind a disclosure — otherwise it removes neither the coin flip nor
-    // the topology disclosure it exists to remove.
-    const leadWithEmail = emailFirst
-    const showEmailField = showPasswordForm || leadWithEmail
-    // Gateway connections stay visible even under email-first: their
+    // The single-step form is offered to everyone it can serve; with the
+    // password limited, only behind the break-glass door.
+    const showLocalForm = breakGlass || everyone
+    // Email-first tucks the button row behind a disclosure — otherwise it
+    // removes neither the coin flip nor the topology disclosure it exists
+    // to remove. Gateway connections stay visible even then: their
     // sign-in is a button on this very page (no redirect to hide), and
     // after a failed silent attempt that button is the recovery — an
     // error with nothing to press strands exactly the person the error
-    // is about. Redirect providers keep the email-first tucking.
+    // is about.
     const gatewayProviders = (providers ?? []).filter(isGatewayProvider)
-    const visibleProviders = leadWithEmail && !showAllProviders
-        ? (providers === null ? null : gatewayProviders)
-        : providers
-    const hiddenProviderCount =
-        (providers?.length ?? 0) - (visibleProviders?.length ?? 0)
-    const showProviderRow =
-        !leadWithEmail || showAllProviders || gatewayProviders.length > 0
-    const portalHasAffordance = showPasswordForm
-        || (visibleProviders?.length ?? 0) > 0 || routed != null
+    const visibleProviders = emailFirst && !showAllProviders
+        ? gatewayProviders
+        : (providers ?? [])
+    const hiddenProviderCount = (providers?.length ?? 0) - visibleProviders.length
+    // Drawn as the main button, unless email-first asked for the address
+    // to lead.
+    const hero = emailFirst ? null : primaryConnection(providers ?? [])
+    const portalHasAffordance = shape === 'sso' || (shape === 'local' && showLocalForm)
+    // The password step, offered from the first step — not while it is
+    // showing, and not mid-hand-off to a connection.
+    const canOpenPassword = shape === 'sso' && view === 'identify'
+
+    const openPassword = () => {
+        clearError()
+        setDirection(1)
+        setEmailSettled(email.includes('@'))
+        setChooseHint(false)
+        setChosenStep('password')
+    }
+
+    const backToIdentify = () => {
+        clearError()
+        setDirection(-1)
+        setEmailSettled(false)
+        setPassword('')
+        setChosenStep('identify')
+    }
 
     const routeTo = (target: SsoProviderSummary) => {
+        setDirection(1)
+        setRouting(target)
         if (isGatewayProvider(target)) {
-            void gatewaySignIn(target)
+            // In-page, so it can come back: a refusal returns to the
+            // first step, where its reason — or the collision modal — is.
+            void gatewaySignIn(target).finally(() => {
+                setDirection(-1)
+                setRouting(null)
+            })
             return
         }
         window.location.assign(
@@ -901,45 +1297,41 @@ export function LoginPage() {
         )
     }
 
-    const handleSubmit = async (e: React.FormEvent) => {
+    // Enter on the first step always leads somewhere: the connection the
+    // address routes to, else the primary. Only with nothing routable —
+    // a browser-storage portal, the dev kind — does it fall to the
+    // password (when everyone may use one) or to the buttons, laid out.
+    const handleContinue = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (showPasswordForm) {
-            if (isLoading || !email) return
-            if (!password) {
-                // Enter with only the email typed. When the domain
-                // routes to a connection — possible here only under
-                // email-first with the password form revealed — go via
-                // SSO: opening the password field must not cost the
-                // Enter-routes behavior.
-                if (routed) routeTo(routed)
-                return
-            }
-            const ok = await login(email, password)
-            if (ok) navigate(afterSignIn, { replace: true })
+        if (isLoading || resolving || !email.includes('@')) return
+        // The debounce may not have answered yet: ask now rather than
+        // swallowing the keystroke. A failed lookup is a miss.
+        let match = resolved?.email === email ? resolved.provider : undefined
+        if (match === undefined) {
+            setResolving(true)
+            match = await authService.resolveEmailDomain(email)
+                .then((r) => r.provider ?? null)
+                .catch(() => null)
+            setResolving(false)
+        }
+        const target = routeTarget(match, providers ?? [])
+        if (target) {
+            routeTo(target)
             return
         }
-        // Email-first renders no password field, so the guard above
-        // turned every Enter press into a silent no-op. Route the
-        // address instead — what the debounced resolve does, forced now.
-        if (isLoading || !email.includes('@')) return
-        const target = routed ?? await authService.resolveEmailDomain(email)
-            .then((r) => r.provider ?? null)
-            .catch(() => null)
-        if (!target) {
-            // A miss used to be a silent return — and with the password
-            // form and button row both tucked behind disclosures under
-            // email-first, Enter did nothing at all. Say what happened
-            // and reveal every way in. (A domain routes only when the
-            // connection lists it under Email domains.)
-            setPortalError(
-                "We don't recognise that email's domain. Choose how to "
-                + 'sign in below.',
-            )
-            if (allowLocal) setForcePassword(true)
-            setShowAllProviders(true)
+        if (everyone) {
+            openPassword()
             return
         }
-        routeTo(target)
+        setShowAllProviders(true)
+        setChooseHint(true)
+    }
+
+    const handlePasswordSubmit = async (e: React.FormEvent) => {
+        e.preventDefault()
+        if (isLoading || !email || !password) return
+        const ok = await login(email, password)
+        if (ok) navigate(afterSignIn, { replace: true })
     }
 
     // Avoid flashing the form to a user whose cookie is still being
@@ -958,13 +1350,189 @@ export function LoginPage() {
         return <AlreadySignedIn email={user.email} />
     }
 
+    // ── The steps ────────────────────────────────────────────────────
+
+    const ssoRow = (heading: ReactNode, withHero: boolean) => (
+        <SsoButtons
+            providers={visibleProviders}
+            failed={false}
+            onPortalError={setPortalError}
+            onGatewaySignIn={gatewaySignIn}
+            hero={withHero ? hero : null}
+            heading={heading}
+        />
+    )
+
+    const otherWays = !showAllProviders && hiddenProviderCount > 0 && (
+        <p className="text-center">
+            <button
+                type="button"
+                onClick={() => setShowAllProviders(true)}
+                className="inline-flex items-center gap-1 text-xs text-ink-muted hover:text-ink transition-colors"
+            >
+                Other ways to sign in
+                <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+        </p>
+    )
+
+    const chooseLine = chooseHint && (
+        <p role="status" className="text-center text-sm font-medium text-ink">
+            Choose how you sign in
+        </p>
+    )
+
+    const emailForm = (
+        <form onSubmit={handleContinue} className="space-y-4">
+            {/* No password field on this step: that is what lets Enter
+                after an address go to its connection, instead of the
+                browser stopping on a required field nobody needs. */}
+            <EmailField value={email} onChange={setEmail} autoFocus={direction < 0} />
+            <ErrorBanner error={error} />
+            <ContinueButton routed={routed} busy={resolving} filled={!hero} />
+        </form>
+    )
+
+    // The way around a single sign-on that is not working for this
+    // person today. Low-key on purpose: the connections lead, this is
+    // the fallback. Only when the server would accept the password.
+    const failAround = everyone && (
+        <p className="text-center text-xs text-ink-muted">
+            Can't use single sign-on?{' '}
+            <button
+                type="button"
+                onClick={openPassword}
+                className="font-semibold text-accent-lineage hover:underline"
+            >
+                Sign in with email and password
+            </button>
+        </p>
+    )
+
+    const identifyStep = emailFirst ? (
+        <div className="space-y-6">
+            {emailForm}
+            {failAround}
+            {ssoRow(chooseLine || <Divider label="or" />, false)}
+            {otherWays}
+        </div>
+    ) : (
+        <div className="space-y-6">
+            {ssoRow(chooseLine || null, true)}
+            <Divider label="or continue with email" />
+            {emailForm}
+            {failAround}
+        </div>
+    )
+
+    const withChip = emailSettled && email !== ''
+    const passwordStep = (
+        <div className="space-y-5">
+            <button
+                type="button"
+                onClick={backToIdentify}
+                className="-ml-0.5 inline-flex items-center gap-1.5 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+            >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Back
+            </button>
+            {!everyone && (
+                <p className="flex items-start gap-2 p-3 rounded-xl text-xs leading-relaxed text-ink-secondary bg-black/[0.03] dark:bg-white/[0.04] border border-black/5 dark:border-white/10">
+                    <KeyRound className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-muted" />
+                    {audience === 'administrators'
+                        ? 'Password sign-in is limited to administrators until single sign-on is back.'
+                        : 'Password sign-in is reserved for break-glass accounts right now. Everyone else signs in with single sign-on.'}
+                </p>
+            )}
+            <form onSubmit={handlePasswordSubmit} className="space-y-5">
+                {withChip ? (
+                    <>
+                        <EmailChip email={email} onChange={backToIdentify} />
+                        {/* The account this password belongs to, for
+                            password managers — which look for a username
+                            field beside the password one. */}
+                        <input
+                            type="email"
+                            name="username"
+                            autoComplete="username"
+                            value={email}
+                            readOnly
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            className="sr-only"
+                        />
+                    </>
+                ) : (
+                    <EmailField value={email} onChange={setEmail} autoFocus />
+                )}
+                <PasswordField value={password} onChange={setPassword} autoFocus={withChip} />
+                <ErrorBanner error={error} />
+                <EnterWorkspace busy={isLoading} />
+            </form>
+            {ssoRow(<Divider label="or" />, false)}
+            {otherWays}
+        </div>
+    )
+
+    const routingStep = routing && (
+        <div className="flex flex-col items-center py-6 text-center">
+            <div className="relative flex items-center justify-center w-16 h-16">
+                <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full border-2 border-accent-lineage/20 border-t-accent-lineage animate-spin"
+                />
+                <SsoMark p={routing} />
+            </div>
+            <p role="status" className="mt-5 text-sm font-semibold text-ink">
+                Taking you to {ssoName(routing)}…
+            </p>
+            {leavesForIdp(routing) && (
+                <p className="mt-1.5 text-xs text-ink-muted">
+                    You'll come straight back here once you've signed in.
+                </p>
+            )}
+        </div>
+    )
+
+    const closesAt = notice?.kind === 'window' ? closingTime(notice.until) : null
+    const noticeBanner = notice?.kind === 'outage' ? (
+        <Notice icon={CloudOff}>
+            <p>
+                We can't reach {outageNames(notice.providers, providers)} right now.
+                {everyone && ' Sign in with your password instead.'}
+                {audience === 'administrators'
+                    && " Administrators can sign in with their password while it's restored."}
+            </p>
+            {canOpenPassword && audience !== 'break_glass' && (
+                <NoticeAction onClick={openPassword}>
+                    {everyone ? 'Use your password' : 'Administrator sign-in'}
+                </NoticeAction>
+            )}
+        </Notice>
+    ) : closesAt ? (
+        <Notice icon={Clock}>
+            <p>Password sign-in is open until {closesAt}.</p>
+            {canOpenPassword && (
+                <NoticeAction onClick={openPassword}>Use your password</NoticeAction>
+            )}
+        </Notice>
+    ) : null
+
+    const showForgot = everyone
+        && (shape === 'local' ? showLocalForm : shape === 'sso' && view === 'password')
+
     return (
         <div className="relative min-h-full w-full flex items-center justify-center py-8 overflow-hidden bg-canvas font-sans">
             {collision && (
                 <CollisionModal
                     email={collision.email}
                     reasons={collision.reasons}
+                    canUsePassword={everyone}
                     onClose={() => setCollision(null)}
+                    onUsePassword={() => {
+                        setCollision(null)
+                        openPassword()
+                    }}
                 />
             )}
             {/* Animated Background Elements */}
@@ -997,9 +1565,9 @@ export function LoginPage() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
-                className="relative z-10 w-full max-w-[420px] px-6"
+                className="relative z-10 w-full max-w-[460px] px-4 sm:px-6"
             >
-                <div className="glass-panel p-8 md:p-10 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl overflow-hidden backdrop-blur-3xl">
+                <div className="glass-panel p-6 sm:p-8 md:p-10 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl overflow-hidden backdrop-blur-3xl">
                     {/* Logo / Header */}
                     <div className="flex flex-col items-center mb-10">
                         <motion.div
@@ -1027,170 +1595,14 @@ export function LoginPage() {
                         <SsoFailureBanner
                             reference={params.get('ref')}
                             onDismiss={() => setShowSsoFailure(false)}
+                            onUsePassword={canOpenPassword && everyone ? openPassword : undefined}
                         />
                     )}
 
-                    {/* Form */}
-                    {showEmailField && (
-                    <form onSubmit={handleSubmit} className="space-y-5">
-                        <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="email">
-                                Email
-                            </label>
-                            <div className="relative group">
-                                <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
-                                    <AtSign className="w-4 h-4" />
-                                </div>
-                                <input
-                                    id="email"
-                                    type="email"
-                                    placeholder="admin@company.com"
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    className="input pl-10 h-12 bg-white/50 dark:bg-black/20 border-white/40 dark:border-white/10"
-                                    required
-                                />
-                            </div>
-                        </div>
+                    {noticeBanner}
 
-                        {showPasswordForm && (
-                        <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted ml-1" htmlFor="password">
-                                Password
-                            </label>
-                            <div className="relative group">
-                                <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
-                                    <Lock className="w-4 h-4" />
-                                </div>
-                                <input
-                                    id="password"
-                                    type="password"
-                                    placeholder="••••••••"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    className="input pl-10 h-12 bg-white/50 dark:bg-black/20 border-white/40 dark:border-white/10"
-                                    required
-                                />
-                            </div>
-                        </div>
-                        )}
-
-                        {/* Error Message */}
-                        <AnimatePresence mode="wait">
-                            {error && (
-                                <motion.div
-                                    initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
-                                    exit={{ opacity: 0, height: 0 }}
-                                    className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-500 text-sm"
-                                >
-                                    <AlertCircle className="w-4 h-4 shrink-0" />
-                                    <p>{error}</p>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
-
-                        {/* Submit Button */}
-                        {showPasswordForm && (
-                        <button
-                            type="submit"
-                            disabled={isLoading}
-                            className={cn(
-                                "w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2",
-                                isLoading ? "opacity-70 cursor-not-allowed" : "hover:brightness-110"
-                            )}
-                        >
-                            {isLoading ? (
-                                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            ) : (
-                                <>
-                                    Enter Workspace
-                                    <ChevronRight className="w-4 h-4" />
-                                </>
-                            )}
-                        </button>
-                        )}
-
-                        {/* Email-first, waiting on an address that routes
-                            somewhere. Says so rather than leaving a lone
-                            field with no visible next step. */}
-                        {leadWithEmail && !routed && !showPasswordForm && (
-                            <p className="text-xs text-center text-ink-muted">
-                                Enter your work email to continue.
-                            </p>
-                        )}
-                    </form>
-                    )}
-
-                    {/* ── SSO ──────────────────────────────────────────── */}
-                    {/* A redirect provider gets a top-level GET so the IdP
-                        flow works. A gateway provider's sign-in starts
-                        with calls only this browser can make — the same
-                        navigation would land it on a dead route — so its
-                        CTA is a button running the browser half. */}
-                    {routed && (
-                        isGatewayProvider(routed) ? (
-                            <button
-                                type="button"
-                                onClick={() => { void gatewaySignIn(routed) }}
-                                className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
-                            >
-                                {ssoLabel(routed)}
-                                <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-                            </button>
-                        ) : (
-                        <a
-                            href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent(returnPath ?? '/dashboard')}`}
-                            className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
-                        >
-                            {/* Through ssoLabel, so a connection with no
-                                display name cannot render "Continue with
-                                undefined" here either. */}
-                            {ssoLabel(routed)}
-                            <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-                        </a>
-                        )
-                    )}
-
-                    {/* Escape hatches out of the email-first flow. Offered
-                        only when there is something to escape to: no
-                        password link when local login is off, because the
-                        server would refuse it. */}
-                    {leadWithEmail && (
-                        <div className="mt-4 flex flex-col items-center gap-2">
-                            {allowLocal && !forcePassword && (
-                                <button
-                                    type="button"
-                                    onClick={() => setForcePassword(true)}
-                                    className="text-xs text-accent-lineage hover:underline"
-                                >
-                                    Use a password instead
-                                </button>
-                            )}
-                            {!showAllProviders && hiddenProviderCount > 0 && (
-                                <button
-                                    type="button"
-                                    onClick={() => setShowAllProviders(true)}
-                                    className="text-xs text-ink-muted hover:text-ink"
-                                >
-                                    Other ways to sign in
-                                </button>
-                            )}
-                        </div>
-                    )}
-
-                    {showProviderRow && (
-                        <SsoButtons
-                            providers={visibleProviders}
-                            failed={contextFailed}
-                            onPortalError={setPortalError}
-                            onGatewaySignIn={gatewaySignIn}
-                            showDivider={showEmailField}
-                        />
-                    )}
-
-                    {portalError && (
-                        <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
+                    {portalError && shape !== 'loading' && (
+                        <div className="mb-5 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-700 dark:text-yellow-300 text-sm">
                             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                             <div>
                                 <p>
@@ -1199,9 +1611,9 @@ export function LoginPage() {
                                         && ' Try signing in again.'}
                                 </p>
                                 {/* An error that says what to do next must
-                                    have a next. With no form, no button and
-                                    no routed provider on the page, offer
-                                    the one thing that can change that. */}
+                                    have a next. With no form and no button
+                                    on the page, offer the one thing that
+                                    can change that. */}
                                 {!portalHasAffordance && (
                                     <button
                                         type="button"
@@ -1211,14 +1623,70 @@ export function LoginPage() {
                                         Retry
                                     </button>
                                 )}
+                                {canOpenPassword && everyone && (
+                                    <button
+                                        type="button"
+                                        onClick={openPassword}
+                                        className="mt-2 block text-xs font-semibold text-accent-lineage hover:underline"
+                                    >
+                                        Use your password instead
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}
 
+                    {/* Until the posture arrives the page does not know
+                        which shape it is, and guessing would flash the
+                        wrong one. Usually hidden by the card's own fade. */}
+                    {shape === 'loading' && (
+                        <div aria-hidden="true" className="space-y-3">
+                            <div className="h-12 rounded-xl bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
+                            <div className="h-12 rounded-xl bg-black/[0.04] dark:bg-white/[0.04] animate-pulse" />
+                        </div>
+                    )}
+
+                    {shape === 'local' && (
+                        <>
+                            {showLocalForm && (
+                                <form onSubmit={handlePasswordSubmit} className="space-y-5">
+                                    <EmailField value={email} onChange={setEmail} />
+                                    <PasswordField value={password} onChange={setPassword} />
+                                    <ErrorBanner error={error} />
+                                    <EnterWorkspace busy={isLoading} />
+                                </form>
+                            )}
+                            <SsoButtons
+                                providers={providers}
+                                failed={contextFailed}
+                                onPortalError={setPortalError}
+                                onGatewaySignIn={gatewaySignIn}
+                            />
+                        </>
+                    )}
+
+                    {shape === 'sso' && (
+                        <AnimatePresence mode="wait" custom={direction}>
+                            <motion.div
+                                key={view}
+                                custom={direction}
+                                variants={STEP_MOTION}
+                                initial="enter"
+                                animate="center"
+                                exit="exit"
+                                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                            >
+                                {view === 'identify'
+                                    ? identifyStep
+                                    : view === 'password' ? passwordStep : routingStep}
+                            </motion.div>
+                        </AnimatePresence>
+                    )}
+
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">
-                        {/* No password to forget when local login is off. */}
-                        {allowLocal && (
+                        {/* No password to forget where none is asked for. */}
+                        {showForgot && (
                             <p className="text-xs text-ink-muted">
                                 <Link to="/forgot-password" className="text-accent-lineage font-semibold hover:underline">
                                     Forgot your password?

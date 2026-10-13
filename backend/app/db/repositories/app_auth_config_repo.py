@@ -36,6 +36,11 @@ class AuthConfigSnapshot:
     email_first_login: bool
     version: int
     updated_at: str
+    # The emergency password window. Defaulted, so every existing
+    # construction keeps working; see ``set_password_fallback``.
+    password_fallback_until: Optional[str] = None
+    password_fallback_by: Optional[str] = None
+    password_fallback_reason: Optional[str] = None
 
 
 class ConflictingVersion(RuntimeError):
@@ -76,6 +81,9 @@ async def get_snapshot(session: AsyncSession) -> AuthConfigSnapshot:
         email_first_login=bool(getattr(row, 'email_first_login', False)),
         version=int(row.version or 1),
         updated_at=row.updated_at or "",
+        password_fallback_until=row.password_fallback_until,
+        password_fallback_by=row.password_fallback_by,
+        password_fallback_reason=row.password_fallback_reason,
     )
 
 
@@ -131,5 +139,38 @@ async def update_config(
     row.version = int(row.version or 0) + 1
     row.updated_at = _now()
     row.updated_by = updated_by
+    await session.flush()
+    return row
+
+
+async def set_password_fallback(
+    session: AsyncSession,
+    *,
+    until: Optional[str],
+    by: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> AppAuthConfigORM:
+    """Open (``until`` an ISO-8601 deadline) or close (``until=None``)
+    the emergency password window.
+
+    Deliberately leaves ``version`` alone. The window is opened in an
+    incident, often by a second admin, and bumping the version would make
+    the next save from a Settings page loaded before it fail with a
+    conflict over a field that page never edits."""
+    row = await get_row(session)
+    if row is None:
+        row = AppAuthConfigORM(
+            id=_SINGLETON_ID,
+            sso_enabled=True,
+            allow_local_login=True,
+            allow_jit_provisioning=True,
+            email_first_login=False,
+            version=0,
+            updated_at=_now(),
+        )
+        session.add(row)
+    row.password_fallback_until = until
+    row.password_fallback_by = by if until else None
+    row.password_fallback_reason = reason if until else None
     await session.flush()
     return row

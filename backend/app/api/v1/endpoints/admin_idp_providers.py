@@ -33,8 +33,7 @@ from backend.auth_service.cookies import set_dryrun_cookie
 from backend.auth_service.core.tokens import create_dryrun_token
 from backend.auth_service.interface import User
 from backend.auth_service.providers import (
-    ASSURANCE_DESCRIPTIONS,
-    assurance_for,
+    assurance_explained,
     apply_claim_mapping,
     ClaimMappingError,
     KIND_DEFAULTS,
@@ -189,10 +188,10 @@ class PreviewMappingRequest(BaseModel):
 
 def _to_dto(row) -> ProviderDTO:
     settings = idp_provider_repo.decrypt_settings(row.settings)
-    level = assurance_for(row.kind, settings)
+    level, reason = assurance_explained(row.kind, settings)
     return ProviderDTO(
         assurance=level,
-        assurance_reason=ASSURANCE_DESCRIPTIONS.get(level, ""),
+        assurance_reason=reason,
         email_domains=idp_provider_repo.parse_email_domains(row),
         last_assertion_at=getattr(row, "last_assertion_at", None),
         lifecycle=getattr(row, "lifecycle", "live"),

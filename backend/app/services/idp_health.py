@@ -159,7 +159,7 @@ async def probe_provider(provider_id: str, slug: str, kind: str,
         health.status = "warning" if health.warnings else "ok"
         health.detail = (
             "; ".join(health.warnings) if health.warnings
-            else "Discovery document and JWKS reachable."
+            else "Discovery document reachable."
         )
         return health
 
@@ -190,19 +190,29 @@ def _probe_backchannel(
     ``sso_backchannel_hosts``. Remove or retype an entry — or move the
     gateway to a new port — and every login through this provider stops,
     with nothing anywhere saying why. This says why.
+
+    Which endpoints depends on where the exchange runs. In server mode the
+    server calls the gateway, and the exchange endpoint when there is one.
+    In browser mode it calls neither — the browser runs the translate
+    call — and its only request is the key set, when the row verifies
+    against a JWKS URL. Demanding a gateway URL there reported every
+    working browser-mode connection as unable to sign anyone in.
     """
     from backend.auth_service.providers.outbound import (
         BlockedOutboundRequest, assert_fetchable,
     )
 
-    targets = [
-        ("gateway_url", str(settings.get("gateway_url") or "")),
-        ("exchange_url", str(settings.get("exchange_url") or "")),
-    ]
+    browser = str(settings.get("exchange_mode") or "server").strip().lower() == "browser"
+    if browser:
+        required = ("browser_exchange_url", str(settings.get("browser_exchange_url") or ""))
+        targets = [("jwks_url", str(settings.get("jwks_url") or ""))]
+    else:
+        required = ("gateway_url", str(settings.get("gateway_url") or ""))
+        targets = [required, ("exchange_url", str(settings.get("exchange_url") or ""))]
     problems: list[str] = []
     for label, url in targets:
         if not url:
-            continue  # exchange_url is optional by design
+            continue  # exchange_url and jwks_url are optional by design
         try:
             assert_fetchable(url, allow_hosts=allow_hosts)
         except BlockedOutboundRequest as exc:
@@ -210,16 +220,26 @@ def _probe_backchannel(
         except Exception as exc:  # noqa: BLE001 — a probe never raises
             problems.append(f"{label}: {exc}")
 
-    if not targets[0][1]:
+    if not required[1]:
         health.status = "unavailable"
-        health.detail = "No gateway_url configured; this provider cannot sign anyone in."
+        health.detail = f"No {required[0]} configured; this provider cannot sign anyone in."
         return health
     if problems:
         health.status = "unavailable"
         health.detail = "; ".join(problems)
         return health
     health.status = "ok"
-    health.detail = "Endpoints are configured and permitted destinations."
+    if not browser:
+        health.detail = "Endpoints are configured and permitted destinations."
+    elif targets[0][1]:
+        health.detail = (
+            "The browser runs the exchange; the key set it is verified "
+            "against is a permitted destination."
+        )
+    else:
+        health.detail = (
+            "The browser runs the exchange; the server has no endpoint to call."
+        )
     return health
 
 

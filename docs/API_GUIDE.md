@@ -170,9 +170,8 @@ anything but `403 csrf_failed` — for example `404` for a workspace that doesn'
 
 | Answer | Why | What to do |
 |---|---|---|
-| `401` `"Invalid email or password"` | Wrong email or password | Check both. Only failures count toward the limit below |
+| `401` `"Invalid email or password"` | Wrong email or password — or password sign-in is switched off for single sign-on and this account may not use one. The two answers are the same on purpose | Check both. While passwords are off, only system (break-glass) accounts keep a password: ask your administrator before automating with one. Only failures count toward the limit below |
 | `429` with `Retry-After` | Too many failed sign-ins for this account in a short time (`RATELIMIT_LOGIN_PER_ACCOUNT`) | Wait the number of seconds in `Retry-After`, then check the password |
-| `403` `local_login_disabled` | Password sign-in is switched off for single sign-on | Only system (break-glass) accounts keep a password. Ask your administrator before automating with one |
 | `403` `csrf_failed` on sign-in | Your client sent an `Origin` or `Referer` that isn't the deployment's own address or in `CORS_ALLOWED_ORIGINS` | Send neither header, as curl and Python do by default |
 | Every later request is `401` | Over plain `http`, the cookies are `Secure` and your client drops them | Use `https`. Only a development stack with `AUTH_COOKIE_SECURE=false` works over `http` |
 

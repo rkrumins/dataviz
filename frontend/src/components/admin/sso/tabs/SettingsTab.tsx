@@ -29,13 +29,18 @@ import {
 import {
     ssoAdminService,
     type AuthConfig,
+    type AuthConfigPatch,
     type IdpProvider,
+    type SsoAdminRequestError,
 } from '@/services/ssoAdminService'
+import { adminUserService } from '@/services/adminUserService'
 import { cn } from '@/lib/utils'
+import { useNow } from '@/lib/useNow'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ErrorBanner } from './ErrorBanner'
 import { BackchannelHostsPanel } from './settings/BackchannelHostsPanel'
 import { AvatarHostsPanel } from './settings/AvatarHostsPanel'
+import { PasswordFallbackSection } from './settings/FallbackCards'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
 import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
 import { SsoSettingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
@@ -86,19 +91,24 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                 field: 'allowLocalLogin',
                 label: 'Passwords',
                 summary:
-                    'Whether anyone can still sign in with an email and password. ' +
-                    'Off means single sign-on is the only way in.',
+                    'On, anyone can fall back to a password. Off, break-glass ' +
+                    'accounts only — everyone else signs in through single ' +
+                    'sign-on, and if it goes down you can open passwords to ' +
+                    'everyone for a few hours.',
                 technical:
-                    'POST /auth/login returns 403. Refused with 409 if it would ' +
-                    'lock out an active admin who has no SSO identity and is not ' +
-                    'a system account. System accounts keep password sign-in, at ' +
-                    '/login?password=1.',
+                    'POST /auth/login answers anyone not allowed a password with ' +
+                    'the same 401 as a wrong one. Break-glass (system) accounts ' +
+                    'sign in at /login?password=1; Super Admins with a password ' +
+                    'can too during a detected outage, and everyone can while an ' +
+                    'emergency window is open. Refused with 409 unless a ' +
+                    'break-glass account is ready; Super Admins without an SSO ' +
+                    'identity are listed for you to acknowledge first.',
                 confirmOff: true,
                 resultOn:
-                    'Passwords are on — people can sign in with an email and ' +
-                    'password again.',
+                    'Passwords are on — anyone can fall back to a password again.',
                 resultOff:
-                    'Passwords are off — single sign-on is the only way in.',
+                    'Passwords are off — break-glass accounts only; everyone ' +
+                    'else signs in through single sign-on.',
             },
         ],
     },
@@ -143,7 +153,7 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                 technical:
                     'The login page calls /auth/resolve with the address and ' +
                     'redirects to the matching provider. An address matching nothing ' +
-                    'falls back to the password form.',
+                    'goes to the primary connection — the first in login-page order.',
                 resultOn:
                     'The sign-in page asks for an email address first.',
                 resultOff:
@@ -163,6 +173,26 @@ const SWITCH: Record<string, SwitchDef> = Object.fromEntries(
  *  action when it did not — a failure must never read as an empty box. */
 function errText(err: unknown, fallback: string): string {
     return err instanceof Error && err.message ? err.message : fallback
+}
+
+type AdminWithoutSso = { id: string; email: string }
+
+/** The two refusals the passwords-off confirm answers in place, because
+ *  what to do next belongs beside the switch rather than in a toast:
+ *  nobody is ready to break the glass, or some Super Admins could not
+ *  sign in at all — a warning the operator may acknowledge. */
+type PasswordsOffRefusal =
+    | { error: 'no_break_glass_account' }
+    | { error: 'would_lock_out_admin'; admins: AdminWithoutSso[] }
+
+function passwordsOffRefusal(err: unknown): PasswordsOffRefusal | null {
+    const detail = (err as Partial<SsoAdminRequestError> | null)?.detail as
+        { error?: string; adminsWithoutSso?: AdminWithoutSso[] } | undefined
+    if (detail?.error === 'no_break_glass_account') return { error: detail.error }
+    if (detail?.error === 'would_lock_out_admin') {
+        return { error: detail.error, admins: detail.adminsWithoutSso ?? [] }
+    }
+    return null
 }
 
 /** The healthy posture is the common one, so it gets the neutral card and
@@ -195,7 +225,13 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         { affected: number; skipped: number } | null
     >(null)
     const [localOffSignOut, setLocalOffSignOut] = useState(false)
+    const [localOffRefusal, setLocalOffRefusal] = useState<PasswordsOffRefusal | null>(null)
+    // The admin whose "Make break-glass" is in flight.
+    const [marking, setMarking] = useState<string | null>(null)
     const { notify } = useAppNotifications()
+    // The posture says whether the emergency window is open, and the
+    // window closes by itself.
+    const now = useNow()
 
     const refresh = useCallback(async () => {
         try {
@@ -218,31 +254,41 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
     useEffect(() => { void refresh() }, [refresh])
 
     const posture = useMemo(
-        () => describePosture(cfg, providers), [cfg, providers],
+        () => describePosture(cfg, providers, now), [cfg, providers, now],
     )
     const risks = useMemo(
         () => riskChecks(cfg, providers), [cfg, providers],
     )
 
-    async function apply(field: keyof AuthConfig, value: boolean): Promise<boolean> {
+    async function apply(
+        field: keyof AuthConfig, value: boolean, extra?: AuthConfigPatch,
+    ): Promise<boolean> {
         if (!cfg) return false
         const def = SWITCH[field]
         setPending(field)
         try {
             setCfg(await ssoAdminService.updateAuthConfig({
-                [field]: value, expectedVersion: cfg.version,
+                [field]: value, expectedVersion: cfg.version, ...extra,
             } as never))
             setError(null)
             notify('success', value ? def.resultOn : def.resultOff)
+            setConfirming(null)
             return true
         } catch (err) {
-            notify('error', errText(
-                err, `Could not turn ${def.label} ${value ? 'on' : 'off'}.`,
-            ))
+            // A refusal with a way forward keeps the confirm open and
+            // says what it is; anything else is a failure like any other.
+            const refusal = field === 'allowLocalLogin' ? passwordsOffRefusal(err) : null
+            if (refusal) {
+                setLocalOffRefusal(refusal)
+            } else {
+                notify('error', errText(
+                    err, `Could not turn ${def.label} ${value ? 'on' : 'off'}.`,
+                ))
+                setConfirming(null)
+            }
             return false
         } finally {
             setPending(null)
-            setConfirming(null)
         }
     }
 
@@ -295,9 +341,12 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         }
     }
 
-    async function confirmLocalOff() {
+    /** ``acknowledge`` answers the admins-without-SSO warning: the
+     *  operator saw the list and turns passwords off anyway. */
+    async function confirmLocalOff(acknowledge = false) {
         const signOut = localOffSignOut
-        const ok = await apply('allowLocalLogin', false)
+        const ok = await apply('allowLocalLogin', false,
+            acknowledge ? { acknowledgeAdminsWithoutSso: true } : undefined)
         if (!ok || !signOut) return
         try {
             const ended = await ssoAdminService.endAllSessions()
@@ -315,6 +364,44 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
             )
         }
     }
+
+    /** One row of the admins-without-SSO warning, answered: the admin
+     *  keeps password sign-in as a break-glass account. Once nobody is
+     *  left on the list, the switch is tried again — that is what the
+     *  operator asked for. */
+    async function makeBreakGlass(admin: AdminWithoutSso) {
+        if (localOffRefusal?.error !== 'would_lock_out_admin') return
+        setMarking(admin.id)
+        try {
+            await adminUserService.setSystemAccount(admin.id, true)
+        } catch (err) {
+            notify('error', errText(
+                err, `Could not make ${admin.email} a break-glass account.`,
+            ))
+            return
+        } finally {
+            setMarking(null)
+        }
+        notify('success',
+            `${admin.email} is a break-glass account — it keeps password `
+            + 'sign-in whatever this switch says.',
+        )
+        const left = localOffRefusal.admins.filter(a => a.id !== admin.id)
+        if (left.length) {
+            setLocalOffRefusal({ error: 'would_lock_out_admin', admins: left })
+            // The break-glass card below gains the account.
+            void refresh()
+        } else {
+            void confirmLocalOff()
+        }
+    }
+
+    // The passwords-off confirm's button follows what the server said: an
+    // acknowledgement once the admins are listed, and nothing to press
+    // until a break-glass account is ready.
+    const localOffLabel = localOffRefusal?.error === 'would_lock_out_admin'
+        ? 'Turn off anyway'
+        : localOffRefusal ? null : undefined
 
     if (cfg === null && error === null) {
         return (
@@ -353,6 +440,9 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                 pending={pending === s.field}
                                 disabled={pending !== null || cfg === null}
                                 confirming={confirming === s.field}
+                                confirmLabel={
+                                    s.field === 'allowLocalLogin' ? localOffLabel : undefined
+                                }
                                 confirmExtra={
                                     s.field === 'ssoEnabled' ? (
                                         <SignOutSsoUsersChoice
@@ -361,11 +451,24 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                             onChange={setSsoOffSignOut}
                                         />
                                     ) : s.field === 'allowLocalLogin' ? (
-                                        <RequireReloginChoice
-                                            dry={localOffDry}
-                                            checked={localOffSignOut}
-                                            onChange={setLocalOffSignOut}
-                                        />
+                                        localOffRefusal?.error === 'no_break_glass_account' ? (
+                                            <NoBreakGlassGuidance />
+                                        ) : (
+                                            <>
+                                                {localOffRefusal && (
+                                                    <AdminsWithoutSso
+                                                        admins={localOffRefusal.admins}
+                                                        marking={marking}
+                                                        onMake={a => void makeBreakGlass(a)}
+                                                    />
+                                                )}
+                                                <RequireReloginChoice
+                                                    dry={localOffDry}
+                                                    checked={localOffSignOut}
+                                                    onChange={setLocalOffSignOut}
+                                                />
+                                            </>
+                                        )
                                     ) : undefined
                                 }
                                 onRequest={next => {
@@ -375,6 +478,7 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                             void loadSsoOffCount()
                                         }
                                         if (s.field === 'allowLocalLogin') {
+                                            setLocalOffRefusal(null)
                                             void loadLocalOffCounts()
                                         }
                                     } else void apply(s.field, next)
@@ -382,7 +486,11 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                 onConfirm={() => {
                                     if (s.field === 'ssoEnabled') void confirmSsoOff()
                                     else if (s.field === 'allowLocalLogin') {
-                                        void confirmLocalOff()
+                                        // Reached with the list on screen, the
+                                        // click is the acknowledgement.
+                                        void confirmLocalOff(
+                                            localOffRefusal?.error === 'would_lock_out_admin',
+                                        )
                                     }
                                     else void apply(s.field, false)
                                 }}
@@ -390,6 +498,12 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                             />
                         ))}
                     </div>
+
+                    {/* Straight after the doors: what still opens when the
+                        SSO door fails, and the one an admin opens by hand. */}
+                    {gi === 0 && cfg !== null && (
+                        <PasswordFallbackSection cfg={cfg} onChange={setCfg} />
+                    )}
                 </motion.section>
             ))}
 
@@ -460,7 +574,7 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
 
 function SwitchRow({
     def, value, risk, pending, disabled, confirming, confirmExtra,
-    onRequest, onConfirm, onCancel,
+    confirmLabel = 'Turn it off', onRequest, onConfirm, onCancel,
 }: {
     def: SwitchDef
     value: boolean
@@ -471,6 +585,9 @@ function SwitchRow({
     /** Extra content for the confirm block — a choice that rides along
      *  with the "turn it off", like the sign-everyone-out checkbox. */
     confirmExtra?: ReactNode
+    /** The confirm button's words; ``null`` when there is nothing to
+     *  confirm yet and the extra content says what has to happen first. */
+    confirmLabel?: string | null
     onRequest: (next: boolean) => void
     onConfirm: () => void
     onCancel: () => void
@@ -563,17 +680,19 @@ function SwitchRow({
                         <div className="mt-3 pt-3 border-t border-red-500/30">
                             <p className="text-xs text-ink">
                                 Turn <strong>{def.label}</strong> off?
-                                {risk?.tone === 'danger' && ` ${risk.message}`}
+                                {risk?.tone === 'danger' && confirmLabel !== null && ` ${risk.message}`}
                             </p>
                             {confirmExtra}
                             <div className="mt-2 flex gap-2">
-                                <button
-                                    onClick={onConfirm}
-                                    disabled={pending}
-                                    className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
-                                >
-                                    Turn it off
-                                </button>
+                                {confirmLabel !== null && (
+                                    <button
+                                        onClick={onConfirm}
+                                        disabled={pending}
+                                        className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+                                    >
+                                        {confirmLabel}
+                                    </button>
+                                )}
                                 <button
                                     onClick={onCancel}
                                     className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
@@ -663,6 +782,80 @@ function RequireReloginChoice({
                         dry.skipped === 1 ? 'account stays' : 'accounts stay'
                     } signed in.`
                     : '.'}
+            </p>
+        </div>
+    )
+}
+
+/** The would-be-stranded Super Admins, inside the passwords-off confirm:
+ *  no SSO identity, not break-glass — off, they could not sign in at all.
+ *  Each can be made break-glass on the spot; "Turn off anyway" below is
+ *  the acknowledgement for the rest. */
+function AdminsWithoutSso({
+    admins, marking, onMake,
+}: {
+    admins: AdminWithoutSso[]
+    marking: string | null
+    onMake: (admin: AdminWithoutSso) => void
+}) {
+    return (
+        <div className="mt-2">
+            <p className="text-xs text-ink leading-relaxed">
+                {admins.length === 1
+                    ? 'This Super Admin has no single sign-on identity and is ' +
+                      'not a break-glass account, so with passwords off they ' +
+                      'could not sign in until one is linked.'
+                    : `These ${admins.length} Super Admins have no single ` +
+                      'sign-on identity and are not break-glass accounts, so ' +
+                      'with passwords off they could not sign in until one ' +
+                      'is linked.'}
+            </p>
+            <ul className="mt-2 space-y-1.5">
+                {admins.map(a => (
+                    <li
+                        key={a.id}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-glass-border bg-canvas-elevated"
+                    >
+                        <span className="text-xs text-ink truncate flex-1 min-w-0">
+                            {a.email}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => onMake(a)}
+                            disabled={marking !== null}
+                            aria-label={`Make ${a.email} a break-glass account`}
+                            className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-glass-border text-[11px] font-medium text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                        >
+                            {marking === a.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                            Make break-glass
+                        </button>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    )
+}
+
+/** Why passwords cannot go off yet, and the two ways to fix it — calm,
+ *  because nothing is broken: the server refused to leave nobody able to
+ *  get in when the IdP is down. */
+function NoBreakGlassGuidance() {
+    return (
+        <div className="mt-2 p-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.05]">
+            <p className="text-xs text-ink leading-relaxed">
+                Not yet — no break-glass account is ready, so an IdP outage
+                would leave nobody able to get in. Mark an operational Super
+                Admin who has a password as a system account under{' '}
+                <a href="/admin/users" className="font-medium text-accent-lineage hover:underline">
+                    Admin → Users
+                </a>
+                , then try again.
+            </p>
+            <p className="mt-1.5 text-[11px] text-ink-muted leading-relaxed">
+                Or on the host:{' '}
+                <code className="font-mono text-[10px] text-ink-secondary break-all">
+                    python -m backend.scripts.reset_admin_password --email … --break-glass
+                </code>
             </p>
         </div>
     )

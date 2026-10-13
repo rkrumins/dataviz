@@ -1,25 +1,38 @@
 """Admin endpoint: platform SSO posture (``app_auth_config``).
 
-Three posture switches exposed at ``/api/v1/admin/sso/config``:
+Posture switches exposed at ``/api/v1/admin/sso/config``:
 
   * ``ssoEnabled`` — master kill-switch.
-  * ``allowLocalLogin`` — when false, password login is refused.
+  * ``allowLocalLogin`` — on: anyone can fall back to a password; off:
+    break-glass (system) accounts only, plus Super Admins while an SSO
+    outage is confirmed (``services/idp_reachability.py``).
   * ``allowJitProvisioning`` — when false, SSO logins for unknown
     subjects raise ``jit_disabled``.
+  * ``emailFirstLogin`` — hide the connection buttons and lead with the
+    email field.
 
 The PATCH endpoint guards against operator self-lockout:
 
-  * Refuses ``allowLocalLogin=false`` when any active admin lacks an
-    SSO identity (HTTP 409 with the offending admin list).
+  * Refuses turning ``allowLocalLogin`` off unless a READY break-glass
+    account exists — active, ``super_admin``, with a password. That is the
+    door that survives an IdP outage; without one, an all-SSO admin team
+    could switch passwords off and be locked out by the next outage.
+  * Warns (409 ``would_lock_out_admin``, with the list) when Super Admins
+    have no SSO identity and are not break-glass: they lose their password
+    until they link one. The admin proceeds by resending with
+    ``acknowledgeAdminsWithoutSso``.
   * Refuses any change that would leave ``ssoEnabled`` AND
     ``allowLocalLogin`` both false. The patch is merged with the stored
     row before the check, so the combination is unreachable whether it
     arrives in one PATCH or as two sequential ones in either order.
+
+``/password-fallback`` opens (POST) or closes (DELETE) the emergency
+window: password sign-in for everyone for 1–24 hours while SSO is down.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -29,15 +42,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import (
-    GroupMemberORM,
-    RoleBindingORM,
-    UserIdentityORM,
-    UserORM,
+from backend.app.db.models import IdpProviderORM, UserIdentityORM, UserORM
+from backend.app.db.repositories import (
+    app_auth_config_repo, binding_repo, user_repo,
 )
-from backend.app.db.repositories import app_auth_config_repo, user_repo
-from backend.app.db.repositories.binding_repo import _is_expired
-from backend.common.roles import RoleName
 from backend.app.db.repositories.app_auth_config_repo import (
     ConflictingVersion,
 )
@@ -47,6 +55,47 @@ from backend.auth_service.interface import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class BreakGlassAccountDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    email: str
+    status: str
+    password_set: bool = Field(alias="passwordSet")
+    super_admin: bool = Field(alias="superAdmin")
+    ready: bool
+
+
+class BreakGlassDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    ready: bool
+    accounts: list[BreakGlassAccountDTO] = Field(default_factory=list)
+
+
+class OutageConnectionDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    slug: str
+    display_name: str = Field(alias="displayName")
+    since: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class OutageDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    since: Optional[str] = None
+    providers: list[OutageConnectionDTO] = Field(default_factory=list)
+
+
+class SsoStatusDTO(BaseModel):
+    """What automatic outage detection last saw. ``stale`` means it has
+    not run recently enough to act on — no OIDC or SAML connection to
+    probe, or no control plane running it — so the automatic fallback is
+    off and only the emergency window and break-glass remain."""
+    model_config = ConfigDict(populate_by_name=True)
+    checked_at: Optional[str] = Field(default=None, alias="checkedAt")
+    stale: bool = True
+    outage: Optional[OutageDTO] = None
 
 
 class AuthConfigDTO(BaseModel):
@@ -60,6 +109,22 @@ class AuthConfigDTO(BaseModel):
     email_first_login: bool = Field(default=False, alias="emailFirstLogin")
     version: int
     updated_at: str = Field(alias="updatedAt")
+    password_fallback_until: Optional[str] = Field(
+        default=None, alias="passwordFallbackUntil",
+    )
+    password_fallback_by: Optional[str] = Field(
+        default=None, alias="passwordFallbackBy",
+    )
+    password_fallback_reason: Optional[str] = Field(
+        default=None, alias="passwordFallbackReason",
+    )
+    break_glass: BreakGlassDTO = Field(
+        default_factory=lambda: BreakGlassDTO(ready=False),
+        alias="breakGlass",
+    )
+    sso_status: SsoStatusDTO = Field(
+        default_factory=SsoStatusDTO, alias="ssoStatus",
+    )
 
 
 class AuthConfigPatch(BaseModel):
@@ -71,6 +136,76 @@ class AuthConfigPatch(BaseModel):
     allow_jit_provisioning: Optional[bool] = Field(default=None, alias="allowJitProvisioning")
     email_first_login: Optional[bool] = Field(default=None, alias="emailFirstLogin")
     expected_version: Optional[int] = Field(default=None, alias="expectedVersion")
+    # Proceed although the listed Super Admins have no SSO identity: they
+    # keep their accounts but lose the password until they link one.
+    acknowledge_admins_without_sso: bool = Field(
+        default=False, alias="acknowledgeAdminsWithoutSso",
+    )
+
+
+async def break_glass_accounts(session: AsyncSession) -> list[dict]:
+    """Every non-deleted system account, and whether it is READY to be
+    the way in during an IdP outage: active, ``super_admin``, and with a
+    password to type. A system account that is not an admin can sign in
+    but cannot fix anything, so it does not count."""
+    admin_ids = await binding_repo.super_admin_user_ids(session)
+    rows = await session.execute(
+        select(UserORM).where(
+            UserORM.is_system_account.is_(True),
+            UserORM.deleted_at.is_(None),
+        ).order_by(UserORM.email)
+    )
+    accounts = []
+    for u in rows.scalars().all():
+        password_set = is_password_set(u.password_hash)
+        super_admin = u.id in admin_ids
+        accounts.append({
+            "id": u.id, "email": u.email, "status": u.status,
+            "password_set": password_set, "super_admin": super_admin,
+            "ready": u.status == "active" and super_admin and password_set,
+        })
+    return accounts
+
+
+async def _config_dto(session: AsyncSession) -> AuthConfigDTO:
+    from backend.app.services import idp_reachability
+
+    snap = await app_auth_config_repo.get_snapshot(session)
+    accounts = await break_glass_accounts(session)
+    try:
+        detection = await idp_reachability.status(session)
+    except Exception as exc:  # noqa: BLE001 — a status card, not a gate
+        logger.warning("SSO status read failed: %s", exc)
+        detection = {"checked_at": None, "stale": True, "outage": None}
+    window_open = False
+    if snap.password_fallback_until:
+        try:
+            window_open = datetime.fromisoformat(
+                snap.password_fallback_until,
+            ) > datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            pass  # unreadable reads as closed, as at sign-in
+    return AuthConfigDTO(
+        sso_enabled=snap.sso_enabled,
+        allow_local_login=snap.allow_local_login,
+        allow_jit_provisioning=snap.allow_jit_provisioning,
+        email_first_login=snap.email_first_login,
+        version=snap.version,
+        updated_at=snap.updated_at,
+        # A lapsed window is reported closed: it already is.
+        password_fallback_until=snap.password_fallback_until if window_open else None,
+        password_fallback_by=snap.password_fallback_by if window_open else None,
+        password_fallback_reason=snap.password_fallback_reason if window_open else None,
+        break_glass=BreakGlassDTO(
+            ready=any(a["ready"] for a in accounts),
+            accounts=[BreakGlassAccountDTO(**a) for a in accounts],
+        ),
+        sso_status=SsoStatusDTO(
+            checked_at=detection["checked_at"],
+            stale=detection["stale"],
+            outage=OutageDTO(**detection["outage"]) if detection["outage"] else None,
+        ),
+    )
 
 
 @router.get("", response_model=AuthConfigDTO, response_model_by_alias=True)
@@ -78,66 +213,19 @@ async def get_config(
     _admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    snap = await app_auth_config_repo.get_snapshot(session)
-    return AuthConfigDTO(
-        sso_enabled=snap.sso_enabled,
-        allow_local_login=snap.allow_local_login,
-        allow_jit_provisioning=snap.allow_jit_provisioning,
-        email_first_login=getattr(snap, "email_first_login", False),
-        version=snap.version,
-        updated_at=snap.updated_at,
-    )
-
-
-async def _super_admin_user_ids(session: AsyncSession) -> set[str]:
-    """User ids that effectively hold ``super_admin`` (the role carrying
-    ``system:admin``) via the canonical ``role_bindings`` table.
-
-    Phase 5 renamed ``admin`` -> ``super_admin`` and moved authority from
-    the legacy ``user_roles`` table to ``role_bindings``. This resolves
-    both direct user bindings and indirect bindings via group membership,
-    skipping expired (time-bound) bindings.
-    """
-    now = datetime.now(timezone.utc)
-    bindings = await session.execute(
-        select(RoleBindingORM).where(
-            RoleBindingORM.role_name == RoleName.SUPER_ADMIN.value,
-            RoleBindingORM.scope_type == "global",
-        )
-    )
-    direct_user_ids: set[str] = set()
-    group_ids: set[str] = set()
-    for b in bindings.scalars().all():
-        if _is_expired(b.expires_at, now=now):
-            continue
-        if b.subject_type == "user":
-            direct_user_ids.add(b.subject_id)
-        elif b.subject_type == "group":
-            group_ids.add(b.subject_id)
-
-    user_ids = set(direct_user_ids)
-    if group_ids:
-        members = await session.execute(
-            select(GroupMemberORM.user_id).where(
-                GroupMemberORM.group_id.in_(group_ids)
-            )
-        )
-        user_ids.update(members.scalars().all())
-    return user_ids
+    return await _config_dto(session)
 
 
 async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
     """Return the (id, email) of every active super-admin who has no SSO
-    identity. Used to refuse the toggle ``allow_local_login=false`` when
-    it would produce a lockout (once local login is off, an admin MUST
-    have at least one SSO identity to get back in).
+    identity on a connection that can sign them in (enabled and
+    published). Once local login is off such an admin has no password
+    door, so turning it off warns about them by name.
 
     System accounts are not counted: the enforcement carves them out
     (they keep password sign-in while the switch is off), so they cannot
-    be locked out by it — and without this exemption a deployment whose
-    only local admin is the seeded bootstrap account could never turn
-    enforcement on at all."""
-    user_ids = await _super_admin_user_ids(session)
+    be locked out by it."""
+    user_ids = await binding_repo.super_admin_user_ids(session)
     if not user_ids:
         return []
     admin_q = await session.execute(
@@ -151,11 +239,26 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
     offending: list[dict] = []
     for admin in admin_q.scalars().all():
         ident = await session.execute(
-            select(UserIdentityORM.id).where(UserIdentityORM.user_id == admin.id)
+            select(UserIdentityORM.id)
+            .join(IdpProviderORM, IdpProviderORM.id == UserIdentityORM.provider_id)
+            .where(
+                UserIdentityORM.user_id == admin.id,
+                IdpProviderORM.enabled.is_(True),
+                IdpProviderORM.lifecycle == "live",
+            )
         )
         if ident.first() is None:
             offending.append({"id": admin.id, "email": admin.email})
     return offending
+
+
+async def _invalidate_posture_cache(request: Request) -> None:
+    svc = getattr(request.app.state, "identity_service", None)
+    if svc is not None and hasattr(svc, "invalidate_auth_config_cache"):
+        try:
+            await svc.invalidate_auth_config_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @router.patch("", response_model=AuthConfigDTO, response_model_by_alias=True)
@@ -169,9 +272,12 @@ async def update_config(
 
     Lockout safeguards:
 
-      * If the patch sets ``allowLocalLogin=false``, every active
-        admin must have at least one SSO identity. Otherwise we
-        return 409 ``would_lock_out_admin`` with the offending list.
+      * Turning ``allowLocalLogin`` off needs a ready break-glass account
+        (409 ``no_break_glass_account``) and, when Super Admins have no
+        SSO identity, ``acknowledgeAdminsWithoutSso`` (409
+        ``would_lock_out_admin`` with the list). Both are checked on the
+        transition only, so saving another switch while passwords are
+        already off is never blocked by them.
       * Any patch whose RESULT would have both ``ssoEnabled`` and
         ``allowLocalLogin`` false is rejected (no way in). The check
         runs against the merged target state, so turning the second
@@ -194,18 +300,32 @@ async def update_config(
                            "platform would be unreachable.",
             },
         )
-    if not target_local:
+    acknowledged: list[str] = []
+    if snap.allow_local_login and not target_local:
+        if not any(a["ready"] for a in await break_glass_accounts(session)):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "no_break_glass_account",
+                    "message": "Passwords cannot be switched off until a "
+                               "break-glass account is ready: an active "
+                               "Super Admin, marked as a system account, "
+                               "with a password. It is the way in if the "
+                               "identity provider goes down.",
+                },
+            )
         offending = await _admins_without_sso_identity(session)
-        if offending:
+        if offending and not body.acknowledge_admins_without_sso:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 detail={
                     "error": "would_lock_out_admin",
                     "adminsWithoutSso": offending,
-                    "message": "Disabling local login would lock out the "
-                               "listed admins (no linked SSO identity).",
+                    "message": "These Super Admins have no linked SSO "
+                               "identity and will lose password sign-in.",
                 },
             )
+        acknowledged = [a["email"] for a in offending]
 
     try:
         row = await app_auth_config_repo.update_config(
@@ -221,36 +341,96 @@ async def update_config(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
     # Audit + cache invalidation. Best-effort: a failed audit must
-    # NOT block the change (the row update is committed already).
+    # NOT block the change.
     try:
+        payload = {
+            "actor_id": admin.id,
+            "sso_enabled": bool(row.sso_enabled),
+            "allow_local_login": bool(row.allow_local_login),
+            "allow_jit_provisioning": bool(row.allow_jit_provisioning),
+            "email_first_login": bool(row.email_first_login),
+            "version": int(row.version or 1),
+        }
+        if acknowledged:
+            payload["admins_without_sso_acknowledged"] = acknowledged
         await user_repo.create_outbox_event(
-            session, event_type="auth.config.updated",
-            payload={
-                "actor_id": admin.id,
-                "sso_enabled": bool(row.sso_enabled),
-                "allow_local_login": bool(row.allow_local_login),
-                "allow_jit_provisioning": bool(row.allow_jit_provisioning),
-                "version": int(row.version or 1),
-            },
+            session, event_type="auth.config.updated", payload=payload,
         )
     except Exception:  # noqa: BLE001
         pass
 
-    svc = getattr(request.app.state, "identity_service", None)
-    if svc is not None and hasattr(svc, "invalidate_auth_config_cache"):
-        try:
-            await svc.invalidate_auth_config_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    await _invalidate_posture_cache(request)
+    return await _config_dto(session)
 
-    return AuthConfigDTO(
-        sso_enabled=bool(row.sso_enabled),
-        email_first_login=bool(getattr(row, "email_first_login", False)),
-        allow_local_login=bool(row.allow_local_login),
-        allow_jit_provisioning=bool(row.allow_jit_provisioning),
-        version=int(row.version or 1),
-        updated_at=row.updated_at or "",
+
+class PasswordFallbackOpen(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    hours: int = Field(ge=1, le=24)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/password-fallback", response_model=AuthConfigDTO,
+             response_model_by_alias=True)
+async def open_password_fallback(
+    body: PasswordFallbackOpen,
+    request: Request,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Open password sign-in to everyone for ``hours`` (1–24), while SSO
+    is down. A deadline, so it closes itself; ``DELETE`` closes it early.
+
+    Sessions opened through it end at their first renewal after it closes
+    and are sent back through single sign-on. Other servers pick it up
+    within the posture cache's 30 seconds. Refused while passwords are
+    already on for everyone — there is nothing to open, and a window
+    lying in wait would quietly outlast a later switch-off."""
+    snap = await app_auth_config_repo.get_snapshot(session)
+    if snap.allow_local_login:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": "passwords_already_on",
+                "message": "Passwords are already on for everyone.",
+            },
+        )
+    until = (datetime.now(timezone.utc) + timedelta(hours=body.hours)).isoformat()
+    reason = (body.reason or "").strip() or None
+    await app_auth_config_repo.set_password_fallback(
+        session, until=until, by=admin.email, reason=reason,
     )
+    try:
+        await user_repo.create_outbox_event(
+            session, event_type="auth.config.password_fallback_opened",
+            payload={
+                "actor_id": admin.id, "until": until,
+                "hours": body.hours, "reason": reason,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    await _invalidate_posture_cache(request)
+    return await _config_dto(session)
+
+
+@router.delete("/password-fallback", response_model=AuthConfigDTO,
+               response_model_by_alias=True)
+async def close_password_fallback(
+    request: Request,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Close the emergency window now."""
+    await app_auth_config_repo.set_password_fallback(session, until=None)
+    try:
+        await user_repo.create_outbox_event(
+            session, event_type="auth.config.password_fallback_closed",
+            payload={"actor_id": admin.id},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    await _invalidate_posture_cache(request)
+    return await _config_dto(session)
 
 
 class EndSsoSessionsRequest(BaseModel):

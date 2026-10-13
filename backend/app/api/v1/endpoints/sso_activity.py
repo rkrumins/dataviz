@@ -60,7 +60,7 @@ OUTCOMES: dict[str, tuple[str, ...]] = {
     "session_ended": (
         "user.session_refused", "user.sso_session_expired",
         "user.sso_session_ended_upstream", "user.session_revoked",
-        "user.sessions_ended_by_admin",
+        "user.sessions_ended_by_admin", "user.password_fallback_session_ended",
     ),
     "signed_out": ("user.logged_out",),
     "account": (
@@ -75,6 +75,9 @@ OUTCOMES: dict[str, tuple[str, ...]] = {
         "idp.provider.sessions_ended",
         "auth.config.updated", "auth.config.sso_sessions_ended",
         "auth.config.all_sessions_ended",
+        "auth.config.password_fallback_opened",
+        "auth.config.password_fallback_closed",
+        "idp.outage.detected", "idp.outage.resolved",
         "rbac.sso_mapping.created", "rbac.sso_mapping.updated",
         "rbac.sso_mapping.deleted",
         "sso.backchannel_host_allowed", "sso.backchannel_host_withdrawn",

@@ -264,6 +264,17 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         lambda p: f"Every session of {p.get('user_id') or '?'} ended by an admin",
     ),
     "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
+    "auth.config.password_fallback_opened": (
+        "critical",
+        lambda p: f"Emergency password access opened until {p.get('until') or '?'}",
+    ),
+    "idp.outage.detected": (
+        "critical",
+        lambda p: (
+            f"SSO connection '{p.get('slug') or '?'}' unreachable — Super "
+            "Admins may sign in with a password"
+        ),
+    ),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
     "rbac.workspace.deleted": (
@@ -297,6 +308,13 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.sso_mapping.updated": ("info", _summary_sso_mapping_updated),
     "idp.provider.created": ("info", _summary_idp_provider("created")),
     "idp.provider.updated": ("info", _summary_idp_provider("updated")),
+    "idp.outage.resolved": (
+        "info",
+        lambda p: f"SSO connection '{p.get('slug') or '?'}' reachable again",
+    ),
+    "auth.config.password_fallback_closed": (
+        "info", lambda p: "Emergency password access closed",
+    ),
     "sso.backchannel_host_allowed": ("info", _summary_backchannel_host("allowed")),
     "branding.updated": ("info", lambda p: "Branding settings updated"),
     "user.approved": ("info", _summary_user_status("approved")),
@@ -329,6 +347,14 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     # Why a session stopped renewing — context for the sign-in that
     # usually follows, not a failure in itself.
     "user.session_refused": ("info", _summary_session_refused),
+    "user.password_fallback_session_ended": (
+        "info",
+        lambda p: (
+            f"Password session opened while SSO was down ended for "
+            f"{p.get('user_id') or '?'} — back through "
+            f"{p.get('provider_slug') or 'single sign-on'}"
+        ),
+    ),
     "user.sso_session_ended_upstream": ("info", _summary_session_ended_upstream),
     "user.sso_unsigned_accepted": (
         "warning",

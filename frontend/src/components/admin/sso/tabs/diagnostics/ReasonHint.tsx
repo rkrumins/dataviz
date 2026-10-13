@@ -125,9 +125,24 @@ const REASONS: Record<string, Reason> = {
         what: 'Their identity provider did not say the address is verified.',
         next: 'Verify it in the IdP, or map a claim that carries verification.',
     },
+    unverified_connection: {
+        what: 'This connection is unverified, so it never links itself to an '
+            + 'existing account: its claims, email included, are whatever the '
+            + 'sender wrote.',
+        next: 'They link it from their own account page once signed in another '
+            + 'way — or make the connection Verified (its card says how).',
+    },
     existing_deleted: {
         what: 'The account that email belongs to was deleted.',
         next: 'Restore it, or let a new one be created.',
+    },
+    account_conflict: {
+        what: 'Another account already holds this email address in a way the '
+            + 'sign-in could not resolve, even after reading again — for '
+            + 'example a deleted account that still keeps it.',
+        next: 'Look the address up under Admin → Users. Two sign-ins racing '
+            + 'for the same person never end here: the second one signs in '
+            + 'to the account the first created.',
     },
     sso_account_inactive: {
         what: 'Their linked account is no longer active.',
@@ -166,9 +181,13 @@ const REASONS: Record<string, Reason> = {
             + 'is a password spray.',
     },
     local_login_disabled: {
-        what: 'A password sign-in while passwords are switched off.',
-        next: 'Expected — only system accounts keep a password. Point them '
-            + 'at their single sign-on button.',
+        what: 'A password sign-in by an account not allowed one while '
+            + 'passwords are off. They were told only "invalid email or '
+            + 'password", the same as a wrong one.',
+        next: 'Expected when passwords are off: only break-glass accounts, '
+            + 'Super Admins during a detected outage, or everyone during an '
+            + 'emergency window may use one. Point them at their single '
+            + 'sign-on button.',
     },
     // ── the redirect sign-in flows ───────────────────────────────────
     idp_error: {
@@ -176,6 +195,15 @@ const REASONS: Record<string, Reason> = {
             + 'signing them in.',
         next: 'The detail carries its error code — access_denied usually '
             + 'means they are not assigned to the application there.',
+    },
+    idp_unreachable: {
+        what: 'The identity provider could not be reached when the sign-in '
+            + 'started.',
+        next: 'Usually an outage at the provider, or a network or DNS '
+            + 'problem between this server and it. Check Settings → Single '
+            + 'sign-on status: once an outage is confirmed, Super Admins can '
+            + 'sign in with a password, and an admin can open emergency '
+            + 'password access for everyone.',
     },
     missing_flow_cookie: {
         what: 'The sign-in came back without the short-lived cookie set '

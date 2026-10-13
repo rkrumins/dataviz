@@ -105,7 +105,7 @@ export interface IdpProvider {
     assurance: AssuranceLevel
     /** One-line operator explanation of what that level means. */
     assuranceReason: string
-    /** Domains routed here when email-first login is on. */
+    /** Domains a typed address is routed here from (whenever SSO is on). */
     emailDomains: string[]
     /** When an assertion was last captured, or null. */
     lastAssertionAt?: string | null
@@ -234,6 +234,26 @@ export interface IdpGroupMapping {
 // ── Phase 4: platform SSO posture (master toggle + local-login + JIT) ─
 
 
+/** A system account, as the break-glass readiness list shows it. */
+export interface BreakGlassAccount {
+    id: string
+    email: string
+    status: string
+    passwordSet: boolean
+    superAdmin: boolean
+    /** active && superAdmin && passwordSet — can get in with SSO down. */
+    ready: boolean
+}
+
+/** A connection the outage detector has confirmed unreachable: seen
+ *  healthy before, and failing for minutes on fresh evidence. */
+export interface SsoOutageProvider {
+    slug: string
+    displayName: string
+    since: string
+    detail?: string | null
+}
+
 export interface AuthConfig {
     ssoEnabled: boolean
     allowLocalLogin: boolean
@@ -241,6 +261,20 @@ export interface AuthConfig {
     emailFirstLogin: boolean
     version: number
     updatedAt: string
+    /** End of the emergency password window; null when none is open. */
+    passwordFallbackUntil?: string | null
+    /** Who opened it: an admin's email, or ``cli``. */
+    passwordFallbackBy?: string | null
+    passwordFallbackReason?: string | null
+    /** Every system account, and whether any can sign in with SSO down. */
+    breakGlass?: { ready: boolean; accounts: BreakGlassAccount[] }
+    /** What the outage detector last saw. ``stale`` means it has not run
+     *  lately (or ever), so the automatic admin fallback is off. */
+    ssoStatus?: {
+        checkedAt: string | null
+        stale: boolean
+        outage: { since: string; providers: SsoOutageProvider[] } | null
+    }
 }
 
 export interface AuthConfigPatch {
@@ -249,6 +283,9 @@ export interface AuthConfigPatch {
     allowJitProvisioning?: boolean
     emailFirstLogin?: boolean
     expectedVersion?: number
+    /** Turn passwords off although some Super Admins have no SSO
+     *  identity — the answer to a ``would_lock_out_admin`` 409. */
+    acknowledgeAdminsWithoutSso?: boolean
 }
 
 /** Outcome of an end-sessions call. With ``dryRun`` nothing was written
@@ -466,6 +503,24 @@ export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
     return lines
 }
 
+/** What a failed request rejects with. ``message`` is the readable line
+ *  every caller shows; ``status`` and the parsed ``detail`` ride along for
+ *  the few that branch on a structured refusal — turning passwords off
+ *  answers 409 with the admins it is about. */
+export interface SsoAdminRequestError extends Error {
+    status: number
+    detail?: unknown
+}
+
+/** An error body's ``detail``, as the server sent it. */
+function errorDetail(text: string): unknown {
+    try {
+        return (JSON.parse(text) as { detail?: unknown } | null)?.detail
+    } catch {
+        return undefined
+    }
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
@@ -477,8 +532,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
         // Use the shared extractor so structured permission /
         // validation envelopes land as readable strings instead of
         // "[object Object]" via ``new Error(dict)`` coercion.
-        const detail = extractErrorMessageFromText(text, res.statusText)
-        throw new Error(detail)
+        const message = extractErrorMessageFromText(text, res.statusText)
+        throw Object.assign(new Error(message), {
+            status: res.status, detail: errorDetail(text),
+        }) as SsoAdminRequestError
     }
     if (res.status === 204) return undefined as T
     return res.json()
@@ -773,6 +830,21 @@ export const ssoAdminService = {
     updateAuthConfig(patch: AuthConfigPatch): Promise<AuthConfig> {
         return request<AuthConfig>(`${ADMIN}/sso/config`, {
             method: 'PATCH', body: JSON.stringify(patch),
+        })
+    },
+
+    /** Open password sign-in to everyone for ``hours`` (1–24) — the door
+     *  for an IdP outage. It closes itself, both ends are audited, and
+     *  neither bumps ``version``. */
+    openPasswordFallback(hours: number, reason?: string): Promise<AuthConfig> {
+        return request<AuthConfig>(`${ADMIN}/sso/config/password-fallback`, {
+            method: 'POST', body: JSON.stringify({ hours, reason }),
+        })
+    },
+
+    closePasswordFallback(): Promise<AuthConfig> {
+        return request<AuthConfig>(`${ADMIN}/sso/config/password-fallback`, {
+            method: 'DELETE',
         })
     },
 
