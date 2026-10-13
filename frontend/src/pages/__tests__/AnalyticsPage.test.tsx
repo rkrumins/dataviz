@@ -823,6 +823,28 @@ describe('AnalyticsPage', () => {
         expect(screen.getByText('−30')).toBeInTheDocument()
     })
 
+    it('says how far back runs reach as the platform keeps them, not as a constant', async () => {
+        // Time to first build reads aggregation runs, and runs are pruned to
+        // AGGREGATION_JOB_RETENTION_DAYS: the caveat said 90 whatever that was.
+        const user = userEvent.setup()
+        vi.mocked(analyticsService.getData).mockResolvedValue({
+            ...DATA, coverage: { ...DATA.coverage, jobsKeptDays: 30 },
+        } as never)
+        renderAt('/analytics?tab=data')
+        await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
+        expect(within(await screen.findByRole('tooltip')).getByText(/kept for 30 days/i)).toBeInTheDocument()
+    })
+
+    it('has no caveat on first builds when every run is kept', async () => {
+        const user = userEvent.setup()
+        vi.mocked(analyticsService.getData).mockResolvedValue({
+            ...DATA, coverage: { ...DATA.coverage, jobsKeptDays: null },
+        } as never)
+        renderAt('/analytics?tab=data')
+        await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
+        expect(within(await screen.findByRole('tooltip')).queryByText(/are kept for/i)).toBeNull()
+    })
+
     it('says version control could not be read rather than reporting none', async () => {
         vi.mocked(analyticsService.getData).mockResolvedValue({
             ...DATA,

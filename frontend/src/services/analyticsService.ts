@@ -456,7 +456,9 @@ export interface AnalyticsDataDoc {
     generatedAt: string
     range: AnalyticsRange
     bucket: 'day' | 'week'
-    coverage: { entitiesSince: string | null; jobsKeptDays: number }
+    /** `jobsKeptDays` is how long finished aggregation runs are kept, `null`
+     *  when every run is (AGGREGATION_JOB_RETENTION_DAYS=0). */
+    coverage: { entitiesSince: string | null; jobsKeptDays: number | null }
     growth: {
         buckets: string[]
         entities: number[]

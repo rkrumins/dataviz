@@ -213,6 +213,19 @@ async def test_the_document_is_a_bounded_number_of_reads(db_session):
     assert len(issued) <= 25, f"{len(issued)} reads"
 
 
+@pytest.mark.parametrize("setting, kept", [(None, 90), ("30", 30), ("0", None), ("ninety", 90)])
+async def test_runs_reach_back_as_far_as_the_prune_keeps_them(db_session, monkeypatch, setting, kept):
+    """How far back runs reach — what bounds time to first build — is the
+    prune's own setting. It was a copy of the default, 90 days, whatever
+    AGGREGATION_JOB_RETENTION_DAYS said. ``None``: every run is kept."""
+    if setting is None:
+        monkeypatch.delenv("AGGREGATION_JOB_RETENTION_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("AGGREGATION_JOB_RETENTION_DAYS", setting)
+    doc = await analytics_data_repo.platform_data(db_session, days=30, now=NOW)
+    assert doc["coverage"]["jobsKeptDays"] == kept
+
+
 async def test_the_drill_in_carries_the_workspaces_own_growth(db_session):
     await _seed(db_session)
     detail = await analytics_repo.workspace_detail(db_session, "ws_a", days=7, now=NOW)

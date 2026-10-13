@@ -258,6 +258,9 @@ services:
       # The activity log's horizon: the sweep runs here, and viz-service
       # reads the same variable to tell readers how far back the log goes.
       ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
+      # How long a finished aggregation run is kept: the prune runs here, and
+      # viz-service reads the same variable to say how far back runs reach.
+      AGGREGATION_JOB_RETENTION_DAYS: "${AGGREGATION_JOB_RETENTION_DAYS:-90}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -384,6 +387,9 @@ services:
       # The activity sweep runs on the control plane, but this role tells
       # readers how far back the log goes: the same ${VAR} keeps them honest.
       ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
+      # Likewise how long aggregation runs are kept: pruned on the control
+      # plane, reported here (Analytics → Data, time to first build).
+      AGGREGATION_JOB_RETENTION_DAYS: "${AGGREGATION_JOB_RETENTION_DAYS:-90}"
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev

@@ -176,6 +176,20 @@ graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once
 - In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
 - A request that ran out of time could answer `500` instead of `504`, when the deadline fell inside
   a middleware that turns a cancelled handler into "No response returned".
+- **Zooming the activity chart crashed the page.** It fell over with "The page hit an unexpected
+  error and stopped rendering" (`Cannot read properties of undefined (reading 'slice')`). The
+  chart remembered the hovered day by its position, and the zoomed chart has fewer days, so the
+  position named none. A chart now lets go of its hover and drag whenever its days change.
+- **The activity event lists had no request deadline.** The timeout middleware took any path ending
+  in `/events` for a live stream. Streams are now named one by one, so the lists answer `504` like
+  any other read.
+- **A slow activity export could be cut off mid-file and still look complete.** The 30-second
+  deadline closed the download cleanly, so nothing showed it was short. The export now runs to the
+  end, like the other streamed downloads: it is capped at 50,000 rows, and each process runs at
+  most two at a time.
+- **Analytics → Data said aggregation runs are kept for 90 days, whatever the setting.** It now
+  reads `AGGREGATION_JOB_RETENTION_DAYS`, the setting the prune deletes by. Time to first build
+  says how far back runs reach, or says nothing when every run is kept.
 
 ### Security
 
@@ -199,6 +213,9 @@ graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once
   takes no writes while it builds, and the relay waits). Run the upgrade job before rolling out.
 - **The activity band's kept counts change shape.** The first band after the upgrade counts its
   days again; the warmer does this for the leading views.
+- **`AGGREGATION_JOB_RETENTION_DAYS` is read by both roles now.** The control plane prunes
+  finished runs to it, and the web tier says how far back runs reach. Compose, the Kustomize config
+  maps and the Helm chart set it on both (90 unless set). If you set it, set it alike on both.
 - **Copying the audit backlog** (see the entry below) also classifies each event for the activity
   log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
   events. Administration → Activity says *Importing earlier activity* until it finishes.
@@ -215,8 +232,9 @@ graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once
 
 - The ledger is not partitioned, so retention deletes in batches rather than dropping a partition.
 - Who started a run, and why, starts at this release; earlier manual runs show their trigger only.
-- Entity history starts when daily profiling began, and aggregation runs are kept for 90 days, so
-  the Data tab and runs by origin reach no further back than that.
+- Entity history starts when daily profiling began, and aggregation runs are kept for
+  `AGGREGATION_JOB_RETENTION_DAYS` (90 unless set), so the Data tab and runs by origin reach no
+  further back than that.
 - Client telemetry carries no workspace, so the workspace pulse counts view opens, view changes and
   recorded operations only. Punchcards are in UTC.
 - A moved data source is attributed to its destination workspace only.
