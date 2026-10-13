@@ -1310,8 +1310,26 @@ async def create_blank_graph(
             "type": "provisioning_failed",
             "message": "The model's version store could not be created; nothing was kept."})
 
-    # 5) Aggregation registration (best-effort, never fails provisioning).
-    await register_aggregation(session, ds_id, f"blank-provision:{created['graph_id']}")
+    # 5) Aggregation registration (best-effort, never fails provisioning). The run
+    #    is theirs on the job row; the model they created is their one activity
+    #    event, recorded below.
+    from backend.app.common import activity_context
+    from backend.app.services.activity import recorder
+
+    person = activity_context.current_provenance()
+    # Read now: a failed trigger rolls this session back, expiring the row.
+    target = recorder.data_source_target(await data_source_repo.get_data_source_orm(session, ds_id))
+    await register_aggregation(
+        session, ds_id, f"blank-provision:{created['graph_id']}",
+        provenance=person.without_recording() if person else None)
+
+    # After the trigger, which starts its own transaction on this session.
+    # Best-effort: the model already exists in the version store.
+    await recorder.record_for_request(
+        session, "workspace.versioning.blank_created", **target,
+        details={"graphId": created["graph_id"], "ontologyId": body.ontology_id},
+        best_effort=True,
+    )
 
     return {"data_source_id": ds_id, "graph_id": created["graph_id"],
             "main_branch_id": created["main_branch_id"], "graph_name": graph_name,

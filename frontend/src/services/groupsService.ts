@@ -7,6 +7,7 @@
  * (``camelCase`` JSON ↔ snake_case Python).
  */
 import { authFetch } from './apiClient'
+import { withReason, type ActivityOpts } from './activityReason'
 
 const API = '/api/v1/admin/groups'
 
@@ -102,16 +103,16 @@ export const groupsService = {
         return authFetch<GroupMemberResponse[]>(`${API}/${groupId}/members`)
     },
 
-    addMember(groupId: string, userId: string): Promise<GroupMemberResponse> {
-        return authFetch<GroupMemberResponse>(`${API}/${groupId}/members`, {
+    addMember(groupId: string, userId: string, opts?: ActivityOpts): Promise<GroupMemberResponse> {
+        return authFetch<GroupMemberResponse>(`${API}/${groupId}/members`, withReason({
             method: 'POST',
             body: JSON.stringify({ userId }),
-        })
+        }, opts?.reason))
     },
 
-    removeMember(groupId: string, userId: string): Promise<void> {
-        return authFetch<void>(`${API}/${groupId}/members/${userId}`, {
+    removeMember(groupId: string, userId: string, opts?: ActivityOpts): Promise<void> {
+        return authFetch<void>(`${API}/${groupId}/members/${userId}`, withReason({
             method: 'DELETE',
-        })
+        }, opts?.reason))
     },
 }

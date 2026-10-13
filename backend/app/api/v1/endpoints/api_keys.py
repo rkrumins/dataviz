@@ -1190,7 +1190,7 @@ async def update_my_api_key(
     }
     if changes:
         await api_key_repo.update_details(session, key.id, name=name, description=description)
-        await _record(session, "updated", key, changes=changes)
+        await _record(session, "updated", key, updated_by=user.id, changes=changes)
         await session.commit()
         await session.refresh(key)
     owner, facts = await _owner_and_facts(session, user)

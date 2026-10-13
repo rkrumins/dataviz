@@ -3,6 +3,7 @@
  * one workspace. Maps to ``/api/v1/admin/workspaces/{ws}/members``.
  */
 import { authFetch } from './apiClient'
+import { withReason, type ActivityOpts } from './activityReason'
 import type { ImpactPreviewResponse } from './permissionsService'
 
 
@@ -107,15 +108,16 @@ export const workspaceMembersService = {
     create(
         wsId: string,
         req: WorkspaceMemberCreateRequest,
+        opts?: ActivityOpts,
     ): Promise<WorkspaceMemberResponse> {
-        return authFetch<WorkspaceMemberResponse>(url(wsId), {
+        return authFetch<WorkspaceMemberResponse>(url(wsId), withReason({
             method: 'POST',
             body: JSON.stringify(req),
-        })
+        }, opts?.reason))
     },
 
-    revoke(wsId: string, bindingId: string): Promise<void> {
-        return authFetch<void>(url(wsId, `/${bindingId}`), { method: 'DELETE' })
+    revoke(wsId: string, bindingId: string, opts?: ActivityOpts): Promise<void> {
+        return authFetch<void>(url(wsId, `/${bindingId}`), withReason({ method: 'DELETE' }, opts?.reason))
     },
 
     /**

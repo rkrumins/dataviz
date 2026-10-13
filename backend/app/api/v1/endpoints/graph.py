@@ -242,6 +242,10 @@ async def bootstrap_versioned_graph_endpoint(
     if res.get("already_enabled"):
         response.status_code = 200
         return {"graphId": res["graph_id"], "alreadyEnabled": True}
+    await _record_versioning(
+        session, "workspace.versioning.enabled", dataSourceId,
+        {"jobId": res["job_id"], "graphId": res["graph_id"]},
+    )
     return {"jobId": res["job_id"], "graphId": res["graph_id"], "status": res["status"],
             "failure": res.get("failure")}
 
@@ -344,6 +348,15 @@ async def bootstrap_decision_endpoint(
     if res["already"]:
         response.status_code = 200
     status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if not res["already"]:
+        # Removing copies from a source graph is a person's decision about their data:
+        # recorded once, with how much it removes. Repeating it records nothing more.
+        dup = (status or {}).get("duplicates") or {}
+        await _record_versioning(
+            session, "workspace.versioning.duplicates_collapsed", dataSourceId,
+            {"jobId": res["jobId"], "identifiers": dup.get("identifiers"),
+             "extraCopies": dup.get("extraCopies")},
+        )
     if status and status.get("duplicates"):
         status["duplicates"].update(await shared_with(session, ds))
     return status
@@ -370,12 +383,16 @@ async def bootstrap_retry_endpoint(
         raise HTTPException(status_code=422, detail="mode must be resume or restart")
     await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
-                                     workspace_id=ws_id)
+        result = await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
+                                       workspace_id=ws_id)
     except BootstrapConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    await _record_versioning(
+        session, "workspace.versioning.retried", dataSourceId, {"mode": mode},
+    )
+    return result
 
 
 @router.post("/bootstrap/abandon")
@@ -404,9 +421,29 @@ async def bootstrap_abandon_endpoint(
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    # Before a package's data source goes below: the record names it, and the
+    # drop's commit carries the record with it.
+    await _record_versioning(session, "workspace.versioning.abandoned", dataSourceId)
     if res.get("origin") == "package":
         res["dataSourceRemoved"] = await drop_managed_data_source(session, dataSourceId)
     return res
+
+
+async def _record_versioning(
+    session: AsyncSession, event_type: str, data_source_id: str,
+    details: Optional[dict] = None,
+) -> None:
+    """A version-control step a person took, recorded best-effort: the step
+    itself happened in the version store, which a failed record cannot undo."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services.activity import recorder
+
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+    if ds is not None:
+        await recorder.record_for_request(
+            session, event_type, **recorder.data_source_target(ds),
+            details=details, best_effort=True,
+        )
 
 
 async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, ws_id: str):
@@ -484,6 +521,7 @@ async def resync_versioned_graph_endpoint(
     _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
     any time for any versioned graph. 3-way merge preserves user edits (a field both the
@@ -496,8 +534,13 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
-    return await svc.resync_from_provider(
+    result = await svc.resync_from_provider(
         graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+    await _record_versioning(
+        session, "workspace.versioning.resynced", dataSourceId,
+        {"strategy": strategy, "commitId": (result or {}).get("commit_id")},
+    )
+    return result
 
 
 @router.get("/vocab-alignment")

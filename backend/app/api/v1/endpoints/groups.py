@@ -311,6 +311,8 @@ async def add_member(
             "user_id": body.user_id,
             "actor_id": admin.id,
             "sessions_revoked": revoked,
+            # By a person's hand; the IdP group sync writes ``via: "sso"``.
+            "via": "manual",
         },
     )
     logger.info(
@@ -364,6 +366,7 @@ async def remove_member(
             "user_id": user_id,
             "actor_id": admin.id,
             "sessions_revoked": revoked,
+            "via": "manual",
         },
     )
     logger.info(

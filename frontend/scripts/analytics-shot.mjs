@@ -7,6 +7,9 @@
  * way; the redaction work shipped twice with nobody having looked at it.
  *
  *   node scripts/analytics-shot.mjs [fixture:tab ...]
+ *
+ * `activity:platform` and `activity:workspace` shoot the Activity explorer,
+ * which draws with the same charts and palette.
  */
 import { spawn, execFile } from 'node:child_process'
 import { mkdirSync, existsSync, readdirSync } from 'node:fs'
@@ -23,6 +26,8 @@ const OUT = '.harness'
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'privileged:overview', 'privileged:engagement', 'privileged:health',
   'privileged:workspaces', 'privileged:growth', 'privileged:content',
+  'privileged:data',
+  'strict:data',        // movers and bands in workspaces the reader cannot see
   'strict:overview',    // withheld people panel + locked leaderboards
   'strict:health',      // both operator sections withheld
   'strict:workspaces',  // locked rows with request-access
@@ -34,6 +39,9 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'firstRun:overview:admin',
   'privileged:overview:dark',
   'strict:overview:dark',
+  'privileged:data:dark',
+  'activity:platform',
+  'activity:workspace:dark',
 ]
 
 function findChromium() {
@@ -87,17 +95,19 @@ try {
     // `fixture:tab[:dark|:admin]` — the third segment picks the palette or the
     // permission claims, whichever the posture needs.
     const [fixture, tab, mode] = shot.split(':')
-    const query = `fixture=${fixture}&tab=${tab}`
+    // `activity:scope[:dark]` names the explorer's scope in place of a tab.
+    const activity = fixture === 'activity'
+    const query = (activity ? `scope=${tab}` : `fixture=${fixture}&tab=${tab}`)
       + (mode === 'dark' ? '&theme=dark' : '')
       + (mode === 'admin' ? '&perms=admin' : '')
-    const out = join(OUT, `analytics-${shot.replace(/:/g, '-')}.png`)
+    const out = join(OUT, `${activity ? '' : 'analytics-'}${shot.replace(/:/g, '-')}.png`)
     await run(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',
       '--force-device-scale-factor=2',
       '--window-size=1600,1400',
       '--virtual-time-budget=4000',
       `--screenshot=${out}`,
-      `http://localhost:${PORT}/analytics-harness.html?${query}`,
+      `http://localhost:${PORT}/${activity ? 'activity' : 'analytics'}-harness.html?${query}`,
     ])
     console.log('  ✓', out)
   }

@@ -7,7 +7,8 @@ import { exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
-import { viewActionLabel } from '@/lib/domainLabels'
+import type { AnalyticsUsageState } from '@/hooks/useAnalytics'
+import { presenceLabel, viewActionLabel } from '@/lib/domainLabels'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
 import { WithheldPanel } from './Redacted'
@@ -17,15 +18,21 @@ import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { FunnelStrip } from './charts/FunnelStrip'
+import { PunchcardGrid } from './charts/PunchcardGrid'
+import { punchcardTable } from './charts/punchcard'
+import { MetricInfo } from './MetricInfo'
+import { UsageSection } from './UsageSection'
 import { comparisonLabel, previousLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
 
 export function EngagementTab({
-    data, range, isStale,
+    data, range, isStale, usage,
 }: {
     data: AnalyticsSummary
     range: AnalyticsRangeSelection
     isStale: boolean
+    /** Presence and the weekly rhythm, from the usage document. */
+    usage?: AnalyticsUsageState
 }) {
     const theme = useChartTheme()
     const { totals, series, engagement, breakdowns, leaderboards, coverage } = data
@@ -194,6 +201,48 @@ export function EngagementTab({
                     <FunnelStrip stages={engagement.funnel} />
                 </ChartFrame>
             </div>
+
+            {/* Who is around at all, and when. Presence is counted, never
+                listed: it says how big the audience is, not who stayed away. */}
+            <UsageSection usage={usage}>
+                {(u) => (
+                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                        <ChartFrame
+                            id="chart-presence"
+                            title="Who is around"
+                            subtitle="Every account, by when it was last seen — as of today"
+                            isStale={usage?.isFetching}
+                            isEmpty={u.engagement.presence.every((p) => p.count === 0)}
+                            emptyLabel="No accounts yet."
+                            action={<MetricInfo metric="presence" />}
+                            table={
+                                <ChartTable
+                                    rowLabel="Presence"
+                                    rows={u.engagement.presence.map((p) => presenceLabel(p.key))}
+                                    columns={[{
+                                        key: 'people', label: 'People',
+                                        values: u.engagement.presence.map((p) => p.count),
+                                    }]}
+                                />
+                            }
+                        >
+                            <StackedShareBar slices={u.engagement.presence} labelOf={presenceLabel} />
+                        </ChartFrame>
+                        <ChartFrame
+                            id="chart-rhythm"
+                            title="When people use it"
+                            subtitle={`Everything recorded in ${rangePhrase(range)}, weekday × hour, UTC`}
+                            className="xl:col-span-2"
+                            isStale={usage?.isFetching}
+                            isEmpty={u.engagement.punchcard.every((row) => row.every((n) => n === 0))}
+                            emptyLabel="Nothing recorded in this range."
+                            table={<ChartTable {...punchcardTable(u.engagement.punchcard)} caption="Events per weekday and hour, UTC" />}
+                        >
+                            <PunchcardGrid grid={u.engagement.punchcard} />
+                        </ChartFrame>
+                    </div>
+                )}
+            </UsageSection>
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame

@@ -409,8 +409,9 @@ workspaces they're explicitly added to, plus any view published to everyone. A r
 is HTTP 403 with
 `"error": "missing_permission"`, naming the permission and the scope.
 
-Entering **Administration** needs `system:admin` or `system:groups:manage`. Inside it, each
-page checks its own permission: **Audit Log** and **Telemetry** need `system:audit:read`,
+Entering **Administration** needs `system:admin`, `system:groups:manage` or
+`system:audit:read`. Inside it, each page checks its own permission: **Activity** and
+**Telemetry** need `system:audit:read`,
 **Groups** needs `system:groups:manage`, and every other page needs `system:admin`.
 
 **How to configure it.** Assign platform roles in **Administration → User Management**. Add
@@ -656,7 +657,10 @@ These surfaces are off by default in production. Turn one on only when you need 
 as the change, so the change can't be saved without its record. A background relay copies each
 event into an audit table (`auth_audit_log`) that the app only ever adds to, skipping any event
 it has already copied. The relay runs in the aggregation control plane (or in-process when the
-whole platform runs as one process), and only one copy of it works at a time. Recorded events include:
+whole platform runs as one process), and only one copy of it works at a time. Beside each
+record the relay stores indexed columns — category, who did it, who it happened to, target,
+workspace, data source, the reason given and the request it came in — which the record itself
+never changes. Recorded events include:
 
 - sign-ins and sign-outs, and failed sign-ins with the reason, client address and user agent;
 - sessions refused or revoked, and why;
@@ -670,26 +674,30 @@ whole platform runs as one process), and only one copy of it works at a time. Re
   scope per hour;
 - API keys created, rotated and revoked, and keys refused — expired or paused, or misused: a
   revoked key presented again, or a key used from a network it isn't limited to — once per key
-  and reason an hour. Every event a key's request writes carries the key's id.
+  and reason an hour; every event a key's request writes carries the key's id;
+- operations people start by hand — aggregation runs started, resumed, stopped, purged or
+  skipped, freshness rebuilds, refreshes and holds — and changes to data sources, providers,
+  version control, feature switches and other platform settings, each with the person who
+  made it and the reason they gave, if any.
 
-**How to read it.** Open **Administration → Identity & Access → Audit Log**. The page needs
-`system:audit:read`, which `super_admin` and `org_auditor` hold, on top of a permission that
-opens Administration (see [Roles and permissions](#roles-and-permissions)). Choose a **Range**
-(**Last 24h**, **Last 7d**, **Last 30d** or **All time**) and a **Scope**:
-
-| Scope | Shows |
-|---|---|
-| **Security** (default) | Sign-ins, sign-outs, failed sign-ins, session revocations and every access-control change |
-| **Activity** | Everything in **Security**, plus sign-ups, password resets and access requests |
-| **Everything** | All events, including the hourly access-denied samples |
-
-Filter by who did something or who it affected — a name, email or user id — and open any row
-for its full detail. The same events are available to scripts from
-`GET /api/v1/admin/audit`, with the same permission and cursor pagination.
+**How to read it.** Open **Administration → Activity**. The page needs `system:audit:read`,
+which `super_admin` and `org_auditor` hold, and which also opens Administration (see
+[Roles and permissions](#roles-and-permissions)). Choose a range and a lens — **Everything**
+(the default, without the routine access-denied samples), **Operations**, **Access**,
+**Identity**, **Data**, **Content**, **Platform**, or **Security** for identity and access
+together with every refused request — then filter by a person, as the one who acted or the one
+it happened to, by action, by outcome or by whether a reason was given, and open any event for
+its full detail. **Export** downloads the view as CSV (at most 50,000 rows, with spreadsheet
+formulas neutralised), and the export is itself recorded. A workspace's admins see only that
+workspace's operations, access and data changes, on its **Activity** tab, and never the raw
+event. Scripts read the same log from `GET /api/v1/admin/activity/events`; the older
+`GET /api/v1/admin/audit` still serves RBAC and identity events with cursor pagination.
 
 **Where in the code.** `backend/app/db/repositories/user_repo.py` (`create_outbox_event`),
-`backend/app/services/outbox_relay.py` (`drain_once`), `backend/app/api/v1/endpoints/audit.py`
-(`list_audit_events`), `frontend/src/components/admin/AdminAudit.tsx`.
+`backend/app/services/outbox_relay.py` (`drain_once`), `backend/app/services/activity/catalogue.py`
+(what each event is), `backend/app/api/v1/endpoints/activity.py` and
+`backend/app/api/v1/endpoints/audit.py` (`list_audit_events`),
+`frontend/src/components/activity/`.
 
 ## Privacy
 

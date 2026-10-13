@@ -19,11 +19,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:  # pragma: no cover — annotation only
+    from backend.app.common.activity_context import Provenance
 
 logger = logging.getLogger(__name__)
 
@@ -367,11 +370,12 @@ async def drop_managed_data_source(session: AsyncSession, ds_id: str) -> bool:
         return False
 
 
-async def register_aggregation(session: AsyncSession, ds_id: str, idempotency_key: str) -> None:
+async def register_aggregation(session: AsyncSession, ds_id: str, idempotency_key: str, *,
+                               provenance: Optional["Provenance"] = None) -> None:
     """Aggregation registration (best-effort, never fails provisioning): creates the data source's
     aggregation state row so readiness reads "configured" instead of "none", and wires the
     publish→rollup pipeline from day one. The projector's on_rollups_stale hook self-heals later if
-    this is skipped."""
+    this is skipped. ``provenance`` names the person the first run is for, on its job row."""
     try:
         from backend.app.main import app as _app
         agg = getattr(_app.state, "aggregation_service", None)
@@ -380,7 +384,8 @@ async def register_aggregation(session: AsyncSession, ds_id: str, idempotency_ke
             await agg.trigger(
                 ds_id,
                 AggregationTriggerRequest(idempotency_key=idempotency_key),
-                "onboarding", session)
+                "onboarding", session,
+                **({"provenance": provenance} if provenance else {}))
     except Exception as exc:
         logger.info("blank-model aggregation registration skipped for ds=%s: %s", ds_id, exc)
 

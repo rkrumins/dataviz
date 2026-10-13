@@ -20,6 +20,7 @@ from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.repositories import provider_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.providers.reachability import resolve_provider_status
+from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.workspace_visibility import compute_visible_provider_ids
 from backend.common.models.management import (
@@ -367,7 +368,12 @@ async def create_provider(
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Register a new provider (database server)."""
-    return await provider_repo.create_provider(session, req)
+    prov = await provider_repo.create_provider(session, req)
+    await recorder.record_for_request(
+        session, "provider.connection.created",
+        target_type="provider", target_id=prov.id, target_label=prov.name,
+    )
+    return prov
 
 
 @router.get("/{provider_id}", response_model=ProviderResponse)
@@ -427,6 +433,12 @@ async def update_provider(
     if not prov:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
+    # Which fields were sent, never their values: one of them may be a secret.
+    await recorder.record_for_request(
+        session, "provider.connection.updated",
+        target_type="provider", target_id=provider_id, target_label=prov.name,
+        details={"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))},
+    )
 
     new_prov = await session.get(ProviderORM, provider_id)
     if old_identity != _effective_provider_identity(new_prov):
@@ -452,10 +464,16 @@ async def delete_provider(
             status_code=409,
             detail="Cannot delete provider: one or more workspaces still reference it.",
         )
+    row = await provider_repo.get_provider_orm(session, provider_id)
     deleted = await provider_repo.delete_provider(session, provider_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
+    await recorder.record_for_request(
+        session, "provider.connection.deleted",
+        target_type="provider", target_id=provider_id,
+        target_label=row.name if row is not None else None,
+    )
 
 
 @router.get("/{provider_id}/impact", response_model=ProviderImpactResponse)

@@ -3,6 +3,9 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { ReasonField } from '@/components/activity/ReasonField'
+import type { ReasonAudience } from '@/components/activity/reasonPresets'
+import type { ReasonDraft } from '@/components/activity/useReasonDraft'
 
 export function ConfirmDialog({
     open,
@@ -14,6 +17,10 @@ export function ConfirmDialog({
     onConfirm,
     onCancel,
     loading,
+    reason,
+    reasonAudience = 'workspace',
+    reasonNote,
+    accent = 'from-red-500 to-red-400',
 }: {
     open: boolean
     title: string
@@ -24,6 +31,12 @@ export function ConfirmDialog({
     onConfirm: () => void
     onCancel: () => void
     loading?: boolean
+    /** Ask why, optionally: the caller takes the draft in `onConfirm`. */
+    reason?: ReasonDraft
+    reasonAudience?: ReasonAudience
+    reasonNote?: string
+    /** The bar across the top; red unless the change is not a destructive one. */
+    accent?: string
 }) {
     if (!open) return null
     return createPortal(
@@ -41,10 +54,22 @@ export function ConfirmDialog({
                     role="dialog"
                     aria-modal="true"
                 >
-                    <div className="h-1 bg-gradient-to-r from-red-500 to-red-400" />
+                    <div className={cn('h-1 bg-gradient-to-r', accent)} />
                     <div className="p-6">
                         <h3 className="text-lg font-bold text-ink mb-2">{title}</h3>
                         <p className="text-sm text-ink-muted leading-relaxed">{message}</p>
+                        {reason && (
+                            <ReasonField
+                                draft={reason}
+                                audience={reasonAudience}
+                                note={reasonNote}
+                                disabled={loading}
+                                autoFocus
+                                onSubmit={() => { if (!loading) onConfirm() }}
+                                onEscape={() => { if (!loading) onCancel() }}
+                                className="mt-4"
+                            />
+                        )}
                     </div>
                     <div className="flex justify-end gap-3 px-6 pb-6">
                         <button

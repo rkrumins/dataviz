@@ -1,4 +1,5 @@
 import { authFetch } from './apiClient';
+import { withReason, type ActivityOpts } from './activityReason';
 
 /**
  * Pipeline tuning overrides (camelCase aliases accepted by the backend).
@@ -96,6 +97,10 @@ export interface AggregationJobResponse {
    *  "Automatic" alone just relocates the question — this answers it. */
   reconcileReason?: string | null;
   reconcileEvidence?: Record<string, unknown> | null;
+  /** The person who started this run by hand, and the reason they gave.
+   *  Null for automated runs and for runs from before this was recorded. */
+  triggeredBy?: string | null;
+  statedReason?: string | null;
   progress: number;
   totalEdges: number;
   processedEdges: number;
@@ -485,6 +490,8 @@ export interface JobHistoryFilters {
   dataSourceId?: string[];
   projectionMode?: string;
   triggerSource?: string;
+  /** Runs this person started by hand. */
+  triggeredBy?: string;
   dateFrom?: string;
   dateTo?: string;
   search?: string;
@@ -858,14 +865,15 @@ class AggregationService {
   async triggerAggregation(
     dataSourceId: string,
     request: AggregationTriggerRequest,
-    triggerSource: 'manual' | 'onboarding' = 'manual'
+    triggerSource: 'manual' | 'onboarding' = 'manual',
+    opts?: ActivityOpts,
   ): Promise<AggregationJobResponse> {
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs?triggerSource=${triggerSource}`,
-      {
+      withReason({
         method: 'POST',
         body: JSON.stringify(request),
-      }
+      }, opts?.reason)
     );
   }
 
@@ -909,6 +917,7 @@ class AggregationService {
     dataSourceId: string,
     jobId: string,
     overrides?: ResumeOverrides,
+    opts?: ActivityOpts,
   ): Promise<AggregationJobResponse> {
     const init: RequestInit = { method: 'POST' };
     if (overrides && Object.keys(overrides).length > 0) {
@@ -916,7 +925,7 @@ class AggregationService {
     }
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/resume`,
-      init,
+      withReason(init, opts?.reason),
     );
   }
 
@@ -946,17 +955,17 @@ class AggregationService {
     );
   }
 
-  async cancelJob(dataSourceId: string, jobId: string): Promise<AggregationJobResponse> {
+  async cancelJob(dataSourceId: string, jobId: string, opts?: ActivityOpts): Promise<AggregationJobResponse> {
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/cancel`,
-      { method: 'POST' }
+      withReason({ method: 'POST' }, opts?.reason)
     );
   }
 
-  async deleteJob(jobId: string): Promise<void> {
+  async deleteJob(jobId: string, opts?: ActivityOpts): Promise<void> {
     return authFetch<void>(
       `/api/v1/admin/aggregation-jobs/${jobId}`,
-      { method: 'DELETE' }
+      withReason({ method: 'DELETE' }, opts?.reason)
     );
   }
 
@@ -981,6 +990,8 @@ class AggregationService {
        *  dropped — so a source that only completes at a narrowed scan width
        *  gets the purge it asked for and a rebuild that cannot finish. */
       reaggregate?: AggregationTriggerRequest
+      /** Why — recorded on the purge job and in the activity log. */
+      reason?: string
     },
   ): Promise<{
     deletedEdges: number
@@ -991,22 +1002,22 @@ class AggregationService {
     const qs = opts?.skipReaggregate ? '?skipReaggregate=true' : '';
     return authFetch(
       `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation${qs}`,
-      {
+      withReason({
         method: 'POST',
         ...(opts?.reaggregate
           ? { body: JSON.stringify({ reaggregate: opts.reaggregate }) }
           : {}),
-      }
+      }, opts?.reason)
     );
   }
 
-  async skipAggregation(dataSourceId: string): Promise<DataSourceReadinessResponse> {
+  async skipAggregation(dataSourceId: string, opts?: ActivityOpts): Promise<DataSourceReadinessResponse> {
     return authFetch<DataSourceReadinessResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/skip-aggregation`,
-      {
+      withReason({
         method: 'POST',
         body: JSON.stringify({ confirmed: true }),
-      }
+      }, opts?.reason)
     );
   }
 
@@ -1027,6 +1038,7 @@ class AggregationService {
     if (filters.dataSourceId?.length) filters.dataSourceId.forEach(id => params.append('dataSourceId', id));
     if (filters.projectionMode) params.set('projectionMode', filters.projectionMode);
     if (filters.triggerSource) params.set('triggerSource', filters.triggerSource);
+    if (filters.triggeredBy) params.set('triggeredBy', filters.triggeredBy);
     if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
     if (filters.dateTo) params.set('dateTo', filters.dateTo);
     if (filters.search) params.set('search', filters.search);

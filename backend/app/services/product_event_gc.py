@@ -14,9 +14,10 @@ Nothing reads past the analytics windows (365 days is the hard ceiling on both
 the ``days`` query param and a custom range), so rows older than the retention
 horizon cost storage and vacuum pressure and buy nothing back.
 
-Runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler`` gate the
-outbox relay and the refresh-token sweeper use. Three web replicas each
-sweeping the same table would only contend for the same rows.
+Runs on the aggregation control plane, and on a dev-role monolith through the
+``runs_scheduler`` gate the outbox relay and the refresh-token sweeper share.
+Each batch takes an advisory lock first (``db/advisory.py``), so control-plane
+replicas take turns rather than contending for the same rows.
 """
 from __future__ import annotations
 

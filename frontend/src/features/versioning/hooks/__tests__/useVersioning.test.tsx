@@ -60,9 +60,11 @@ describe('useDecideBootstrapDuplicates', () => {
     decideBootstrapDuplicates.mockResolvedValue({ jobId: 'vjob_1', status: 'pending' })
     const { result, invalidate } = setup()
 
-    result.current.mutate('fp_1')
+    result.current.mutate({ fingerprint: 'fp_1', reason: 'Source loaded twice' })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    expect(decideBootstrapDuplicates).toHaveBeenCalledWith('ws1', 'ds1', { fingerprint: 'fp_1' })
+    expect(decideBootstrapDuplicates).toHaveBeenCalledWith(
+      'ws1', 'ds1', { fingerprint: 'fp_1' }, { reason: 'Source loaded twice' },
+    )
     expect(invalidate).toHaveBeenCalledWith({ queryKey: VERSIONING_KEYS.bootstrap('ws1', 'ds1') })
   })
 
@@ -70,7 +72,7 @@ describe('useDecideBootstrapDuplicates', () => {
     decideBootstrapDuplicates.mockRejectedValue(new Error('stale'))
     const { result, invalidate } = setup()
 
-    result.current.mutate('fp_old')
+    result.current.mutate({ fingerprint: 'fp_old' })
     await waitFor(() => expect(result.current.isError).toBe(true))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: VERSIONING_KEYS.bootstrap('ws1', 'ds1') })
   })

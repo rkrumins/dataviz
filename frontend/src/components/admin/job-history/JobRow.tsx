@@ -11,7 +11,7 @@ import type { AdaptedRunState, AggregationJobResponse, AggregationTuning, JobLim
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
 import {
-    formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
+    formatDuration, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
 } from './shared'
 import { RunSettingsPanel } from './RunSettingsPanel'
@@ -27,6 +27,11 @@ import { ReconcileWhy } from '../Freshness/reconcileEvidence'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory } from '../Freshness/failureGuidance'
 import { remainingSecsFromLedger, stoppedStage, STEP_LABELS } from './runSteps'
 import { runRecordText } from './runRecord'
+import { PersonChip } from '@/components/ui/PersonChip'
+import { DateTime } from '@/components/ui/DateTime'
+import { RunTimeline } from './RunTimeline'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 /**
  * History-informed ETA: uses the PREVIOUS completed run's durations
@@ -128,6 +133,52 @@ export function KpiCard({ icon: Icon, label, value, accent, iconBg }: {
     )
 }
 
+/**
+ * The purge confirmation, with the optional reason. Its own component so the
+ * reason's state (and its recent-reasons read) exists only while a purge is
+ * being confirmed, not once per row.
+ */
+function PurgeConfirm({ loading, onConfirm, onCancel }: {
+    loading: boolean
+    onConfirm: (reason?: string) => void
+    onCancel: () => void
+}) {
+    const reason = useReasonDraft('purge')
+    const confirm = () => onConfirm(reason.take())
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-3 p-3 rounded-xl bg-red-500/[0.04] border border-red-500/15"
+        >
+            <div className="flex items-center gap-3">
+                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="text-[11px] text-red-400 flex-1">
+                    Remove all materialized edges? A re-aggregation job starts automatically when the purge completes (use the Assets tab purge for a stay-empty option).
+                </span>
+                <button
+                    onClick={confirm}
+                    disabled={loading}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm shadow-red-500/20 disabled:opacity-40"
+                >
+                    {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Confirm Purge'}
+                </button>
+                <button onClick={onCancel} className="text-[11px] text-ink-muted hover:text-ink transition-colors">
+                    Cancel
+                </button>
+            </div>
+            <ReasonField
+                draft={reason}
+                audience="workspace"
+                note="It also shows on the purge in Job History."
+                disabled={loading}
+                onSubmit={() => { if (!loading) confirm() }}
+                onEscape={onCancel}
+            />
+        </motion.div>
+    )
+}
+
 // ── Job Row ──────────────────────────────────────────────────────────
 
 export interface JobRowProps {
@@ -141,7 +192,8 @@ export interface JobRowProps {
     onResume: (job: AggregationJobResponse) => void
     onRetrigger: (job: AggregationJobResponse) => void
     onDelete: (job: AggregationJobResponse) => void
-    onPurge: (job: AggregationJobResponse) => void
+    /** ``reason`` is the person's reason, when they gave one. */
+    onPurge: (job: AggregationJobResponse, reason?: string) => void
     purgeConfirm: string | null
     setPurgeConfirm: (id: string | null) => void
     actionLoading: boolean
@@ -474,6 +526,21 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                     ) : (
                         <span className="text-[11px] text-ink-muted">{triggerLabel(job.triggerSource)}</span>
                     )}
+                    {/* Who started it by hand, and why — on the row, so the
+                        list answers "who keeps rebuilding this?" unopened. */}
+                    {job.triggeredBy && (
+                        <span className="mt-0.5 flex max-w-[12rem] items-center gap-1 text-[10px] text-ink-muted">
+                            by <PersonChip id={job.triggeredBy} size="xs" className="min-w-0" />
+                        </span>
+                    )}
+                    {job.triggeredBy && job.statedReason && !compact && (
+                        <span
+                            className="block max-w-[12rem] truncate text-[10px] italic text-ink-secondary"
+                            title={job.statedReason}
+                        >
+                            “{job.statedReason}”
+                        </span>
+                    )}
                 </td>
 
                 {/* Progress */}
@@ -598,9 +665,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
 
                 {/* Started */}
                 <td className={cn('px-4', compact ? 'py-2' : 'py-3')}>
-                    <span className="text-[11px] text-ink-muted" title={job.startedAt ? new Date(job.startedAt).toLocaleString() : job.createdAt}>
-                        {timeAgo(job.startedAt ?? job.createdAt)}
-                    </span>
+                    <DateTime at={job.startedAt ?? job.createdAt} className="text-[11px] text-ink-muted" />
                 </td>
 
                 {/* Actions */}
@@ -831,6 +896,27 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             />
                                         )}
 
+                                        {/* The same question for a run a person
+                                            started: who, and the reason they gave. */}
+                                        {job.triggeredBy && (
+                                            <div
+                                                data-testid="run-started-by"
+                                                className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-4 py-3"
+                                            >
+                                                <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Started by</p>
+                                                <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2">
+                                                    <PersonChip id={job.triggeredBy} size="md" showEmail />
+                                                    {job.statedReason ? (
+                                                        <blockquote className="min-w-0 flex-1 border-l-2 border-indigo-500/40 pl-3 text-sm italic text-ink break-words">
+                                                            “{job.statedReason}”
+                                                        </blockquote>
+                                                    ) : (
+                                                        <span className="text-xs text-ink-muted">No reason given</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
                                         {/* Stat grid */}
                                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                             <StatCell
@@ -1052,31 +1138,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         )}
 
                                         {/* Timeline */}
-                                        <div className="flex items-center gap-3 text-[10px] text-ink-muted border-t border-glass-border/30 pt-3">
-                                            <span>Created {new Date(job.createdAt).toLocaleString()}</span>
-                                            {job.startedAt && (
-                                                <>
-                                                    <span className="text-ink-muted/20">{'\u2192'}</span>
-                                                    <span>Started {new Date(job.startedAt).toLocaleString()}</span>
-                                                </>
-                                            )}
-                                            {job.completedAt && (
-                                                <>
-                                                    <span className="text-ink-muted/20">{'\u2192'}</span>
-                                                    <span>
-                                                        {job.status === 'completed' ? 'Completed' :
-                                                         job.status === 'failed' ? 'Failed' : 'Ended'}{' '}
-                                                        {new Date(job.completedAt).toLocaleString()}
-                                                    </span>
-                                                </>
-                                            )}
-                                            {job.lastCheckpointAt && isRunning && (
-                                                <span className="ml-auto flex items-center gap-1">
-                                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                                    Checkpoint {timeAgo(job.lastCheckpointAt)}
-                                                </span>
-                                            )}
-                                        </div>
+                                        <RunTimeline job={job} className="border-t border-black/[0.06] pt-3 dark:border-white/[0.08]" />
 
                                         {/* Waiting (routine park on a running job — not a failure) */}
                                         {job.errorMessage && isRunning && job.errorMessage.startsWith('Quiesce') && (
@@ -1157,26 +1219,11 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Purge {job.createdEdges.toLocaleString()} aggregated edges from graph
                                                     </button>
                                                 ) : (
-                                                    <motion.div
-                                                        initial={{ opacity: 0, y: -4 }}
-                                                        animate={{ opacity: 1, y: 0 }}
-                                                        className="flex items-center gap-3 p-3 rounded-xl bg-red-500/[0.04] border border-red-500/15"
-                                                    >
-                                                        <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                                                        <span className="text-[11px] text-red-400 flex-1">
-                                                            Remove all materialized edges? A re-aggregation job starts automatically when the purge completes (use the Assets tab purge for a stay-empty option).
-                                                        </span>
-                                                        <button
-                                                            onClick={() => onPurge(job)}
-                                                            disabled={actionLoading}
-                                                            className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm shadow-red-500/20 disabled:opacity-40"
-                                                        >
-                                                            {actionLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Confirm Purge'}
-                                                        </button>
-                                                        <button onClick={() => setPurgeConfirm(null)} className="text-[11px] text-ink-muted hover:text-ink transition-colors">
-                                                            Cancel
-                                                        </button>
-                                                    </motion.div>
+                                                    <PurgeConfirm
+                                                        loading={actionLoading}
+                                                        onConfirm={reason => onPurge(job, reason)}
+                                                        onCancel={() => setPurgeConfirm(null)}
+                                                    />
                                                 )}
                                             </div>
                                         )}

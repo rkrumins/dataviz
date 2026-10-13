@@ -27,6 +27,9 @@ data:
   AGGREGATION_API_PORT: "8091"
   WORKER_CONCURRENCY: {{ .Values.config.aggregation.workerConcurrency | quote }}
   AGGREGATION_JOB_TIMEOUT_SECS: {{ .Values.config.aggregation.jobTimeoutSecs | quote }}
+  # Pruned to by the control plane, reported by the web tier: one ConfigMap,
+  # so how far back runs reach is the same answer on both.
+  AGGREGATION_JOB_RETENTION_DAYS: {{ .Values.config.aggregation.jobRetentionDays | quote }}
   MAX_CONCURRENT_PER_GRAPH: {{ .Values.config.aggregation.maxConcurrentPerGraph | quote }}
   STATS_SCHEDULER_TICK_SECS: {{ .Values.config.stats.schedulerTickSecs | quote }}
   STATS_WORKER_CONCURRENCY: {{ .Values.config.stats.workerConcurrency | quote }}
@@ -75,3 +78,6 @@ data:
   # but it is harmless and clearer to ship it fleet-wide from the same
   # place as everything else.
   PRODUCT_EVENT_RETENTION_DAYS: {{ .Values.config.analytics.productEventRetentionDays | quote }}
+  # The control plane sweeps the activity log to this horizon and the web
+  # tier tells readers what it is: one ConfigMap, so they cannot disagree.
+  ACTIVITY_RETENTION_DAYS: {{ .Values.config.analytics.activityRetentionDays | quote }}

@@ -25,6 +25,9 @@ import type {
 } from '@/services/permissionsService'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { ReasonField } from '@/components/activity/ReasonField'
+import type { ReasonAudience } from '@/components/activity/reasonPresets'
+import type { ReasonDraft } from '@/components/activity/useReasonDraft'
 
 
 export interface ImpactPreviewModalProps {
@@ -41,12 +44,15 @@ export interface ImpactPreviewModalProps {
     /** Disable the confirm button (e.g. while the actual mutation is
      *  in flight after the user clicked confirm). */
     confirming?: boolean
+    /** Ask why, optionally: the caller takes the draft in `onConfirm`. */
+    reason?: ReasonDraft
+    reasonAudience?: ReasonAudience
 }
 
 
 export function ImpactPreviewModal({
     open, title, intent, confirmLabel, preview, loading, error,
-    onCancel, onConfirm, confirming = false,
+    onCancel, onConfirm, confirming = false, reason, reasonAudience = 'workspace',
 }: ImpactPreviewModalProps) {
     const intentColors = intent === 'destructive'
         ? {
@@ -115,6 +121,15 @@ export function ImpactPreviewModal({
                                     <PreviewBody preview={preview} />
                                 ) : null}
                             </div>
+
+                            {reason && (
+                                <ReasonField
+                                    draft={reason}
+                                    audience={reasonAudience}
+                                    disabled={confirming}
+                                    className="px-6 py-4 border-t border-glass-border"
+                                />
+                            )}
 
                             <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-2">
                                 <button

@@ -14,8 +14,10 @@ import { useQuery } from '@tanstack/react-query'
 import {
     analyticsService,
     rangeKey,
+    type AnalyticsDataDoc,
     type AnalyticsRangeSelection,
     type AnalyticsSummary,
+    type AnalyticsUsageDoc,
     type WorkspaceAnalyticsDetail,
     type WorkspaceAnalyticsRow,
 } from '@/services/analyticsService'
@@ -62,6 +64,47 @@ export function useWorkspaceAnalytics(range: AnalyticsRangeSelection, enabled = 
         error: query.error as Error | null,
     }
 }
+
+/** The Data tab's document. `enabled` keeps it off every other tab. */
+export function useAnalyticsData(range: AnalyticsRangeSelection, enabled = true) {
+    const query = useQuery({
+        queryKey: ['analytics', 'data', rangeKey(range)] as const,
+        queryFn: () => analyticsService.getData(range),
+        enabled,
+        staleTime: STALE_MS,
+        placeholderData: (prev) => prev,
+        retry: 1,
+        refetchOnWindowFocus: false,
+    })
+    return {
+        data: query.data as AnalyticsDataDoc | undefined,
+        isLoading: query.isLoading,
+        isFetching: query.isFetching,
+        error: query.error as Error | null,
+    }
+}
+
+/** The usage document, read only by the tabs that draw from it. */
+export function useAnalyticsUsage(range: AnalyticsRangeSelection, enabled = true) {
+    const query = useQuery({
+        queryKey: ['analytics', 'usage', rangeKey(range)] as const,
+        queryFn: () => analyticsService.getUsage(range),
+        enabled,
+        staleTime: STALE_MS,
+        placeholderData: (prev) => prev,
+        retry: 1,
+        refetchOnWindowFocus: false,
+    })
+    return {
+        data: query.data as AnalyticsUsageDoc | undefined,
+        isLoading: query.isLoading,
+        isFetching: query.isFetching,
+        error: query.error as Error | null,
+    }
+}
+
+/** What a tab is handed of the usage document: it may still be on its way. */
+export type AnalyticsUsageState = ReturnType<typeof useAnalyticsUsage>
 
 export function useWorkspaceAnalyticsDetail(
     workspaceId: string | null, range: AnalyticsRangeSelection,

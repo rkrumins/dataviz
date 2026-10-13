@@ -129,6 +129,242 @@ used from a network it isn't limited to — even when it only asks about itself.
 
 ---
 
+## [Unreleased] — Who did what, where and why: one activity log, and analytics that see the data
+
+### Added
+
+**Administration → Activity: one log of what people do across the platform.** The RBAC-only Audit
+Log page at `/admin/audit` is replaced by an explorer of every recorded change: sign-ins and access, aggregation
+and freshness operations, data sources and providers, version control, group membership and
+platform settings. Lenses (Operations, Access, Identity, Data, Content, Platform, Security), a date
+range, and filters for a person — as the one who acted or the one it happened to — action, outcome,
+whether a reason was given, and free text. An insight band compares the range with the period
+before it: events, people active, operations started by hand, the share of changes that said why,
+volume by kind, a weekday × hour punchcard (UTC), the most active people, the most hands-on data
+sources and how often each is touched, the most frequent actions, and the reasons people give. The
+timeline groups by day, folds repeats and offers newer events without moving the page; each event
+opens a drawer with who, when, where and why, links to the run, source, group, view or workspace,
+and the other events from the same request and on the same target. Every filtered view is a link,
+and **Export** downloads it as CSV. Workspaces gain an **Activity** tab with the same explorer,
+scoped to that workspace's operations, access and data changes, for its admins.
+
+**Every manual operation names its person.** Aggregation runs record who started them and why
+(`aggregation_jobs.triggered_by` and `stated_reason`), through the web tier and across the
+control-plane proxy. Job History shows *Manual · by {name} — "why"* on each run and filters by who
+started it. Recorded once each, as the person, with the request it came in: re-trigger, resume,
+cancel, delete, purge, skip, limits, schedules and fleet settings; Freshness rebuilds, retries, bulk
+and provider/fleet refreshes, reconcile runs and automation holds; data sources added (by hand
+or from a view package), changed, removed, restored, made primary or switched projection mode;
+providers registered, changed or deleted; version control enabled, retried, abandoned or
+re-synced, and duplicate copies collapsed; discovery runs and asset statistics refreshes;
+dead-lettered messages redriven or deleted, admission limits, graph-store query limits and graph
+cache rebuilds; feature flags, the profiling policy and the node-identity default; and group
+membership — by hand, or by the identity provider's sync, which now records the memberships it
+actually changed.
+
+**Asked, never required: why.** Wherever work is started, stopped or destroyed, the dialog asks
+for an optional reason, with one-click suggestions for that kind of change and the person's own
+recent reasons, and says who will be able to read it. One-click actions get a prompt that is also
+their confirmation, so nothing asks twice. Safe resets, previews, limit tweaks and settings edits
+do not ask.
+
+**Activity is kept for two years.** `ACTIVITY_RETENTION_DAYS` (730 unless set; `0` keeps
+everything; less than a year counts as a year, so the longest range stays whole) bounds both the
+activity log and the outbox it is copied from. A daily sweep on the control plane deletes what
+happened before that horizon, oldest first, a batch per short transaction, pacing itself so a first
+run that clears years of history shares the database. It never deletes an outbox row the relay has
+not copied, nor the password events sign-in reads back. The end of the timeline says how long the
+log keeps activity, and a range whose previous period reaches past the horizon shows no change
+rather than a comparison with what is left of it, and says why.
+
+**The explorer from the keyboard, and what needs a look.** `j`/`k` (or the arrows) walk the
+timeline and Enter opens an event; in an open event `j`/`k` or `←`/`→` step to the next and
+previous, and Esc returns to the row you reached; `/` searches and `?` lists the keys. Above the
+figures, *Needs attention* says what they suggest, each one click from the events it is about: a
+source run by hand at least daily (a schedule could take it over), a source only one person ever
+operates, manual operations up by half or more, and changes that mostly gave no reason. Each
+hands-on source shows the faces of the people who keep operating it, and picking a person puts
+them in focus: who they are, when they are busiest and what they do most.
+
+**Zoom in from the chart, and search that helps.** Drag across *What happened, by kind* — or click
+one day or week — and the whole explorer narrows to exactly those days, as a log console's
+histogram does; *Back* retraces each zoom. Search is the widest field on the bar: focused, it
+offers the searches made here before (kept in this browser) and words the range can answer — the
+reasons people gave, the sources and targets acted on most — picked with ↑/↓ and Enter, and what
+it matched is marked in each row. A range longer than search reads offers *Search the last 90
+days* instead of a disabled box. Under it, a person is picked by face from the people active in
+the range and then reads as their name; their part, the actions (several at once), the outcome and
+whether a reason was given are pills, each saying what it is set to.
+
+**Analytics → Data: what the platform holds, and how it got there.** Entities and relationships as
+they stood at the end of each period — so a pruned graph shows as a fall — overall, by workspace
+and by kind of source, with the sources that moved most; sources onboarded, under version control
+or external, by provider type, and the wait for a first build; and version-control adoption by how
+graphs are kept. When version control cannot be read, that section says so and the rest still
+loads.
+
+**Richer Analytics tabs.**
+- *Engagement:* who is around (active this week, seen, gone quiet, never signed in) and when
+  people use the platform, by weekday and hour.
+- *Content:* distinct viewers over time, how far each view reaches, how many new views are read by
+  someone other than their author and how soon, and views built against opened, by kind or by who
+  can see them.
+- *Health:* how ingestion is driven — runs started by hand against automatic and onboarding runs,
+  the share started by hand, the run failure rate, and the most hands-on sources.
+- *Workspaces:* a pulse of each workspace, period by period, so one that went quiet mid-range shows
+  as a gap; and *By hand* and *Access* columns in the table.
+- *Workspace drill-in:* what the workspace holds over time, and how its ingestion ran.
+
+**API.** `/api/v1/admin/activity/*` (`system:audit:read`) and
+`/api/v1/admin/workspaces/{ws_id}/activity/*` (that workspace's admins), each with `events`,
+`events/newer`, `events/{event_id}`, `summary`, `catalogue` and `export.csv`;
+`GET /api/v1/admin/analytics/data` and `/usage`; and `GET /api/v1/directory/people?ids=`, which
+names up to 100 people for any signed-in reader. Mutating requests may carry an optional
+`X-Activity-Reason` header. See `docs/RBAC.md` §Activity log.
+
+### Changed
+
+**`auth_audit_log` is the activity ledger.** Each record stays immutable; beside it sits a
+rebuildable projection in indexed columns (category, audience, severity, outcome, actor, subject,
+target, workspace, data source, stated reason, correlation id), so every filter runs in SQL.
+
+**Administration's "Audit Log" is now "Activity"**, second in the System group, and holders of
+`system:audit:read` (Org Auditors) can open Administration, landing on it.
+
+**The public trigger endpoint accepts only `manual`, `onboarding` and `api`**, so a rebuild started
+by a person cannot be recorded as automation.
+
+The analytics document cache moves to schema version 3; documents rebuild on first read.
+
+**A busy replica answers "try again shortly" instead of timing out.** Free-text activity searches,
+exports and the first build of a summary each get a fixed share of a replica's read connections.
+Past it, a request waits briefly, then gets `429` with `Retry-After` (`"code": "busy"`) rather
+than taking the connections the readiness probe needs. Of several replicas missing the same
+summary, one builds it and the others wait for its result. The warmer prepares every lens of the
+activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
+
+**A zoom adds up days already counted.** The activity insight band is the sum of whole days. Each day
+that is over is counted once and kept, in Redis, until it has gone three days unread. Any range — a
+preset, a zoom, or the period it is compared with — adds up the days it covers, so a zoom into days
+already counted reads none of the log's rows. The warmer counts each lens's last 180 days before
+anyone opens them, and the counts survive a restart. Days not yet counted are read a fortnight at a
+time and kept as each fortnight lands, so a long range that cannot be counted within one request
+is ready after a few, instead of timing out every time. How often each source is run by hand is
+read from a new index that holds the operations (`idx_aal_cadence`), without touching the table.
+Measured with 300 people reading the explorer on a ten-million-event log, about one action in
+eight a zoom: a zoom's band answered in 96 ms (p95 204 ms). Before, it took 15 s (p95 24 s), and
+one zoom in five was refused or timed out. The readiness probe stays at p95 63 ms (was 4.7 s), and
+none of the 6,929 requests failed.
+
+**People, times and values, drawn as what they are.** Wherever a record names a person — who
+started a run, who changed a running job's limits, who acted in the activity log, who added a group
+member or rebuilt a source — they appear with their face (profile picture, the illustration they
+picked, or initials) and name, linking to them in User Management, with their email and id on
+hover; an id that names nobody stays the id, and a deleted account is still named, and marked.
+Times read by age ("12 min ago", "Today 09:41", "Mon 18:02", "12 Oct") and move together on one
+shared clock; hovering gives the local time with its zone, UTC and ISO. Job History shows each
+run's timeline — created, started, finished — with how long it waited for a worker and how long it
+ran, counting up while it runs. In an activity event, a change reads as before → after (several at
+once as one per field), every value is drawn by kind — durations and sizes in their units, yes/no,
+statuses, links, ids named where the event names them — and the raw payload is a highlighted,
+foldable tree that copies as JSON — as is an entity's or a relationship's raw data in its drawer.
+`GET /api/v1/directory/people` and the activity API also say
+which illustration a person picked (`avatarId`) and whether they have a profile picture
+(`hasImage`), so a page of people without pictures asks for none.
+
+**Theme colours take their opacity — an app-wide visual change.** About 1,700 classes asked for a
+theme colour at an opacity (`bg-canvas-elevated/95`, `border-glass-border/50`, `text-ink-muted/60`)
+and emitted no CSS, because the theme's variables hold whole colours: translucent panels and sticky
+headers were see-through, and those borders fell back to the default grey, a bright line in the dark
+theme. They now render. A surface takes its alpha; a glass border at an opacity is a divider in the
+theme's own ink (subtle in the dark theme, as it always was in the light one); text never fades
+below its token, so muted labels stay legible, and `/0` still hides. About 170 tints at in-between
+amounts (`/8`, `/12`, `/98`) emitted nothing for a second reason — they are not on Tailwind's scale
+— and render too. A source test now fails any such class.
+
+**Redis waits a moment for a free connection.** With all of a role's pooled connections busy, a
+command now waits up to `REDIS_<ROLE>_POOL_TIMEOUT` seconds (2) for one instead of failing at once,
+which sent every caller of a burst to its fallback together: sign-in checks to the database, cached
+graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once, as before.
+
+### Fixed
+
+- The audit page filtered people and targets after the page limit, so a filtered page could come
+  back short or empty. Administration → Activity filters in the query. `GET /api/v1/admin/audit`,
+  kept as it was for API clients, still filters that way.
+- Data sources added through the API recorded no creator; `created_by` is now set.
+- In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
+- A request that ran out of time could answer `500` instead of `504`, when the deadline fell inside
+  a middleware that turns a cancelled handler into "No response returned".
+- **Zooming the activity chart crashed the page.** It fell over with "The page hit an unexpected
+  error and stopped rendering" (`Cannot read properties of undefined (reading 'slice')`). The
+  chart remembered the hovered day by its position, and the zoomed chart has fewer days, so the
+  position named none. A chart now lets go of its hover and drag whenever its days change.
+- **The activity event lists had no request deadline.** The timeout middleware took any path ending
+  in `/events` for a live stream. Streams are now named one by one, so the lists answer `504` like
+  any other read.
+- **A slow activity export could be cut off mid-file and still look complete.** The 30-second
+  deadline closed the download cleanly, so nothing showed it was short. The export now runs to the
+  end, like the other streamed downloads: it is capped at 50,000 rows, and each process runs at
+  most two at a time.
+- **Analytics → Data said aggregation runs are kept for 90 days, whatever the setting.** It now
+  reads `AGGREGATION_JOB_RETENTION_DAYS`, the setting the prune deletes by. Time to first build
+  says how far back runs reach, or says nothing when every run is kept.
+
+### Security
+
+- A client `X-Request-ID` is honoured only when it matches `^[A-Za-z0-9._:-]{1,128}$`; otherwise the
+  server makes one. It is now the correlation id that groups a request's events.
+- The control plane trusts the forwarded `X-Activity-*` identity only behind its internal token,
+  and re-validates each value. The web tier builds them from the session, never from the client.
+- Recorded values are stripped of control, format and lone-surrogate characters, so a hostile
+  payload cannot stop the relay.
+- The workspace activity routes force the workspace scope on the server, and never return raw
+  payloads.
+- The CSV export neutralises spreadsheet formulas.
+
+### Upgrading
+
+- **Four migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
+  no data updates), `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
+  `stated_reason`), `20261011_1000_activity_pulse` (a partial index on `auth_audit_log` for the
+  workspace pulse) and `20261013_1000_activity_cadence` (a partial index over its manual
+  operations: 3.4 s and 171 MB for 1.5 million operations among ten million events; the ledger
+  takes no writes while it builds, and the relay waits). Run the upgrade job before rolling out.
+- **The activity band's kept counts change shape.** The first band after the upgrade counts its
+  days again; the warmer does this for the leading views.
+- **`AGGREGATION_JOB_RETENTION_DAYS` is read by both roles now.** The control plane prunes
+  finished runs to it, and the web tier says how far back runs reach. Compose, the Kustomize config
+  maps and the Helm chart set it on both (90 unless set). If you set it, set it alike on both.
+- **Copying the audit backlog** (see the entry below) also classifies each event for the activity
+  log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
+  events. Administration → Activity says *Importing earlier activity* until it finishes.
+- **Event storage roughly doubles:** events are kept both in `outbox_events` and in the ledger, each
+  for `ACTIVITY_RETENTION_DAYS`.
+- **The first activity retention sweep** deletes ledger events and relayed outbox rows from before
+  the horizon — two years unless set. Set `ACTIVITY_RETENTION_DAYS` alike on the control plane,
+  which deletes, and the web tier, which tells readers how far back the log goes. The Helm chart
+  and the Compose file take one value for both; the Kustomize base sets it in both config maps.
+  Set `0` before upgrading to keep everything.
+- Browser clients may send `X-Activity-Reason`; it is in the CORS allow-list.
+
+### Known limitations
+
+- The ledger is not partitioned, so retention deletes in batches rather than dropping a partition.
+- Who started a run, and why, starts at this release; earlier manual runs show their trigger only.
+- Entity history starts when daily profiling began, and aggregation runs are kept for
+  `AGGREGATION_JOB_RETENTION_DAYS` (90 unless set), so the Data tab and runs by origin reach no
+  further back than that.
+- Client telemetry carries no workspace, so the workspace pulse counts view opens, view changes and
+  recorded operations only. Punchcards are in UTC.
+- A moved data source is attributed to its destination workspace only.
+- Version publishes and merges stay in graph history (Reviews); the ledger covers version control's
+  onboarding side.
+- A stated reason is free text and may contain personal data. Auditors can read it, and so can the
+  workspace's admins for a workspace change; the field says so.
+
+---
+
 ## [Unreleased] — Exports you can follow from anywhere, and cancel
 
 ### Added
@@ -367,7 +603,7 @@ match the code.
 - **Sign-in events reach the audit table in every deployment.** The relay that copies them into
   the append-only `auth_audit_log` — with the refresh-token and product-event retention sweeps and
   the analytics warmer — never ran in Docker Compose, Kubernetes or Helm. The control plane runs
-  them now, one copy at a time. The Audit Log also shows changes to the SSO back-channel host
+  them now, one copy at a time. The activity log also shows changes to the SSO back-channel host
   list, and **Recent activity** on Account settings shows password resets, reset links, role
   changes and suspensions done to your account.
 

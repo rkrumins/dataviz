@@ -33,6 +33,7 @@ import {
     type ScopeHold,
     type ScopeHoldPatch,
 } from '@/services/freshnessService'
+import type { ActivityOpts } from '@/services/activityReason'
 import { ACTIVE_JOBS_KEY } from './useActiveJobs'
 
 /** One generous page — the cockpit is a bounded operator surface, so a
@@ -93,7 +94,9 @@ export function useSourceFreshness(
     })
 }
 
-export interface RefreshSourceVars {
+/** ``reason`` is the person's, and travels beside the body — never in it:
+ *  the body's own ``reason`` is a detector code. */
+export interface RefreshSourceVars extends ActivityOpts {
     dsId: string
     scope: RefreshScope
     force?: boolean
@@ -102,8 +105,10 @@ export interface RefreshSourceVars {
 export function useRefreshSource(): UseMutationResult<RefreshResponse, Error, RefreshSourceVars> {
     const qc = useQueryClient()
     return useMutation<RefreshResponse, Error, RefreshSourceVars>({
-        mutationFn: ({ dsId, scope, force }) =>
-            freshnessService.refreshSource(dsId, { scope, force }),
+        // Sent only when given, so a call without one is the call it always was.
+        mutationFn: ({ dsId, scope, force, reason }) => reason
+            ? freshnessService.refreshSource(dsId, { scope, force }, { reason })
+            : freshnessService.refreshSource(dsId, { scope, force }),
         onSuccess: (_res, { dsId }) => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
             // The drawer's resolution guidance reads this source's doc — refetch
@@ -168,10 +173,12 @@ export function useReconcileActivity(
     })
 }
 
-export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy, Error, ReconcilePolicyPatch> {
+export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy, Error, ReconcilePolicyPatch & ActivityOpts> {
     const qc = useQueryClient()
-    return useMutation<ReconcilePolicy, Error, ReconcilePolicyPatch>({
-        mutationFn: (patch) => freshnessService.putReconciliation(patch),
+    return useMutation<ReconcilePolicy, Error, ReconcilePolicyPatch & ActivityOpts>({
+        mutationFn: ({ reason, ...patch }) => reason
+            ? freshnessService.putReconciliation(patch, { reason })
+            : freshnessService.putReconciliation(patch),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
             // The resolved per-source ``autoReconcile`` inherits the global,
@@ -182,7 +189,7 @@ export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy,
     })
 }
 
-export interface SetProviderHoldVars extends ScopeHoldPatch {
+export interface SetProviderHoldVars extends ScopeHoldPatch, ActivityOpts {
     providerId: string
 }
 
@@ -191,7 +198,9 @@ export interface SetProviderHoldVars extends ScopeHoldPatch {
 export function useSetProviderHold(): UseMutationResult<ScopeHold, Error, SetProviderHoldVars> {
     const qc = useQueryClient()
     return useMutation<ScopeHold, Error, SetProviderHoldVars>({
-        mutationFn: ({ providerId, ...patch }) => freshnessService.setProviderHold(providerId, patch),
+        mutationFn: ({ providerId, reason, ...patch }) => reason
+            ? freshnessService.setProviderHold(providerId, patch, { reason })
+            : freshnessService.setProviderHold(providerId, patch),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
         },
@@ -201,11 +210,13 @@ export function useSetProviderHold(): UseMutationResult<ScopeHold, Error, SetPro
 /** Run a sweep on demand. ``dryRun`` reports what WOULD be reconciled and
  *  queues nothing, so it is safe to call before enabling automation. */
 export function useReconcileNow(): UseMutationResult<
-    ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] }
+    ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] } & ActivityOpts
 > {
     const qc = useQueryClient()
-    return useMutation<ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] }>({
-        mutationFn: (body) => freshnessService.reconcileNow(body),
+    return useMutation<ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] } & ActivityOpts>({
+        mutationFn: ({ reason, ...body }) => reason
+            ? freshnessService.reconcileNow(body, { reason })
+            : freshnessService.reconcileNow(body),
         onSuccess: (_res, vars) => {
             if (vars.dryRun) return   // a preview changed nothing
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
@@ -216,7 +227,7 @@ export function useReconcileNow(): UseMutationResult<
     })
 }
 
-export interface RefreshProviderVars {
+export interface RefreshProviderVars extends ActivityOpts {
     providerId: string
     scope: RefreshScope
     force?: boolean
@@ -224,12 +235,13 @@ export interface RefreshProviderVars {
 
 export function useRefreshProvider(): UseMutationResult<BatchStatus, Error, RefreshProviderVars> {
     return useMutation<BatchStatus, Error, RefreshProviderVars>({
-        mutationFn: ({ providerId, scope, force }) =>
-            freshnessService.refreshProvider(providerId, { scope, force }),
+        mutationFn: ({ providerId, scope, force, reason }) => reason
+            ? freshnessService.refreshProvider(providerId, { scope, force }, { reason })
+            : freshnessService.refreshProvider(providerId, { scope, force }),
     })
 }
 
-export interface RefreshFleetVars {
+export interface RefreshFleetVars extends ActivityOpts {
     scope: RefreshScope
     force?: boolean
 }
@@ -239,7 +251,9 @@ export interface RefreshFleetVars {
  *  only starts it; the caller invalidates the fleet on ``done``. */
 export function useRefreshFleet(): UseMutationResult<BatchStatus, Error, RefreshFleetVars> {
     return useMutation<BatchStatus, Error, RefreshFleetVars>({
-        mutationFn: ({ scope, force }) => freshnessService.refreshAll({ scope, force }),
+        mutationFn: ({ scope, force, reason }) => reason
+            ? freshnessService.refreshAll({ scope, force }, { reason })
+            : freshnessService.refreshAll({ scope, force }),
     })
 }
 

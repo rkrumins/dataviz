@@ -5,7 +5,7 @@
 The authorization reference for {brand}: the seven built-in roles and the default `user`
 tier, every permission the platform seeds, how a permission check is decided, the typed 403
 body, and the machinery around them — custom roles, invitations, time-bound bindings, session
-revocation and the audit log.
+revocation and the activity log.
 
 **How to read it.** To choose a role, start at [Built-in roles](#built-in-roles). To answer
 "who holds this permission?", use the [Permission catalogue](#permission-catalogue). To
@@ -37,7 +37,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 |---|---|---|---|
 | Super Admin | `super_admin` | Platform | Platform owner or SRE break-glass. Bind sparingly. |
 | Org Admin | `org_admin` | Platform | Org-wide operator who curates workspaces, but doesn't manage users or SSO. |
-| Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the audit log, and changes nothing. |
+| Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the activity log, and changes nothing. |
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
 | Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
 | Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
@@ -128,13 +128,13 @@ enforce, and the app shows or hides it to match:
 | **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
 | **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
 | **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
-| **Administration** (entering it at all) | `system:admin` or `system:groups:manage` |
-| Administration → **Audit Log** and **Telemetry** | `system:audit:read` |
+| **Administration** (entering it at all) | `system:admin`, `system:groups:manage` or `system:audit:read` |
+| Administration → **Activity** and **Telemetry** | `system:audit:read` |
 | Administration → **Groups** | `system:groups:manage` |
 | Every other Administration page | `system:admin` |
 
 Entering **Administration** and opening one of its pages are separate checks: a page inside
-it needs its own permission as well as one of the two that open Administration.
+it needs its own permission as well as one of the three that open Administration.
 
 ### View visibility and sharing
 
@@ -461,11 +461,11 @@ administration or SSO config.
 ### "I want X to audit everything but change nothing"
 
 Bind `org_auditor` at global scope. The user reads every workspace through
-`system:org-viewer`, and holds `system:audit:read` and `system:bindings:read` for the audit
-log and the role-binding inventory. To use the **Audit Log** page in the app, they also need
-one of the permissions that open **Administration** (see
-[Which permissions open which screens](#which-permissions-open-which-screens)); the audit API
-needs only `system:audit:read`.
+`system:org-viewer`, and holds `system:audit:read` and `system:bindings:read` for the activity
+log and the role-binding inventory. `system:audit:read` also opens **Administration** and its
+**Activity** page (see
+[Which permissions open which screens](#which-permissions-open-which-screens)), so nothing more
+is needed.
 
 ### "I want X to be platform owner"
 
@@ -672,35 +672,86 @@ sent.
 > one workspace; only `super_admin` and `org_admin` cross workspaces,
 > via the resolver short-circuits (and `org_auditor`, read-only).
 
-## Audit log
+## Activity log
 
-Every state-changing RBAC/auth mutation emits an outbox event in the
-same transaction as the change. The Audit Log reads those events; the
-control plane's relay also copies each one into the append-only
-`auth_audit_log`. Operators read it through:
+Every change a person makes emits an outbox event in the same transaction
+as the change: RBAC changes and sign-ins as before, and now aggregation and
+freshness operations, data sources, providers, version control, feature
+flags and other platform settings, and group membership — whether changed
+by hand (`via: "manual"`) or by the IdP group sync (`via: "sso"`, no
+actor). Where the change lives in another store (a graphver write, a
+refresh already committed) the event is recorded best-effort instead.
 
-* `GET /api/v1/admin/audit` (gated `system:audit:read`) — filter by event
-  type prefix (`rbac.role.*`), actor, target user / role, workspace,
-  and timestamp window. Cursor pagination (50/page default, 500 max).
-  Every row carries a `severity` (`info` / `warning` / `critical`) and
-  a one-line human `summary` computed from the event-type catalogue;
-  unknown events fall back to `info` + the raw type.
-* `GET /api/v1/admin/audit/event-types` (same permission) — distinct event
-  types for the filter dropdown.
-* **Administration → Identity & Access → Audit Log** — the admin page: a
-  three-mode scope filter (**Security** default / **Activity** / **Everything**),
-  time-range chips, a KPI strip by category, click-to-expand JSON payloads, and
-  clickable actor / target / workspace links. Like every Administration page, it
-  also needs one of the permissions that open Administration.
+The control plane's relay projects each event into `auth_audit_log`, the
+activity ledger. The record itself is immutable; beside it sits a
+rebuildable set of indexed columns — category, audience, severity, outcome,
+actor, the person it happened to, target, workspace, data source, stated
+reason and correlation id — so every filter is a SQL predicate.
+`backend/app/services/activity/catalogue.py` decides each event's six-way
+category (operations, access, identity, data, content, platform) and its
+audience.
+
+**Who reads what:**
+
+| Reader | Where | Sees |
+|---|---|---|
+| `system:audit:read` (`org_auditor`, `super_admin`) | **Administration → System → Activity** (`/admin/audit`); `/api/v1/admin/activity/*` | Every event, with its raw payload. |
+| `workspace:admin` in that workspace | The workspace's **Activity** tab; `/api/v1/admin/workspaces/{ws_id}/activity/*` | That workspace's *workspace-audience* events only. Never identity, SSO, global RBAC or platform events, and never a raw payload. |
+
+The workspace audience is an explicit allow-list: member bindings and role
+cascades in the workspace, access requests for it, view grants, its
+aggregation runs and source operations, and its data-source and
+version-control changes. Everything else is platform audience. The
+workspace scope is forced on the server, so no query parameter widens it.
+
+Each family serves `events` (keyset pages, 50 by default and 200 at most),
+`events/newer` (the live "N new" count), `events/{event_id}` (with the
+other events from the same request and on the same target), `summary`,
+`catalogue` and `export.csv` (streamed, at most 50,000 rows, with
+spreadsheet formulas neutralised; the export is itself recorded as
+`platform.activity.exported`). Free-text search (`q`) needs a window of 92
+days or less. A replica already running its share of searches, exports or
+summary builds answers `429` with `Retry-After` and `"code": "busy"`: ask
+again after that many seconds.
+
+**Why.** Any mutating request may carry an optional `X-Activity-Reason`
+header: percent-encoded UTF-8, at most 500 characters once decoded, with
+control and format characters stripped. It is recorded as the event's
+`stated_reason`, and for an aggregation run also on the job row
+(`aggregation_jobs.stated_reason`, next to `triggered_by`). The UI asks for
+one wherever work is started, stopped or destroyed; the API never requires
+it. A reason is free text and may contain personal data: auditors can read
+it, and so can the workspace's admins for a workspace event. The UI says so
+under the field.
+
+**How long.** Activity is kept for `ACTIVITY_RETENTION_DAYS` days — two
+years unless set, never less than one, `0` for everything — in the ledger
+and in the outbox it is copied from. A daily sweep on the control plane
+deletes what happened before that horizon, oldest first, a batch per short
+transaction. It never deletes an outbox row the relay has not copied, nor
+the password events sign-in reads back to decide whether an account chose
+its own password (`user.password_changed`, `user.password_reset_completed`,
+`user.password_reset_by_admin`). The first page of `events` reports
+`ledger.retentionDays`. A `summary` whose previous period starts before the
+horizon compares with nothing — `previous` and `delta` are `null` — and
+says from when activity is kept (`window.keptFrom`), rather than comparing
+with what is left of it.
 
 Every `requires()` 403 also emits a `user.access_denied` event,
 sampled hourly per `(user, permission, scope)` so a hostile scan
 can't drown the signal. Emission is best-effort (wrapped in
-try/except) so an outbox or Redis failure never blocks the 403.
+try/except) so an outbox or Redis failure never blocks the 403. The
+explorer's default lens leaves these out; the **Security** lens and
+`includeNoise=true` show them.
 
-Compliance recipe: "Who promoted Alice last week?" → filter
-`targetUserId=alice`, `eventType=user.role_changed`,
-`fromTs=<7-days-ago>`.
+`GET /api/v1/admin/audit` and `/event-types` (gated `system:audit:read`)
+are unchanged for API clients. They read the outbox and cover RBAC and
+identity events only.
+
+Compliance recipe: "Who promoted Alice last week?" → Administration →
+Activity, **Access** lens, person *Alice* as **the one it happened to**,
+last 7 days. Through the API:
+`GET /api/v1/admin/activity/events?person=<alice-id>&personRole=subject&eventType=user.role_changed&days=7`.
 
 ## Where in the code
 
@@ -713,6 +764,11 @@ Compliance recipe: "Who promoted Alice last week?" → filter
 | Which permission opens which screen    | `backend/app/services/nav_catalogue.py`                       |
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
+| Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
+| Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
+| Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |
+| Activity API (both scopes)             | `backend/app/api/v1/endpoints/activity.py`                    |
+| Activity explorer UI                   | `frontend/src/components/activity/`                           |
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
 | View visibility and publishing         | `backend/app/services/view_access.py`                         |
 | API key claims and scope               | `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`), `backend/app/services/api_key_service.py` (`claims_for_key`) |

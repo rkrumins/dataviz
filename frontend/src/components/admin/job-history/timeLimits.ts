@@ -186,8 +186,9 @@ const SHAPE_FIELDS = new Set([
     'replica_ack_min', 'replica_ack_timeout_ms',
 ])
 
-/** One history entry as a sentence: "ops@x raised the stall window 3 h → 6 h", "ops@x set the write pacing 1× → 2×". */
-export function describeChange(entry: LiveLimitChange): string {
+/** One history entry in words, without who made it — the surface shows the
+ *  person itself: "raised the stall window 3 h → 6 h", "set the write pacing 1× → 2×". */
+export function describeChangeAction(entry: LiveLimitChange): string {
     const label = FIELD_LABEL[entry.field] ?? entry.field
     const fmt = (v: number | null | undefined) => {
         if (v == null) return SHAPE_FIELDS.has(entry.field) ? 'the job’s setting' : 'default'
@@ -201,10 +202,9 @@ export function describeChange(entry: LiveLimitChange): string {
             default: return formatWindow(v)
         }
     }
-    const who = entry.by ?? 'An operator'
-    if (entry.to == null && entry.from != null) return `${who} cleared the ${label} (${fmt(entry.from)} → ${fmt(entry.to)})`
+    if (entry.to == null && entry.from != null) return `cleared the ${label} (${fmt(entry.from)} → ${fmt(entry.to)})`
     const verb = SHAPE_FIELDS.has(entry.field)
         ? 'set'
         : entry.from != null && entry.to != null && entry.to < entry.from ? 'lowered' : 'raised'
-    return `${who} ${verb} the ${label} ${fmt(entry.from)} → ${fmt(entry.to)}`
+    return `${verb} the ${label} ${fmt(entry.from)} → ${fmt(entry.to)}`
 }

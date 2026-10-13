@@ -38,6 +38,7 @@ from backend.auth_service.core.tokens import (
 )
 from backend.auth_service.interface import IdentityService, User
 from backend.app.auth import api_key_auth
+from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.app.services.permission_service import (
@@ -268,6 +269,10 @@ async def get_current_user(request: Request) -> User:
     # the handful of routes needed to rotate it, and nothing else. After
     # the tombstone check: a revoked session is signed out, not held.
     _hold_for_password_change(request, payload, user)
+    # Whatever this request goes on to change is attributed to this person
+    # (``activity_context.current_provenance``), here and across the hop to
+    # the aggregation control plane.
+    activity_context.bind_actor(user.id)
     return user
 
 
@@ -319,6 +324,10 @@ async def get_optional_user(request: Request) -> User | None:
     if sid and await _tombstoned(sid, user.id, where="get_optional_user"):
         return None
     _hold_for_password_change(request, payload, user)
+    # Signed in is signed in: what this request changes is this person's, as
+    # it is through ``get_current_user``. Without it, a route that signs in
+    # only through here recorded its activity with nobody's name on it.
+    activity_context.bind_actor(user.id)
     return user
 
 

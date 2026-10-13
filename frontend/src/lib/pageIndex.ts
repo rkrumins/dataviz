@@ -163,6 +163,15 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'analytics' },
     },
     {
+        id: 'analytics-data',
+        category: 'Page',
+        title: 'Analytics · Data',
+        description: 'What the platform holds, onboarding, version control',
+        keywords: ['data', 'entities', 'relationships', 'onboarding', 'version control', 'sources'],
+        path: '/analytics?tab=data',
+        gate: { kind: 'analytics' },
+    },
+    {
         id: 'analytics-engagement',
         category: 'Page',
         title: 'Analytics · Engagement',
@@ -387,9 +396,9 @@ export const PAGE_INDEX: PageEntry[] = [
     {
         id: 'admin-audit',
         category: 'Setting',
-        title: 'Audit Log',
-        description: 'RBAC + user lifecycle history',
-        keywords: ['admin', 'audit', 'log', 'history', 'compliance'],
+        title: 'Activity',
+        description: 'Who did what, where and why — across the platform',
+        keywords: ['admin', 'audit', 'log', 'history', 'compliance', 'activity', 'who', 'triggered'],
         path: '/admin/audit',
         gate: { kind: 'admin', key: 'audit' },
     },

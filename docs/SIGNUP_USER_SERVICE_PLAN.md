@@ -140,7 +140,7 @@ itself — `user.created`, `user.approved`, `user.rejected`, `user.password_rese
 outbox relay (`backend/app/services/outbox_relay.py`) copies each event into `auth_audit_log`
 and marks it processed in one transaction. `auth_audit_log.source_event_id` is unique, so an
 event the relay has already copied is skipped rather than recorded twice. Administrators read
-the trail in **Administration → Identity & Access → Audit Log**; see the
+the trail in **Administration → Activity**; see the
 [Security Overview](/docs/security-overview#audit-trail).
 
 ## Where the code lives

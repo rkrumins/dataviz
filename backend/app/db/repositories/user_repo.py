@@ -14,8 +14,8 @@ from typing import Optional
 
 from sqlalchemy import select, func, delete, or_, update
 
+from backend.app.common import activity_context, api_key_context
 from backend.common.display_name import resolve_display_name
-from backend.app.common import api_key_context
 from backend.auth_service.activity import (
     RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
     ActivityGate,
@@ -856,10 +856,14 @@ async def create_outbox_event(
     needs to be *found* by subject later — ``idx_outbox_aggregate``
     covers that pair, whereas locating the same row through the JSON
     payload means an unindexed scan.
+
+    The request's correlation id and the reason a person gave, when there
+    is one, ride along in the payload (``activity_context.envelope``) —
+    under their own keys, and only where the payload has not set them.
     """
     event = OutboxEventORM(
         event_type=event_type,
-        payload=json.dumps(api_key_context.stamp(payload)),
+        payload=json.dumps(activity_context.envelope(api_key_context.stamp(payload))),
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
     )
@@ -1171,6 +1175,9 @@ async def get_identities_by_ids(
             UserORM.status,
             UserORM.deleted_at,
             UserORM.avatar_id,
+            # Whether there is a picture, not the picture: IS NOT NULL is
+            # answered from the row header, never by reading the image.
+            UserORM.avatar_image.is_not(None),
         ).where(UserORM.id.in_(ids))
     )).all()
     return {
@@ -1186,6 +1193,10 @@ async def get_identities_by_ids(
             # The picked illustration, for surfaces that draw an avatar.
             # Additive: callers that only name people ignore it.
             "avatar_id": r[7],
+            # A provider picture to load. Without one, a list of people
+            # asks for none of them — rather than one 404 per face. A
+            # deleted account's picture is not served, so it has none.
+            "has_image": bool(r[8]) and r[6] is None,
         }
         for r in rows
     }

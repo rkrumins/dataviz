@@ -39,6 +39,8 @@ export interface KpiCardProps {
     accent?: 'indigo' | 'amber' | 'cyan' | 'pink' | 'violet' | 'emerald' | 'rose'
     /** Key into `metricDefinitions` — adds the "what does this mean?" button. */
     metric?: MetricKey
+    /** A caveat known only from the data, in place of the definition's. */
+    caveat?: string
     onClick?: () => void
     className?: string
 }
@@ -58,7 +60,7 @@ const ACCENTS = {
 export function KpiCard({
     label, value, changePct, comparisonLabel, sub, icon: Icon,
     trend, trendTone = 'indigo', higherIsBetter = true, accent = 'indigo',
-    metric, onClick, className,
+    metric, caveat, onClick, className,
 }: KpiCardProps) {
     const delta = signedPercent(changePct ?? null)
     const good = changePct == null || changePct === 0
@@ -107,7 +109,7 @@ export function KpiCard({
                 already is when they wonder. */}
             <p className="mt-1.5 flex items-center gap-1 text-xs font-medium text-ink-secondary">
                 {label}
-                {metric && <MetricInfo metric={metric} />}
+                {metric && <MetricInfo metric={metric} caveat={caveat} />}
             </p>
 
             <div className="mt-2 flex items-center gap-1.5 min-h-[18px]">

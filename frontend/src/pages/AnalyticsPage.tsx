@@ -1,5 +1,5 @@
 /**
- * AnalyticsPage — platform insights: growth, engagement, content, workspaces.
+ * AnalyticsPage — platform insights: growth, data, engagement, content, workspaces.
  *
  * Tab state lives in the URL and nowhere else. A `useState` mirrored into
  * `?tab=` is two sources of truth: the Back button restores the URL but not the
@@ -13,7 +13,7 @@
 import { useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-    AlertCircle, Activity, BarChart3, Boxes, LayoutGrid, Sparkles, TrendingUp,
+    AlertCircle, Activity, BarChart3, Boxes, Database, LayoutGrid, Sparkles, TrendingUp,
     Users,
 } from 'lucide-react'
 
@@ -21,7 +21,9 @@ import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
-import { useAnalyticsSummary, useWorkspaceAnalytics } from '@/hooks/useAnalytics'
+import {
+    useAnalyticsData, useAnalyticsSummary, useAnalyticsUsage, useWorkspaceAnalytics,
+} from '@/hooks/useAnalytics'
 import {
     DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker, customRangeError,
 } from '@/components/analytics/RangePicker'
@@ -29,6 +31,7 @@ import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import { AnalyticsSkeleton } from '@/components/analytics/AnalyticsSkeleton'
 import { OverviewTab } from '@/components/analytics/OverviewTab'
 import { GrowthTab } from '@/components/analytics/GrowthTab'
+import { DataTab } from '@/components/analytics/DataTab'
 import { EngagementTab } from '@/components/analytics/EngagementTab'
 import { ContentTab } from '@/components/analytics/ContentTab'
 import { WorkspacesTab } from '@/components/analytics/WorkspacesTab'
@@ -38,7 +41,7 @@ import { PublicPosture } from '@/components/analytics/PublicPosture'
 import { WorkspaceInsightsPanel } from '@/components/analytics/WorkspaceInsightsPanel'
 
 type AnalyticsTab =
-    | 'overview' | 'growth' | 'engagement' | 'content' | 'health' | 'workspaces'
+    | 'overview' | 'growth' | 'data' | 'engagement' | 'content' | 'health' | 'workspaces'
 
 interface TabDef {
     id: AnalyticsTab
@@ -47,9 +50,13 @@ interface TabDef {
     desc: string
 }
 
+/** The tabs that draw from the usage document as well as the summary. */
+const USAGE_TABS: ReadonlySet<AnalyticsTab> = new Set(['engagement', 'content', 'health', 'workspaces'])
+
 const TABS: TabDef[] = [
     { id: 'overview', label: 'Overview', icon: BarChart3, desc: 'The headline numbers' },
     { id: 'growth', label: 'Growth', icon: TrendingUp, desc: 'Signups, sources, retention cohorts' },
+    { id: 'data', label: 'Data', icon: Database, desc: 'What the platform holds, onboarding, version control' },
     { id: 'engagement', label: 'Engagement', icon: Users, desc: 'Activity, stickiness, activation funnel' },
     { id: 'content', label: 'Content', icon: LayoutGrid, desc: 'Views, visibility and who builds them' },
     { id: 'health', label: 'Health', icon: Activity, desc: 'Freshness, access friction, semantic coverage' },
@@ -93,9 +100,11 @@ export function AnalyticsPage() {
     }
 
     const summary = useAnalyticsSummary(range)
-    // The workspace table is only fetched by the tab that shows it, so four of
-    // the five tabs cost one request rather than two.
+    // Each document is fetched only by the tabs that draw from it, so the
+    // Overview and Growth tabs cost one request and none costs more than three.
     const workspaces = useWorkspaceAnalytics(range, activeTab === 'workspaces')
+    const dataDoc = useAnalyticsData(range, activeTab === 'data')
+    const usage = useAnalyticsUsage(range, USAGE_TABS.has(activeTab))
 
     // Documents are precomputed on an interval and served from a shared cache,
     // so what a reader sees is minutes old by design. A RELATIVE age states
@@ -155,7 +164,8 @@ export function AnalyticsPage() {
                                     ? { from: next.from, to: next.to, range: null }
                                     : { range: String(next.days), from: null, to: null },
                             )}
-                            isFetching={summary.isFetching || workspaces.isFetching}
+                            isFetching={summary.isFetching || workspaces.isFetching
+                                || dataDoc.isFetching || usage.isFetching}
                         />
                     </div>
 
@@ -215,7 +225,17 @@ export function AnalyticsPage() {
                             className="mb-5"
                         />
                     )}
-                    {summary.error ? (
+                    {/* The Data tab reads its own document, so it does not
+                        wait on — or fail with — the summary. */}
+                    {activeTab === 'data' ? (
+                        dataDoc.error ? (
+                            <ErrorPanel message={dataDoc.error.message} />
+                        ) : dataDoc.isLoading || !dataDoc.data ? (
+                            <AnalyticsSkeleton />
+                        ) : (
+                            <DataTab data={dataDoc.data} range={range} isStale={dataDoc.isFetching} />
+                        )
+                    ) : summary.error ? (
                         <ErrorPanel message={summary.error.message} />
                     ) : summary.isLoading || !summary.data ? (
                         <AnalyticsSkeleton />
@@ -229,11 +249,11 @@ export function AnalyticsPage() {
                     ) : activeTab === 'growth' ? (
                         <GrowthTab data={summary.data} range={range} isStale={summary.isFetching} />
                     ) : activeTab === 'engagement' ? (
-                        <EngagementTab data={summary.data} range={range} isStale={summary.isFetching} />
+                        <EngagementTab data={summary.data} range={range} isStale={summary.isFetching} usage={usage} />
                     ) : activeTab === 'content' ? (
-                        <ContentTab data={summary.data} range={range} isStale={summary.isFetching} />
+                        <ContentTab data={summary.data} range={range} isStale={summary.isFetching} usage={usage} />
                     ) : activeTab === 'health' ? (
-                        <HealthTab data={summary.data} range={range} isStale={summary.isFetching} />
+                        <HealthTab data={summary.data} range={range} isStale={summary.isFetching} usage={usage} />
                     ) : workspaces.error ? (
                         <ErrorPanel message={workspaces.error.message} />
                     ) : workspaces.isLoading || !workspaces.data ? (
@@ -245,6 +265,7 @@ export function AnalyticsPage() {
                             isStale={workspaces.isFetching}
                             selectedId={selectedWorkspace}
                             onSelect={(id) => patchParams({ workspace: id })}
+                            usage={usage}
                         />
                     )}
                 </PageContainer>

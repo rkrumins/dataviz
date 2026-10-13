@@ -44,7 +44,7 @@ const AdminGroups = lazyWithRetry(() => import('@/components/admin/AdminGroups')
 const AdminPermissions = lazyWithRetry(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazyWithRetry(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const AdminSso = lazyWithRetry(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
-const AdminAudit = lazyWithRetry(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
+const AdminActivity = lazyWithRetry(() => import('@/components/admin/AdminActivity').then(m => ({ default: m.AdminActivity })))
 const AdminApiKeys = lazyWithRetry(() => import('@/components/admin/AdminApiKeys').then(m => ({ default: m.AdminApiKeys })))
 const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
@@ -358,7 +358,7 @@ export const router = createBrowserRouter([
             path: 'audit',
             element: (
               <RequireNav group="admin" sectionKey="audit">
-                <Lazy><AdminAudit /></Lazy>
+                <Lazy><AdminActivity /></Lazy>
               </RequireNav>
             ),
           },

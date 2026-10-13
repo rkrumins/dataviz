@@ -446,21 +446,68 @@ def test_the_web_route_is_system_admin_only_and_takes_the_actor_from_the_session
     assert agg_mod._REQUIRE_SYSTEM_ADMIN in _dep_calls(route.dependant)
 
     seen = {}
+    done = _applied_result()
 
     async def applied(session, endpoint, patch):
         seen.update(endpoint=endpoint, actor=patch.actor)
-        return "done"
+        return done
 
     monkeypatch.setattr(gsl, "apply_graph_store_limits", applied)
+    monkeypatch.setattr(agg_mod.recorder, "record_for_request", _no_record)
     # Proxy mode makes no difference: the change goes out from the web tier,
     # which has the topology and the instance's own settings.
     monkeypatch.setattr(agg_mod, "_PROXY_ENABLED", True)
     out = asyncio.run(agg_mod.set_graph_store_limits(
         "10.0.0.1:6379", _patch(timeoutMaxMs=300_000, actor="spoofed"),
-        admin=types.SimpleNamespace(id="admin-1"), session=None,
+        admin=types.SimpleNamespace(id="admin-1"), session=None, write=object(),
     ))
-    assert out == "done"
+    assert out is done
     assert seen == {"endpoint": "10.0.0.1:6379", "actor": "admin-1"}
+
+
+def _applied_result():
+    """What the store reports: the limits before, what was set, and where."""
+    return types.SimpleNamespace(
+        previous={"TIMEOUT_MAX": 120_000, "QUERY_MEM_CAPACITY": None},
+        applied={"TIMEOUT_MAX": 300_000},
+        applied_to=["10.0.0.1:6379", "10.0.0.2:6379"],
+    )
+
+
+async def _no_record(session, event_type, **fields):
+    return None
+
+
+def test_the_web_route_records_the_change_as_before_and_after(monkeypatch):
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    recorded = {}
+
+    async def applied(session, endpoint, patch):
+        return _applied_result()
+
+    async def record(session, event_type, **fields):
+        recorded.update(session=session, event_type=event_type, **fields)
+
+    monkeypatch.setattr(gsl, "apply_graph_store_limits", applied)
+    monkeypatch.setattr(agg_mod.recorder, "record_for_request", record)
+    write = object()
+    asyncio.run(agg_mod.set_graph_store_limits(
+        "10.0.0.1:6379", _patch(timeoutMaxMs=300_000),
+        admin=types.SimpleNamespace(id="admin-1"), session=None, write=write,
+    ))
+    # On the write pool (the read is the graph-read pool's), best-effort: the
+    # store has already taken the change. Fields named in their units.
+    assert recorded == {
+        "session": write,
+        "event_type": "aggregation.graph_store.limits_changed",
+        "target_type": "graph_store_node", "target_id": "10.0.0.1:6379", "target_label": "10.0.0.1:6379",
+        "details": {
+            "changes": [{"field": "timeoutMaxMs", "from": 120_000, "to": 300_000}],
+            "appliedTo": ["10.0.0.1:6379", "10.0.0.2:6379"],
+        },
+        "best_effort": True,
+    }
 
 
 def test_the_web_route_maps_refusals_to_422_and_unknown_nodes_to_404(monkeypatch):

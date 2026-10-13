@@ -63,6 +63,7 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
+from backend.app.services.activity import recorder
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
 from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exists
@@ -194,14 +195,17 @@ async def _refresh_in_flight(provider_id: str, asset_name: str) -> bool:
 
 async def _ensure_provider_exists(
     session: AsyncSession, provider_id: str
-) -> None:
+) -> str:
+    """404 unless the provider exists; its name when it does."""
     row = await session.execute(
-        select(ProviderORM.id).where(ProviderORM.id == provider_id)
+        select(ProviderORM.name).where(ProviderORM.id == provider_id)
     )
-    if row.scalar_one_or_none() is None:
+    name = row.scalar_one_or_none()
+    if name is None:
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider_id}' not found"
         )
+    return name
 
 
 async def _build_response(
@@ -405,6 +409,13 @@ async def refresh_asset(
 
     await _ensure_provider_exists(session, provider_id)
     job_id = await enqueue_discovery_job_force(provider_id, asset_name)
+    # Best-effort: the job is already on the stream.
+    await recorder.record_for_request(
+        session, "stats.asset.refresh_requested",
+        target_type="asset", target_id=f"{provider_id}:{asset_name}", target_label=asset_name,
+        details={"providerId": provider_id, "queued": job_id is not None},
+        best_effort=True,
+    )
     return {
         "provider_id": provider_id,
         "asset_name": asset_name,
@@ -448,7 +459,7 @@ async def refresh_all_assets(
 
     from backend.insights_service.enqueue import enqueue_discovery_job_force
 
-    await _ensure_provider_exists(session, provider_id)
+    provider_name = await _ensure_provider_exists(session, provider_id)
 
     # What the provider currently LISTS, from the sentinel's payload (the
     # empty-string row is the inventory, not an asset — ``list_assets``
@@ -532,6 +543,12 @@ async def refresh_all_assets(
     list_job_id = await enqueue_discovery_job_force(provider_id, "")
     asset_job_ids = list(
         await asyncio.gather(*(_enqueue_one(n) for n in asset_names))
+    )
+    await recorder.record_for_request(
+        session, "stats.discovery.triggered",
+        target_type="provider", target_id=provider_id, target_label=provider_name,
+        details={"assets": sum(1 for j in asset_job_ids if j is not None)},
+        best_effort=True,   # the jobs are already on the stream
     )
 
     return {
@@ -630,7 +647,10 @@ async def list_dlq(
 
 
 @router.post("/dlq/{msg_id}/redrive")
-async def redrive_dlq(msg_id: str = Path(...)) -> dict:
+async def redrive_dlq(
+    msg_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Re-deliver a DLQ entry to its original stream.
 
     Status mapping:
@@ -655,6 +675,14 @@ async def redrive_dlq(msg_id: str = Path(...)) -> dict:
     except RedriveLimitExceeded as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
+    await recorder.record_for_request(
+        session, "stats.dlq.redriven",
+        details={
+            "messageId": msg_id, "redrivenMessageId": result.redriven_msg_id,
+            "originalStream": result.original_stream, "redriveCount": result.redrive_count,
+        },
+        best_effort=True,   # the message is back on its stream
+    )
     return {
         "redriven_msg_id": result.redriven_msg_id,
         "original_stream": result.original_stream,
@@ -663,12 +691,19 @@ async def redrive_dlq(msg_id: str = Path(...)) -> dict:
 
 
 @router.delete("/dlq/{msg_id}", status_code=204)
-async def delete_dlq(msg_id: str = Path(...)) -> None:
+async def delete_dlq(
+    msg_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
     """Drop a single DLQ entry. Idempotent: returns 204 whether or not
-    the entry existed."""
+    the entry existed — and records a deletion only when there was one."""
     from backend.insights_service.redis_streams import delete_dlq_entry
 
-    await delete_dlq_entry(msg_id)
+    if await delete_dlq_entry(msg_id):
+        await recorder.record_for_request(
+            session, "stats.dlq.deleted", details={"messageId": msg_id},
+            best_effort=True,   # the entry is gone from Redis
+        )
     return None
 
 
@@ -752,10 +787,13 @@ async def put_admission_config(
 ) -> AdmissionConfigResponse:
     """Upsert the admission knobs for a provider. Workers re-read on
     next acquire because we invalidate the in-process config cache."""
-    await _ensure_provider_exists(session, provider_id)
+    provider_name = await _ensure_provider_exists(session, provider_id)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     existing = await session.get(ProviderAdmissionConfigORM, provider_id)
+    before = None if existing is None else {
+        "bucketCapacity": existing.bucket_capacity, "refillPerSec": existing.refill_per_sec,
+    }
     if existing is None:
         # Insert with NOT-NULL defaults from the ORM column definitions
         # (5 / 30 / 60). PR A doesn't read or expose these; PR B drops
@@ -772,6 +810,14 @@ async def put_admission_config(
         existing.bucket_capacity = body.bucket_capacity
         existing.refill_per_sec = body.refill_per_sec
         existing.updated_at = now_iso
+    after = {"bucketCapacity": body.bucket_capacity, "refillPerSec": body.refill_per_sec}
+    if before != after:
+        # Committed with the change: the knobs and their record move together.
+        await recorder.record_for_request(
+            session, "stats.admission.updated",
+            target_type="provider", target_id=provider_id, target_label=provider_name,
+            details={"from": before, "to": after},
+        )
     await session.commit()
 
     # Drop the in-process cache so the next worker acquire re-reads
@@ -839,7 +885,9 @@ async def get_discovery_status() -> DiscoverySchedulerStatusResponse:
 
 
 @router.post("/discovery/trigger", status_code=202)
-async def trigger_discovery_now() -> dict:
+async def trigger_discovery_now(
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Run one discovery tick immediately.
 
     Useful for ops verifying scheduler wiring without waiting for the
@@ -851,6 +899,14 @@ async def trigger_discovery_now() -> dict:
     from backend.insights_service.scheduler import trigger_discovery_tick_now
 
     summary = await trigger_discovery_tick_now()
+    await recorder.record_for_request(
+        session, "stats.discovery.triggered",
+        details={
+            "providers": summary.providers, "listJobs": summary.list_jobs,
+            "assetJobs": summary.asset_jobs,
+        },
+        best_effort=True,   # the tick has run
+    )
     return {
         "status": "completed",
         "providers": summary.providers,

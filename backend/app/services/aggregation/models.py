@@ -171,6 +171,14 @@ class AggregationJobORM(Base):
     # NULL as 0.
     last_sequence = Column(Integer, nullable=True, default=0)
 
+    # ── Provenance ───────────────────────────────────────────────────
+    # The person who started the run (NULL for automation, and for every
+    # run before this was recorded) and the reason they gave, if any —
+    # what the run's ``aggregation.job.triggered`` activity event records,
+    # kept here so Job History shows and filters by it without a join.
+    triggered_by = Column(Text, nullable=True)
+    stated_reason = Column(Text, nullable=True)
+
     # ── Timestamps ───────────────────────────────────────────────────
     started_at = Column(Text, nullable=True)
     completed_at = Column(Text, nullable=True)
@@ -179,6 +187,7 @@ class AggregationJobORM(Base):
 
     __table_args__ = (
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
+        Index("ix_agg_jobs_triggered_by", "triggered_by", "created_at"),
         Index("ix_agg_jobs_created_at", "created_at"),
         Index("ix_agg_jobs_workspace", "workspace_id"),
         # The stuck-job reconciler asks "which rows are pending or running?"

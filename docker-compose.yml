@@ -245,15 +245,22 @@ services:
       # a large-graph scan: reusing the stats TTL (1200s) would leave a source
       # un-probeable for twenty minutes after a worker died mid-probe.
       STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
-      # Analytics warmer + product-event retention sweep. Both run here: the
-      # control plane runs the housekeeping loops (audit relay, retention
-      # sweeps, analytics warmer). The warm interval MUST
+      # Outbox relay (the activity ledger), analytics warmer and the
+      # product-event / refresh-token retention sweeps all run here: the
+      # control plane's lifespan starts them, single-flight across replicas.
+      # The warm interval MUST
       # match viz-service's copy of the same variable — it is also the grid
       # readers snap `now` to, and a warmer phase-locked to a different grid
       # writes cache entries no reader will ever look up. Same ${VAR} on both
       # services is what keeps them identical.
       ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
       PRODUCT_EVENT_RETENTION_DAYS: "${PRODUCT_EVENT_RETENTION_DAYS:-400}"
+      # The activity log's horizon: the sweep runs here, and viz-service
+      # reads the same variable to tell readers how far back the log goes.
+      ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
+      # How long a finished aggregation run is kept: the prune runs here, and
+      # viz-service reads the same variable to say how far back runs reach.
+      AGGREGATION_JOB_RETENTION_DAYS: "${AGGREGATION_JOB_RETENTION_DAYS:-90}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -374,8 +381,15 @@ services:
       # Not the warmer (that is controlplane-only) — this is the grid every
       # analytics window ends on. It has to be the SAME value the controlplane
       # warms with, or readers ask for epochs the warmer never wrote.
-      # Retention is deliberately absent: the sweep does not run on this role.
+      # Product-event retention is deliberately absent: that sweep does not
+      # run on this role.
       ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
+      # The activity sweep runs on the control plane, but this role tells
+      # readers how far back the log goes: the same ${VAR} keeps them honest.
+      ACTIVITY_RETENTION_DAYS: "${ACTIVITY_RETENTION_DAYS:-730}"
+      # Likewise how long aggregation runs are kept: pruned on the control
+      # plane, reported here (Analytics → Data, time to first build).
+      AGGREGATION_JOB_RETENTION_DAYS: "${AGGREGATION_JOB_RETENTION_DAYS:-90}"
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev

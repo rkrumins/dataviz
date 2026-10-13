@@ -274,6 +274,15 @@ async def init_aggregation_db() -> None:
                 f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, completed_at)",
                 f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_updated ON "
                 f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, updated_at)",
+                # Who triggered a run and why (2026-10-10), mirrored in alembic
+                # 20261010_1100_job_provenance; NULL for automation and for
+                # every run before it was recorded.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS triggered_by TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS stated_reason TEXT NULL",
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_triggered_by ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (triggered_by, created_at)",
             )
             # ONE TRANSACTION PER STATEMENT, deliberately. These all shared
             # a single `engine.begin()`, which made the try/except below

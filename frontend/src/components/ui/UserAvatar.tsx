@@ -38,6 +38,7 @@ export function UserAvatar({
     shape = 'gradient',
     fallback,
     alt,
+    hasImage,
 }: {
     /** Enables the image layer; without one only fallbacks render. */
     userId?: string | null
@@ -51,12 +52,16 @@ export function UserAvatar({
     /** A surface-owned fallback, replacing the shape-derived initials. */
     fallback?: React.ReactNode
     alt?: string
+    /** Whether a picture is stored, when the caller was told (the directory
+     *  and the activity log say). False asks for none — a list of people
+     *  without pictures fires no requests at all; true asks at once. */
+    hasImage?: boolean
 }) {
     const [failedSrc, setFailedSrc] = useState<string | null>(null)
-    const src = userId ? avatarImageSrc(userId) : null
+    const src = userId && hasImage !== false ? avatarImageSrc(userId) : null
     const showImage = Boolean(src)
         && failedSrc !== src
-        && avatarImageState(userId as string) !== 'none'
+        && (hasImage === true || avatarImageState(userId as string) !== 'none')
 
     const art = avatarId
         ? AVATARS.find((a) => a.id === avatarId)
@@ -113,6 +118,10 @@ export function UserAvatar({
                 <img
                     src={src as string}
                     alt={alt ?? ''}
+                    // Faces now fill long lists (job runs, the activity log):
+                    // fetch the ones scrolled to, decode off the main thread.
+                    loading="lazy"
+                    decoding="async"
                     className="absolute inset-0 h-full w-full object-cover"
                     onLoad={() => rememberAvatarImage(userId as string, 'ok')}
                     onError={() => {

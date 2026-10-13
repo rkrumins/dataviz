@@ -97,7 +97,36 @@ def test_retention_is_set_where_the_sweep_actually_runs():
     )
 
 
-@pytest.mark.parametrize("key", [_GRID, _RETENTION])
+_ACTIVITY = "ACTIVITY_RETENTION_DAYS"
+_JOBS = "AGGREGATION_JOB_RETENTION_DAYS"
+
+
+def _both_roles_agree(key: str) -> None:
+    viz, control = _values(_VIZ, key), _values(_CONTROLPLANE, key)
+    assert viz and control, f"{key} must be set in both viz-config and controlplane-config"
+    assert viz == control, f"{key} is {viz} in viz-config and {control} in controlplane-config"
+    settings = _values(_COMPOSE, key)
+    assert len(settings) >= 2 and all("${" + key in s for s in settings), (
+        f"docker-compose.yml must interpolate one {key} into both services: {settings}"
+    )
+    assert len(set(settings)) == 1, f"services interpolate differently: {settings}"
+
+
+def test_both_roles_agree_on_how_long_activity_is_kept():
+    """Unlike product events, the activity horizon is read by BOTH roles: the
+    controlplane sweeps to it and the web tier tells readers what it is. Two
+    values would make the explorer promise history the sweep has deleted."""
+    _both_roles_agree(_ACTIVITY)
+
+
+def test_both_roles_agree_on_how_long_aggregation_runs_are_kept():
+    """The controlplane prunes finished runs to it, and the web tier says how
+    far back they reach (Analytics → Data, time to first build). Two values
+    would have it promise runs the prune has deleted."""
+    _both_roles_agree(_JOBS)
+
+
+@pytest.mark.parametrize("key", [_GRID, _RETENTION, _ACTIVITY, _JOBS])
 def test_operators_can_find_both_knobs(key):
     """A setting documented only in a changelog cannot be set by anybody."""
     for name in (".env.example", ".env.prod.example"):

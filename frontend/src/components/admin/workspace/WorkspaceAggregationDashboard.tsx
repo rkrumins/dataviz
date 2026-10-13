@@ -91,11 +91,9 @@ export function WorkspaceAggregationDashboard({
     onReaggregateAll,
 }: WorkspaceAggregationDashboardProps) {
     const [activeFilter, setActiveFilter] = useState<StatusFilter>('all')
-    const [confirmPurgeId, setConfirmPurgeId] = useState<string | null>(null)
     const [purging, setPurging] = useState<string | null>(null)
     const [triggering, setTriggering] = useState<string | null>(null)
     const [expandedId, setExpandedId] = useState<string | null>(null)
-    const [confirmRebuildAll, setConfirmRebuildAll] = useState(false)
     const [rebuildingAll, setRebuildingAll] = useState(false)
 
     // Live readiness state — starts from parent's map, then polled locally
@@ -180,7 +178,6 @@ export function WorkspaceAggregationDashboard({
             setTimeout(pollReadiness, 500)
         } finally {
             setPurging(null)
-            setConfirmPurgeId(null)
         }
     }
 
@@ -192,7 +189,6 @@ export function WorkspaceAggregationDashboard({
             setTimeout(pollReadiness, 500)
         } finally {
             setRebuildingAll(false)
-            setConfirmRebuildAll(false)
         }
     }
 
@@ -216,46 +212,29 @@ export function WorkspaceAggregationDashboard({
                             Live — polling every 4s
                         </span>
                     )}
+                    {/* The page asks to confirm (and why) before anything runs. */}
                     {onReaggregateAll && rebuildableCount > 0 && (
-                        confirmRebuildAll ? (
-                            <span className="flex items-center gap-2 text-xs">
-                                <span className="text-ink-muted">Rebuild all {rebuildableCount}?</span>
-                                <button
-                                    onClick={handleRebuildAll}
-                                    disabled={rebuildingAll}
-                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
-                                >
-                                    {rebuildingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                                    {rebuildingAll ? 'Triggering…' : 'Confirm'}
-                                </button>
-                                <button
-                                    onClick={() => setConfirmRebuildAll(false)}
-                                    disabled={rebuildingAll}
-                                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                                >
-                                    Cancel
-                                </button>
-                            </span>
-                        ) : (
-                            <button
-                                onClick={() => setConfirmRebuildAll(true)}
-                                title={`Re-run aggregation for all ${rebuildableCount} data source(s) in this workspace. Heals graphs materialized before the depth-stamp contract so nested (self-referencing) hierarchies resolve.`}
-                                className={cn(
-                                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors',
-                                    needsRebuildCount > 0
-                                        ? 'border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/[0.06]'
-                                        : 'border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400',
-                                )}
-                            >
-                                {needsRebuildCount > 0 ? <AlertTriangle className="w-3.5 h-3.5" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                                Rebuild all aggregations
-                                {needsRebuildCount > 0 && (
-                                    <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-bold tabular-nums">
-                                        {needsRebuildCount} need it
-                                    </span>
-                                )}
-                            </button>
-                        )
+                        <button
+                            onClick={handleRebuildAll}
+                            disabled={rebuildingAll}
+                            title={`Re-run aggregation for all ${rebuildableCount} data source(s) in this workspace. Heals graphs materialized before the depth-stamp contract so nested (self-referencing) hierarchies resolve.`}
+                            className={cn(
+                                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50',
+                                needsRebuildCount > 0
+                                    ? 'border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/[0.06]'
+                                    : 'border-glass-border text-ink-secondary hover:border-indigo-500/40 hover:text-indigo-600 dark:hover:text-indigo-400',
+                            )}
+                        >
+                            {rebuildingAll
+                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                : needsRebuildCount > 0 ? <AlertTriangle className="w-3.5 h-3.5" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                            Rebuild all aggregations
+                            {needsRebuildCount > 0 && (
+                                <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-bold tabular-nums">
+                                    {needsRebuildCount} need it
+                                </span>
+                            )}
+                        </button>
                     )}
                 </div>
             </div>
@@ -523,41 +502,16 @@ export function WorkspaceAggregationDashboard({
                                         </button>
 
                                         {status === 'ready' && (
-                                            <>
-                                                {confirmPurgeId === ds.id ? (
-                                                    <div className="inline-flex items-center gap-2">
-                                                        <span className="text-[11px] text-red-500 font-medium">
-                                                            Purge all edges?
-                                                        </span>
-                                                        <button
-                                                            onClick={() => handlePurge(ds)}
-                                                            disabled={isPurging}
-                                                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
-                                                        >
-                                                            {isPurging ? (
-                                                                <Loader2 className="w-3 h-3 animate-spin" />
-                                                            ) : (
-                                                                <Trash2 className="w-3 h-3" />
-                                                            )}
-                                                            Confirm
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setConfirmPurgeId(null)}
-                                                            className="px-2 py-1 text-[11px] font-medium rounded-lg text-ink-muted hover:text-ink transition-colors"
-                                                        >
-                                                            Cancel
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <button
-                                                        onClick={() => setConfirmPurgeId(ds.id)}
-                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" />
-                                                        Purge
-                                                    </button>
-                                                )}
-                                            </>
+                                            <button
+                                                onClick={() => handlePurge(ds)}
+                                                disabled={isPurging}
+                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                                            >
+                                                {isPurging
+                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                    : <Trash2 className="w-3.5 h-3.5" />}
+                                                Purge
+                                            </button>
                                         )}
 
                                         {/* Expand/collapse history toggle */}

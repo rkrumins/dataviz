@@ -1636,6 +1636,20 @@ async def lifespan(_app: FastAPI):
             name="product-event-gc",
         )
 
+    # Activity retention sweep: the ledger and the relayed outbox kept to
+    # ACTIVITY_RETENTION_DAYS. Same owner role, same reason.
+    _app.state._activity_retention_shutdown = asyncio.Event()
+    _app.state._activity_retention_task = None
+    if runs_scheduler():
+        from .services.activity_retention import run_sweeper as _run_activity_retention
+        _app.state._activity_retention_task = asyncio.create_task(
+            _run_activity_retention(
+                get_jobs_session,
+                _app.state._activity_retention_shutdown,
+            ),
+            name="activity-retention",
+        )
+
     # Analytics warmer — precomputes the standard windows so no reader ever
     # pays for an aggregation. Same owner role: one replica warming the shared
     # Redis copy, not three racing to warm it. Purely an optimisation; the
@@ -1796,6 +1810,21 @@ async def lifespan(_app: FastAPI):
             _pe_gc_task.cancel()
             try:
                 await _pe_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the activity retention sweep before DB pool teardown, same shape.
+    _ar_shutdown = getattr(_app.state, "_activity_retention_shutdown", None)
+    _ar_task = getattr(_app.state, "_activity_retention_task", None)
+    if _ar_shutdown is not None:
+        _ar_shutdown.set()
+    if _ar_task is not None and not _ar_task.done():
+        try:
+            await asyncio.wait_for(_ar_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _ar_task.cancel()
+            try:
+                await _ar_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -2167,6 +2196,29 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
                 "code": "PROVIDER_BUSY",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# Every slot of a bulkhead stayed taken while the request waited for one (see
+# common/bulkhead.py): too many slow reads of one kind on this replica at once.
+# 429 + Retry-After, for the same reason as a busy provider — the client backs
+# off and asks again, instead of every request timing out on an empty pool.
+from backend.app.common.bulkhead import Busy as _Busy
+
+
+@app.exception_handler(_Busy)
+async def _busy_handler(request, exc: _Busy):
+    logger.info("Busy on %s: %s", request.url.path, exc.kind)
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "busy",
+                "message": str(exc),
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
@@ -2633,11 +2685,14 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # P1.8 — explicit SSE path registry. Routers may extend this at
-    # startup via ``register_sse_path("/api/v1/.../my-stream")``. The
-    # default suffix ``/events`` matches today's only SSE convention but
-    # the contract is explicit registration, not endswith heuristics.
-    _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
+    # P1.8 — explicit SSE path registry: each live feed by its exact shape,
+    # never by how its path ends. Matching any path ending in ``/events``
+    # also exempted the activity log's event lists — ordinary paged reads —
+    # from every deadline.
+    _SSE_PATHS: tuple[re.Pattern, ...] = (
+        # An aggregation job's progress (``aggregation.stream_job_events``).
+        re.compile(r"^/api/v1/admin/data-sources/[^/]+/aggregation-jobs/[^/]+/events$"),
+    )
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
     # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
     # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
@@ -2650,6 +2705,9 @@ class _TimeoutMiddleware:
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+        # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
+        # short keyset read per chunk, two at a time per process (activity._EXPORTS).
+        re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
     )
 
     def __init__(self, app):
@@ -2702,10 +2760,7 @@ class _TimeoutMiddleware:
     def _is_sse_path(self, path: str) -> bool:
         if path in self._SSE_EXACT_PATHS:
             return True
-        for suffix in self._SSE_PATH_SUFFIXES:
-            if path.endswith(suffix):
-                return True
-        return any(p.match(path) for p in self._STREAM_PATHS)
+        return any(p.match(path) for p in (*self._SSE_PATHS, *self._STREAM_PATHS))
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
@@ -2781,13 +2836,21 @@ class _TimeoutMiddleware:
                 state["terminal"] = True
             await original_send(message)
 
+        deadline = asyncio.timeout(timeout)
         try:
-            async with asyncio.timeout(timeout):
+            async with deadline:
                 await self.app(scope, receive, tracked_send)
-        except TimeoutError:
+        except Exception as exc:
             # ``asyncio.timeout()`` converts the inner CancelledError to a
-            # TimeoutError. The inner task is already torn down — no more
+            # TimeoutError — unless something inside caught the cancellation
+            # and raised an error of its own. ``BaseHTTPMiddleware`` does
+            # exactly that ("No response returned"), which used to escape as
+            # a 500 for a request whose only fault was being slow. An error
+            # raised once the deadline has passed is the deadline's. Either
+            # way the inner task is already torn down — no more
             # ``tracked_send`` calls will arrive.
+            if not isinstance(exc, TimeoutError) and not deadline.expired():
+                raise
             if state["terminal"]:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
@@ -2879,7 +2942,12 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
+    # ``X-Activity-Reason`` carries the optional "why" a person gives for a
+    # manual operation into the activity ledger (``common/activity_context``).
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+        "X-Activity-Reason",
+    ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
     #

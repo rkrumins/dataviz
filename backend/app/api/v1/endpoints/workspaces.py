@@ -34,6 +34,7 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
     load_node_identity,
@@ -486,7 +487,9 @@ async def add_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
     try:
-        created = await data_source_repo.create_data_source(session, workspace_id, req)
+        created = await data_source_repo.create_data_source(
+            session, workspace_id, req, created_by=_user.id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -533,6 +536,18 @@ async def add_data_source(
                 )
         except Exception:
             pass  # seed is a bonus; the poll below is the real refresh
+
+    # Recorded in the onboarding's own transaction, committed below.
+    await recorder.record_for_request(
+        session, "workspace.data_source.added", **recorder.data_source_target(created),
+        details={
+            key: value for key, value in (
+                ("providerId", created.provider_id),
+                ("graphName", created.graph_name),
+                ("catalogItemId", created.catalog_item_id),
+            ) if value
+        },
+    )
 
     # Commit before enqueueing the stats poll. The stats worker uses an
     # independent session pool (PoolRole.JOBS), so if it pulls the job
@@ -587,6 +602,11 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+    # Which fields were sent, never their values: an extraConfig can be large.
+    await recorder.record_for_request(
+        session, "workspace.data_source.updated", **recorder.data_source_target(ds),
+        details={"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))},
+    )
 
     new_identity = await load_node_identity(session, ds_id)
     mapping_changed = (
@@ -708,6 +728,10 @@ async def remove_data_source(
                 detail="The version store is unavailable, so this cannot be permanently deleted "
                        "right now. Try again shortly.")
         await _evict(ds, workspace_id, session)
+        await recorder.record_for_request(
+            session, "workspace.data_source.removed", **recorder.data_source_target(ds),
+            details={"permanent": True},
+        )
         await data_source_repo.delete_data_source(session, ds_id)
         return
 
@@ -727,6 +751,10 @@ async def remove_data_source(
 
     await _evict(ds, workspace_id, session)
     await data_source_repo.soft_delete_data_source(session, ds_id, actor=_user.id)
+    await recorder.record_for_request(
+        session, "workspace.data_source.removed", **recorder.data_source_target(ds),
+        details={"permanent": False},
+    )
     logger.info("data source %s moved to trash by %s (restorable for %s days)",
                 ds_id, _user.id, gv_config.PURGE_GRACE_DAYS)
 
@@ -757,6 +785,9 @@ async def restore_data_source(
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if ds is not None:
         await _evict(ds, workspace_id, session)   # re-resolve it fresh, not from a stale cache
+    await recorder.record_for_request(
+        session, "workspace.data_source.restored", **recorder.data_source_target(restored),
+    )
     logger.info("data source %s restored by %s", ds_id, _user.id)
     return restored
 
@@ -902,6 +933,9 @@ async def set_primary_data_source(
     if not success:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
     ds = await data_source_repo.get_data_source(session, ds_id)
+    await recorder.record_for_request(
+        session, "workspace.data_source.primary_set", **recorder.data_source_target(ds),
+    )
     return ds
 
 
@@ -942,9 +976,14 @@ async def set_projection_mode(
             detail=f"Cannot change projection mode while aggregation job '{active_job.id}' is active. Cancel or wait for it to complete.",
         )
 
+    before = ds.projection_mode
     ds.projection_mode = mode if mode else None
     from datetime import datetime, timezone
     ds.updated_at = datetime.now(timezone.utc).isoformat()
+    await recorder.record_for_request(
+        session, "workspace.data_source.projection_changed", **recorder.data_source_target(ds),
+        details={"from": before, "to": ds.projection_mode},
+    )
     await session.flush()
     await provider_registry.evict_workspace(workspace_id, session)
     return await data_source_repo.get_data_source(session, ds_id)
