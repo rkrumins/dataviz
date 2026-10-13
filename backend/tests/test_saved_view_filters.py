@@ -59,7 +59,8 @@ async def test_create_list_rename_requery_reorder_delete(test_client: AsyncClien
 
 async def test_positions_close_up_after_a_delete(test_client: AsyncClient):
     ids = [(await _create(test_client, name))["id"] for name in "ABCD"]
-    assert (await test_client.delete(f"{BASE}/{ids[1]}")).status_code == 204
+    resp = await test_client.delete(f"{BASE}/{ids[1]}")
+    assert resp.status_code == 204
     assert await _listed(test_client) == [("A", 0), ("C", 1), ("D", 2)]
     # And a new one goes last, after the closed-up list.
     await _create(test_client, "E")
@@ -150,7 +151,8 @@ async def test_one_person_never_reaches_anothers_filters(test_client: AsyncClien
     # The platform admin is no exception either way.
     listed = (await test_client.get(BASE)).json()
     assert [(f["id"], f["name"]) for f in listed] == [(ours["id"], "Admin's own")]
-    assert (await test_client.delete(f"{BASE}/{bobs['id']}")).status_code == 404
+    resp = await test_client.delete(f"{BASE}/{bobs['id']}")
+    assert resp.status_code == 404
 
 
 async def test_signed_out_is_401(test_client: AsyncClient):
