@@ -320,3 +320,13 @@ export function overreach(
         ...dataSources.filter((d) => RANK[permissions.data] > RANK[d.level]),
     ]
 }
+
+// ── Where the server sends you ──────────────────────────────────────
+
+/** A sign-in URL the server handed back, only while it stays on this site:
+ *  a path — never a scheme, another origin (`//host`), or a backslash form
+ *  a browser reads as one. Anything else is not followed. */
+export function sitePath(url: string | null | undefined): string | null {
+    if (!url || !url.startsWith('/') || url.startsWith('//') || url.includes('\\')) return null
+    return url
+}

@@ -25,7 +25,7 @@ import {
 } from '@/services/apiKeyService'
 import {
     cidrProblem, customDateProblem, describePermissions, describeResources, expiryDays, expiryFields,
-    expiryOptions, formatDay, type ExpiryChoice,
+    expiryOptions, formatDay, sitePath, type ExpiryChoice,
 } from '../apiKeyFormat'
 import { freshDraft, parkDraft, type ApiKeyDraft, type WizardStep } from '../apiKeyDraft'
 import { keyExposure } from '../exposure'
@@ -154,9 +154,11 @@ export function useApiKeyWizard({ options, resumed }: {
             setPassword('')
             setCreated(result)
         } catch (err) {
-            if (err instanceof ApiKeyError && err.code === 'step_up_required' && err.method === 'sso' && err.loginUrl) {
+            const signIn = err instanceof ApiKeyError && err.code === 'step_up_required' && err.method === 'sso'
+                ? sitePath(err.loginUrl) : null
+            if (signIn) {
                 parkDraft({ ...draft, step: 'review' })
-                window.location.href = err.loginUrl
+                window.location.href = signIn
                 return
             }
             if (err instanceof ApiKeyError && err.code === 'step_up_unavailable') {

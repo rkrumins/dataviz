@@ -250,6 +250,18 @@ describe('confirming it is you', () => {
         expect(await screen.findByLabelText('Your new API key')).toBeInTheDocument()
     })
 
+    it('never follows a sign-in link that leaves this site', async () => {
+        svc.create.mockRejectedValue(new ApiKeyError(403, 'Confirm it’s you', {
+            error: 'step_up_required', method: 'sso', loginUrl: '//evil.example/login',
+        }))
+        await wizard({ stepUp: { method: 'sso', fresh: false } })
+        await toReview()
+        await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+        expect(await screen.findByText('Confirm it’s you')).toBeInTheDocument()
+        expect(window.location.href).toBe('http://localhost/me/api-keys')
+        expect(sessionStorage.getItem('nx-api-key-draft')).toBeNull()
+    })
+
     it('comes back to Review with what was chosen, on the way back', async () => {
         svc.list.mockResolvedValue([])
         svc.options.mockResolvedValue(opts({ stepUp: { method: 'sso', fresh: true } }))

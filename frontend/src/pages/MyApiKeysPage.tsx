@@ -28,7 +28,7 @@ import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
 import { STEP_UP_UNAVAILABLE } from '@/components/apiKeys/StepUpField'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
-import { expiryCountdown, isLive, isRenewable, stillCalled } from '@/components/apiKeys/apiKeyFormat'
+import { expiryCountdown, isLive, isRenewable, sitePath, stillCalled } from '@/components/apiKeys/apiKeyFormat'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
 import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -124,8 +124,8 @@ function ApiKeysContent() {
             tone: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
             title: paused.length === 1 ? `“${paused[0].name}” is paused` : `${paused.length} of your keys are paused`,
             body: `Paused until you sign in through ${provider} again — nothing was revoked. Keys that act as you pause after ${options?.policy.ssoSignInWindowDays ? `${options.policy.ssoSignInWindowDays} days` : 'a while'} without a sign-in there.`,
-            action: options?.ssoSignInUrl ? (
-                <a href={options.ssoSignInUrl} className={ACTION}>
+            action: sitePath(options?.ssoSignInUrl) ? (
+                <a href={sitePath(options?.ssoSignInUrl)!} className={ACTION}>
                     <LogIn className="w-3.5 h-3.5" aria-hidden /> Sign in to resume
                 </a>
             ) : undefined,

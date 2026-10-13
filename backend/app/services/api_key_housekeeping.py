@@ -120,6 +120,6 @@ async def run_sweeper(
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval)
         except asyncio.TimeoutError:
-            pass
+            pass  # a whole interval with no shutdown: time for the next pass
 
     logger.info("API key housekeeping stopped")

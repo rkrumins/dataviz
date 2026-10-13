@@ -21,6 +21,7 @@ import {
     isRenewable,
     overreach,
     parseCidrs,
+    sitePath,
     statusLabel,
     stillCalled,
 } from '../apiKeyFormat'
@@ -175,5 +176,18 @@ describe('asking for more than you have', () => {
             .toEqual(['v_read'])
         expect(overreach({ views: 'read', data: 'write', publish: false }, views, sources).map((i) => i.id))
             .toEqual(['ds_read'])
+    })
+})
+
+describe('sitePath', () => {
+    it('follows a path on this site, and nothing that leaves it', () => {
+        expect(sitePath('/api/v1/auth/corp/login?next=/me/api-keys&force=1'))
+            .toBe('/api/v1/auth/corp/login?next=/me/api-keys&force=1')
+        for (const away of [
+            'https://evil.example/login', '//evil.example/login', '/\\evil.example',
+            'javascript:alert(1)', '', null, undefined,
+        ]) {
+            expect(sitePath(away)).toBeNull()
+        }
     })
 })

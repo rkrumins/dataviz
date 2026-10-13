@@ -251,18 +251,25 @@ def can_hard_delete_view(ctx: ViewerContext, view: ViewORM) -> bool:
     )
 
 
-def can_change_visibility(ctx: ViewerContext, view: ViewORM) -> bool:
+def can_change_visibility(
+    ctx: ViewerContext, view: ViewORM, to: Optional[str] = None,
+) -> bool:
     """Creator or workspace admin can change the visibility tier.
 
     This is the base rule (private ↔ workspace). Any transition to or
     from ``enterprise`` must ALSO pass ``can_publish`` — enforced at
     the endpoint, which knows both sides of the transition.
 
-    A key needs its own ``publish`` to touch visibility at all: under an
-    open workspace policy this predicate is what lets a creator publish,
-    and a key minted to edit a view was not minted to share it.
+    Through an API key, the workspace tier takes the key's view write, as
+    creating a view there does (``authorize_view_create``); anything to do
+    with ``enterprise`` takes its own ``publish``: under an open workspace
+    policy this predicate is what lets a creator publish, and a key minted
+    to edit views was not minted to share them with everyone. ``to``
+    unknown is read as the enterprise tier.
     """
-    if not _key_admits_view(ctx, view, "workspace:view:publish"):
+    platform_wide = to in (None, "enterprise") or view.visibility == "enterprise"
+    needed = "workspace:view:publish" if platform_wide else "workspace:view:edit"
+    if not _key_admits_view(ctx, view, needed):
         return False
     if has_permission(ctx.claims, "system:admin"):
         return True
@@ -464,6 +471,15 @@ def can_answer_publish_request(ctx: ViewerContext, view: ViewORM) -> bool:
     """May this caller approve or deny a pending request? Approving
     performs the publish, so it takes exactly the publish permission."""
     return can_publish(ctx, view)
+
+
+def can_withdraw_publish_request(ctx: ViewerContext, view: ViewORM) -> bool:
+    """May this caller take a pending request back? Whoever made it, or
+    anyone who could have answered it. Through an API key, only one that
+    could have made it: withdrawing is the same sharing decision."""
+    if not _key_admits_view(ctx, view, "workspace:view:publish"):
+        return False
+    return view.publish_requested_by == ctx.user_id or can_answer_publish_request(ctx, view)
 
 
 def can_manage_grants(ctx: ViewerContext, view: ViewORM) -> bool:

@@ -111,7 +111,7 @@ async def run_flusher(shutdown: asyncio.Event, *, interval: float = FLUSH_SECOND
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval)
         except asyncio.TimeoutError:
-            pass
+            pass  # a whole interval with no shutdown: time to flush again
         try:
             await recorder.flush()
         except asyncio.CancelledError:

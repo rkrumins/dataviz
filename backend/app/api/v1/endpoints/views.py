@@ -1043,7 +1043,7 @@ async def update_view_visibility(
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
         ctx = await _viewer_context(session, user, claims)
-        if not view_access.can_change_visibility(ctx, view_orm):
+        if not view_access.can_change_visibility(ctx, view_orm, to=visibility):
             raise HTTPException(
                 status_code=403,
                 detail="Only the creator or a workspace admin can change visibility",
@@ -1198,10 +1198,7 @@ async def withdraw_publication_request(
     have answered it."""
     view_orm = await _load_view_orm(session, view_id)
     ctx = await _viewer_context(session, user, claims)
-    is_requester = view_orm.publish_requested_by == user.id
-    if rbac_flag("RBAC_ENFORCE_VIEWS") and not (
-        is_requester or view_access.can_answer_publish_request(ctx, view_orm)
-    ):
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_withdraw_publish_request(ctx, view_orm):
         raise HTTPException(status_code=403, detail="Not your request to withdraw")
     _clear_publish_request(view_orm)
     await session.flush()

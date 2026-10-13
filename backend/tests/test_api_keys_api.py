@@ -197,6 +197,11 @@ async def test_an_sso_session_must_prove_a_recent_sign_in(client, db_session):
     refused = await _create(client, silent, currentPassword=None)
     assert refused.status_code == 403 and error(refused) == "step_up_unavailable"
 
+    # A sign-in dated in the future proves nothing about the last few minutes.
+    ahead = _sign_in(client, signin="sso", auth_time=int(time.time()) + 3600, proven=True)
+    refused = await _create(client, ahead, currentPassword=None)
+    assert refused.status_code == 403 and error(refused) == "step_up_required"
+
     proven = _sign_in(client, signin="sso", auth_time=int(time.time()) - 60, proven=True)
     assert (await _create(client, proven, currentPassword=None)).status_code == 201
 
@@ -232,7 +237,8 @@ async def test_someone_elses_key_is_not_found(client, db_session):
         json={"currentPassword": PASSWORD}, headers=headers,
     )
     assert rotated.status_code == 404
-    assert (await client.delete(f"/api/v1/me/api-keys/{theirs.id}", headers=headers)).status_code == 404
+    reply = await client.delete(f"/api/v1/me/api-keys/{theirs.id}", headers=headers)
+    assert reply.status_code == 404
     assert (await db_session.get(ApiKeyORM, theirs.id)).revoked_at is None
 
 
@@ -245,6 +251,9 @@ async def test_someone_elses_key_is_not_found(client, db_session):
     ({"expiresAt": _in(-1)}, "future"),
     ({"neverExpires": True}, "not both"),
     ({"allowedCidrs": ["not-a-network"]}, "not an address"),
+    ({"name": "   "}, "needs a name"),
+    # Past the last day a date can hold, once moved to UTC.
+    ({"expiresAt": "9999-12-31T23:00:00-05:00"}, "too far"),
 ])
 async def test_a_key_must_say_what_it_may_do_and_until_when(client, ask, overrides, says):
     """A preview says no to exactly what creating says no to."""
@@ -291,13 +300,29 @@ async def test_a_person_holds_a_bounded_number_of_keys(client, monkeypatch):
     assert second.status_code == 409 and error(second) == "too_many_api_keys"
 
 
+async def test_keeping_the_old_key_while_rotating_counts_toward_the_limit(client, monkeypatch):
+    """A grace period keeps the old key working beside its replacement — one
+    more live key for up to a week. At the limit, rotating outright still
+    works; rotating with grace is refused like making one more key."""
+    monkeypatch.setattr(api_keys_endpoints, "MAX_ACTIVE_KEYS", 1)
+    headers = _sign_in(client)
+    key = (await _create(client, headers)).json()["key"]
+    rotate = f"/api/v1/me/api-keys/{key['id']}/rotate"
+    kept = await client.post(rotate, json={"currentPassword": PASSWORD, "graceSeconds": 3600}, headers=headers)
+    assert kept.status_code == 409 and error(kept) == "too_many_api_keys"
+    assert "without a grace period" in kept.json()["detail"]["message"]
+    outright = await client.post(rotate, json={"currentPassword": PASSWORD, "graceSeconds": 0}, headers=headers)
+    assert outright.status_code == 200, outright.text
+
+
 async def test_switching_keys_off_stops_minting_but_never_revoking(client, db_session):
     existing = await mint(db_session, views="read")
     headers = _sign_in(client)
     prime(apiKeysEnabled=False)
     refused = await _create(client, headers)
     assert refused.status_code == 403 and error(refused) == "api_keys_disabled"
-    assert (await client.delete(f"/api/v1/me/api-keys/{existing.id}", headers=headers)).status_code == 204
+    reply = await client.delete(f"/api/v1/me/api-keys/{existing.id}", headers=headers)
+    assert reply.status_code == 204
 
 
 async def test_an_expiry_is_kept_in_utc_whatever_offset_it_came_in(client, db_session):
@@ -360,7 +385,8 @@ async def test_a_key_can_be_renamed_and_described_but_never_widened(client, db_s
 
     # What it may do, where and until when are not this route's to change.
     for change in ({"permissions": {"views": "write"}}, {"expiresAt": _in(400)}, {}):
-        assert (await client.patch(url, json=change, headers=headers)).status_code == 422, change
+        reply = await client.patch(url, json=change, headers=headers)
+        assert reply.status_code == 422, change
 
     theirs = await mint(db_session, OTHER, views="read")
     stolen = await client.patch(
@@ -368,7 +394,8 @@ async def test_a_key_can_be_renamed_and_described_but_never_widened(client, db_s
     )
     assert stolen.status_code == 404
     await client.delete(url, headers=headers)
-    assert (await client.patch(url, json={"name": "too late"}, headers=headers)).status_code == 409
+    reply = await client.patch(url, json={"name": "too late"}, headers=headers)
+    assert reply.status_code == 409
 
     payloads = [
         json.loads(e.payload)
@@ -436,7 +463,8 @@ async def test_a_key_is_replaced_once(client):
     key = (await _create(client, headers)).json()["key"]["id"]
     rotate = f"/api/v1/me/api-keys/{key}/rotate"
     body = {"currentPassword": PASSWORD, "graceSeconds": 3600}
-    assert (await client.post(rotate, json=body, headers=headers)).status_code == 200
+    reply = await client.post(rotate, json=body, headers=headers)
+    assert reply.status_code == 200
     again = await client.post(rotate, json=body, headers=headers)
     assert again.status_code == 409 and error(again) == "api_key_rotated"
 
@@ -593,10 +621,20 @@ async def test_a_keys_use_is_on_its_card_and_in_its_detail(client, db_session):
 
 
 async def test_a_key_can_describe_and_end_itself_whatever_its_state(client, db_session):
-    expired = await mint(db_session, views="read", expires_at=days_ago(1))
+    expired = await mint(
+        db_session, views="read", expires_at=days_ago(1), resources={"views": ["v_a_mine"]},
+    )
     described = await client.get("/api/v1/api-keys/self", headers=expired.headers)
     assert described.status_code == 200, described.text
     assert described.json()["status"] == "expired" and described.json()["id"] == expired.id
+    # What it is and why it stopped — not whose it was or what it reached:
+    # a key that no longer works may be in hands it was never meant for.
+    assert {k: described.json()[k] for k in ("userId", "permissions", "resources")} == {
+        "userId": None, "permissions": None, "resources": None,
+    }
+    working = await mint(db_session, views="read")
+    described = (await client.get("/api/v1/api-keys/self", headers=working.headers)).json()
+    assert described["userId"] == OWNER and described["resources"] == "all"
 
     # A read-only key may still end itself.
     ended = await client.delete("/api/v1/api-keys/self", headers=expired.headers)
@@ -612,7 +650,8 @@ async def test_a_paused_key_cannot_act_but_can_end_itself(client, db_session):
     assert (await client.get("/api/v1/views/v_a_mine", headers=paused.headers)).status_code == 401
     described = await client.get("/api/v1/api-keys/self", headers=paused.headers)
     assert described.json()["status"] == "ip_not_allowed"
-    assert (await client.delete("/api/v1/api-keys/self", headers=paused.headers)).status_code == 204
+    reply = await client.delete("/api/v1/api-keys/self", headers=paused.headers)
+    assert reply.status_code == 204
 
 
 async def test_the_self_endpoints_are_for_keys(client):
@@ -666,7 +705,8 @@ async def test_administrators_see_and_revoke_everyones_keys(test_client, db_sess
     only = (await test_client.get(f"/api/v1/admin/api-keys?ownerId={OWNER}")).json()
     assert [item["id"] for item in only["items"]] == [mine.id]
 
-    assert (await test_client.delete(f"/api/v1/admin/api-keys/{theirs.id}")).status_code == 204
+    reply = await test_client.delete(f"/api/v1/admin/api-keys/{theirs.id}")
+    assert reply.status_code == 204
     revoked = await db_session.get(ApiKeyORM, theirs.id)
     await db_session.refresh(revoked)
     assert revoked.revoked_reason == "admin"
@@ -856,6 +896,17 @@ async def test_the_export_is_a_spreadsheet_that_cannot_run_anything(admin, db_se
     none = await admin.get("/api/v1/admin/api-keys/export.csv?status=revoked")
     assert none.headers["x-total-count"] == "0"
     assert list(csv.reader(io.StringIO(none.text))) == [list(api_keys_endpoints._CSV_COLUMNS)]
+
+
+async def test_the_export_quotes_every_cell_for_any_separator(admin, db_session):
+    """Spreadsheets in many locales split on ``;``, not ``,``. Unquoted, a
+    name with a ``;`` in it would become two cells, the second beginning
+    with whatever followed — a formula the neutralising quote never saw."""
+    await mint(db_session, OWNER, views="read", name='nightly;=HYPERLINK("x")')
+    response = await admin.get("/api/v1/admin/api-keys/export.csv")
+    header, row = response.text.splitlines()[:2]
+    assert header.startswith('"id","name",')
+    assert '"nightly;=HYPERLINK(""x"")"' in row and row.startswith('"')
 
 
 async def test_the_export_pages_through_the_keys_it_listed_first(admin, db_session, monkeypatch):

@@ -229,6 +229,24 @@ def _client_ip(request: Request) -> Optional[str]:
     return client_address(request.client.host if request.client else None)
 
 
+_told_no_address = False
+
+
+def _no_address() -> None:
+    """A request with no client address — behind a Unix socket with no proxy
+    headers, every one. Counted together, a few bad tokens from anyone would
+    lock every key out, so no address means no budget by address; the
+    operator is told once."""
+    global _told_no_address
+    if not _told_no_address:
+        _told_no_address = True
+        logger.warning(
+            "API key requests arrive with no client address, so bad tokens are not "
+            "limited per address. Pass the client's address through the proxy "
+            "(FORWARDED_ALLOW_IPS) to turn the limit on."
+        )
+
+
 async def _too_many(
     scope: str, identity: str, limit: str, *, consumed: bool = False,
 ) -> HTTPException:
@@ -256,11 +274,14 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
 
     limiter = get_account_limiter()
     client_ip = _client_ip(request)
-    address = address_bucket(client_ip)
-    if not await limiter.check(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP):
+    address = address_bucket(client_ip) if client_ip else None
+    if address is None:
+        _no_address()
+    elif not await limiter.check(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP):
         raise await _too_many(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
     if not looks_valid(token):
-        await limiter.record(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
+        if address is not None:
+            await limiter.record(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
         raise api_key_errors.invalid_key(*_REFUSALS["malformed"])
     # Every request a key makes counts against its own budget — refused
     # ones included — keyed by its hash, which is one-to-one with the key.
@@ -281,7 +302,7 @@ async def _authenticate(request: Request, token: str) -> ApiKeyContext:
     except ApiKeyRejected as exc:
         if exc.key_id:
             request.state.api_key_id = exc.key_id
-        else:
+        elif address is not None:
             await limiter.record(_FAILURE_SCOPE, address, RATELIMIT_API_KEY_FAILURES_PER_IP)
         code, message = _REFUSALS.get(exc.reason, _REFUSALS["unknown"])
         raise api_key_errors.invalid_key(code, message)
@@ -349,7 +370,9 @@ _locations: dict[tuple[str, str], tuple[float, _Place]] = {}
 
 
 def reset_for_tests() -> None:
+    global _told_no_address
     _locations.clear()
+    _told_no_address = False
 
 
 async def _locate(kind: str, ids: list[str]) -> dict[str, _Place]:

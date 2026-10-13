@@ -137,6 +137,43 @@ async def test_what_a_key_does_names_its_owner_and_the_key(client, db_session, m
     assert (svc.provenance.actor_id, svc.provenance.api_key_id) == (OWNER, key.id)
 
 
+async def test_a_key_shares_a_view_with_its_workspace_as_it_creates_one_there(client, db_session):
+    """Creating a view straight into the workspace tier takes a key that may
+    write views; so does moving one there. Everyone on the platform is the
+    key's own publish, both ways."""
+    url = "/api/v1/views/v_a_mine/visibility"
+    writer = await mint(db_session, views="write")
+    shared = await client.put(url, json={"visibility": "workspace"}, headers=writer.headers)
+    assert shared.status_code == 200, shared.text
+    back = await client.put(url, json={"visibility": "private"}, headers=writer.headers)
+    assert back.status_code == 200, back.text
+    published = await client.put(url, json={"visibility": "enterprise"}, headers=writer.headers)
+    assert published.status_code == 403, published.text
+
+    reader = await mint(db_session, views="read", data="write")
+    refused = await client.put(url, json={"visibility": "workspace"}, headers=reader.headers)
+    assert refused.status_code == 403, refused.text
+
+
+async def test_only_a_key_that_may_publish_withdraws_a_publication_request(client, db_session):
+    """Asking for a view to be published takes a key that may publish, and so
+    does taking the request back: a key minted to load data does not make
+    its owner's sharing decisions, even about their own request."""
+    from backend.app.db.models import ViewORM
+
+    view = await db_session.get(ViewORM, "v_a_mine")
+    view.publish_requested_by = OWNER
+    await db_session.commit()
+    url = "/api/v1/views/v_a_mine/publish-request"
+
+    loader = await mint(db_session, data="write")
+    refused = await client.delete(url, headers=loader.headers)
+    assert refused.status_code == 403, refused.text
+    publisher = await mint(db_session, views="write", publish=True)
+    reply = await client.delete(url, headers=publisher.headers)
+    assert reply.status_code == 204
+
+
 async def test_a_key_request_never_rides_a_browser_session(client, db_session):
     """Cookies are dropped from a key request: someone else's session riding
     along neither widens it nor is touched by it."""
@@ -279,7 +316,8 @@ async def test_a_key_outside_its_networks_is_on_the_record_even_asking_about_its
     assert [json.loads(e.payload)["reason"] for e in misuse] == ["ip_not_allowed"]
 
     # And ending itself says where from.
-    assert (await client.delete("/api/v1/api-keys/self", headers=key.headers)).status_code == 204
+    reply = await client.delete("/api/v1/api-keys/self", headers=key.headers)
+    assert reply.status_code == 204
     revoked = (await db_session.execute(
         select(OutboxEventORM).where(OutboxEventORM.event_type == "identity.api_key.revoked")
     )).scalars().one()
@@ -305,6 +343,23 @@ async def test_a_dead_key_looping_never_locks_out_its_neighbours(client, db_sess
         await _refused(client, {"Authorization": f"Bearer {stranger}"}, "invalid_api_key")
     guessing = await client.get("/api/v1/views/v_a_mine", headers=healthy.headers)
     assert guessing.status_code == 429
+
+
+async def test_without_a_client_address_nobody_shares_one_budget_of_bad_keys(
+    client, db_session, monkeypatch, caplog,
+):
+    """Behind a Unix socket with no proxy headers, no request has an address.
+    Counted together, a few bad tokens from anyone would lock every key out;
+    so they are not counted by address then — and the operator is told once."""
+    monkeypatch.setattr(api_key_auth, "RATELIMIT_API_KEY_FAILURES_PER_IP", "2/minute")
+    monkeypatch.setattr(api_key_auth, "_client_ip", lambda request: None)
+    healthy = await mint(db_session, views="read")
+    with caplog.at_level(logging.WARNING, logger=api_key_auth.__name__):
+        for _ in range(3):
+            stranger = api_keys.generate().token
+            await _refused(client, {"Authorization": f"Bearer {stranger}"}, "invalid_api_key")
+    assert (await client.get("/api/v1/views/v_a_mine", headers=healthy.headers)).status_code == 200
+    assert sum("no client address" in r.getMessage() for r in caplog.records) == 1
 
 
 async def test_a_revoked_key_presented_again_is_misuse_recorded_once_and_told_to_its_owner(
@@ -473,6 +528,74 @@ async def test_a_resource_named_against_the_wrong_workspace_is_not_found(client,
     assert response.status_code == 404
 
 
+async def test_a_workspace_shows_a_narrow_key_only_the_sources_it_covers(client, db_session):
+    """The workspace detail and list name their data sources. A key on part
+    of a workspace sees the ones it covers — those it names, and those its
+    views render — never the rest of the workspace's."""
+    def _sources(response, ws="ws_a"):
+        assert response.status_code == 200, response.text
+        body = response.json()
+        workspace = body if isinstance(body, dict) else next(w for w in body if w["id"] == ws)
+        return sorted(d["id"] for d in workspace["dataSources"])
+
+    named = await mint(db_session, data="read", resources={"dataSources": ["ds_a2"]})
+    through_a_view = await mint(db_session, views="read", resources={"views": ["v_a_ws"]})
+    whole = await mint(db_session, data="read", resources={"workspaces": ["ws_a"]})
+    for key, sources in ((named, ["ds_a2"]), (through_a_view, ["ds_a"]), (whole, ["ds_a", "ds_a2"])):
+        assert _sources(await client.get("/api/v1/admin/workspaces/ws_a", headers=key.headers)) == sources
+        assert _sources(await client.get("/api/v1/admin/workspaces", headers=key.headers)) == sources
+
+
+async def test_a_view_does_not_open_a_members_only_route_for_a_mixed_selection(
+    client, db_session, monkeypatch,
+):
+    """A key on a view and on another data source of the same workspace holds
+    ``datasource:read`` there for the source it names. A route its holders
+    need membership of — not just a view — answers for that source alone:
+    the view's own source, reached through the view, stays closed."""
+    from backend.app.services.versioning import bootstrap_worker
+    from tests.common.api_key_world import reached_the_handler
+
+    async def _reached(**_kwargs):
+        reached_the_handler()
+
+    monkeypatch.setattr(bootstrap_worker, "duplicates_csv", _reached)
+    key = await mint(
+        db_session, views="read", data="read",
+        resources={"views": ["v_a_ws"], "dataSources": ["ds_a2"]},
+    )
+    duplicates = "/api/v1/ws_a/graph/bootstrap/duplicates?format=csv&dataSourceId="
+    through_the_view = await client.get(f"{duplicates}ds_a&viewId=v_a_ws", headers=key.headers)
+    assert through_the_view.status_code == 403, through_the_view.text
+    named = await client.get(f"{duplicates}ds_a2", headers=key.headers)
+    assert named.status_code == 418, named.text
+
+
+@pytest.mark.parametrize("route", ["search/advanced", "search/explain"])
+async def test_a_search_is_held_to_a_view_the_caller_can_read(client, db_session, route):
+    """A search names its view in the body. The gate checked the workspace and
+    the data source; the view is held to the caller here — a key on a data
+    source does not search inside someone else's private view, and is told
+    it does not exist."""
+    from backend.app.api.v1.endpoints import graph as graph_endpoints
+    from backend.app.main import app
+
+    class _Engine:
+        provider = object()
+        _db_session = db_session
+
+    app.dependency_overrides[graph_endpoints.get_context_engine] = lambda: _Engine()
+    key = await mint(db_session, data="read", resources={"dataSources": ["ds_a"]})
+    body = {
+        "predicate": {"kind": "text", "value": "orders"},
+        "scope": {"viewId": "v_a_theirs", "scopeMode": "view"},
+    }
+    response = await client.post(
+        f"/api/v1/ws_a/graph/{route}?dataSourceId=ds_a", json=body, headers=key.headers,
+    )
+    assert response.status_code == 404, response.text
+
+
 async def test_a_graph_is_held_to_the_key_by_its_data_source(client, db_session):
     key = await mint(db_session, data="read", resources={"dataSources": ["ds_a"]})
     mine = await client.get("/api/v1/ws_a/versioning/graphs/g_a", headers=key.headers)
@@ -512,7 +635,8 @@ async def test_a_forks_pull_request_needs_the_parents_data_source_too(client, db
     assert refused.status_code == 403 and error(refused) == "api_key_out_of_scope"
 
     both = await mint(db_session, data="write", resources={"dataSources": ["ds_a", "ds_a2"]})
-    assert (await client.post(pulls, json={}, headers=both.headers)).status_code == 418
+    reply = await client.post(pulls, json={}, headers=both.headers)
+    assert reply.status_code == 418
 
 
 async def test_a_draft_is_reached_through_its_own_graph_only(client, db_session):

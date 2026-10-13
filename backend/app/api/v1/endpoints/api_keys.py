@@ -111,6 +111,8 @@ SSO_ROUND_TRIP_FLAG = "apiKeySsoRoundTripStepUp"
 #: How long a gateway may take to say whether a company session is live
 #: before a step-up is answered "try again", and how soon to.
 _GATEWAY_RETRY_SECONDS = 30
+#: How far ahead of this server's clock a provider's may be.
+_CLOCK_SKEW_SECONDS = 60
 _STEP_UP_SCOPE = "stepup"
 _STEP_UP_NEXT = "/me/api-keys"
 _MAX_IDS = 100
@@ -355,9 +357,12 @@ class SelfDescription(_Model):
     prefix: str
     kind: str
     status: str
-    user_id: str = Field(alias="userId")
-    permissions: dict
-    resources: Union[Literal["all"], dict]
+    #: Whose it is and what it reaches — for a key that works. One that is
+    #: paused or expired says only what it is and why it stopped: it may be
+    #: in hands it was never meant for.
+    user_id: Optional[str] = Field(None, alias="userId")
+    permissions: Optional[dict] = None
+    resources: Optional[Union[Literal["all"], dict]] = None
     expires_at: Optional[str] = Field(None, alias="expiresAt")
     created_at: str = Field(alias="createdAt")
 
@@ -545,8 +550,7 @@ def _fresh(payload: dict, *, proven: bool = False) -> bool:
     """The session authenticated at its identity provider within the
     step-up window — and, with ``proven``, the provider itself asserted when
     (``AUTH_TIME_PROVEN_CLAIM``), rather than the sign-in standing in for it."""
-    auth_time = payload.get(AUTH_TIME_CLAIM)
-    if not isinstance(auth_time, (int, float)) or time.time() - auth_time > STEP_UP_SECONDS:
+    if not _within_step_up_window(payload.get(AUTH_TIME_CLAIM)):
         return False
     return not proven or payload.get(AUTH_TIME_PROVEN_CLAIM) is True
 
@@ -555,8 +559,16 @@ def _vouched_recently(payload: dict) -> bool:
     """The session's provider vouched for it within the step-up window
     (``IDP_VOUCHED_AT_CLAIM``): for a gateway the browser talks to, a sign-in
     through it — the gateway's own answer, minutes ago."""
-    vouched_at = payload.get(IDP_VOUCHED_AT_CLAIM)
-    return isinstance(vouched_at, int) and time.time() - vouched_at <= STEP_UP_SECONDS
+    return _within_step_up_window(payload.get(IDP_VOUCHED_AT_CLAIM))
+
+
+def _within_step_up_window(instant) -> bool:
+    """``instant`` (epoch seconds) is in the last ``STEP_UP_SECONDS`` — and
+    not ahead of now by more than a minute of clock skew: a time in the
+    future says nothing about the last few minutes."""
+    if not isinstance(instant, (int, float)):
+        return False
+    return -_CLOCK_SKEW_SECONDS <= time.time() - instant <= STEP_UP_SECONDS
 
 
 _UNAVAILABLE = (
@@ -799,7 +811,10 @@ def _checked_expiry(
         expires = cap
     # Stored in UTC whatever offset it was given in: expiries are compared as
     # text, and only one offset compares correctly.
-    return expires.astimezone(timezone.utc).isoformat()
+    try:
+        return expires.astimezone(timezone.utc).isoformat()
+    except OverflowError:
+        raise _invalid("The expiry date is too far in the future.") from None
 
 
 def _checked_cidrs(cidrs: List[str]) -> list[str]:
@@ -822,6 +837,8 @@ async def _validated_draft(
     """The permissions, resources, expiry and networks a key described by
     ``body`` would have — or the 422 saying why it can't. Shared by create
     and preview, so a preview never says yes to what create refuses."""
+    if not body.name.strip():
+        raise _invalid("A key needs a name.")
     owner = await permission_service.resolve(session, user.id, sid="")
     permissions = _checked_permissions(body.permissions)
     resources = await _checked_resources(session, user, owner, body.resources)
@@ -830,12 +847,12 @@ async def _validated_draft(
     return permissions, resources, expires_at, cidrs
 
 
-def _too_many() -> HTTPException:
+def _too_many(hint: str = "Revoke one you no longer use.") -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
             "error": "too_many_api_keys",
-            "message": f"You can have {MAX_ACTIVE_KEYS} active keys. Revoke one you no longer use.",
+            "message": f"You can have {MAX_ACTIVE_KEYS} active keys. {hint}",
         },
     )
 
@@ -1323,11 +1340,17 @@ async def rotate_my_api_key(
     await _replaceable()
     old_expiry = api_keys.effective_expiry(old, max_lifetime_days=policy.max_lifetime_days)
     renewing = old_expiry is not None and old_expiry <= _now()
-    if renewing and await api_key_repo.count_active_for_user(
+    grace = 0 if renewing else body.grace_seconds
+    # A renewal adds a live key, and so does keeping the old one working
+    # beside its replacement; only a rotation that ends the old key at once
+    # leaves the count where it was.
+    if (renewing or grace) and await api_key_repo.count_active_for_user(
         session, user.id, max_lifetime_days=policy.max_lifetime_days,
     ) >= MAX_ACTIVE_KEYS:
-        raise _too_many()
-    grace = 0 if renewing else body.grace_seconds
+        raise _too_many(
+            "Revoke one you no longer use." if renewing else
+            "Rotate without a grace period, or revoke one you no longer use."
+        )
     created = api_keys.parse_instant(old.created_at)
     stored_expiry = api_keys.parse_instant(old.expires_at)
     expires_at = _checked_expiry(
@@ -1407,16 +1430,18 @@ async def describe_this_key(
     """The key making this request: what it may do, until when, and whether
     it is working — answered even when it is paused or expired."""
     context, key = await _this_key(request, session)
+    reach = dict(
+        user_id=key.user_id,
+        permissions=api_key_repo.loads(key.permissions, {}),
+        resources=api_key_repo.loads(key.resources, {}),
+    ) if context.active else {}
     return SelfDescription(
         id=key.id, name=key.name, prefix=key.token_prefix, kind=key.kind,
         status=(
             "active" if context.active
             else _STATUS_BY_REFUSAL.get(context.status, context.status)
         ),
-        user_id=key.user_id,
-        permissions=api_key_repo.loads(key.permissions, {}),
-        resources=api_key_repo.loads(key.resources, {}),
-        expires_at=context.expires_at, created_at=key.created_at,
+        expires_at=context.expires_at, created_at=key.created_at, **reach,
     )
 
 
@@ -1591,7 +1616,9 @@ async def export_api_keys(
 
     async def stream():
         out = io.StringIO()
-        writer = csv.writer(out)
+        # Every cell quoted: a spreadsheet splitting on ``;`` would otherwise
+        # cut an unquoted name in two, past ``_cell``'s reach.
+        writer = csv.writer(out, quoting=csv.QUOTE_ALL)
         writer.writerow(_CSV_COLUMNS)
         yield out.getvalue()
         # Held while the rows stream, and released when the stream ends or the

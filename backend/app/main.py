@@ -1796,7 +1796,7 @@ async def lifespan(_app: FastAPI):
             try:
                 await _key_hk_task
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # cancelled on purpose, past its grace: shutting down regardless
 
     # Stop the product-event sweeper before DB pool teardown, same shape.
     _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
@@ -1874,7 +1874,7 @@ async def lifespan(_app: FastAPI):
             try:
                 await _usage_task
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # cancelled on purpose, past its grace: the final flush follows
     try:
         from .services.api_key_usage import recorder as _usage_recorder
         await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)

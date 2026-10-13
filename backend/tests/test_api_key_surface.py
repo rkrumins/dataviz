@@ -261,6 +261,24 @@ async def test_a_view_never_opens_a_route_naming_its_data_source_in_the_path(mon
     assert len(checked) >= 10, checked
 
 
+def test_a_data_source_permission_is_checked_in_the_paths_workspace():
+    """A key on part of a workspace holds a data-source permission there only
+    for the sources it selects itself (``_key_holds_the_named_source``) —
+    a check ``requires`` makes in the workspace the path names. A route that
+    takes ``dataSourceId`` and checks such a permission any other way would
+    let a view stand in for its source."""
+    loose = sorted(
+        f"{method} {path}"
+        for method, path, _r, dependant, _rule in _eligible()
+        if "dataSourceId" in _query_names(dependant)
+        for call in _calls(dependant)
+        if (getattr(call, "required_permission", None) or "").startswith("workspace:datasource:")
+        and not getattr(call, "accepts_view_capability", False)
+        and (getattr(call, "workspace_any", False) or not getattr(call, "workspace_param", None))
+    )
+    assert not loose, loose
+
+
 # ── The reviewed snapshot ───────────────────────────────────────────
 
 

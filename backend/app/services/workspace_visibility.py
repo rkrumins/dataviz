@@ -107,6 +107,20 @@ def _in_reach(stmt, claims: PermissionClaims):
     return stmt if clause is None else stmt.where(clause)
 
 
+async def key_data_source_ids(
+    session: AsyncSession, claims: PermissionClaims,
+) -> Optional[set[str]]:
+    """The data sources an API key limited to a selection covers
+    (``_key_sources``); ``None`` for every other caller, who sees a
+    workspace's sources whole."""
+    clause = _key_sources(claims)
+    if clause is None:
+        return None
+    return set((await session.execute(
+        select(WorkspaceDataSourceORM.id).where(clause)
+    )).scalars())
+
+
 def _parse_permitted(raw: Optional[str]) -> list[str]:
     """Defensive JSON parse for the ``permitted_workspaces`` column.
     Empty/malformed values mean "no overrides" — return an empty list."""

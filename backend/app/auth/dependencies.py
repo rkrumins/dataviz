@@ -695,6 +695,28 @@ async def _audit_access_denied(
         )
 
 
+def _key_holds_the_named_source(
+    request: Request, claims: PermissionClaims, workspace_id: str,
+) -> bool:
+    """For an API key on part of a workspace, a data-source permission there
+    is held for the data sources it selects, and the request must name one
+    of those if it names any. Its claims carry the permission for the whole
+    workspace as soon as it selects one source in it, so without this a
+    route its holders need membership of would answer for a sibling source
+    the key reaches only through a view (a view's own data is the
+    capability gate's to open, read-only). A request that names no source
+    is held by its resolver (``graph_in_workspace``, …)."""
+    key = claims.key_scope
+    if key is None or key.selects_workspace(workspace_id):
+        return True
+    named = (
+        request.path_params.get("ds_id")
+        or request.path_params.get("data_source_id")
+        or request.query_params.get("dataSourceId")
+    )
+    return named is None or key.selects_data_source(named, workspace_id)
+
+
 def requires(
     permission: str,
     *,
@@ -783,6 +805,8 @@ def requires(
             allowed = has_permission_any_workspace(claims, permission)
         else:
             allowed = has_permission(claims, permission, workspace_id=workspace_id)
+        if allowed and workspace_id is not None and permission.startswith("workspace:datasource:"):
+            allowed = _key_holds_the_named_source(request, claims, workspace_id)
 
         # A denial reached by consulting a workspace map that nothing could
         # populate is not a denial — it is an unanswered question, and 403
