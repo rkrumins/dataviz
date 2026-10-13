@@ -66,8 +66,8 @@ interface ExplorerPreviewDrawerProps {
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   /** Open directly in details-edit mode (used when the pencil is clicked). */
   initialEditMode?: boolean
-  /** Called after a successful details save so the host can refetch. */
-  onSaved?: () => void
+  /** Called with the saved view after a successful details save, so the host can show it. */
+  onSaved?: (updated: View) => void
   /** A person in the Contributors line was clicked: filter to them. */
   onPickPerson?: (userId: string) => void
 }

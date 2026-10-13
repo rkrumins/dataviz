@@ -1206,16 +1206,21 @@ function ViewWizardBody({
     // Hydrate form from view in edit mode. normalizeReferenceLayout up-converts
     // legacy per-layer entityAssignments/rules into the flattened assignments
     // map, so canvas-created layer placements (canonical or legacy) become
-    // visible in the wizard here.
+    // visible in the wizard here. A refetch of the view hydrates it again only
+    // while the form is untouched: one landing after the user's edits (a save's
+    // own write triggers one) must not reset them.
+    const hydratedRef = useRef(false)
+    const formEditedRef = useRef(false)
     useEffect(() => {
-        if (mode === 'edit' && editingView) {
+        if (mode === 'edit' && editingView && !(hydratedRef.current && formEditedRef.current)) {
+            hydratedRef.current = true
             const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
                 icon: editingView.icon ?? 'Layout',
                 visibility: (editingView as any).visibility ?? (editingView.isPublic ? 'enterprise' : 'private'),
-                tags: (editingView as any).tags ?? [],
+                tags: editingView.tags ?? [],
                 dataSourceId: editingView.dataSourceId ?? undefined,
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                 layers,
@@ -1723,7 +1728,9 @@ function ViewWizardBody({
                     // permission files a request rather than attempting a
                     // transition the server will refuse.
                     visibility: wantsPublication ? undefined : formData.visibility,
-                    tags: formData.tags.length > 0 ? formData.tags : undefined,
+                    // The whole list, empty included: it replaces the view's tags, and
+                    // leaving it out (as an empty list used to be) keeps them.
+                    tags: formData.tags,
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {
@@ -1791,6 +1798,7 @@ function ViewWizardBody({
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()
+        formEditedRef.current = true
         setFormData(prev => ({ ...prev, ...updates }))
     }, [markDirty])
 

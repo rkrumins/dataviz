@@ -67,7 +67,7 @@ vi.mock('@/store/workspaces', () => {
 // hydrate that resolves before this fires is never clobbered.
 vi.mock('../steps/BasicsStep', () => ({
   BasicsStep: ({ formData, updateFormData }: {
-    formData: { name: string }
+    formData: { name: string; tags: string[] }
     updateFormData: (updates: Record<string, unknown>) => void
   }) => {
     const formDataRef = useRef(formData)
@@ -80,7 +80,12 @@ vi.mock('../steps/BasicsStep', () => ({
       }, 0)
       return () => clearTimeout(t)
     }, [])
-    return <div data-testid="basics-step" />
+    return (
+      <div data-testid="basics-step">
+        <span data-testid="basics-tags">{formData.tags.join(',')}</span>
+        <button onClick={() => updateFormData({ tags: [] })}>stub-clear-tags</button>
+      </div>
+    )
   },
 }))
 // The real step pins entityScope when a rule-driven Quick Start is applied; the
@@ -302,6 +307,68 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument()
+  })
+})
+
+describe('ViewWizard — tags and description (edit path)', () => {
+  // The wizard read a view's tags off a converted copy that had none, so it opened every view
+  // with no tags; saved only a non-empty list, so a cleared one stayed; and never sent the
+  // description at all.
+  const tagged = () => ({
+    ...makeView(baseConfig({ layers: [], assignments: {} })),
+    description: 'Quarterly numbers',
+    tags: ['finance', 'pii'],
+  })
+
+  it('opens with the view\'s tags and saves them back with its description', async () => {
+    renderWizard(tagged())
+
+    await waitFor(() => expect(screen.getByTestId('basics-tags').textContent).toBe('finance,pii'))
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    expect(updateViewMock.mock.calls[0][1]).toMatchObject({
+      tags: ['finance', 'pii'], description: 'Quarterly numbers',
+    })
+  })
+
+  it('saves a cleared list as empty, not as no change', async () => {
+    renderWizard(tagged())
+
+    await waitFor(() => expect(screen.getByTestId('basics-tags').textContent).toBe('finance,pii'))
+    fireEvent.click(screen.getByRole('button', { name: 'stub-clear-tags' }))
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    expect(updateViewMock.mock.calls[0][1].tags).toEqual([])
+  })
+
+  it('keeps an edit when a refetch of the view lands after it', async () => {
+    // A save refreshes every copy of the view, the wizard's own included, before the
+    // wizard has closed: that refetch must not put back what the user just changed.
+    getViewMock.mockResolvedValue(tagged())
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard mode="edit" viewId="v1" isOpen onClose={vi.fn()} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(screen.getByTestId('basics-tags').textContent).toBe('finance,pii'))
+    fireEvent.click(screen.getByRole('button', { name: 'stub-clear-tags' }))
+    getViewMock.mockResolvedValue({ ...tagged(), tags: ['refetched'] })
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: ['view', 'v1'] })
+      // The query tells its observers a tick after the fetch settles.
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    expect(qc.getQueryData<View>(['view', 'v1'])?.tags).toEqual(['refetched'])
+    expect(screen.getByTestId('basics-tags').textContent).toBe('')
   })
 })
 

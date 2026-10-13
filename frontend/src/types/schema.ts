@@ -156,6 +156,8 @@ export interface ViewConfiguration {
   name: string;
   description?: string;
   icon?: string;
+  /** Optional because store-cached configs may predate the field. */
+  tags?: string[];
 
   /**
    * Scope key for per-datasource isolation.

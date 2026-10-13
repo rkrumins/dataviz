@@ -104,6 +104,13 @@ creates, renames, reorders (`PUT /order`) and deletes the caller's own saved fil
 - **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
 - **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
   a narrower created date instead of combining with it.
+- **A view's tags are the same wherever you look.** The view wizard opened every view with no tags,
+  so tags added in the Explorer were missing there, and a tag added in the wizard replaced all of
+  them; tags couldn't be cleared from the wizard, and a description changed there was never saved.
+  The Explorer's and the workspace tab's preview, the view page, the canvas and the wizard each kept
+  their own copy of a view, so a change made in one reached the others only after a reload. A save
+  now refreshes them all, and the preview shows what it saved straight away. Emptying the
+  description in the preview's **Edit details** now clears it.
 
 ### Upgrading
 

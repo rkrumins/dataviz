@@ -612,10 +612,23 @@ export async function getWorkspaceViewActivity(
 
 /** Update an existing view */
 export async function updateView(viewId: string, data: ViewUpdateRequest): Promise<View> {
-    return apiFetch<View>(`/api/v1/views/${viewId}`, {
+    const view = await apiFetch<View>(`/api/v1/views/${viewId}`, {
         method: 'PUT',
         body: JSON.stringify(data),
     })
+    // Every editor of a view's name, description and tags saves through here: the Explorer's
+    // and the workspace tab's drawer, the view page, the canvas and the wizard. So every copy
+    // of the view is refreshed here, and each of them shows what the last one saved. The keys
+    // are spelled out because the hooks that own them import this module: the view and each
+    // draft's read of it (useViewMetadata), the lists, their counts and facets, and its
+    // versions and activity (a new label is a change since the latest version).
+    void queryClient.invalidateQueries({ queryKey: ['view', viewId] })
+    void queryClient.invalidateQueries({ queryKey: ['views'] })
+    void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
+    void queryClient.invalidateQueries({ queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, viewId] })
+    void queryClient.invalidateQueries({ queryKey: [VIEW_VERSIONS_QUERY_KEY, viewId] })
+    void queryClient.invalidateQueries({ queryKey: ['view-activity', viewId] })
+    return view
 }
 
 /**
@@ -831,6 +844,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         name: view.name,
         description: view.description,
         icon: cfg.icon ?? 'Layout',
+        tags: view.tags ?? [],
         scopeKey,
         workspaceId: view.workspaceId,
         dataSourceId: view.dataSourceId ?? null,

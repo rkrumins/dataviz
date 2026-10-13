@@ -1026,7 +1026,10 @@ export function ExplorerPage() {
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
         initialEditMode={previewEditMode}
-        onSaved={() => refetch()}
+        // The save refreshed the lists; the drawer holds its own copy of the view.
+        onSaved={updated => setPreviewView(prev => prev && {
+          ...prev, name: updated.name, description: updated.description, tags: updated.tags, visibility: updated.visibility,
+        })}
         onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
       />
       <ExplorerBulkActions
