@@ -58,7 +58,7 @@ import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 import { isInKeyboardScope } from '@/lib/keyboardScope'
 import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
-import { readFilterState, writeFilterState } from '@/features/view-filters/url'
+import { matchesFilterQuery, readFilterState, writeFilterState } from '@/features/view-filters/url'
 import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { ActivityTimeline } from '@/features/view-filters/components/ActivityTimeline'
@@ -70,6 +70,8 @@ import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/peopl
 import { activeDimensions, filterChips } from '@/features/view-filters/dimensions'
 import { searchTextOf } from '@/features/view-filters/tokens'
 import { FilterPalette } from '@/features/view-filters/components/FilterPalette'
+import { SavedFilterPills } from '@/features/view-filters/components/SavedFilterPills'
+import { useSavedViewFilters } from '@/features/view-filters/useSavedViewFilters'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { useRelaxations } from '@/features/view-filters/useRelaxations'
 import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
@@ -220,6 +222,22 @@ export function ExplorerPage() {
     latestFilters.current = value
     setSearchParams(prev => writeFilterState(prev, value), { replace: true })
   }, [setSearchParams])
+
+  // A saved filter is its filters plus, when one was chosen, its sort — put on
+  // screen in one write, for the same reason setFilterState composes.
+  const applySavedQuery = useCallback((query: string) => {
+    const saved = new URLSearchParams(query)
+    const value = readFilterState(saved)
+    latestFilters.current = value
+    setSearchParams(prev => {
+      const next = writeFilterState(prev, value)
+      const sort = saved.get('sort')
+      if (sort) next.set('sort', sort)
+      return next
+    }, { replace: true })
+    setSearchInput(value.search)
+  }, [setSearchParams])
+  const { filters: savedFilters } = useSavedViewFilters()
 
   // "Show all views": every filter goes, the person's sort and layout stay —
   // with an Undo, because a carefully built filter set is one click from gone.
@@ -677,6 +695,14 @@ export function ExplorerPage() {
             today={today}
             currentUser={me}
             ctx={resolveCtx}
+            saved={(
+              <SavedFilterPills
+                state={filterState}
+                sort={searchParams.get('sort')}
+                lookups={lookups}
+                onApply={applySavedQuery}
+              />
+            )}
             trailing={(
               <>
                 <button
@@ -1047,6 +1073,10 @@ export function ExplorerPage() {
           onChange={setFilterState}
           ctx={resolveCtx}
           currentUser={me}
+          saved={savedFilters.map(f => ({
+            id: f.id, name: f.name, active: matchesFilterQuery(f.query, filterState),
+            apply: () => applySavedQuery(f.query),
+          }))}
           onClose={() => setPaletteOpen(false)}
         />
       )}

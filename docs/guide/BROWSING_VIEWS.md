@@ -61,6 +61,26 @@ more than one person, tag or source isn't guessed: it stays in the box, with a
 note under it, until you finish it from the suggestions or remove it.
 **Backspace** in an empty search box removes the last chip, with an **Undo**.
 
+### Save a set of filters
+
+Once you have a set of filters you will want again — say *Versioned · Updated
+past 7 days · By Ada Lovelace* — click **Save** after the quick filters at the
+top. The name is filled in from what the filters do; change it if you like,
+then click **Save**. The filter appears as a pill beside the quick filters, and
+one click puts the same filters back. A sort you chose is saved with them.
+
+- A pill is highlighted whenever the filters on screen are that set, however
+  you got there.
+- Its **⋯** menu can **Rename** it, **Save the current filters here** (when
+  you've changed them), **Copy link**, move it left or right, or **Delete** it.
+  A deleted filter comes back with **Undo**.
+- Saved filters belong to your account, so they are there in any browser you
+  sign in from. You can keep up to 30, each with its own name. The first five
+  show as pills; the rest are under **+N**, and all of them are in the filter
+  list (**Shift+F**).
+- A filter on **You** keeps meaning you: it shows your own views, not those of
+  whoever made the filter.
+
 ### Filter by anything from one list
 
 Press **Shift+F**, or click the filter button beside **Sort**, for every filter

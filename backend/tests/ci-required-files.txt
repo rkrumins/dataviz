@@ -140,6 +140,7 @@ tests/test_reconcile_sweeper.py
 tests/test_request_body_limit.py
 tests/test_run_step_ledger.py
 tests/test_s3_object_store.py
+tests/test_saved_view_filters.py
 tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_engine.py

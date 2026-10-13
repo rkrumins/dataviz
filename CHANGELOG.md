@@ -64,6 +64,12 @@ removes the last chip, with an **Undo**. The workspace Views tab takes them too.
 person, tag, source, workspace, type, date period and visibility — with live counts and a check by
 those already on. **Ctrl/⌘+Enter** picks several in a row.
 
+**Saved filters.** Save any set of filters (and the sort, if you chose one) under a name filled in
+from what it does — *Versioned · Updated past 7 days · By Ada Lovelace* — and it becomes a pill beside
+the Explorer's quick filters: one click puts it back, and the pill lights up whenever its filters
+are on screen. Rename it, point it at the current filters, copy its link, reorder it or delete it
+(with an **Undo**) from its **⋯** menu. Saved filters belong to your account, up to 30 each.
+
 **Since your last visit.** Back after half an hour or more, the Explorer and each workspace's Views
 tab say how many views are new or updated since you were last there, counted with your filters;
 click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
@@ -75,7 +81,8 @@ API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`,
 applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
 `GET /views/count` returns how many views a filter set leaves; `GET /views/histogram` counts views
 created or updated per hour (or ten minutes) over a window, with the same filters. Views carry
-`createdByAvatarId`, `updatedByAvatarId` and `dataUpdatedByAvatarId`.
+`createdByAvatarId`, `updatedByAvatarId` and `dataUpdatedByAvatarId`. `/views/saved-filters` lists,
+creates, renames, reorders (`PUT /order`) and deletes the caller's own saved filters.
 
 ### Changed
 
@@ -97,6 +104,11 @@ created or updated per hour (or ten minutes) over a window, with the same filter
 - **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
 - **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
   a narrower created date instead of combining with it.
+
+### Upgrading
+
+- One migration, `20261013_0116_saved_filters`, adds the `saved_view_filters` table. It only adds;
+  run it with the usual `alembic upgrade head`.
 
 ### Known limitations
 

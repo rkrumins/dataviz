@@ -216,3 +216,37 @@ export function activeDimensions(
 export function clearDimensions(s: ViewFilterState, keep: readonly DimensionKey[] = []): ViewFilterState {
   return DIMENSIONS.filter(d => !keep.includes(d.key)).reduce((acc, d) => d.clear(acc), s)
 }
+
+/** "past 7 days" after a word such as "Updated"; a month or a date keeps its capital. */
+function midSentence(period: string): string {
+  return /^(Past|Today|Yesterday|This|Last|Since|Until)\b/.test(period)
+    ? period[0].toLowerCase() + period.slice(1)
+    : period
+}
+
+/** Longer than this and a pill stops being a pill. */
+const MAX_NAME = 60
+
+/**
+ * A name for a saved filter, from what it filters — "Versioned · Updated past 7
+ * days · By Ada Lovelace" — so saving takes one click and the name says what the
+ * filter does.
+ */
+export function suggestFilterName(s: ViewFilterState, l: FilterLookups): string {
+  const parts = DIMENSIONS.filter(d => d.isActive(s)).map(d => {
+    switch (d.key) {
+      case 'search': return `"${s.search.trim()}"`
+      case 'category': return d.summary(s, l)
+      case 'sourceKind': return SOURCE_KIND_LABELS[s.sourceKind ?? 'versioned']
+      case 'created': return `Created ${midSentence(describeRule(s.created ?? '', l.today))}`
+      case 'updated': return `Updated ${midSentence(describeRule(s.updated ?? '', l.today))}`
+      case 'people': {
+        const names = list(s.contributorIds.map(id => personLabel(id, l))).replace(/\bYou\b/, 'you')
+        return `${s.contributorRole ? ROLE_PREFIX[s.contributorRole] : 'By'} ${names}`
+      }
+      default: return d.chips(s, l).map(c => c.value).join(', ')
+    }
+  })
+  const name = parts.join(' · ') || 'All views'
+  return name.length > MAX_NAME ? `${name.slice(0, MAX_NAME - 1)}…` : name
+}

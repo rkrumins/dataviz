@@ -76,6 +76,12 @@ export function writeFilterState(prev: URLSearchParams, state: ViewFilterState):
  * filter knows it is the one on screen. `sort` rides along when given, because a
  * saved filter restores the order too.
  */
+/** Whether a stored query selects the same views as `state` — compared in
+ *  canonical form, so how a link happened to spell it doesn't matter. */
+export function matchesFilterQuery(query: string, state: ViewFilterState): boolean {
+  return canonicalFilterQuery(readFilterState(new URLSearchParams(query))) === canonicalFilterQuery(state)
+}
+
 export function canonicalFilterQuery(state: ViewFilterState, extra: { sort?: string | null } = {}): string {
   const sp = new URLSearchParams()
   const full = { ...EMPTY_FILTERS, ...state }

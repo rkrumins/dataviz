@@ -1449,6 +1449,39 @@ class ViewHistogramResponse(BaseModel):
     buckets: List[ViewHistogramBucket]
 
 
+class SavedViewFilterResponse(BaseModel):
+    """A person's saved Explorer filter set (``/views/saved-filters``).
+
+    ``query`` is the Explorer's address query (no leading ``?``), as saved;
+    empty means all views. ``position`` orders the person's list from 0.
+    """
+    id: str
+    name: str
+    query: str
+    position: int
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class SavedViewFilterCreateRequest(BaseModel):
+    name: str
+    query: str
+
+
+class SavedViewFilterUpdateRequest(BaseModel):
+    """Either or both; a field left out keeps its value."""
+    name: Optional[str] = None
+    query: Optional[str] = None
+
+
+class SavedViewFilterOrderRequest(BaseModel):
+    """Every one of the caller's saved filter ids, once each, in the new order."""
+    ids: List[str]
+
+
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 

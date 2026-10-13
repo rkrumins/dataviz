@@ -63,6 +63,8 @@ interface ExplorerFilterBarProps {
   ctx: ResolveContext
   /** The page's own controls (sort, layout), at the end of the first row. */
   trailing?: React.ReactNode
+  /** The person's saved filters, after the built-in quick filters. */
+  saved?: React.ReactNode
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,7 +103,7 @@ interface SourceRow {
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
-export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, trailing }: ExplorerFilterBarProps) {
+export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, trailing, saved }: ExplorerFilterBarProps) {
   const { workspaceIds, dataSourceId, viewTypes, tags, category, visibility } = state
   const set = (patch: Partial<ViewFilterState>) => onChange({ ...state, ...patch })
 
@@ -206,6 +208,7 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
             </button>
           )
         })}
+        {saved}
         {trailing && <div className="ml-auto flex items-center gap-1.5">{trailing}</div>}
       </div>
 
