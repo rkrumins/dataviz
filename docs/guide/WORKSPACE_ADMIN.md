@@ -319,8 +319,10 @@ moved in, and version control turned on.
 1. Open the workspace and select the **Activity** tab.
 2. Choose a range, and a lens: **Everything**, **Operations**, **Access** or
    **Data**.
-3. Narrow it down by person — as the one who **Did it** or **Had it done to
-   them** — by action, by outcome, or to the changes that came with a reason.
+3. Narrow it down by person — whether they **Did it**, it was **Done to
+   them**, or **Either way** — by action, by outcome, or to the changes that
+   came with a reason. To look closer at a stretch of time, drag across
+   **What happened, by kind**; **Back** retraces the zoom.
 4. Read the band at the top: how busy the workspace has been against the
    period before, which data sources people operate by hand most and how
    often, who is most active, and the reasons people give.
