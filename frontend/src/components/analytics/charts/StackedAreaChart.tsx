@@ -94,15 +94,23 @@ export function StackedAreaChart({
     const theme = useChartTheme()
     const clipId = useId()
     const [wrapRef, width] = useChartWidth()
-    const [hover, setHover] = useState<number | null>(null)
     const svgRef = useRef<SVGSVGElement>(null)
+    // Hover and drag are bucket indexes, so each holds only for the buckets it
+    // was taken on. A zoom redraws the chart under a pointer that has not
+    // moved, and a refetch can land mid-drag: read against new buckets, an
+    // index names another day, or none at all.
+    const shape = `${buckets.length}:${buckets[0]}:${buckets[buckets.length - 1]}`
+    const [hoverAt, setHoverAt] = useState<{ shape: string; i: number } | null>(null)
+    const hover = hoverAt?.shape === shape ? hoverAt.i : null
+    const setHover = (i: number | null) => setHoverAt(i === null ? null : { shape, i })
     // The bucket the drag started on, and the one under the pointer now.
-    const [drag, setDrag] = useState<{ from: number; to: number } | null>(null)
+    const [dragAt, setDragAt] = useState<{ shape: string; from: number; to: number } | null>(null)
+    const drag = dragAt?.shape === shape ? dragAt : null
 
     // Esc lets go of a drag without picking anything.
     useEffect(() => {
         if (!drag) return
-        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrag(null) }
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDragAt(null) }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
     }, [drag])
@@ -199,21 +207,21 @@ export function StackedAreaChart({
         onPointerDown: (e: React.PointerEvent<SVGSVGElement>) => {
             if (e.button !== 0) return
             const i = indexAt(e.clientX)
-            setDrag({ from: i, to: i })
+            setDragAt({ shape, from: i, to: i })
             e.currentTarget.setPointerCapture?.(e.pointerId)
         },
         onPointerMove: (e: React.PointerEvent<SVGSVGElement>) => {
             if (!drag) return
             const i = indexAt(e.clientX)
             setHover(i)
-            setDrag((d) => (d && d.to !== i ? { ...d, to: i } : d))
+            setDragAt((d) => (d && d.shape === shape && d.to !== i ? { ...d, to: i } : d))
         },
         onPointerUp: () => {
             if (!span) return
-            setDrag(null)
+            setDragAt(null)
             onSelectSpan!(span.lo, span.hi)
         },
-        onPointerCancel: () => setDrag(null),
+        onPointerCancel: () => setDragAt(null),
     } : {}
 
     // Axis ticks: at most six, always including both ends.
