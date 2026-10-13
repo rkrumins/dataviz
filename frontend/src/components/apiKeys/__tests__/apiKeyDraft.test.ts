@@ -24,9 +24,9 @@ describe('a parked draft', () => {
 
     it('is versioned, and a version this code does not read starts fresh', () => {
         parkDraft(draft(), T0)
-        const raw = JSON.parse(sessionStorage.getItem('nx-api-key-draft')!)
-        expect(raw.v).toBe(2)
-        sessionStorage.setItem('nx-api-key-draft', JSON.stringify({ ...raw, v: 1 }))
+        expect(JSON.parse(sessionStorage.getItem('nx-api-key-draft')!).v).toBe(2)
+        // What an older build parked: the same draft, an older version.
+        sessionStorage.setItem('nx-api-key-draft', JSON.stringify({ ...draft(), v: 1, savedAt: T0 }))
         expect(peekDraft(T0)).toBeNull()
     })
 

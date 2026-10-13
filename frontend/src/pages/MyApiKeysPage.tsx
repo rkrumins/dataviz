@@ -28,7 +28,7 @@ import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
 import { STEP_UP_UNAVAILABLE } from '@/components/apiKeys/StepUpField'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
-import { expiryCountdown, isLive, isRenewable, sitePath, stillCalled } from '@/components/apiKeys/apiKeyFormat'
+import { expiryCountdown, isLive, isRenewable, siteUrl, stillCalled } from '@/components/apiKeys/apiKeyFormat'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
 import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -113,6 +113,8 @@ function ApiKeysContent() {
     const rotateKey = rotating ? keys?.find((k) => k.id === rotating.keyId) : undefined
 
     const openRotate = (key: ApiKey) => setRotating({ keyId: key.id, resumed: null })
+    // Where "Sign in to resume" goes: the server's sign-in URL, while it stays on this site.
+    const resumeUrl = siteUrl(options?.ssoSignInUrl)
 
     // What needs doing, most pressing first: keys that do not work until you
     // sign in, an expired key whose callers are failing now, then a key about
@@ -124,8 +126,8 @@ function ApiKeysContent() {
             tone: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
             title: paused.length === 1 ? `“${paused[0].name}” is paused` : `${paused.length} of your keys are paused`,
             body: `Paused until you sign in through ${provider} again — nothing was revoked. Keys that act as you pause after ${options?.policy.ssoSignInWindowDays ? `${options.policy.ssoSignInWindowDays} days` : 'a while'} without a sign-in there.`,
-            action: sitePath(options?.ssoSignInUrl) ? (
-                <a href={sitePath(options?.ssoSignInUrl)!} className={ACTION}>
+            action: resumeUrl ? (
+                <a href={resumeUrl} className={ACTION}>
                     <LogIn className="w-3.5 h-3.5" aria-hidden /> Sign in to resume
                 </a>
             ) : undefined,
@@ -288,7 +290,7 @@ function ApiKeysContent() {
                                     <KeyCard
                                         key={key.id}
                                         apiKey={key}
-                                        resume={{ url: options?.ssoSignInUrl ?? null, provider }}
+                                        resume={{ url: resumeUrl, provider }}
                                         onOpen={() => setDrawerKey(key)}
                                         onRotate={mintable ? () => openRotate(key) : undefined}
                                         onEdit={() => setEditing(key)}
@@ -383,7 +385,7 @@ function ApiKeysContent() {
                     <DrawerActions
                         key={drawerKey.id}
                         apiKey={drawerKey}
-                        resumeUrl={drawerKey.status === 'paused' ? options?.ssoSignInUrl ?? null : null}
+                        resumeUrl={drawerKey.status === 'paused' ? resumeUrl : null}
                         onRotate={mintable && (isLive(drawerKey) || isRenewable(drawerKey)) ? () => openRotate(drawerKey) : undefined}
                         onEdit={drawerKey.status !== 'revoked' ? () => setEditing(drawerKey) : undefined}
                         onRevoke={isLive(drawerKey) ? () => void revoke(drawerKey) : undefined}

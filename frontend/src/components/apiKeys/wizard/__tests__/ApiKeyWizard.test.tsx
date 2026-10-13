@@ -229,7 +229,7 @@ describe('confirming it is you', () => {
         expect(screen.queryByLabelText('Your password')).not.toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
 
-        await waitFor(() => expect(window.location.href).toBe('/api/v1/auth/corp/login?next=/me/api-keys&force=1'))
+        await waitFor(() => expect(window.location.href).toBe('http://localhost/api/v1/auth/corp/login?next=/me/api-keys&force=1'))
         const parked = JSON.parse(sessionStorage.getItem('nx-api-key-draft')!)
         expect(parked).toMatchObject({ v: 2, mode: 'create', step: 'review', name: 'from sso', resourceMode: 'all', preset: 'custom' })
         expect(JSON.stringify(parked)).not.toMatch(/password|token/i)

@@ -19,7 +19,6 @@ later revocation of them.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,8 +31,6 @@ from backend.app.db.repositories import api_key_repo, notification_repo, outbox_
 from backend.app.services import permission_service
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.revocation_service import get_revocation_service
-
-logger = logging.getLogger(__name__)
 
 CLAIMS_TTL_SECONDS = 30
 #: Bounds memory by keys in use. Expired entries go first; cleared wholesale

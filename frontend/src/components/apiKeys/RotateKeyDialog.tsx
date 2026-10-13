@@ -36,7 +36,7 @@ import { ExpiryPicker } from './ExpiryPicker'
 import { KeyDialog } from './KeyDialog'
 import { RevealPanel } from './RevealPanel'
 import { StepUpField } from './StepUpField'
-import { customDateProblem, expiryFields, formatWhen, isRenewable, sitePath, type ExpiryChoice } from './apiKeyFormat'
+import { customDateProblem, expiryFields, formatWhen, isRenewable, siteUrl, type ExpiryChoice } from './apiKeyFormat'
 import { freshDraft, parkDraft, type ApiKeyDraft, type Grace } from './apiKeyDraft'
 
 const GRACE: { value: Grace; label: string; sub: string; icon: typeof Zap }[] = [
@@ -116,7 +116,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
             setCreated(result)
         } catch (err) {
             const signIn = err instanceof ApiKeyError && err.code === 'step_up_required' && err.method === 'sso'
-                ? sitePath(err.loginUrl) : null
+                ? siteUrl(err.loginUrl) : null
             if (signIn) {
                 parkDraft({
                     ...freshDraft(options, apiKey, renew ? 'renew' : 'rotate'),

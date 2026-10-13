@@ -136,13 +136,13 @@ describe('what needs doing first', () => {
         render(<MyApiKeysPage />)
         const banner = (await screen.findByText(/“nightly sync” is paused/i)).closest('li') as HTMLElement
         expect(within(banner).getByRole('link', { name: /sign in to resume/i }))
-            .toHaveAttribute('href', '/api/v1/auth/corp/login?next=/me/api-keys')
+            .toHaveAttribute('href', `${window.location.origin}/api/v1/auth/corp/login?next=/me/api-keys`)
         expect(banner).toHaveTextContent(/nothing was revoked/i)
         expect(banner).toHaveTextContent(/30 days/)
 
         const card = within(screen.getByRole('region', { name: 'Your keys' })).getByText('nightly sync').closest('li') as HTMLElement
         expect(within(card).getByRole('link', { name: /sign in to resume/i }))
-            .toHaveAttribute('href', '/api/v1/auth/corp/login?next=/me/api-keys')
+            .toHaveAttribute('href', `${window.location.origin}/api/v1/auth/corp/login?next=/me/api-keys`)
         expect(within(card).getByRole('button', { name: /^rotate$/i })).toBeInTheDocument()
         expect(within(card).queryByRole('button', { name: /renew/i })).not.toBeInTheDocument()
         expect(card).toHaveTextContent(/nothing was revoked/i)

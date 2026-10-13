@@ -323,10 +323,19 @@ export function overreach(
 
 // ── Where the server sends you ──────────────────────────────────────
 
-/** A sign-in URL the server handed back, only while it stays on this site:
- *  a path — never a scheme, another origin (`//host`), or a backslash form
- *  a browser reads as one. Anything else is not followed. */
-export function sitePath(url: string | null | undefined): string | null {
-    if (!url || !url.startsWith('/') || url.startsWith('//') || url.includes('\\')) return null
-    return url
+/** A sign-in URL the server handed back, only while it stays on this site.
+ *  Resolved the way the browser will resolve it — which drops tabs and line
+ *  breaks, so `/\t/host` is `//host` — and followed only when it lands on
+ *  this origin: never a scheme of its own, another host, or a backslash form
+ *  a browser reads as one. */
+export function siteUrl(url: string | null | undefined): string | null {
+    if (!url) return null
+    let target: URL
+    try {
+        target = new URL(url, window.location.origin)
+    } catch {
+        return null
+    }
+    const here = window.location
+    return target.origin === here.origin && target.protocol === here.protocol ? target.href : null
 }

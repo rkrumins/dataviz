@@ -21,7 +21,7 @@ import {
     isRenewable,
     overreach,
     parseCidrs,
-    sitePath,
+    siteUrl,
     statusLabel,
     stillCalled,
 } from '../apiKeyFormat'
@@ -179,15 +179,20 @@ describe('asking for more than you have', () => {
     })
 })
 
-describe('sitePath', () => {
+describe('siteUrl', () => {
     it('follows a path on this site, and nothing that leaves it', () => {
-        expect(sitePath('/api/v1/auth/corp/login?next=/me/api-keys&force=1'))
-            .toBe('/api/v1/auth/corp/login?next=/me/api-keys&force=1')
+        const here = window.location.origin
+        expect(siteUrl('/api/v1/auth/corp/login?next=/me/api-keys&force=1'))
+            .toBe(`${here}/api/v1/auth/corp/login?next=/me/api-keys&force=1`)
+        // A path a browser reads as starting with two slashes stays a path here.
+        expect(siteUrl('/.//evil.example')).toBe(`${here}//evil.example`)
         for (const away of [
             'https://evil.example/login', '//evil.example/login', '/\\evil.example',
-            'javascript:alert(1)', '', null, undefined,
+            // Browsers drop tabs and line breaks: these are `//evil.example`.
+            '/\t/evil.example', '/\n/evil.example', '\t//evil.example',
+            'javascript:alert(1)', `blob:${here}/0`, '', null, undefined,
         ]) {
-            expect(sitePath(away)).toBeNull()
+            expect(siteUrl(away)).toBeNull()
         }
     })
 })
