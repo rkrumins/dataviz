@@ -662,9 +662,16 @@ async def test_every_request_a_key_makes_is_counted_by_what_became_of_it(client,
     await client.get("/api/v1/views/v_a_mine", headers={"Authorization": f"Bearer {stranger}"})
     await client.get("/api/v1/views/v_a_ws")
 
+    # A key that has stopped still counts what calls it — how its owner
+    # learns something still depends on it.
+    expired = await mint(db_session, views="read", expires_at=days_ago(1))
+    assert (await client.get("/api/v1/views/v_a_mine", headers=expired.headers)).status_code == 401
+
     today = datetime.now(timezone.utc).date().isoformat()
     # requests, writes, refused, errors
-    assert api_key_usage.recorder._pending == {(key.id, today): [5, 1, 1, 2]}
+    assert api_key_usage.recorder._pending == {
+        (key.id, today): [5, 1, 1, 2], (expired.id, today): [1, 0, 1, 0],
+    }
 
 
 # ── Imports that name a view ────────────────────────────────────────

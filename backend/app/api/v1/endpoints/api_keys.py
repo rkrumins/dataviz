@@ -1040,7 +1040,8 @@ async def list_my_api_keys(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Your keys, newest first: those still in date, and those that ended in
-    the last 90 days — or, with ``history=all``, every one you have had."""
+    the last 90 days — or, with ``history=all``, every one you have had, up
+    to the newest 500."""
     owner, facts = await _owner_and_facts(session, user)
     policy = await _policy(session)
     keys = await api_key_repo.list_for_user(session, user.id, history=history == "all")
