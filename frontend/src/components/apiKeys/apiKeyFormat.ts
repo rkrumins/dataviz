@@ -3,7 +3,7 @@
  * Pure, so the page and the admin inventory say it the same way.
  */
 import type {
-    ApiKey, ApiKeyPermissions, ApiKeyResources, ApiKeyStatus, Level, PickerItem,
+    ApiKey, ApiKeyPermissions, ApiKeyResources, ApiKeyStatus, Level, PickerItem, StepUpReason,
 } from '@/services/apiKeyService'
 
 const LEVEL_WORD: Record<Level, string> = { none: 'no', read: 'read', write: 'read & write' }
@@ -338,4 +338,35 @@ export function siteUrl(url: string | null | undefined): string | null {
     }
     const here = window.location
     return target.origin === here.origin && target.protocol === here.protocol ? target.href : null
+}
+
+/** Why minting is refused when the sign-in cannot be confirmed, by the server's
+ *  reason — shared with the page's banner. */
+export function stepUpUnavailable(reason?: StepUpReason | null): { title: string; body: string } {
+    if (reason === 'system_account') {
+        return {
+            title: 'A break-glass account holds no keys',
+            body: 'This is a break-glass account, kept for when nobody else can sign in, so it can’t have API keys — '
+                + 'any it has don’t work while it is one. Make them from your own account.',
+        }
+    }
+    if (reason === 'idp_unreachable') {
+        return {
+            title: 'Your sign-in provider isn’t answering',
+            body: 'It can’t confirm it’s you while it’s down, so keys can’t be created, rotated or renewed through it. '
+                + 'Try again once it’s back — nothing has changed about the keys you have.',
+        }
+    }
+    if (reason === 'passwords_off') {
+        return {
+            title: 'A password can’t confirm it’s you here',
+            body: 'Password sign-in is switched off, so keys can’t be created, rotated or renewed with a password. '
+                + 'Sign in with single sign-on to manage them.',
+        }
+    }
+    return {
+        title: 'This sign-in can’t confirm it’s you',
+        body: 'Your sign-in provider can’t confirm a fresh sign-in, so keys can’t be created or rotated from this session. '
+            + 'An administrator can allow it under Administration → Features → Authentication.',
+    }
 }

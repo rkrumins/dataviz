@@ -4,7 +4,8 @@
  * A key outlives the session that made it, so creating or rotating one asks
  * for proof of a fresh sign-in: your password, or your identity provider.
  * The provider is a round trip away — the dialog's own button parks what you
- * chose and goes there, and you come back to the step you left. Some
+ * chose and goes there, and you come back to the step you left; an Enterprise
+ * gateway is signed in through again without leaving the page. Some
  * providers cannot prove a sign-in at all; that is said up front, with who
  * can change it, rather than after a form that was always going to be refused.
  */
@@ -12,37 +13,7 @@ import { AlertTriangle, CheckCircle2, Lock, ShieldAlert, ShieldCheck } from 'luc
 
 import { BigInput, FieldLabel, Hint } from '@/components/admin/InviteWizard/ui'
 import type { ApiKeyOptions, StepUpReason } from '@/services/apiKeyService'
-
-/** Why minting is refused when the sign-in cannot be confirmed, by the server's
- *  reason — shared with the page's banner. */
-export function stepUpUnavailable(reason?: StepUpReason | null): { title: string; body: string } {
-    if (reason === 'system_account') {
-        return {
-            title: 'A break-glass account holds no keys',
-            body: 'This is a break-glass account, kept for when nobody else can sign in, so it can’t have API keys — '
-                + 'any it has don’t work while it is one. Make them from your own account.',
-        }
-    }
-    if (reason === 'idp_unreachable') {
-        return {
-            title: 'Your sign-in provider isn’t answering',
-            body: 'It can’t confirm it’s you while it’s down, so keys can’t be created, rotated or renewed through it. '
-                + 'Try again once it’s back — nothing has changed about the keys you have.',
-        }
-    }
-    if (reason === 'passwords_off') {
-        return {
-            title: 'A password can’t confirm it’s you here',
-            body: 'Password sign-in is switched off, so keys can’t be created, rotated or renewed with a password. '
-                + 'Sign in with single sign-on to manage them.',
-        }
-    }
-    return {
-        title: 'This sign-in can’t confirm it’s you',
-        body: 'Your sign-in provider can’t confirm a fresh sign-in, so keys can’t be created or rotated from this session. '
-            + 'An administrator can allow it under Administration → Features → Authentication.',
-    }
-}
+import { stepUpUnavailable } from './apiKeyFormat'
 
 export function StepUpField({ stepUp, available, reason, password, onPasswordChange, failed }: {
     stepUp: ApiKeyOptions['stepUp']
