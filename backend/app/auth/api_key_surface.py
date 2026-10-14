@@ -90,6 +90,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "views", FILTERED,
         "list_views", "get_view_stats", "get_view_facets", "list_popular_views",
         "list_my_recent_views", "list_my_activity_feed", "list_my_drafts",
+        "count_views", "get_view_histogram",
     ),
     # ``create_view`` names its workspace in the body;
     # ``authorize_view_create`` holds a key to the workspaces it covers.

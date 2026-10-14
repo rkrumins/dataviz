@@ -4,7 +4,7 @@
 
 **46 reachable with no gate of any kind** — worth attacking first. Routes whose gate lives inside the handler (most of the auth surface) are named explicitly rather than reported as ungated.
 
-**209 callable with an API key** (`Authorization: Bearer nxpat_…`), each held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
+**211 callable with an API key** (`Authorization: Bearer nxpat_…`), each held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
 
 
 ### Authentication + SSO
@@ -357,9 +357,9 @@
 | `GET` | `/api/v1/views/` | authenticated | n/a | filtered |
 | `POST` | `/api/v1/views/` | **NONE — unauthenticated** | enforced | workspace |
 | `GET` | `/api/v1/views/audience` | authenticated | n/a | refused |
-| `GET` | `/api/v1/views/count` | authenticated | n/a | refused |
+| `GET` | `/api/v1/views/count` | authenticated | n/a | filtered |
 | `GET` | `/api/v1/views/facets` | authenticated | n/a | filtered |
-| `GET` | `/api/v1/views/histogram` | authenticated | n/a | refused |
+| `GET` | `/api/v1/views/histogram` | authenticated | n/a | filtered |
 | `GET` | `/api/v1/views/me/drafts` | **NONE — unauthenticated** | n/a | filtered |
 | `GET` | `/api/v1/views/me/feed` | **NONE — unauthenticated** | n/a | filtered |
 | `GET` | `/api/v1/views/me/recent` | authenticated | n/a | filtered |

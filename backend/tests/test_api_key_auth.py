@@ -537,6 +537,25 @@ async def test_a_key_on_one_granted_view_edits_that_view_and_nothing_else(client
     assert created.status_code == 403
 
 
+async def test_a_key_counts_and_charts_exactly_the_views_it_lists(client, db_session):
+    """The view list's count and its histogram narrow in SQL as the list
+    does, so a read-only key on one view gets that one — of the four its
+    owner can read — from all three."""
+    key = await mint(db_session, views="read", resources={"views": ["v_b_granted"]})
+    today = datetime.now(timezone.utc).date()
+    window = {
+        "field": "created", "after": str(today - timedelta(days=1)),
+        "before": str(today + timedelta(days=1)),
+    }
+
+    listed = await client.get("/api/v1/views/", headers=key.headers)
+    counted = await client.get("/api/v1/views/count", headers=key.headers)
+    charted = await client.get("/api/v1/views/histogram", params=window, headers=key.headers)
+    for response in (listed, counted, charted):
+        assert response.status_code == 200, response.text
+    assert listed.json()["total"] == counted.json()["total"] == charted.json()["total"] == 1
+
+
 async def test_the_workspace_feed_needs_the_whole_workspace(client, db_session):
     key = await mint(db_session, views="read", resources={"views": ["v_a_ws"]})
     response = await client.get("/api/v1/views/workspace/ws_a/activity", headers=key.headers)

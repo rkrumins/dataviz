@@ -136,6 +136,7 @@ reference marks every operation a key may call.
 
 | To… | Use |
 | --- | --- |
+| Find views, count them, or chart when they were made or changed | `GET /api/v1/views/`, `/views/count`, `/views/histogram` |
 | Read a view and its layout | `GET /api/v1/views/{id}` |
 | Read the data behind a view you can read | `/api/v1/{workspace}/graph/…?viewId={id}` |
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |

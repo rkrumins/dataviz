@@ -25,7 +25,9 @@ GET /api/v1/admin/workspaces/{workspace_id}/datasources/{ds_id}/cached-schema re
 GET /api/v1/admin/workspaces/{workspace_id}/datasources/{ds_id}/cached-stats resource
 GET /api/v1/api-keys/self self
 GET /api/v1/views/ filtered
+GET /api/v1/views/count filtered
 GET /api/v1/views/facets filtered
+GET /api/v1/views/histogram filtered
 GET /api/v1/views/me/drafts filtered
 GET /api/v1/views/me/feed filtered
 GET /api/v1/views/me/recent filtered
