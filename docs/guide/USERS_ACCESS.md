@@ -273,6 +273,10 @@ workspace — and anyone you add to the group later gets it too. Deleting a
 group revokes every workspace binding and view share it held; its members lose
 that access on their next request.
 
+> **Note:** Only a **Super Admin** can add or remove members of a group that
+> grants Super Admin, or delete it. Joining such a group makes someone a Super
+> Admin, so an **Org Admin** who tries is told only a Super Admin can.
+
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
 > groups to an invite link, so new people land in them.

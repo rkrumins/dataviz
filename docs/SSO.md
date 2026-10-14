@@ -450,7 +450,8 @@ none every account counts): its claims, the email and `email_verified`
 included, are whatever the sender wrote, so linking by email would hand the
 platform to anyone able to reach the sign-in endpoint. Every other account
 still links, an org admin's included — `org_admin` runs workspaces but has
-neither `system:admin` nor user management — so an unsigned connection keeps
+neither `system:admin` nor user management, and cannot change who is in a
+group that grants `super_admin` — so an unsigned connection keeps
 working for the people its operator trusted it for; Super Admins link it
 from their own page. An operator who accepts the risk for them too turns on
 **Link Super Admin and break-glass accounts too** on the connection

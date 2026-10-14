@@ -113,6 +113,13 @@ as well turns on **Link Super Admin and break-glass accounts too** on the connec
 on any connection below Verified, Unverified or Asserted — and every existing account links as
 before.
 
+**Only a Super Admin changes who is in a group that grants Super Admin.** Org admins manage
+groups, and a member inherits every binding its group holds, so an org admin could add themselves
+— or anyone — to a group bound to `super_admin` and so make a Super Admin. Adding or removing
+members of such a group, or deleting it, now needs `system:admin` (403
+`group_grants_super_admin`); every other group is managed as before. It matters more now that an
+org admin's account links through a connection below Verified.
+
 ### Fixed
 
 - **Two first sign-ins for the same person at once** — tabs restored together, each running the

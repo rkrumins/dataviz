@@ -33,7 +33,7 @@ so sees them all.
 | **Telemetry** | Find out which help content people miss | `system:audit:read` — Org Auditors and Super Admins | [Below](#telemetry) |
 | **Announcements** | Show a banner to everyone | Super Admin | [Below](#announcements) |
 | **User Management** | Invite, add, approve and look after accounts | Super Admin | [Users & Access](/guide/users-access) |
-| **Groups** | Bundle people to grant roles in bulk | `system:groups:manage` — Org Admins and Super Admins | [Users & Access](/guide/users-access#groups) |
+| **Groups** | Bundle people to grant roles in bulk | `system:groups:manage` — Org Admins and Super Admins; only Super Admins change the members of a group that grants Super Admin | [Users & Access](/guide/users-access#groups) |
 | **Permissions** | See and change what each role grants, and who has access where | Super Admin | [Users & Access](/guide/users-access#permissions) |
 | **SSO** | Connect and run single sign-on | Super Admin | [Single Sign-On](/guide/sso-setup) |
 
