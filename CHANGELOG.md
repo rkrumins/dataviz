@@ -66,9 +66,11 @@ default, it lets people on portal connections, which can't date a sign-in, make 
 **Enterprise gateway users make keys with nothing to switch on.** When this server can reach the
 gateway (server exchange with an ambient token), creating or rotating a key asks it, then and
 there, whether the company session behind the request is still live: confirmed makes the key, ended
-asks for a sign-in, and no answer makes nothing (`503 gateway_unreachable`; try again). Where only
-the browser reaches the gateway, a sign-in through it in the last 15 minutes counts, and **Sign in
-again** goes through it and back to the review. Every key's record says how it was confirmed.
+signs in through the gateway again without leaving the page, and no answer makes nothing (`503
+gateway_unreachable`; try again). Where only the browser reaches the gateway, a sign-in through it in
+the last 15 minutes counts, and an older one signs in through it again the same way. The request is
+sent again only if the same person is still signed in. Every key's record says how it was
+confirmed.
 
 **Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
 administrator revokes it (with their note), and when a revoked key is presented again or a key is

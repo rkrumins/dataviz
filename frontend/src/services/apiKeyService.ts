@@ -248,6 +248,8 @@ export class ApiKeyError extends Error {
     readonly method: 'password' | 'sso' | null
     /** step_up_required with method sso: where to sign in again. */
     readonly loginUrl: string | null
+    /** step_up_required through an Enterprise gateway: its slug, to sign in through it again in place. */
+    readonly gateway: string | null
     /** step_up_unavailable: why this sign-in cannot confirm a key. */
     readonly reason: StepUpReason | null
     /** Selected resources the owner cannot give a key, by type. */
@@ -259,6 +261,7 @@ export class ApiKeyError extends Error {
         this.code = typeof detail?.error === 'string' ? detail.error : null
         this.method = detail?.method === 'password' || detail?.method === 'sso' ? detail.method : null
         this.loginUrl = typeof detail?.loginUrl === 'string' ? detail.loginUrl : null
+        this.gateway = typeof detail?.gateway === 'string' ? detail.gateway : null
         this.reason = typeof detail?.reason === 'string' ? detail.reason as StepUpReason : null
         this.unknown = detail?.unknown && typeof detail.unknown === 'object'
             ? detail.unknown as ApiKeyError['unknown']

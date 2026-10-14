@@ -14,12 +14,22 @@ import { EditKeyDialog } from '../EditKeyDialog'
 import { RotateKeyDialog } from '../RotateKeyDialog'
 import { access, apiKey, detail, inDays, options as opts } from './fixtures'
 import { ApiKeyError, type ApiKey } from '@/services/apiKeyService'
+import { useAuthStore } from '@/store/auth'
 
 const svc = vi.hoisted(() => ({ rotate: vi.fn(), get: vi.fn(), update: vi.fn() }))
 vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/services/apiKeyService')>()),
     apiKeyService: svc,
 }))
+const reauth = vi.hoisted(() => ({ attemptSilentReauth: vi.fn(), me: vi.fn() }))
+vi.mock('@/services/backchannelReauth', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/backchannelReauth')>()),
+    attemptSilentReauth: reauth.attemptSilentReauth,
+}))
+vi.mock('@/services/authService', async (importOriginal) => {
+    const real = await importOriginal<typeof import('@/services/authService')>()
+    return { ...real, authService: { ...real.authService, me: reauth.me } }
+})
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -75,6 +85,20 @@ describe('rotating a live key', () => {
         await userEvent.click(screen.getByRole('button', { name: /^rotate key$/i }))
         expect(await screen.findByText(/password sign-in is switched off/i)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /^rotate key$/i })).toBeDisabled()
+    })
+
+    it('confirms through an Enterprise gateway without leaving the page, and rotates', async () => {
+        useAuthStore.setState({ user: { id: 'usr_me' } } as never)
+        reauth.me.mockResolvedValue({ user: { id: 'usr_me' } })
+        reauth.attemptSilentReauth.mockResolvedValue('recovered')
+        svc.rotate.mockRejectedValueOnce(new ApiKeyError(403, 'Confirm it’s you', {
+            error: 'step_up_required', method: 'sso', gateway: 'corp-gateway',
+        }))
+        rotateDialog(apiKey(), { stepUp: { method: 'sso', fresh: false } })
+        await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+        expect(await screen.findByLabelText('Your new API key')).toBeInTheDocument()
+        expect(reauth.attemptSilentReauth).toHaveBeenCalledWith('corp-gateway')
+        expect(svc.rotate).toHaveBeenCalledTimes(2)
     })
 
     it('says so when the key was already replaced', async () => {

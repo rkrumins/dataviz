@@ -140,10 +140,12 @@ class StepUpTarget:
     their session signed in through can confirm it (``STEP_UP_CONFIRMS``).
     ``unreachable``: that provider is confirmed down (``sso_outage_slugs``),
     so neither sending anyone to it nor asking it can confirm anything until
-    it is back."""
+    it is back. ``slug``: that provider's, for a sign-in the page runs in
+    place — a gateway's."""
     login_url: str
     confirms: str
     unreachable: bool = False
+    slug: Optional[str] = None
 
 
 # ── Service protocol ─────────────────────────────────────────────────

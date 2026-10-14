@@ -8,11 +8,16 @@ the gateway the session came from instead:
 
 * server exchange — the company session reaches this server: the gateway is
   asked, on the create or rotate request itself, whether it is still live.
-  Confirmed mints; ended or absent sends the person to sign in through it
+  Confirmed mints; ended or absent asks the page to sign in through it
   again; no answer mints nothing (503) — it fails closed;
 * browser exchange — only the browser holds the company session: a sign-in
   through the gateway in the last few minutes is the gateway's answer; an
-  older session is sent through it again, and comes back able to.
+  older session signs in through it again, and comes back able to.
+
+A gateway's sign-in runs in the browser, so a refusal names the gateway
+(``gateway``) for the page to sign in through in place, never a sign-in URL:
+the gateway's sign-in route cannot complete a browser exchange, and refuses
+a company session the gateway has just refused.
 
 Through the real routes — the gateway sign-ins, and the create, rotate and
 options routes — against stubbed gateways.
@@ -50,7 +55,6 @@ from tests.common.api_key_world import (
 )
 
 GATEWAY_LOGIN = "/api/v1/auth/corp-gateway/login?next=/me/api-keys&force=1"
-BROWSER_LOGIN = "/api/v1/auth/corp-browser/login?next=/me/api-keys&force=1"
 
 #: What the server-mode gateway says about its person: the key owner, last
 #: through the company portal two hours ago — long before the window a
@@ -189,7 +193,8 @@ async def test_a_company_session_that_ended_sends_the_person_to_sign_in_again(
         assert refused.status_code == 403, refused.text
         detail = refused.json()["detail"]
         assert (detail["error"], detail["method"]) == ("step_up_required", "sso")
-        assert detail["loginUrl"] == GATEWAY_LOGIN
+        assert detail["gateway"] == "corp-gateway"
+        assert "loginUrl" not in detail
     assert await _keys(db_session) == 0
 
 
@@ -274,7 +279,7 @@ async def test_the_session_is_checked_against_its_own_gateway(client, db_session
 
     gateway.answer = 401
     refused = await client.post("/api/v1/me/api-keys", json=_draft(), headers=headers)
-    assert refused.json()["detail"]["loginUrl"] == GATEWAY_LOGIN
+    assert refused.json()["detail"]["gateway"] == "corp-gateway"
 
 
 async def test_signing_in_through_the_gateway_resumes_paused_keys(client, db_session, gateway):
@@ -325,8 +330,10 @@ async def test_a_browser_gateway_sign_in_minutes_ago_mints_and_an_older_one_sign
 
     options = (await client.get("/api/v1/me/api-keys/options")).json()
     assert options["stepUp"] == {"method": "sso", "fresh": True}
+    # Its sign-in route can't complete a browser exchange: nothing to resume paused keys with.
+    assert options["ssoSignInUrl"] is None
 
-    # Two hours on, the same session is sent through the gateway again…
+    # Two hours on, the same session signs in through the gateway again…
     real = time.time
     with monkeypatch.context() as later:
         later.setattr(api_keys_endpoints, "time", SimpleNamespace(time=lambda: real() + 7200))
@@ -335,7 +342,8 @@ async def test_a_browser_gateway_sign_in_minutes_ago_mints_and_an_older_one_sign
         assert options["stepUpAvailable"] is True
         stale = await client.post("/api/v1/me/api-keys", json=_draft(), headers=headers)
     assert stale.status_code == 403 and error(stale) == "step_up_required"
-    assert stale.json()["detail"]["loginUrl"] == BROWSER_LOGIN
+    assert stale.json()["detail"]["gateway"] == "corp-browser"
+    assert "loginUrl" not in stale.json()["detail"]
     assert await _keys(db_session) == 0
 
     # …and back from it, minutes ago again, it mints.

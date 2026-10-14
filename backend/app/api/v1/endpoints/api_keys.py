@@ -630,9 +630,17 @@ def _provider_down() -> HTTPException:
 
 def _sign_in_again(target, message: str) -> HTTPException:
     """Sign in again through the session's provider, then try again — or,
-    while it is confirmed down, try again later (``_provider_down``)."""
+    while it is confirmed down, try again later (``_provider_down``).
+
+    An Enterprise gateway's sign-in runs in the browser, so the page signs in
+    through it again in place (``gateway``, its slug) rather than going to
+    its sign-in route, which could only fail here: that route cannot complete
+    a browser exchange, and refuses a company session the gateway has just
+    refused."""
     if target.unreachable:
         return _provider_down()
+    if target.confirms in ("gateway_live", "gateway_sign_in"):
+        return _refused("step_up_required", message, method="sso", gateway=target.slug)
     return _refused("step_up_required", message, method="sso", loginUrl=target.login_url)
 
 
@@ -1116,8 +1124,12 @@ async def get_api_key_options(
         target = await _identity_service(request).step_up_target(
             user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
         )
-        # Not while it is confirmed down: that page cannot answer.
-        sign_in_url = None if target.unreachable else target.login_url
+        # Not while it is confirmed down: that page cannot answer. Nor for a
+        # gateway only the browser reaches: its sign-in route can't complete.
+        sign_in_url = (
+            None if target.unreachable or target.confirms == "gateway_sign_in"
+            else target.login_url
+        )
     fresh = False
     refusal = _minting_refusal(account, method, policy)
     if refusal is None and method == "sso":

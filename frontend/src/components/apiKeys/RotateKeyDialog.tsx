@@ -39,6 +39,7 @@ import { RevealPanel } from './RevealPanel'
 import { StepUpField } from './StepUpField'
 import { customDateProblem, expiryFields, formatWhen, isRenewable, siteUrl, type ExpiryChoice } from './apiKeyFormat'
 import { freshDraft, parkDraft, type ApiKeyDraft, type Grace } from './apiKeyDraft'
+import { withGatewayStepUp } from './gatewayStepUp'
 
 const GRACE: { value: Grace; label: string; sub: string; icon: typeof Zap }[] = [
     { value: 0, label: 'Right away', sub: 'For a key that may have leaked', icon: Zap },
@@ -110,11 +111,11 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
         setError(null)
         setPasswordFailed(false)
         try {
-            const result = await apiKeyService.rotate(apiKey.id, {
+            const result = await withGatewayStepUp(() => apiKeyService.rotate(apiKey.id, {
                 graceSeconds: renew ? 0 : grace,
                 ...(expiry === 'same' ? {} : expiryFields(expiry, customDate)),
                 currentPassword: options.stepUp.method === 'password' ? password : undefined,
-            })
+            }))
             setPassword('')
             setCreated(result)
         } catch (err) {

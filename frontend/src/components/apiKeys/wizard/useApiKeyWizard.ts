@@ -29,6 +29,7 @@ import {
     expiryOptions, formatDay, siteUrl, type ExpiryChoice,
 } from '../apiKeyFormat'
 import { freshDraft, parkDraft, type ApiKeyDraft, type WizardStep } from '../apiKeyDraft'
+import { withGatewayStepUp } from '../gatewayStepUp'
 import { keyExposure } from '../exposure'
 import { presetById, presetPatch, type Preset } from '../presets'
 
@@ -150,10 +151,10 @@ export function useApiKeyWizard({ options, resumed }: {
         setError(null)
         setPasswordFailed(false)
         try {
-            const result = await apiKeyService.create({
+            const result = await withGatewayStepUp(() => apiKeyService.create({
                 ...bodyOf(draft),
                 currentPassword: options.stepUp.method === 'password' ? password : undefined,
-            })
+            }))
             setPassword('')
             setCreated(result)
         } catch (err) {

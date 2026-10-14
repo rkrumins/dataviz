@@ -524,6 +524,7 @@ class LocalIdentityService:
         down = sso_outage_slugs(await self._auth_config_provider.get())
         return StepUpTarget(
             login_url=url, confirms=confirms, unreachable=bool(slug) and slug in down,
+            slug=slug,
         )
 
     async def confirm_live_session(

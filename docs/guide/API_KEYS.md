@@ -80,11 +80,13 @@ away with a credential.
   there — never the key itself, which doesn't exist yet.
 - **Through your company's Enterprise gateway**, there is usually nothing to
   do: the gateway is asked, as you create the key, whether your company
-  sign-in is still live. If it has ended, sign in again; if the gateway
-  doesn't answer, try again in a moment — no key is made without its answer.
-  Where only your browser talks to the gateway, a sign-in through it in the
-  last 15 minutes counts, and **Sign in again** takes you through it and back
-  to the review.
+  sign-in is still live. If it has ended, the page signs you in through it
+  again without leaving the review, and carries on — or says why it
+  couldn't; if the gateway doesn't answer, try again in a moment — no key is
+  made without its answer. Where only your browser talks to the gateway, a
+  sign-in through it in the last 15 minutes counts, and when it has been
+  longer the page signs you in through it again the same way. If your
+  company sign-in turns out to be someone else's, nothing is made.
 - **Portal connections** can't say when you signed in, so keys can't be
   created through them unless your administrator has turned on **Accept a
   fresh sign-in round trip for API keys**. The review step tells you when that

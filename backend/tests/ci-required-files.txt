@@ -43,6 +43,7 @@ tests/test_api_analytics_data.py
 tests/test_api_analytics_usage.py
 tests/test_api_graph.py
 tests/test_api_key_auth.py
+tests/test_api_key_gateway_step_up.py
 tests/test_api_key_migrations.py
 tests/test_api_key_scope.py
 tests/test_api_key_surface.py

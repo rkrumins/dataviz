@@ -342,7 +342,10 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
     sign-in; no answer mints nothing (`503 gateway_unreachable`, `Retry-After`) — unlike
     session renewal, there is no grace. It proves the company session is live, not that a
     credential was typed just now. A gateway only the browser reaches vouches by having
-    signed the session in within the last 15 minutes.
+    signed the session in within the last 15 minutes. A gateway's sign-in runs in the
+    browser, so a refusal names the gateway rather than a sign-in URL: the page signs in
+    through it again in place, and sends the request again only if the same person is still
+    signed in.
   - Portal connections can do neither, so their users cannot make keys unless an
     administrator accepts a fresh round trip instead.
   - While the reachability prober has the session's provider **confirmed down**, a step-up

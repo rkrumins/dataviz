@@ -15,6 +15,7 @@ import { MyApiKeysPage } from '@/pages/MyApiKeysPage'
 import { freshDraft, parkDraft } from '../../apiKeyDraft'
 import { apiKey, access, options as opts } from '../../__tests__/fixtures'
 import { ApiKeyError, type ApiKeyOptions, type ApiKeyPreview } from '@/services/apiKeyService'
+import { useAuthStore } from '@/store/auth'
 
 const svc = vi.hoisted(() => ({
     create: vi.fn(),
@@ -39,6 +40,17 @@ vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/lib/useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 vi.mock('@/store/features', () => ({ useFeature: () => true }))
+
+const reauth = vi.hoisted(() => ({ attemptSilentReauth: vi.fn(), readReauthNotice: vi.fn(), me: vi.fn() }))
+vi.mock('@/services/backchannelReauth', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/backchannelReauth')>()),
+    attemptSilentReauth: reauth.attemptSilentReauth,
+    readReauthNotice: reauth.readReauthNotice,
+}))
+vi.mock('@/services/authService', async (importOriginal) => {
+    const real = await importOriginal<typeof import('@/services/authService')>()
+    return { ...real, authService: { ...real.authService, me: reauth.me } }
+})
 
 const PREVIEW: ApiKeyPreview = {
     permissions: { views: 'read', data: 'none', publish: false }, resources: 'all', allowedCidrs: [],
@@ -249,6 +261,54 @@ describe('confirming it is you', () => {
         expect(window.location.href).toBe('http://localhost/me/api-keys')      // nowhere to go
         await userEvent.click(screen.getByRole('button', { name: /^create key$/i }))
         expect(await screen.findByLabelText('Your new API key')).toBeInTheDocument()
+    })
+
+    describe('through an Enterprise gateway, whose sign-in runs here', () => {
+        const ASKED = new ApiKeyError(403, 'Confirm it’s you: sign in again through your company sign-in, then try again.', {
+            error: 'step_up_required', method: 'sso', gateway: 'corp-gateway',
+        })
+
+        beforeEach(() => {
+            useAuthStore.setState({ user: { id: 'usr_me' } } as never)
+            reauth.me.mockResolvedValue({ user: { id: 'usr_me' } })
+        })
+
+        it('signs in through it again without leaving the page, and makes the key', async () => {
+            svc.create.mockRejectedValueOnce(ASKED)
+            reauth.attemptSilentReauth.mockResolvedValue('recovered')
+            await wizard({ stepUp: { method: 'sso', fresh: false } })
+            await toReview()
+            await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+            expect(await screen.findByLabelText('Your new API key')).toBeInTheDocument()
+            expect(reauth.attemptSilentReauth).toHaveBeenCalledWith('corp-gateway')
+            expect(svc.create).toHaveBeenCalledTimes(2)
+            expect(window.location.href).toBe('http://localhost/me/api-keys')
+            expect(sessionStorage.getItem('nx-api-key-draft')).toBeNull()
+        })
+
+        it('says why when that sign-in does not work, and sends nothing more', async () => {
+            svc.create.mockRejectedValue(ASKED)
+            reauth.attemptSilentReauth.mockResolvedValue('failed')
+            reauth.readReauthNotice.mockReturnValue({ at: Date.now(), reason: 'Your company sign-in has ended.', hold: true })
+            await wizard({ stepUp: { method: 'sso', fresh: false } })
+            await toReview()
+            await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+            expect(await screen.findByText('Your company sign-in has ended.')).toBeInTheDocument()
+            expect(svc.create).toHaveBeenCalledTimes(1)
+            expect(window.location.href).toBe('http://localhost/me/api-keys')
+        })
+
+        it('makes nothing when it signs in someone else', async () => {
+            svc.create.mockRejectedValueOnce(ASKED)
+            reauth.attemptSilentReauth.mockResolvedValue('recovered')
+            reauth.me.mockResolvedValue({ user: { id: 'usr_someone_else' } })
+            await wizard({ stepUp: { method: 'sso', fresh: false } })
+            await toReview()
+            await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+            expect(await screen.findByText(/someone else’s/)).toBeInTheDocument()
+            expect(svc.create).toHaveBeenCalledTimes(1)
+            expect(screen.queryByLabelText('Your new API key')).not.toBeInTheDocument()
+        })
     })
 
     it('never follows a sign-in link that leaves this site', async () => {
