@@ -114,12 +114,18 @@ used from a network it isn't limited to — even when it only asks about itself.
 ### Upgrading
 
 - **Run the upgrade job.** Migrations `20261012_1000_api_keys` and `20261013_1000_api_key_usage`
-  add the `api_keys` and `api_key_usage` tables; `20261013_1100_merge_api_keys` joins them to the
-  activity ledger's chain; `20261013_1200_activity_api_key` adds `auth_audit_log.api_key_id` and a
-  partial index on it, and `20261013_1300_api_key_scale` indexes `user_identities (user_id,
-  last_login_at)` and a key's successor. The indexes are built in the migration's transaction, as
-  the others here are: building them reads `auth_audit_log` and `user_identities` once, and holds
-  writes to each table for that long (seconds at millions of rows).
+  add the `api_keys` and `api_key_usage` tables; `20261013_1100_merge_api_keys`,
+  `20261014_0600_merge_key_filters` and `20261014_1100_merge_sso_keys` join them to `main`'s chain;
+  `20261013_1300_api_key_scale` indexes `user_identities (user_id, last_login_at)` and a key's
+  successor; and, last, `20261014_1200_aal_api_key` adds `auth_audit_log.api_key_id` and a partial
+  index on it (`20261013_1200_activity_api_key` now builds nothing).
+- **The upgrade is one transaction, and waits at most 5 seconds for any lock.** If it fails or gives
+  up — a long-running reader, such as an activity export, holding a table it needs — nothing has
+  changed, servers still on the previous version keep working, and you run it again. Every lock is
+  held until it commits. Measured on Postgres 16 with 10 million activity events, 100,000 people
+  and a million SSO identities, the whole upgrade took 6.7 seconds: sign-ins (which write `users`
+  and `user_identities`) waited up to 4 seconds, and the activity log, changed last, was unreadable
+  for 1.5 seconds at the end.
 - **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
   Features → Authentication**; people can still see and revoke their keys while it is off.
 - **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and

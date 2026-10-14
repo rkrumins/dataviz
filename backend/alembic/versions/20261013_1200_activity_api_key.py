@@ -10,14 +10,20 @@ a column with an index that leads with it and ends on the timeline, so "what
 did this key do?" is a range scan like every other activity filter, not a
 scan of payloads.
 
-Partial: most changes are made in a browser, so the index costs a write only
-for the rows made with a key. No row recorded before keys existed names one,
-so nothing is backfilled and ``PROJECTION_VERSION`` stays: new rows get the
-column as the relay records them. Building the index reads the table once and
-writes nothing for those rows.
+No row recorded before keys existed names one, so nothing is backfilled and
+``PROJECTION_VERSION`` stays: new rows get the column as the relay records
+them.
 
-Inspector-guarded like its siblings: ``0001_baseline`` create_all()s the
-current ORM, so a brand-new environment already has both.
+Nothing is built here any more: ``20261014_1200_aal_api_key`` adds the column
+and its index as the upgrade's last step. The upgrade job applies its
+revisions in one transaction, so a lock taken here would be held to its end
+— the ledger's
+exclusive lock, reads included, through every later revision's work. Taken
+last, it lasts only as long as the ledger's own build. A database that ran
+this revision while it still built both keeps them, and the later revision
+finds them there; the downgrade below still removes them from such a
+database, guarded, and waits a bounded time for the ledger's lock
+(``_bound_lock_wait``).
 """
 from __future__ import annotations
 
@@ -35,21 +41,23 @@ depends_on: Union[str, Sequence[str], None] = None
 _TABLE = "auth_audit_log"
 _COLUMN = "api_key_id"
 _INDEX = "idx_aal_api_key_occurred"
-_WHERE = "api_key_id IS NOT NULL"
+
+
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for the ledger's lock: a long reader — an
+    activity export streaming for minutes — makes the downgrade give up, to
+    be run again, rather than queue every later query on the table behind
+    it while it waits."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
 
 
 def upgrade() -> None:
-    inspector = sa.inspect(op.get_bind())
-    if _COLUMN not in {c["name"] for c in inspector.get_columns(_TABLE)}:
-        op.add_column(_TABLE, sa.Column(_COLUMN, sa.Text(), nullable=True))
-    if _INDEX not in {i["name"] for i in inspector.get_indexes(_TABLE)}:
-        op.create_index(
-            _INDEX, _TABLE, [_COLUMN, "occurred_at"],
-            postgresql_where=sa.text(_WHERE), sqlite_where=sa.text(_WHERE),
-        )
+    pass
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     inspector = sa.inspect(op.get_bind())
     if _INDEX in {i["name"] for i in inspector.get_indexes(_TABLE)}:
         op.drop_index(_INDEX, table_name=_TABLE)

@@ -27,7 +27,17 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for a lock. The key's foreign key locks
+    ``users``, which every request reads: a long transaction there makes
+    this revision give up, to be run again, rather than queue every later
+    query on the table behind it while it waits."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
+
 def upgrade() -> None:
+    _bound_lock_wait()
     op.create_table(
         "api_keys",
         sa.Column("id", sa.Text(), primary_key=True),
@@ -72,6 +82,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     op.drop_index("idx_api_keys_expires_at", table_name="api_keys", if_exists=True)
     op.drop_index("idx_api_keys_user", table_name="api_keys", if_exists=True)
     op.drop_table("api_keys", if_exists=True)

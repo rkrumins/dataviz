@@ -18,7 +18,9 @@ Create Date: 2026-10-13 13:00
 
 Plain builds in the migration's transaction, like the other index migrations
 here (``20260913_1000_job_scan_indexes`` says why): ``user_identities`` has a
-row per SSO identity, seconds to index at a million. Inspector-guarded:
+row per SSO identity, seconds to index at a million, during which SSO
+sign-ins wait to record theirs; reads carry on. The wait for the lock itself
+is bounded (``_bound_lock_wait``). Inspector-guarded:
 ``0001_baseline`` create_all()s the current ORM, so a brand-new environment
 already has the new indexes and never had the old one.
 """
@@ -44,7 +46,17 @@ def _indexes(table: str) -> set[str]:
     return {i["name"] for i in sa.inspect(op.get_bind()).get_indexes(table)}
 
 
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for a lock. Every SSO sign-in writes
+    ``user_identities``: a long transaction there makes this revision give
+    up, to be run again, rather than queue every later query on the table
+    behind it while it waits."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
+
 def upgrade() -> None:
+    _bound_lock_wait()
     keys = _indexes("api_keys")
     if _UNUSED in keys:
         op.drop_index(_UNUSED, table_name="api_keys")
@@ -59,6 +71,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     if _SIGN_IN in _indexes("user_identities"):
         op.drop_index(_SIGN_IN, table_name="user_identities")
     keys = _indexes("api_keys")
