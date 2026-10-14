@@ -64,6 +64,7 @@ tests/test_configmap_matches_manifests.py
 tests/test_controlplane_loops_wiring.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_default_data_source_ids.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_draft_overlay_lazy.py
@@ -154,6 +155,7 @@ tests/test_reconcile_sweeper.py
 tests/test_request_body_limit.py
 tests/test_run_step_ledger.py
 tests/test_s3_object_store.py
+tests/test_saved_view_filters.py
 tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_engine.py
@@ -179,7 +181,11 @@ tests/test_typed_patch_merge.py
 tests/test_upload_pins.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_read_only_queries.py
+tests/test_view_avatar_ids.py
 tests/test_view_bundle_schema.py
+tests/test_view_facets_live.py
+tests/test_view_filters_api.py
+tests/test_view_histogram.py
 tests/test_view_layer_rule_validation.py
 tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
@@ -187,6 +193,7 @@ tests/test_view_library_schema.py
 tests/test_view_live_filter.py
 tests/test_view_placement.py
 tests/test_view_portability_switch.py
+tests/test_view_source_kinds.py
 tests/test_view_transfer_canonical.py
 tests/test_view_transfer_export.py
 tests/test_view_transfer_import.py

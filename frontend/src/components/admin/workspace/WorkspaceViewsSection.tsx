@@ -23,13 +23,13 @@
  * change of each kind (created / settings-edited / data-published, each with
  * who + when). A full activity log per view is a backend follow-up.
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import {
-    Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
+    Eye, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
-    Check, Loader2, FileUp,
+    Check, Loader2, FileUp, Database,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
@@ -50,6 +50,7 @@ import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
+import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
 import { timeAgo } from '@/lib/timeAgo'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
@@ -64,6 +65,30 @@ import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { useQueryClient } from '@tanstack/react-query'
+import { FilterDropdown } from '@/components/explorer/FilterDropdown'
+import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
+import { resolveFilters } from '@/features/view-filters/params'
+import { writeFilterState } from '@/features/view-filters/url'
+import { filterChips } from '@/features/view-filters/dimensions'
+import { useLiveFacets } from '@/features/view-filters/useLiveFacets'
+import { useRelaxations } from '@/features/view-filters/useRelaxations'
+import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
+import { withCounts } from '@/features/view-filters/facetOptions'
+import { SOURCE_KIND_META } from '@/features/view-filters/sourceKindMeta'
+import { RelaxationList } from '@/features/view-filters/components/RelaxationList'
+import { useLocalDay } from '@/features/view-filters/useLocalDay'
+import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
+import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
+import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
+import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
+import { searchTextOf } from '@/features/view-filters/tokens'
+import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
+import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
+import { VISIT_RULE } from '@/features/view-filters/dateFilter'
+import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
+import { currentPersonOf } from '@/features/view-filters/people'
+import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
 
 type Visibility = 'private' | 'workspace' | 'enterprise'
 
@@ -103,35 +128,75 @@ export default function WorkspaceViewsSection({
     const canAdminWorkspace = usePermission('workspace:admin', wsId)
 
     // ─── Filters + layout ────────────────────────────────────────────
-    const [search, setSearch] = useState('')
-    const [dsFilter, setDsFilter] = useState<string>('all')
-    const [visFilter, setVisFilter] = useState<Visibility | 'all'>('all')
-    const [ownerFilter, setOwnerFilter] = useState<string>('all')
-    const [attentionOnly, setAttentionOnly] = useState(false)
+    // The same filter value and controls as the Explorer, held here in state
+    // (this tab has never kept its filters in the address) and always scoped to
+    // this workspace. Visibility and "Need attention" are driven by the insight
+    // chips below; the rest by the toolbar.
+    const [fstate, setFstate] = useState<ViewFilterState>(EMPTY_FILTERS)
+    const patchFilters = (patch: Partial<ViewFilterState>) => setFstate(prev => ({ ...prev, ...patch }))
+    // The box can hold a token being typed (`by:al`); the filter searches only
+    // its words. A reset from elsewhere (Clear all, a suggestion) wins.
+    const [searchBox, setSearchBox] = useState('')
+    const searchBoxText = searchTextOf(searchBox) === fstate.search ? searchBox : fstate.search
+    const searchRef = useRef<HTMLInputElement>(null)
+    const visFilter = fstate.visibility
+    const attentionOnly = fstate.category === 'needs-attention'
     const [sort, setSort] = useState<SortOption>('updated')
     const [layout, setLayout] = useState<'grid' | 'list'>('grid')
     const [showActivity, setShowActivity] = useState(false)
+    const today = useLocalDay()
+    const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
+    // "Since your last visit" to this workspace's views, per browser.
+    const visitKey = currentUser?.id ? `${currentUser.id}:ws:${wsId}` : null
+    const visit = useVisitWindow(visitKey)
+    const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
+    const visitFrom = visit?.from
+    const visitTo = visit?.to
+    const resolveCtx = useMemo(
+        () => ({
+            currentUserId: currentUser?.id ?? null,
+            today,
+            scopeWorkspaceId: wsId,
+            visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+        }),
+        [currentUser?.id, today, wsId, visitFrom, visitTo],
+    )
     const filters: ExplorerFilters = useMemo(() => ({
-        search,
-        visibility: visFilter === 'all' ? null : visFilter,
-        workspaceIds: [wsId],
-        dataSourceId: dsFilter === 'all' ? null : dsFilter,
-        viewTypes: [],
-        tags: [],
-        creatorIds: ownerFilter === 'all' ? [] : [ownerFilter],
+        ...resolveFilters(fstate, resolveCtx),
         sort,
         favouritedOnly: false,
-        category: attentionOnly ? 'needs-attention' : null,
-        currentUserId: currentUser?.id ?? null,
         limit: 60,
         offset: 0,
-    }), [search, visFilter, wsId, dsFilter, ownerFilter, sort, attentionOnly, currentUser?.id])
+    }), [fstate, resolveCtx, sort])
+
+    // People, sources and counts for this workspace — from the server, so they
+    // aren't limited to the first page of views the parent loaded, and with
+    // each option's count following the other filters.
+    const { universe, people, counts, sourceKinds, pending: countsPending } = useLiveFacets(fstate, resolveCtx)
+    const lookups = useFilterLookups(people, today, currentUser?.id)
+    const chips = useMemo(
+        () => filterChips(fstate, lookups, ['workspace', 'category', 'search']),
+        [fstate, lookups],
+    )
+    const sourceOptions = useMemo(() => {
+        const kinds = new Map((universe.dataSources ?? []).map(d => [d.id, d.kind]))
+        return withCounts(dataSources, ds => ds.id, counts.dataSources)
+            .map(({ option: ds, count }) => {
+                const kind = kinds.get(ds.id)
+                const meta = kind ? SOURCE_KIND_META[kind] : null
+                return {
+                    id: ds.id, label: ds.label || ds.catalogItemId || ds.id, count,
+                    icon: meta?.icon ?? Database, iconClassName: meta?.glyph ?? 'text-emerald-500',
+                }
+            })
+    }, [dataSources, universe.dataSources, counts.dataSources])
 
     const {
-        views: loadedViews, totalCount, isLoading,
+        views: loadedViews, totalCount, isLoading, error: listError,
         toggleFavourite, removeView, refetch, loadMore, hasMore,
     } = useExplorerViews(filters)
+    const queryClient = useQueryClient()
     const healthMap = useViewHealth(loadedViews)
 
     // Same batched call as the Explorer, and the same reason: a card fetching
@@ -146,17 +211,20 @@ export default function WorkspaceViewsSection({
     const { stats } = useViewStats(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
 
     // ─── Insight header (whole-workspace population) ─────────────────
+    // The counts come from the server, over the whole workspace: `allViews` is
+    // only the first page the parent loads, so counting it understated every
+    // number in a large workspace. The last activity still reads it — the
+    // newest changes are on that first page.
     const insight = useMemo(() => {
-        let mine = 0, priv = 0, wsVis = 0, ent = 0
-        const owners = new Set<string>()
+        const visibilityCount = (v: string) => universe.visibilities?.find(x => x.value === v)?.count
+        // The unfiltered people, not the toolbar's: their numbers follow the filters.
+        const everyone = universe.contributors
+        const owners = everyone
+            ? everyone.filter(p => p.createdCount > 0).length
+            : new Set(allViews.map(v => v.createdBy).filter(Boolean)).size
         let lastAt: string | null = null
         let lastBy: string | null = null
         for (const v of allViews) {
-            if (currentUser?.id && v.createdBy === currentUser.id) mine++
-            if (v.visibility === 'private') priv++
-            else if (v.visibility === 'workspace') wsVis++
-            else if (v.visibility === 'enterprise') ent++
-            if (v.createdBy) owners.add(v.createdBy)
             const dataAt = v.dataUpdatedAt ?? null
             const freshest = dataAt && dataAt > v.updatedAt ? dataAt : v.updatedAt
             if (freshest && (!lastAt || freshest > lastAt)) {
@@ -165,17 +233,19 @@ export default function WorkspaceViewsSection({
                     ?? v.createdByName ?? null
             }
         }
-        return { total: allViews.length, mine, priv, wsVis, ent, owners: owners.size, lastAt, lastBy }
-    }, [allViews, currentUser?.id])
-
-    // Distinct owners for the owner filter (from the full population).
-    const ownerOptions = useMemo(() => {
-        const map = new Map<string, string>()
-        for (const v of allViews) if (v.createdBy) map.set(v.createdBy, v.createdByName ?? v.createdBy)
-        return [...map.entries()]
-            .map(([id, name]) => ({ id, name }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-    }, [allViews])
+        return {
+            total: stats.total || allViews.length,
+            mine: everyone
+                ? (everyone.find(p => p.userId === currentUser?.id)?.createdCount ?? 0)
+                : allViews.filter(v => currentUser?.id && v.createdBy === currentUser.id).length,
+            priv: visibilityCount('private') ?? allViews.filter(v => v.visibility === 'private').length,
+            wsVis: visibilityCount('workspace') ?? allViews.filter(v => v.visibility === 'workspace').length,
+            ent: visibilityCount('enterprise') ?? allViews.filter(v => v.visibility === 'enterprise').length,
+            owners,
+            lastAt,
+            lastBy,
+        }
+    }, [allViews, currentUser?.id, universe.visibilities, universe.contributors, stats.total])
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -207,12 +277,14 @@ export default function WorkspaceViewsSection({
         removeView(id)
         setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n })
         notify('success', `"${name}" has been deleted`)
+        invalidateViewAggregates(queryClient)
     }
 
     const handleRestore = async (view: View) => {
         try {
             await restoreViewApi(view.id)
             refetch()
+            invalidateViewAggregates(queryClient)
             notify('success', `"${view.name}" has been restored`)
         } catch {
             notify('error', `Failed to restore "${view.name}"`)
@@ -236,6 +308,7 @@ export default function WorkspaceViewsSection({
             await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
             setSelectedIds(new Set())
             refetch()
+            invalidateViewAggregates(queryClient)
             notify('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
         } catch {
             notify('error', 'Some views could not be updated')
@@ -274,6 +347,7 @@ export default function WorkspaceViewsSection({
             setDenyReason('')
             setConfirmingId(null)
             refetch()
+            invalidateViewAggregates(queryClient)
             onWorkspaceChanged?.()
             notify('success', successMessage)
         } catch (err) {
@@ -319,15 +393,31 @@ export default function WorkspaceViewsSection({
         ids.forEach(id => removeView(id))
         setSelectedIds(new Set())
         setShowBulkDelete(false)
+        invalidateViewAggregates(queryClient)
         notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     }
 
-    const hasActiveFilters = !!search || dsFilter !== 'all' || visFilter !== 'all' || ownerFilter !== 'all' || attentionOnly
-    const clearFilters = () => {
-        setSearch(''); setDsFilter('all'); setVisFilter('all'); setOwnerFilter('all'); setAttentionOnly(false)
-    }
+    const hasActiveFilters = isAnyFilterActive(fstate, { workspace: true })
+    const clearFilters = () => setFstate(EMPTY_FILTERS)
+    const relaxations = useRelaxations(fstate, resolveCtx, lookups, {
+        enabled: !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters,
+        hide: ['workspace'],
+    })
 
     // Shared per-view action props for card + row.
+    // A person in a contributor trail joins the People filter ("You" for you).
+    const pickPerson = (userId: string) => {
+        const id = userId === currentUser?.id ? ME : userId
+        setFstate(prev => (prev.contributorIds.includes(id) ? prev : { ...prev, contributorIds: [...prev.contributorIds, id] }))
+    }
+    // Seen: the window closes, and a filter on it would now match nothing.
+    const markSeen = () => {
+        if (!visitKey) return
+        markVisitSeen(visitKey)
+        const drop = (rule: string | null) => (rule === VISIT_RULE ? null : rule)
+        setFstate(prev => ({ ...prev, created: drop(prev.created), updated: drop(prev.updated) }))
+    }
+
     const actionProps = (v: View) => ({
         onToggleFavourite: () => toggleFavourite(v.id),
         onShare: () => setShareView({ id: v.id, name: v.name, visibility: v.visibility }),
@@ -348,6 +438,8 @@ export default function WorkspaceViewsSection({
         // identical on every card/row, so drop it and give the scope column
         // room for the data source + provider.
         hideWorkspaceInScope: true,
+        onPickPerson: pickPerson,
+        visitMark: visitMarkOf(v, visit),
     })
 
     return (
@@ -372,17 +464,17 @@ export default function WorkspaceViewsSection({
                 <div className="flex flex-wrap items-center gap-2">
                     <SegmentChip icon={Lock} label="Private" count={insight.priv}
                         active={visFilter === 'private'} tone="slate"
-                        onClick={() => setVisFilter(v => v === 'private' ? 'all' : 'private')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'private' ? null : 'private' })} />
                     <SegmentChip icon={Users} label="Workspace" count={insight.wsVis}
                         active={visFilter === 'workspace'} tone="emerald"
-                        onClick={() => setVisFilter(v => v === 'workspace' ? 'all' : 'workspace')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'workspace' ? null : 'workspace' })} />
                     <SegmentChip icon={Globe} label="Enterprise" count={insight.ent}
                         active={visFilter === 'enterprise'} tone="indigo"
-                        onClick={() => setVisFilter(v => v === 'enterprise' ? 'all' : 'enterprise')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'enterprise' ? null : 'enterprise' })} />
                     {stats.needsAttention > 0 && (
                         <SegmentChip icon={AlertTriangle} label="Need attention" count={stats.needsAttention}
                             active={attentionOnly} tone="amber"
-                            onClick={() => setAttentionOnly(a => !a)} />
+                            onClick={() => patchFilters({ category: attentionOnly ? null : 'needs-attention' })} />
                     )}
                 </div>
             </div>
@@ -600,7 +692,9 @@ export default function WorkspaceViewsSection({
                 </div>
                 <div className="flex items-center gap-2">
                     <Link
-                        to={`/explorer?workspace=${wsId}`}
+                        // Carries this tab's filters across, in the Explorer's own
+                        // spelling, so the wider list starts where this one is.
+                        to={`/explorer?${writeFilterState(new URLSearchParams(), { ...fstate, workspaceIds: [wsId] })}`}
                         className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
                     >
                         <Compass className="w-4 h-4" /> Browse in Explorer
@@ -624,64 +718,99 @@ export default function WorkspaceViewsSection({
             </div>
 
             {/* ── Toolbar ────────────────────────────────────────── */}
-            <div className="flex flex-wrap items-center gap-2 mb-5">
-                <div className="relative flex-1 min-w-[200px]">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input
-                        value={search}
-                        onChange={e => setSearch(e.target.value)}
-                        placeholder="Search views by name or description…"
-                        className="w-full pl-9 pr-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                    />
-                </div>
-                <select
-                    value={dsFilter}
-                    onChange={e => setDsFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                >
-                    <option value="all">All sources</option>
-                    {dataSources.map(ds => (
-                        <option key={ds.id} value={ds.id}>{ds.label || ds.catalogItemId}</option>
-                    ))}
-                </select>
-                <select
-                    value={ownerFilter}
-                    onChange={e => setOwnerFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 max-w-[180px]"
-                >
-                    <option value="all">All owners</option>
-                    {currentUser?.id && <option value={currentUser.id}>You</option>}
-                    {ownerOptions.filter(o => o.id !== currentUser?.id).map(o => (
-                        <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
-                </select>
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+                <ExplorerSearchBox
+                    className="flex-1 min-w-[200px]"
+                    value={searchBoxText}
+                    onChange={text => { setSearchBox(text); patchFilters({ search: searchTextOf(text) }) }}
+                    inputRef={searchRef}
+                    state={fstate}
+                    onApplyFilters={setFstate}
+                    ctx={resolveCtx}
+                    currentUser={me}
+                    onRemoveLastFilter={() => {
+                        const last = chips[chips.length - 1]
+                        if (!last) return
+                        const previous = fstate
+                        setFstate(last.without(fstate))
+                        notify('info', `Removed ${last.prefix}: ${last.value}`, {
+                            label: 'Undo',
+                            onClick: () => setFstate(previous),
+                        })
+                    }}
+                    fixedWorkspace
+                />
+                <SourceKindToggle
+                    value={fstate.sourceKind}
+                    onChange={v => patchFilters({ sourceKind: v })}
+                    counts={sourceKinds}
+                />
+                <DateFilterMenu
+                    created={fstate.created}
+                    updated={fstate.updated}
+                    onChange={patch => patchFilters(patch)}
+                    today={today}
+                    counting={{ state: fstate, ctx: resolveCtx }}
+                />
+                <PeopleFilterMenu
+                    ids={fstate.contributorIds}
+                    role={fstate.contributorRole}
+                    people={people}
+                    currentUser={me}
+                    onChange={({ ids, role }) => patchFilters({ contributorIds: ids, contributorRole: role })}
+                />
+                <FilterDropdown
+                    icon={Database}
+                    label="Source"
+                    accent="emerald"
+                    selectionMode="single"
+                    disableSearch={dataSources.length < 8}
+                    options={sourceOptions}
+                    countsPending={countsPending}
+                    selectedIds={fstate.dataSourceId ? [fstate.dataSourceId] : []}
+                    onChange={ids => patchFilters({ dataSourceId: ids[0] ?? null })}
+                    activeLabelFormatter={(ids, opts) => opts.find(o => o.id === ids[0])?.label ?? 'Source'}
+                    emptyMessage="No data sources"
+                />
                 <ExplorerSortControl sort={sort} onSortChange={setSort} />
-                {hasActiveFilters && (
-                    <button
-                        onClick={clearFilters}
-                        className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                    >
-                        <X className="w-3.5 h-3.5" /> Clear
-                    </button>
-                )}
                 {/* Grid / list toggle */}
                 <div className="inline-flex items-center rounded-xl border border-glass-border overflow-hidden ml-auto">
                     <button
                         onClick={() => setLayout('grid')}
                         title="Grid"
-                        className={cn('p-2 transition-colors', layout === 'grid' ? 'bg-indigo-500/12 text-indigo-500' : 'text-ink-muted hover:text-ink')}
+                        className={cn('p-2 transition-colors', layout === 'grid' ? 'bg-indigo-500/10 text-indigo-500' : 'text-ink-muted hover:text-ink')}
                     >
                         <LayoutGrid className="w-4 h-4" />
                     </button>
                     <button
                         onClick={() => setLayout('list')}
                         title="List"
-                        className={cn('p-2 transition-colors', layout === 'list' ? 'bg-indigo-500/12 text-indigo-500' : 'text-ink-muted hover:text-ink')}
+                        className={cn('p-2 transition-colors', layout === 'list' ? 'bg-indigo-500/10 text-indigo-500' : 'text-ink-muted hover:text-ink')}
                     >
                         <ListIcon className="w-4 h-4" />
                     </button>
                 </div>
             </div>
+            <ActiveFilterChips
+                className="mb-4"
+                chips={chips}
+                currentUserId={currentUser?.id}
+                onRemove={chip => setFstate(prev => chip.without(prev))}
+                // In this tab "Clear all" resets everything — search and the
+                // insight chips included — back to the whole workspace.
+                onClearAll={clearFilters}
+            />
+            {!chips.length && <div className="mb-2" />}
+            {visit && (
+                <SinceLastVisitBanner
+                    state={fstate}
+                    ctx={resolveCtx}
+                    window={visit}
+                    onApply={setFstate}
+                    onMarkSeen={markSeen}
+                    className="mb-4"
+                />
+            )}
 
             {/* ── Body ───────────────────────────────────────────── */}
             {isLoading ? (
@@ -729,11 +858,19 @@ export default function WorkspaceViewsSection({
                     <h4 className="text-sm font-bold text-ink mb-1">
                         {hasActiveFilters ? 'No matching views' : 'No views yet'}
                     </h4>
-                    <p className="text-xs text-ink-muted mb-4 max-w-sm mx-auto">
-                        {hasActiveFilters
-                            ? 'Try a different search or filter.'
-                            : 'Views are saved visual perspectives on this workspace’s graph data. Create one to get started.'}
-                    </p>
+                    {hasActiveFilters && relaxations.length > 0 ? (
+                        <RelaxationList
+                            relaxations={relaxations}
+                            onRelax={setFstate}
+                            className="mx-auto mb-4 max-w-md px-4"
+                        />
+                    ) : (
+                        <p className="text-xs text-ink-muted mb-4 max-w-sm mx-auto">
+                            {hasActiveFilters
+                                ? 'Try a different search or filter.'
+                                : 'Views are saved visual perspectives on this workspace’s graph data. Create one to get started.'}
+                        </p>
+                    )}
                     {hasActiveFilters ? (
                         <button
                             onClick={clearFilters}
@@ -780,7 +917,11 @@ export default function WorkspaceViewsSection({
                     : undefined}
                 healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
                 initialEditMode={previewEditMode}
-                onSaved={() => refetch()}
+                // The save refreshed the lists; the drawer holds its own copy of the view.
+                onSaved={updated => setPreviewView(prev => prev && {
+                    ...prev, name: updated.name, description: updated.description, tags: updated.tags, visibility: updated.visibility,
+                })}
+                onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
             />
 
             {/* ── Dialogs (reused from Explorer) ─────────────────── */}

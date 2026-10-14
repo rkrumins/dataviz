@@ -92,7 +92,8 @@ export function EditDetailsPanel({
       // authorization — the publish gate), so the save is two steps.
       let updated = await updateView(view.id, {
         name: name.trim(),
-        description: description.trim() || undefined,
+        // Empty, not left out: left out keeps the old description.
+        description: description.trim(),
         tags: tagList,
       })
       if (visibility !== updated.visibility) {

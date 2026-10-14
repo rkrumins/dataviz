@@ -16,7 +16,7 @@ import {
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useViewActivity } from '@/hooks/useViewActivity'
-import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
+import { PersonHoverCard } from '@/components/explorer/PersonHoverCard'
 import type { ViewActivityEntry, ViewActivityAction } from '@/services/viewApiService'
 
 type Channel = 'data' | 'settings' | 'sharing'
@@ -193,14 +193,14 @@ export function ViewActivityTimeline({ viewId }: { viewId: string }) {
                                     </div>
                                     <div className="flex-1 min-w-0 pt-0.5">
                                         <div className="flex items-center gap-2 flex-wrap">
-                                            <CreatorHoverCard userId={e.actor} displayName={e.actorName} email={e.actorEmail} accentClassName={meta.tint}>
+                                            <PersonHoverCard userId={e.actor} displayName={e.actorName} email={e.actorEmail} accentClassName={meta.tint}>
                                                 <span className="inline-flex items-center gap-1.5 cursor-default" tabIndex={0}>
                                                     <span className={cn('w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold border', meta.tint)}>
                                                         {initials(e.actorName)}
                                                     </span>
                                                     <span className="text-sm font-semibold text-ink">{who}</span>
                                                 </span>
-                                            </CreatorHoverCard>
+                                            </PersonHoverCard>
                                             <span className="text-sm text-ink-muted">{e.summary ?? meta.label.toLowerCase()}</span>
                                             {e.synthetic && (
                                                 <span className="text-[9px] uppercase tracking-wide text-ink-muted border border-glass-border rounded px-1 py-0.5">pre-tracking</span>

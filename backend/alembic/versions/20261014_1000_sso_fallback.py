@@ -24,7 +24,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20261014_1000_sso_fallback"
-down_revision: Union[str, None] = "20261013_1000_activity_cadence"
+down_revision: Union[str, None] = "20261013_0116_saved_filters"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

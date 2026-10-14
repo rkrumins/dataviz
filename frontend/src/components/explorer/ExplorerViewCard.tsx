@@ -29,8 +29,9 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
-import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
+import { ContributorTrail } from '@/features/view-filters/components/ContributorTrail'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -196,11 +197,10 @@ export interface ExplorerViewCardProps {
   providerInfo?: DataSourceProviderInfo
   /** Hide the (redundant) workspace pill when the grid is one workspace. */
   hideWorkspaceInScope?: boolean
-}
-
-function initials(name?: string): string {
-  if (!name) return '?'
-  return name.split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase() ?? '').join('')
+  /** A person in the contributor trail was clicked: filter to them. */
+  onPickPerson?: (userId: string) => void
+  /** New or changed since the reader's last visit (see SinceLastVisitBanner). */
+  visitMark?: 'new' | 'updated' | null
 }
 
 // ─── Component ───────────────────────────────────────────────────
@@ -225,6 +225,8 @@ export function ExplorerViewCard({
   density = 'comfortable',
   providerInfo,
   hideWorkspaceInScope,
+  onPickPerson,
+  visitMark,
 }: ExplorerViewCardProps) {
   // Density-derived classes. Compact noticeably reduces vertical rhythm
   // (padding, section margins, suppressed mini preview) so a dense grid
@@ -296,18 +298,52 @@ export function ExplorerViewCard({
           />
         )}
 
-        {/* Pinned ribbon — compact accent badge in the top-right corner. */}
-        {view.isPinned && !isDeleted && (
+        {/* Since your last visit — a coloured top edge and a tab naming it,
+            centred so it clears the checkbox (left). Worded apart from "New to
+            you", which is about opening it. */}
+        {visitMark && !isDeleted && (
           <div
             aria-hidden
             className={cn(
-              'pointer-events-none absolute top-0 right-5 z-10',
-              'inline-flex items-center gap-1 rounded-b-md px-1.5 py-0.5',
-              'bg-accent-lineage text-white text-[9px] font-semibold uppercase tracking-wider',
-              'shadow-sm',
+              'pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5',
+              visitMark === 'new' ? 'bg-emerald-500' : 'bg-sky-500',
+            )}
+          />
+        )}
+
+        {/* The tabs hanging from the top edge: since your last visit, centred, and
+            Pinned in the top-right corner — or beside it when both show, since the
+            centred tab ran under Pinned on a narrow card. */}
+        {!isDeleted && (visitMark || view.isPinned) && (
+          <div
+            className={cn(
+              'pointer-events-none absolute top-0 z-10 flex gap-1 whitespace-nowrap',
+              visitMark ? 'left-1/2 -translate-x-1/2' : 'right-5',
             )}
           >
-            Pinned
+            {visitMark && (
+              <div
+                className={cn(
+                  'rounded-b-md px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white shadow-sm',
+                  visitMark === 'new' ? 'bg-emerald-600' : 'bg-sky-600',
+                )}
+              >
+                {visitMark === 'new' ? 'New since your visit' : 'Updated since your visit'}
+              </div>
+            )}
+            {/* Pinned ribbon — compact accent badge. */}
+            {view.isPinned && (
+              <div
+                aria-hidden
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-b-md px-1.5 py-0.5',
+                  'bg-accent-lineage text-white text-[9px] font-semibold uppercase tracking-wider',
+                  'shadow-sm',
+                )}
+              >
+                Pinned
+              </div>
+            )}
           </div>
         )}
         {/* ── Top-left checkbox ── */}
@@ -468,6 +504,10 @@ export function ExplorerViewCard({
               <VisIcon className="h-2.5 w-2.5" />
               {vis.label}
             </span>
+            {/* Versioned or external — the fact the filter pills select on, so a
+                filtered list explains itself. A short word, so it shares this
+                row; the glyph alone in compact density. */}
+            <SourceKindBadge kind={view.sourceKind} compact={compact} />
             {healthInfo && (
               <span
                 className={cn(
@@ -622,33 +662,9 @@ export function ExplorerViewCard({
               was the loudest text on a shelf of quiet views. */}
           <ViewUsageCounters usage={usage} />
 
-          {/* Creator — middle.
-              Compact initials-only avatar; hover reveals the
-              CreatorHoverCard with full name + email + user id so the
-              card footer stays uncluttered next to favourite / sync
-              indicators. */}
-          {(view.createdByName || view.createdBy) && (() => {
-            const displayName = view.createdByName ?? 'Unknown'
-            return (
-              <CreatorHoverCard
-                userId={view.createdBy ?? null}
-                displayName={view.createdByName ?? null}
-                email={view.createdByEmail ?? null}
-                accentClassName={meta.iconBg}
-              >
-                <div
-                  className={cn(
-                    'w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0 cursor-default',
-                    meta.iconBg,
-                  )}
-                  aria-label={`Creator: ${displayName}`}
-                  tabIndex={0}
-                >
-                  {initials(displayName)}
-                </div>
-              </CreatorHoverCard>
-            )
-          })()}
+          {/* Who shaped it — creator, last editor, last data publisher, each
+              once. Hover says what they did and when; a click filters to them. */}
+          <ContributorTrail view={view} onPick={onPickPerson} />
 
           {/* Sync indicator — right. Freshest of settings-edit vs data-publish, with both
               stories in the tooltip ("Data updated … by X" / "Settings edited … by Y").

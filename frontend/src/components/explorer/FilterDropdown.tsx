@@ -1,6 +1,6 @@
 /**
- * FilterDropdown — reusable searchable multi-select dropdown for the
- * Explorer filter bar.
+ * FilterDropdown — reusable searchable multi- (or single-) select dropdown for
+ * the Explorer filter bar.
  *
  * Handles the boilerplate shared by Workspace / Tag / ViewType / Creator
  * filters: trigger button with accent tint, popover panel, search input,
@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Check, ChevronDown, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { keyboardScopeProps } from '@/lib/keyboardScope'
 
 /** The colour family the trigger + active options use. */
 export type FilterAccent =
@@ -33,32 +34,32 @@ const ACCENT_CLASSES: Record<FilterAccent, {
 }> = {
   indigo: {
     triggerActive: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
-    optionActive: 'bg-indigo-500/8 text-indigo-600 dark:text-indigo-400',
+    optionActive: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
     checkBox: 'bg-indigo-500 border-indigo-500',
   },
   emerald: {
     triggerActive: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-    optionActive: 'bg-emerald-500/8 text-emerald-600 dark:text-emerald-400',
+    optionActive: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
     checkBox: 'bg-emerald-500 border-emerald-500',
   },
   violet: {
     triggerActive: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
-    optionActive: 'bg-violet-500/8 text-violet-600 dark:text-violet-400',
+    optionActive: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
     checkBox: 'bg-violet-500 border-violet-500',
   },
   amber: {
     triggerActive: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-    optionActive: 'bg-amber-500/8 text-amber-600 dark:text-amber-400',
+    optionActive: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
     checkBox: 'bg-amber-500 border-amber-500',
   },
   sky: {
     triggerActive: 'bg-sky-500/10 text-sky-600 dark:text-sky-400',
-    optionActive: 'bg-sky-500/8 text-sky-600 dark:text-sky-400',
+    optionActive: 'bg-sky-500/10 text-sky-600 dark:text-sky-400',
     checkBox: 'bg-sky-500 border-sky-500',
   },
   rose: {
     triggerActive: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
-    optionActive: 'bg-rose-500/8 text-rose-600 dark:text-rose-400',
+    optionActive: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
     checkBox: 'bg-rose-500 border-rose-500',
   },
 }
@@ -72,6 +73,10 @@ export interface FilterOption {
   icon?: LucideIcon
   /** Per-option icon colour class (e.g. ``text-indigo-500``). */
   iconClassName?: string
+  /** Views this option would leave with the other filters applied. A zero is
+   *  dimmed — a dead end — but still pickable: with several picked, any one
+   *  of them is enough. */
+  count?: number
 }
 
 export interface FilterDropdownProps {
@@ -100,6 +105,16 @@ export interface FilterDropdownProps {
    * for avatar + name + email should pass something wider.
    */
   panelWidthClassName?: string
+  /** Rendered at the top of the panel, above the search box — e.g. the People
+   *  filter's role switch. */
+  header?: React.ReactNode
+  /** Replaces the trigger's icon — e.g. the selected people's avatars. */
+  triggerPrefix?: React.ReactNode
+  /** `single`: picking an option selects only it and closes the panel; picking
+   *  the selected one clears it. Defaults to `multi`. */
+  selectionMode?: 'multi' | 'single'
+  /** The counts shown are about to be replaced; they dim until they are. */
+  countsPending?: boolean
 }
 
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
@@ -125,11 +140,17 @@ export function FilterDropdown({
   activeLabelFormatter,
   renderOption,
   panelWidthClassName = 'w-64',
+  header,
+  triggerPrefix,
+  selectionMode = 'multi',
+  countsPending,
 }: FilterDropdownProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const single = selectionMode === 'single'
   const accentClasses = ACCENT_CLASSES[accent]
 
   const close = () => {
@@ -156,7 +177,18 @@ export function FilterDropdown({
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const selectedCount = selectedIds.length
 
+  // Escape closes and hands focus back to the trigger, like every other menu.
+  function closeToTrigger() {
+    close()
+    triggerRef.current?.focus()
+  }
+
   function toggle(id: string) {
+    if (single) {
+      onChange(selectedSet.has(id) ? [] : [id])
+      close()
+      return
+    }
     if (selectedSet.has(id)) {
       onChange(selectedIds.filter(x => x !== id))
     } else {
@@ -169,9 +201,18 @@ export function FilterDropdown({
     : label
 
   return (
-    <div ref={containerRef} className="relative">
+    <div
+      ref={containerRef}
+      className="relative"
+      onKeyDown={e => {
+        if (e.key === 'Escape' && open) { e.stopPropagation(); closeToTrigger() }
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
+        aria-haspopup="true"
+        aria-expanded={open}
         onClick={() => setOpen(p => !p)}
         className={cn(
           'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium',
@@ -181,16 +222,21 @@ export function FilterDropdown({
             : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
         )}
       >
-        <Icon className="h-3.5 w-3.5" />
+        {triggerPrefix ?? <Icon className="h-3.5 w-3.5" />}
         {triggerLabel}
         <ChevronDown className={cn('h-3 w-3 transition-transform duration-150', open && 'rotate-180')} />
       </button>
 
       {open && (
-        <div className={cn(
-          'absolute left-0 top-full z-50 mt-1.5 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden',
-          panelWidthClassName,
-        )}>
+        <div
+          {...keyboardScopeProps('view-filters')}
+          className={cn(
+            'absolute left-0 top-full z-50 mt-1.5 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden',
+            'max-w-[calc(100vw-2rem)]',
+            panelWidthClassName,
+          )}
+        >
+          {header}
           {!disableSearch && (
             <div className="relative border-b border-glass-border/50 p-2">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-3 w-3 text-ink-muted/60 pointer-events-none" />
@@ -201,7 +247,12 @@ export function FilterDropdown({
                 onChange={e => setSearch(e.target.value)}
                 placeholder={searchPlaceholder ?? `Search ${label.toLowerCase()}...`}
                 className="w-full rounded-lg bg-black/[0.03] dark:bg-white/[0.04] pl-7 pr-2 py-1.5 text-xs text-ink outline-none placeholder:text-ink-muted/50 focus:bg-black/[0.05] dark:focus:bg-white/[0.06]"
-                onKeyDown={e => e.stopPropagation()}
+                onKeyDown={e => {
+                  // Typing must not reach the page's shortcuts — but Escape
+                  // still closes the menu.
+                  e.stopPropagation()
+                  if (e.key === 'Escape') closeToTrigger()
+                }}
               />
             </div>
           )}
@@ -247,15 +298,18 @@ export function FilterDropdown({
                     checked
                       ? accentClasses.optionActive
                       : 'text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+                    opt.count === 0 && !checked && 'opacity-50',
                   )}
                 >
-                  <span className={cn(
-                    'w-4 h-4 rounded border flex items-center justify-center shrink-0',
-                    'transition-colors duration-150',
-                    checked ? cn(accentClasses.checkBox, 'text-white') : 'border-glass-border',
-                  )}>
-                    {checked && <Check className="h-3 w-3" />}
-                  </span>
+                  {!single && (
+                    <span className={cn(
+                      'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                      'transition-colors duration-150',
+                      checked ? cn(accentClasses.checkBox, 'text-white') : 'border-glass-border',
+                    )}>
+                      {checked && <Check className="h-3 w-3" />}
+                    </span>
+                  )}
                   {OptIcon && (
                     <OptIcon className={cn('h-3.5 w-3.5 shrink-0', opt.iconClassName)} />
                   )}
@@ -267,6 +321,15 @@ export function FilterDropdown({
                       </span>
                     )}
                   </span>
+                  {opt.count !== undefined && (
+                    <span className={cn(
+                      'shrink-0 tabular-nums text-[10px] font-semibold text-ink-muted transition-opacity duration-150',
+                      countsPending && 'opacity-50',
+                    )}>
+                      {opt.count.toLocaleString()}
+                    </span>
+                  )}
+                  {single && checked && <Check className="h-3.5 w-3.5 shrink-0" />}
                 </button>
               )
             })}
