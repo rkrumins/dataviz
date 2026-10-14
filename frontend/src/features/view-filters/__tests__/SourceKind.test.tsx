@@ -1,14 +1,14 @@
 /**
  * Versioned / External is a version-control surface: it follows the deployment's
- * Version control switch like every other one. The pills toggle (pressing the
- * active one lets go), and a badge with no known kind renders nothing rather than
- * guessing.
+ * Version control switch like every other one. Its menu works like the other
+ * filters (picking the chosen kind again lets go), and a badge with no known kind
+ * renders nothing rather than guessing.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
-import { SourceKindToggle } from '../components/SourceKindToggle'
+import { SourceKindMenu } from '../components/SourceKindMenu'
 import { SourceKindBadge } from '../components/SourceKindBadge'
 
 function versioning(on: boolean) {
@@ -17,29 +17,37 @@ function versioning(on: boolean) {
 
 afterEach(() => versioning(true))
 
-describe('SourceKindToggle', () => {
-  it('selects a kind, and lets go when the active pill is pressed again', async () => {
+describe('SourceKindMenu', () => {
+  const trigger = () => screen.getByRole('button', { expanded: false })
+  const option = (name: RegExp) => screen.getAllByRole('button', { name }).at(-1)!
+
+  it('picks a kind, names it on the menu, and lets go when it is picked again', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
-    const { rerender } = render(<SourceKindToggle value={null} onChange={onChange} />)
-    await user.click(screen.getByRole('button', { name: /Versioned/ }))
+    const { rerender } = render(<SourceKindMenu value={null} onChange={onChange} />)
+    expect(trigger().textContent).toMatch(/Versioning/)
+    await user.click(trigger())
+    await user.click(option(/Versioned/))
     expect(onChange).toHaveBeenLastCalledWith('versioned')
 
-    rerender(<SourceKindToggle value="versioned" onChange={onChange} />)
-    expect(screen.getByRole('button', { name: /Versioned/ }).getAttribute('aria-pressed')).toBe('true')
-    await user.click(screen.getByRole('button', { name: /Versioned/ }))
+    rerender(<SourceKindMenu value="versioned" onChange={onChange} />)
+    expect(trigger().textContent).toMatch(/^Versioned/)
+    await user.click(trigger())
+    await user.click(option(/Versioned/))
     expect(onChange).toHaveBeenLastCalledWith(null)
   })
 
-  it('shows how many views each would leave, when known', () => {
-    render(<SourceKindToggle value={null} onChange={() => {}} counts={{ versioned: 12, external: 3 }} />)
-    expect(screen.getByRole('button', { name: /Versioned\s*12/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /External\s*3/ })).toBeTruthy()
+  it('shows how many views each would leave, when known', async () => {
+    const user = userEvent.setup()
+    render(<SourceKindMenu value={null} onChange={() => {}} counts={{ versioned: 12, external: 3 }} />)
+    await user.click(trigger())
+    expect(option(/Versioned/).textContent).toMatch(/12$/)
+    expect(option(/External/).textContent).toMatch(/3$/)
   })
 
   it('is hidden when version control is switched off', () => {
     versioning(false)
-    const { container } = render(<SourceKindToggle value={null} onChange={() => {}} />)
+    const { container } = render(<SourceKindMenu value={null} onChange={() => {}} />)
     expect(container.textContent).toBe('')
   })
 })
