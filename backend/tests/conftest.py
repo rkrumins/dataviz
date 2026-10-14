@@ -191,6 +191,26 @@ def _feature_flags_at_their_defaults():
 
 
 @pytest.fixture(autouse=True)
+def _view_source_kinds_unknown():
+    """Every test starts with the view reads' versioned/external lookup marked as
+    having just failed, so ``sourceKind`` is unknown and nothing reaches for the
+    ``graphver`` store.
+
+    Every view list asks that store, through its own engine — which the SQLite
+    harness never creates, and which, wherever a dev Postgres IS reachable, would
+    open a real connection on this test's event loop: the hazard described in
+    ``_feature_flags_at_their_defaults`` above. A test about source kinds calls
+    ``view_source_kinds.reset()`` and stubs
+    ``versioned_sources.versioned_data_source_ids`` (see test_view_filters_api.py).
+    """
+    from backend.app.services import view_source_kinds
+
+    view_source_kinds._failed_at = time.monotonic()
+    yield
+    view_source_kinds.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_replica_penalty_box():
     """Clear the process-global replica penalty box between tests.
 

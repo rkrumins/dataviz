@@ -314,10 +314,23 @@ describe('enrichment: free, or absent', () => {
     expect(within(semantic).getByText('2 entity types · 1 relationship')).toBeTruthy()
   })
 
-  it('says how the data source is held, and when its data last changed', () => {
+  it('says whether the data source is versioned, and when its data last changed', () => {
     workspaces = [{ id: 'ws_1', dataSources: [{ id: 'ds_1', sourceMode: 'managed' }] }]
-    renderBuiltOn(viewFixture({ dataUpdatedAt: new Date(Date.now() - 2 * 3600_000).toISOString() }))
-    expect(within(rung('Data source')).getByText(/Managed graph · Data updated 2h ago/)).toBeTruthy()
+    renderBuiltOn(viewFixture({
+      sourceKind: 'versioned',
+      dataUpdatedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    }))
+    expect(within(rung('Data source')).getByText(/Versioned graph · Data updated 2h ago/)).toBeTruthy()
+  })
+
+  // The card shows Versioned or External from the same server fact. Falling back
+  // to provenance here ("External graph" for a federated source) would contradict
+  // a "Versioned" badge on the card the drawer was opened from.
+  it('leaves the kind out when the server could not tell, rather than guessing', () => {
+    workspaces = [{ id: 'ws_1', dataSources: [{ id: 'ds_1', sourceMode: 'federated' }] }]
+    renderBuiltOn(viewFixture({ sourceKind: null }))
+    const source = rung('Data source')
+    expect(within(source).queryByText(/External graph|Managed graph|Versioned graph/)).toBeNull()
   })
 })
 

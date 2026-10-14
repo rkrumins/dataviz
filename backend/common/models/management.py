@@ -3,7 +3,7 @@ Pydantic models for the management database layer.
 Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
@@ -1291,6 +1291,12 @@ class ViewResponse(BaseModel):
     data_updated_by: Optional[str] = Field(None, alias="dataUpdatedBy")
     data_updated_by_name: Optional[str] = Field(None, alias="dataUpdatedByName")
     data_updated_by_email: Optional[str] = Field(None, alias="dataUpdatedByEmail")
+    # Each of those people's chosen avatar illustration (UserORM.avatar_id), from
+    # the same lookup as their name, so the contributor trail can show it; None
+    # when they picked none or cannot be resolved.
+    created_by_avatar_id: Optional[str] = Field(None, alias="createdByAvatarId")
+    updated_by_avatar_id: Optional[str] = Field(None, alias="updatedByAvatarId")
+    data_updated_by_avatar_id: Optional[str] = Field(None, alias="dataUpdatedByAvatarId")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")
@@ -1320,6 +1326,10 @@ class ViewResponse(BaseModel):
     portable_id: Optional[str] = Field(None, alias="portableId")
     # Set while the view exists only in a draft, waiting to go live (see ViewORM.draft_branch_id).
     draft_branch_id: Optional[str] = Field(None, alias="draftBranchId")
+    # Whether the data it reads (its own source, else its workspace's default) is
+    # versioned on this platform or mastered elsewhere. Set by the view reads
+    # (backend.app.services.view_source_kinds); None = unknown, or no source at all.
+    source_kind: Optional[Literal["versioned", "external"]] = Field(None, alias="sourceKind")
 
     class Config:
         populate_by_name = True
@@ -1365,6 +1375,113 @@ class ViewFacetCreator(BaseModel):
         populate_by_name = True
 
 
+class ViewFacetContributor(BaseModel):
+    """A person behind views, for the Explorer's contributor filter.
+
+    ``count`` is the views they created or last edited, each counted once —
+    what ``contributorIn`` matches by default. ``publishedCount`` (views whose
+    data they published last) is kept apart and out of ``count``: a publish
+    stamps every view of the source, read or not.
+    """
+    user_id: str = Field(alias="userId")
+    display_name: str = Field(alias="displayName")
+    email: Optional[str] = None
+    avatar_id: Optional[str] = Field(None, alias="avatarId")
+    count: int
+    created_count: int = Field(alias="createdCount")
+    edited_count: int = Field(alias="editedCount")
+    published_count: int = Field(alias="publishedCount")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewFacetWorkspace(BaseModel):
+    """A workspace facet row; ``name`` falls back to the id when unresolvable."""
+    id: str
+    name: str
+    count: int
+
+
+class ViewFacetDataSource(BaseModel):
+    """A data-source facet row. ``kind`` is None when the versioned set is
+    unknown; ``name`` falls back to the id when the source has no label."""
+    id: str
+    name: str
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    kind: Optional[Literal["versioned", "external"]] = None
+    count: int
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewFacetSourceKinds(BaseModel):
+    """How many views each Versioned / External choice would leave."""
+    versioned: int
+    external: int
+
+
+class ViewCountResponse(BaseModel):
+    """``GET /views/count`` — the list's ``total`` without the rows."""
+    total: int
+
+
+class ViewHistogramBucket(BaseModel):
+    """Views in one UTC bucket: ``t`` is ``YYYY-MM-DDTHH`` (hour) or
+    ``YYYY-MM-DDTHH:M`` (ten minutes, M the first digit of the minutes)."""
+    t: str
+    n: int
+
+
+class ViewHistogramResponse(BaseModel):
+    """``GET /views/histogram`` — views created or changed per bucket of a window.
+
+    ``after`` / ``before`` echo the window as normalised (UTC); buckets are
+    sparse and ascending, and ``total`` is their sum.
+    """
+    field: Literal["created", "updated"]
+    grain: Literal["hour", "10min"]
+    after: str
+    before: str
+    total: int
+    buckets: List[ViewHistogramBucket]
+
+
+class SavedViewFilterResponse(BaseModel):
+    """A person's saved Explorer filter set (``/views/saved-filters``).
+
+    ``query`` is the Explorer's address query (no leading ``?``), as saved;
+    empty means all views. ``position`` orders the person's list from 0.
+    """
+    id: str
+    name: str
+    query: str
+    position: int
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class SavedViewFilterCreateRequest(BaseModel):
+    name: str
+    query: str
+
+
+class SavedViewFilterUpdateRequest(BaseModel):
+    """Either or both; a field left out keeps its value."""
+    name: Optional[str] = None
+    query: Optional[str] = None
+
+
+class SavedViewFilterOrderRequest(BaseModel):
+    """Every one of the caller's saved filter ids, once each, in the new order."""
+    ids: List[str]
+
+
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 
@@ -1384,16 +1501,22 @@ class ViewCatalogStats(BaseModel):
 class ViewFacetsResponse(BaseModel):
     """Aggregate facets across the views table.
 
-    Used by the Explorer to populate the Tag / View Type / Creator
-    dropdowns so users can pick from the real set of values in the
-    database rather than a derived-from-current-page approximation.
-    Facets are intentionally GLOBAL (not filter-scoped) so dropdowns
-    always offer the full option space — see ``GET /views/stats`` for
-    filter-aware counts.
+    Used by the Explorer's filter dropdowns, from the real set of values in
+    the database rather than a derived-from-current-page approximation.
+    Each facet is counted under every active filter except its own, so a
+    count says what choosing that option would leave (see
+    ``view_repo.get_view_facets``). A facet the caller did not ask for
+    (``fields``) is empty, and ``source_kinds`` None.
     """
     tags: List[ViewFacetValue]
     view_types: List[ViewFacetValue] = Field(alias="viewTypes")
     creators: List[ViewFacetCreator]
+    contributors: List[ViewFacetContributor] = Field(default_factory=list)
+    workspaces: List[ViewFacetWorkspace] = Field(default_factory=list)
+    data_sources: List[ViewFacetDataSource] = Field(default_factory=list, alias="dataSources")
+    visibilities: List[ViewFacetValue] = Field(default_factory=list)
+    # None when not asked for, or while the versioned set cannot be read.
+    source_kinds: Optional[ViewFacetSourceKinds] = Field(None, alias="sourceKinds")
 
     class Config:
         populate_by_name = True

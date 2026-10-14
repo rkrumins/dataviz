@@ -1206,16 +1206,22 @@ function ViewWizardBody({
     // Hydrate form from view in edit mode. normalizeReferenceLayout up-converts
     // legacy per-layer entityAssignments/rules into the flattened assignments
     // map, so canvas-created layer placements (canonical or legacy) become
-    // visible in the wizard here.
+    // visible in the wizard here. A refetch of the view hydrates it again only
+    // while the form is untouched: one landing after the user's edits (a save's
+    // own write triggers one) must not reset them. The tags it was filled with
+    // are kept, so that a save sends tags only when they were changed here.
+    const hydratedTagsRef = useRef<string[] | null>(null)
+    const formEditedRef = useRef(false)
     useEffect(() => {
-        if (mode === 'edit' && editingView) {
+        if (mode === 'edit' && editingView && !(hydratedTagsRef.current && formEditedRef.current)) {
+            hydratedTagsRef.current = editingView.tags ?? []
             const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
                 icon: editingView.icon ?? 'Layout',
                 visibility: (editingView as any).visibility ?? (editingView.isPublic ? 'enterprise' : 'private'),
-                tags: (editingView as any).tags ?? [],
+                tags: editingView.tags ?? [],
                 dataSourceId: editingView.dataSourceId ?? undefined,
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                 layers,
@@ -1706,6 +1712,9 @@ function ViewWizardBody({
                     setSubmitError(err instanceof Error ? err.message : 'The view was created, but its layout could not be saved.')
                 }
             } else if (viewId) {
+                const loadedTags = hydratedTagsRef.current ?? []
+                const tagsChanged = formData.tags.length !== loadedTags.length
+                    || formData.tags.some((tag, i) => tag !== loadedTags[i])
                 // This updateView writes the published/base row (name/filters/visible-types
                 // stay base-global even in a draft). buildViewConfig now preserves the base's
                 // existing content.entityScope, so the config PUT no longer wipes it — the
@@ -1723,7 +1732,11 @@ function ViewWizardBody({
                     // permission files a request rather than attempting a
                     // transition the server will refuse.
                     visibility: wantsPublication ? undefined : formData.visibility,
-                    tags: formData.tags.length > 0 ? formData.tags : undefined,
+                    // Only when changed here, and then the whole list (empty clears
+                    // them). Left out, the view keeps its own: an untouched list must
+                    // not overwrite tags set elsewhere since the form loaded, nor
+                    // write a draft's staged import's tags to the view.
+                    tags: tagsChanged ? formData.tags : undefined,
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {
@@ -1791,6 +1804,7 @@ function ViewWizardBody({
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()
+        formEditedRef.current = true
         setFormData(prev => ({ ...prev, ...updates }))
     }, [markDirty])
 
