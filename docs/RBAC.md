@@ -456,7 +456,10 @@ and nothing in any other workspace.
 
 Bind `org_admin` at global scope. The user gets the cross-workspace
 shortcut + workspace creation + group management, but not user
-administration or SSO config.
+administration or SSO config. Group management stops at a group that grants
+`super_admin`: adding or removing its members, or deleting it, needs
+`system:admin` (403 `group_grants_super_admin`) — you cannot grant what you do
+not hold.
 
 ### "I want X to audit everything but change nothing"
 

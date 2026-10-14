@@ -75,11 +75,13 @@ def posture_wired(db_session):
 
 
 async def _seed_sso_admin(session: AsyncSession) -> None:
-    """An active super-admin with a linked SSO identity, so disabling
-    local login clears the would-lock-out-admin guard."""
+    """An active super-admin with a linked SSO identity and a password,
+    marked as a system account — a ready break-glass account — so
+    disabling local login clears both lockout guards."""
     session.add(m.UserORM(
         id="usr_sso_admin", email="sso-admin@example.com", password_hash="x",
         first_name="A", last_name="Dmin", status="active",
+        is_system_account=True,
         created_at="2024-01-01T00:00:00Z", updated_at="2024-01-01T00:00:00Z",
     ))
     session.add(m.RoleBindingORM(
@@ -89,7 +91,7 @@ async def _seed_sso_admin(session: AsyncSession) -> None:
     ))
     session.add(m.IdpProviderORM(
         id="idp_toggle01", slug="entra", display_name="Entra",
-        kind="oidc", enabled=True,
+        kind="oidc", enabled=True, lifecycle="live",
     ))
     session.add(m.UserIdentityORM(
         id="uid_usr_sso_admin", user_id="usr_sso_admin",

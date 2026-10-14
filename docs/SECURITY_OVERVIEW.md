@@ -97,9 +97,18 @@ password, not the person.
   Self-registration**. Accounts created that way wait for approval in **Administration →
   User Management**. Invitations work either way, unless you also turn off **Invite links**.
 - To make single sign-on the only way in, turn off **Passwords** in **Administration → SSO →
-  Settings**. The switch refuses to turn off while an active Super Admin has no SSO identity
-  and isn't marked as a system (break-glass) account. System accounts keep password sign-in,
-  so an identity-provider outage can't lock everyone out.
+  Settings**. The switch refuses to turn off until a break-glass account is ready — an active
+  Super Admin with a password, marked as a system account — and lists any Super Admin it
+  would leave without a way in. System accounts keep password sign-in, so an
+  identity-provider outage can't lock everyone out. While passwords are off, an account that
+  may not use one gets the same answer as a wrong password, so the sign-in form does not
+  reveal which accounts may.
+- When an identity provider is confirmed down by the server's own checks — seen working,
+  then failing for three minutes on fresh evidence — Super Admins with a password may sign
+  in with it, and an administrator can open password sign-in to everyone for 1–24 hours.
+  Sessions opened that way end at their next renewal once single sign-on is back, and within
+  a day regardless; signed-in SSO users ride through the outage. Every one of these sign-ins
+  is audited. See [SSO](/docs/sso) §1.17.
 
 **Where in the code.** `backend/auth_service/core/password.py` (`hash_password`,
 `verify_password`), `backend/auth_service/providers/local.py` (`LocalIdentityProvider`),

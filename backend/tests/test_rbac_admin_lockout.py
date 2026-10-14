@@ -35,7 +35,7 @@ async def _seed_super_admin(
     if with_identity:
         session.add(m.IdpProviderORM(
             id="idp_test01", slug="entra", display_name="Entra",
-            kind="oidc", enabled=True,
+            kind="oidc", enabled=True, lifecycle="live",
         ))
         session.add(m.UserIdentityORM(
             id=f"uid_{user_id}", user_id=user_id, provider_id="idp_test01",
@@ -44,10 +44,60 @@ async def _seed_super_admin(
     await session.commit()
 
 
+async def _seed_break_glass(session: AsyncSession) -> None:
+    """A READY break-glass account: active, super_admin, marked as a
+    system account, with a password. Turning passwords off needs one."""
+    await _seed_super_admin(
+        session, user_id="usr_breakglass", email="breakglass@example.com",
+        with_identity=False,
+    )
+    from backend.app.db.repositories import user_repo
+    await user_repo.set_system_account(session, "usr_breakglass", True)
+    await session.commit()
+
+
 @pytest.mark.asyncio
-async def test_disabling_local_login_blocked_when_admin_lacks_sso(
+async def test_disabling_local_login_refused_without_a_ready_break_glass_account(
     test_client: AsyncClient, db_session: AsyncSession
 ):
+    """Every admin having SSO is not enough: with no break-glass account,
+    an IdP outage would leave nobody able to sign in at all."""
+    await _seed_super_admin(
+        db_session, user_id="usr_admin_sso",
+        email="sso@example.com", with_identity=True,
+    )
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "no_break_glass_account"
+
+
+@pytest.mark.asyncio
+async def test_a_system_account_without_a_password_is_not_ready(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    await _seed_super_admin(
+        db_session, user_id="usr_sys_nopw", email="sys@example.com",
+        with_identity=True,
+    )
+    from backend.app.db.repositories import user_repo
+    from backend.auth_service.core.password import disabled_password_hash
+    user = await user_repo.set_system_account(db_session, "usr_sys_nopw", True)
+    user.password_hash = disabled_password_hash()
+    await db_session.commit()
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "no_break_glass_account"
+
+
+@pytest.mark.asyncio
+async def test_disabling_local_login_warns_when_admin_lacks_sso(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    await _seed_break_glass(db_session)
     await _seed_super_admin(
         db_session, user_id="usr_admin_no_sso",
         email="nosso@example.com", with_identity=False,
@@ -59,13 +109,70 @@ async def test_disabling_local_login_blocked_when_admin_lacks_sso(
     body = resp.json()["detail"]
     assert body["error"] == "would_lock_out_admin"
     offending_ids = {a["id"] for a in body["adminsWithoutSso"]}
-    assert "usr_admin_no_sso" in offending_ids
+    assert offending_ids == {"usr_admin_no_sso"}
+
+    # A warning, not a wall: acknowledged, the switch lands.
+    resp = await test_client.patch(PATCH_PATH, json={
+        "allowLocalLogin": False, "acknowledgeAdminsWithoutSso": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["allowLocalLogin"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_org_admin_without_sso_is_named_too(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Org admins lose their password with everyone else, so a switch-off
+    names them beside the Super Admins — each with their role."""
+    await _seed_break_glass(db_session)
+    await _seed_super_admin(
+        db_session, user_id="usr_sa_no_sso",
+        email="sa@example.com", with_identity=False,
+    )
+    await _seed_super_admin(
+        db_session, user_id="usr_oa_no_sso",
+        email="oa@example.com", with_identity=False,
+    )
+    binding = await db_session.get(m.RoleBindingORM, "bnd_usr_oa_no_sso")
+    binding.role_name = "org_admin"
+    await db_session.commit()
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 409, resp.text
+    listed = {a["id"]: a["role"] for a in resp.json()["detail"]["adminsWithoutSso"]}
+    assert listed == {"usr_sa_no_sso": "super_admin", "usr_oa_no_sso": "org_admin"}
+
+
+@pytest.mark.asyncio
+async def test_an_identity_on_a_draft_connection_does_not_count(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """A draft connection signs nobody in, so an admin linked only there
+    has no way in once passwords are off."""
+    await _seed_break_glass(db_session)
+    await _seed_super_admin(
+        db_session, user_id="usr_admin_draft",
+        email="draft@example.com", with_identity=True,
+    )
+    provider = await db_session.get(m.IdpProviderORM, "idp_test01")
+    provider.lifecycle = "draft"
+    await db_session.commit()
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 409, resp.text
+    assert {a["id"] for a in resp.json()["detail"]["adminsWithoutSso"]} == {
+        "usr_admin_draft",
+    }
 
 
 @pytest.mark.asyncio
 async def test_disabling_local_login_allowed_when_admin_has_sso(
     test_client: AsyncClient, db_session: AsyncSession
 ):
+    await _seed_break_glass(db_session)
     await _seed_super_admin(
         db_session, user_id="usr_admin_sso",
         email="sso@example.com", with_identity=True,
@@ -74,7 +181,32 @@ async def test_disabling_local_login_allowed_when_admin_has_sso(
     resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["allowLocalLogin"] is False
+    body = resp.json()
+    assert body["allowLocalLogin"] is False
+    assert body["breakGlass"]["ready"] is True
+    assert [a["email"] for a in body["breakGlass"]["accounts"]] == [
+        "breakglass@example.com",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_guard_runs_on_the_transition_only(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Saving another switch while passwords are already off is never
+    blocked by the lockout checks — they guard turning passwords off."""
+    await _seed_break_glass(db_session)
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+    assert resp.status_code == 200, resp.text
+    await _seed_super_admin(
+        db_session, user_id="usr_late_admin", email="late@example.com",
+        with_identity=False,
+    )
+
+    resp = await test_client.patch(PATCH_PATH, json={"emailFirstLogin": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["emailFirstLogin"] is True
 
 
 @pytest.mark.asyncio

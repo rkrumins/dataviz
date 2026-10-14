@@ -151,13 +151,26 @@ async def test_resolve_routes_a_known_domain(hrd_client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_resolve_is_inert_while_the_toggle_is_off(
-    hrd_client, db_session,
-):
-    """Additive by design: with the switch off the login page is exactly
-    what it was, so this must reveal nothing even for a configured domain."""
+async def test_resolve_routes_without_email_first(hrd_client, db_session):
+    """The SSO-first page routes the address on Enter in every posture
+    with a connection, so resolution no longer waits for email-first —
+    only for single sign-on itself."""
     await _provider(db_session, slug="entra-off", domains=["corp.example"])
     await _enable_email_first(db_session, on=False)
+
+    resp = await hrd_client.post(
+        "/api/v1/auth/resolve", json={"email": "alice@corp.example"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["provider"]["slug"] == "entra-off"
+
+
+@pytest.mark.asyncio
+async def test_resolve_is_inert_while_sso_is_off(hrd_client, db_session):
+    await _provider(db_session, slug="entra-sso-off", domains=["corp.example"])
+    from backend.app.db.repositories import app_auth_config_repo
+    await app_auth_config_repo.update_config(db_session, sso_enabled=False)
+    await db_session.commit()
 
     resp = await hrd_client.post(
         "/api/v1/auth/resolve", json={"email": "alice@corp.example"},
@@ -322,6 +335,9 @@ async def test_login_context_reports_the_posture(hrd_client, db_session):
     assert body["allowLocalLogin"] is True
     assert body["emailFirstLogin"] is True
     assert [p["slug"] for p in body["providers"]] == ["ctx-idp"]
+    assert body["passwordAccess"] == "everyone"
+    assert body["ssoOutage"] is None
+    assert body["passwordFallbackUntil"] is None
 
 
 @pytest.mark.asyncio
@@ -351,5 +367,7 @@ async def test_login_context_fails_open_on_a_broken_posture_read(test_client):
         assert resp.status_code == 200
         assert resp.json()["allowLocalLogin"] is True
         assert resp.json()["emailFirstLogin"] is False
+        assert resp.json()["passwordAccess"] == "everyone"
+        assert resp.json()["ssoOutage"] is None
     finally:
         app.state.identity_service = previous

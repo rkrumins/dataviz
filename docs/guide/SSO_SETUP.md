@@ -301,7 +301,7 @@ endpoint to call. Two things to know before you do:
 - It runs **automatically**, once per browser tab, for anyone opening
   {brand}. A session the machine already holds should not need a button
   press. If it fails — an off-network laptop, a browser that has not
-  been told to answer for that host — the ordinary sign-in form is still
+  been told to answer for that host — the ordinary sign-in page is still
   there, and pressing the button will say what went wrong.
 - There is a **switch** on the section. Turning it off stops the call
   without losing what you configured, which is what you want during an
@@ -539,8 +539,11 @@ Closing with unsaved edits asks first.
 - **Turn off one connection** — the power button on its card. The configuration
   is kept; sign-ins through it stop.
 - **Turn off all SSO** — Settings → *Single sign-on*. The master switch.
-- **SSO only, no passwords** — Settings → *Passwords*. Refused if it would lock
-  out an admin who has no SSO identity.
+- **SSO only, no passwords** — Settings → *Passwords*. Refused until a
+  break-glass account is ready, and lists any Super Admin it would leave
+  without a way in. See
+  [When your identity provider is down](/guide/sso-operations#when-your-identity-provider-is-down)
+  for who can still get in during an outage.
 
 The Settings tab opens with one sentence describing what somebody arriving at the
 sign-in page gets right now, because four independent switches do not add up to

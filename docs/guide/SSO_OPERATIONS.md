@@ -15,6 +15,7 @@ working.
 - [Offboard somebody who is leaving](#somebody-is-leaving)
 - [End someone's sessions now](#ending-sessions)
 - [Make single sign-on the only way in](#enforcing-single-sign-on)
+- [Let people in when the identity provider is down](#when-your-identity-provider-is-down)
 - [Add a second identity provider](#adding-a-second-identity-provider)
 - [Turn a connection off](#turning-a-connection-off)
 
@@ -148,7 +149,85 @@ stored, so it always reflects reality.
 |---|---|---|
 | **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold (their JWKS, a pasted public key, or a shared secret), or an answer the provider gave us directly when we asked it | Yes |
 | **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not | No |
-| **Unverified** | We cannot tell a genuine claim from a forged one — an unsigned portal payload, or a gateway connection running *Trust unverified sign-ins* | No |
+| **Unverified** | We cannot tell a genuine claim from a forged one — an unsigned portal payload, a gateway connection running *Trust unverified sign-ins*, or one with TLS verification switched off (anyone on the network path could answer as the gateway) | No |
+
+### Getting a connection to Verified
+
+A live connection below Verified carries a warning on its card that names its cause and its
+fix, with **Open its settings** beside it; once you have read it, **Hide** folds it to one
+line on your screen (it opens again if the cause changes). The **Unverified** or
+**Asserted** pill stays either way.
+
+**Nobody is locked out below Verified.** An Unverified or Asserted connection signs people in
+and links existing accounts by email — org admins' included — exactly as a Verified one does.
+What it never does is link itself to a Super Admin's or a break-glass account: a forged identity
+cannot claim the platform. Super Admins link the connection from their own account page once
+(user menu → **Identities** → **Link**), and sign in through it from then on; break-glass
+accounts stay password-only. To link *every* existing account automatically, Super Admins and
+break-glass included, turn on **Link Super Admin and break-glass accounts too** under the
+connection's **Identity** (it appears whenever the connection is below Verified, and the card
+says when it is on) — and accept that anyone who can forge what the connection trusts could then
+sign in as one of them.
+
+**What linking means on such a connection.** Once an account is linked — by email, by the
+person, or through that switch — anyone able to forge a reply naming its subject can sign in as
+it. That is what the Unverified rating says, for every account the connection signs in; the
+lasting fix is to make the connection Verified, below. Until then, Super Admins can keep signing
+in with their password instead of linking.
+Whether an existing account links at all is still the **Account linking** policy's call:
+*Strict* skips accounts that already have another single sign-on identity (choose *Allow
+verified* to stack them), and the gateway's addresses count as verified only while **Treat
+the gateway's email addresses as verified** is on (the default).
+
+**What decides the rating:**
+
+| Connection | Verified when | Below it when |
+|---|---|---|
+| OIDC, SAML | Always: the IdP's signature is checked on every sign-in | — |
+| Enterprise gateway, exchange on **our server** | TLS to the gateway is verified (the default): the server asks the gateway itself at every sign-in and renewal | **Skip TLS verification for this connection** is on — *Unverified*, unless the answer arrives as a signed token checked against a pasted public key or shared secret |
+| Enterprise gateway, exchange in **the browser** | **Verify the token with** is a JWKS URL, a pasted public key or a shared secret: the gateway's token is signature-checked and accepted once | It is *Nothing — trust it unverified* (Trust unsigned) — *Unverified*; or TLS verification is off with a JWKS URL, since the key set itself would arrive unverified |
+| Portal (corporate profile) | Its payload is a signed JWT, read from a cookie or browser storage, checked against the key the connection holds | The payload is read from a **header** — *Asserted*: trusted only as far as your proxy strips inbound copies of it; or it is accepted unsigned — *Unverified* |
+| Development sign-in | Never | Always *Unverified*: keep it off wherever real people sign in |
+
+**An Enterprise gateway that trusts unsigned replies**, step by step:
+
+1. **Ask the gateway team for a signed reply.** The translate endpoint returns its answer as a
+   JWT signed with their key, and they give you one of: a JWKS URL (best — keys rotate on
+   their side without you), a PEM public key, or a shared secret for HS256. What to send
+   them is in the [gateway integration contract](/docs/sso-backchannel-contract#when-the-cookie-never-reaches-us-the-browser-side-exchange).
+2. **Keep the same subject.** The signed token must carry the same subject (the claim mapped
+   to the person's ID) as today's replies. Existing people are matched by it; a token
+   naming them differently reads as a new identity, and under *Strict* their account, which
+   already has the old one, is not linked.
+3. **Let the server reach the key set.** An internal JWKS host needs an entry under
+   **Settings → Internal gateways SSO may call** (host **and** port), and, if it is signed
+   by your corporate CA, the [CA bundle](/docs/deployment#corporate-tls-trust-for-sso).
+4. **Switch the connection over.** Under its settings, set **Verify the token with** to the
+   key you were given, and save. Choosing a key replaces *Nothing — trust it unverified*.
+5. **Rehearse** from the card before publishing it to everyone: the verdict states which
+   reply shape arrived (a signed token or bare JSON), what judged it, and the claims — check
+   the subject is the one people already have. The pill turns **Verified**.
+
+If the corporate cookie is set on a parent domain this application shares, there is a second
+way: set **Who redeems the corporate session** to *Our server*, give it the **Gateway URL**
+and an allowlist entry, and the server asks the gateway itself over verified TLS — no
+signature needed.
+
+**A gateway or IdP behind your corporate CA:** mount the
+[CA bundle](/docs/deployment#corporate-tls-trust-for-sso) (`SSO_OUTBOUND_TLS_CA_CERTS`)
+rather than switching TLS verification off; the bundle keeps the connection Verified.
+
+**A portal:** have it sign its payload as a JWT and give the connection the key. A header
+from your proxy can only ever be *Asserted*.
+
+**Once a connection is Verified:**
+
+- Super Admin and break-glass accounts link automatically, by the linking policy, like
+  everyone else, and **Link Super Admin and break-glass accounts too** no longer applies (it
+  disappears);
+- access mapping rules can grant platform administrator roles through it;
+- the card's warning goes away;
+- people already linked notice nothing: their sign-in, sessions and accounts are unchanged.
 
 For a gateway connection's browser exchange, the rehearsal verdict states
 which reply shape arrived (a signed token or bare JSON) and what judged it —
@@ -166,6 +245,16 @@ event records it as `auth_time_anchored: true`.
 
 ## Who can sign in, and how
 
+**The sign-in page leads with single sign-on.** With a connection live, the
+first thing on it is **Continue with** your primary connection — the first in
+login-page order (**Priority**, lowest first; the providers list marks it
+**Primary**). Below it, people can type their email and press Enter: an
+address whose domain a connection lists under **Email domains** goes to that
+connection, and any other address goes to the primary. Nobody is asked for a
+password they do not need. While **Passwords** is on, a quieter **Can't use
+single sign-on? Sign in with email and password** link is the fallback, and it
+is offered prominently whenever a single sign-on attempt fails.
+
 **Admin → SSO → Settings.** Four switches. The page opens with one sentence
 describing what somebody arriving at the sign-in page gets right now, because
 four independent switches do not add up to that on their own — watch it as you
@@ -174,9 +263,9 @@ change them.
 | Switch | On | Off |
 |---|---|---|
 | **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was. People already signed in through a connection stay signed in until their sessions expire — the confirm offers to sign them out now, with the count, and the same action stands alone on the page once the switch is off |
-| **Passwords** | Email and password still work | SSO is the only way in — see *Enforcing single sign-on* below. Refused if it would lock out an admin who has no SSO identity and is not a system account |
+| **Passwords** | Anyone with a password can fall back to it | Break-glass accounts only — see *Enforcing single sign-on* below, and *When your identity provider is down* for who else gets in during an outage. Refused until a break-glass account is ready |
 | **Create accounts automatically** | An account appears the first time somebody signs in through a connection | They must already exist here. An unknown person is turned away with `jit_disabled` |
-| **Ask for an email first** | One field, routed to the connection owning that domain | A button per connection |
+| **Ask for an email first** | One email field leads; the connection buttons sit behind **Other ways to sign in** | The primary connection's button leads, with the others under it |
 
 ### The combination the server refuses
 
@@ -190,27 +279,34 @@ until they expire, so there is a window to put one back.
 
 ### Enforcing single sign-on
 
-Turning **Passwords** off makes SSO the only way in. Three things make that
-safe to actually do:
+Turning **Passwords** off makes SSO the only way in for everybody except
+break-glass accounts. Four things make that safe to actually do:
 
-1. **The lockout guard.** The switch is refused while any active admin has
-   neither a linked SSO identity nor the system-account mark — the 409 lists
-   who. Fix it by having each listed admin sign in once through a connection
-   (linking their identity), or by marking the operational account as a
-   **system account** in Admin → Users.
+1. **A ready break-glass account.** The switch is refused until one exists: an
+   active Super Admin with a password, marked as a **system account** in
+   Admin → Users. **Break-glass accounts** on the Settings page shows whether
+   one is ready. It is the door that survives an identity-provider outage.
 
-2. **The system account (break-glass).** A system account is out of scope for
+2. **The lockout warning.** Administrators — Super Admins and org admins —
+   who have neither a linked SSO identity nor the system-account mark are
+   listed, with their role, when you turn the switch off, each with **Make
+   break-glass**. **Turn off anyway** proceeds: they
+   keep their accounts and sign in through a connection from then on (it links
+   them by email the first time, where the connection's linking policy
+   allows).
+
+3. **The system account (break-glass).** A system account is out of scope for
    enforcement: it keeps password sign-in even while passwords are off, and
-   forced sign-outs skip it. The sign-in page hides the password form under
+   forced sign-outs skip it. The sign-in page shows no password form under
    enforcement, so the system account signs in at `/login?password=1` — the
-   page does not advertise that address, and revealing the form grants
-   nothing, because the server refuses every account that is not marked (an
-   unknown email gets the identical refusal). A fresh deployment's seeded
+   page does not advertise that address outside an outage, and revealing the
+   form grants nothing: every account that may not use a password gets the
+   same "Invalid email or password" a wrong password gets, so the form cannot
+   be used to find out which accounts may. A fresh deployment's seeded
    administrator is marked automatically; existing deployments mark theirs in
-   Admin → Users. Reserve the mark for operational accounts — it is the door
-   that survives an IdP outage.
+   Admin → Users. Reserve the mark for operational accounts.
 
-3. **Requiring everyone to sign in again.** Flipping the switch changes what
+4. **Requiring everyone to sign in again.** Flipping the switch changes what
    the *next* sign-in must be; the sessions already out there stay valid under
    the old policy until they expire — up to a day. The confirm offers to end
    them in the same breath, with the counts, and the same act stands alone on
@@ -225,6 +321,88 @@ account created with a password it can never use is a dead end discovered at
 first sign-in. Invites are redeemed by signing in through a connection
 instead.
 
+### When your identity provider is down
+
+Enforcing single sign-on must not turn an IdP outage into a platform outage.
+
+**What happens by itself.** Every minute the platform checks that each OIDC,
+SAML and Enterprise gateway connection still answers — the same calls a
+sign-in makes (a gateway is asked with no session, and a 401 counts as an
+answer). Once a
+connection it has seen working has failed for three minutes in a row, the
+outage is confirmed:
+
+- the sign-in page says *We can't reach {connection} right now*;
+- **Super Admins with a password can sign in with it**, through
+  **Administrator sign-in** on that page — so somebody can always get in to
+  support everyone else. Break-glass accounts always could;
+- people already signed in through that connection keep working past their
+  daily re-authentication, for up to a day more, instead of being sent to a
+  sign-in page that cannot answer. Through an Enterprise gateway they keep
+  working for the connection's outage grace (see *People on the gateway
+  connection keep getting signed out* below), then land on this sign-in page
+  with the notice, not on the gateway's.
+
+It counts as over after five minutes of the connection answering again. Only
+the platform's own checks count — nothing a browser reports — and when the
+checks are not running (Settings says so), nothing opens by itself.
+
+**What you do when people need to work.** Settings → **Emergency password
+access** → choose how long (1 to 24 hours) → **Open for everyone**. Anyone with
+a password can then use it, and the sign-in page says until when. It closes
+itself; **Close now** ends it early once the IdP is back. Use it too for an
+outage the checks cannot see: a portal connection, a gateway whose exchange
+runs in the browser, or an IdP that answers the platform but not your users.
+
+**An outage longer than the window.** While it is open, the same card offers
+**Extend**: keep it open for 1, 4, 8 or 24 hours from now (only the choices that
+end later than it does now are offered), with a reason. It is never open more
+than a day ahead, so somebody decides again at least once a day, and there is
+no limit to how many times it is extended. Extend it **before** it lapses: when
+the window closes, everybody who signed in through it is sent back to single
+sign-on at their next renewal — to the sign-in page while the IdP is still down.
+Each person's own emergency session also lasts a day at most, so during a long
+outage people type their password again once a day. Super Admins need no
+window: their way in stays open for as long as the outage is confirmed.
+
+**When it is over.** Password sessions opened during the outage end at their
+next renewal and go back through single sign-on — usually a brief redirect
+that lands people on the page they were on — and never last more than a day.
+People who stayed signed in through the outage meet their daily
+re-authentication at the next renewal; one who has been signed in for more
+than two days in all is sent to sign in again even if the IdP is still down,
+when the emergency window is their way back.
+
+**What the activity log records.** Administration → Activity, and the SSO
+page's **Activity** tab:
+
+| Event | Says |
+|---|---|
+| The outage | *SSO connection 'entra' unreachable…* when it is confirmed, and *…reachable again* when it is over |
+| The window | Opened (for how long, until when, the reason given), extended (to when, from when, the reason), closed early by an admin, or closed by itself at its deadline — each with who did it |
+| Each sign-in through a door | *Signed in with a password through emergency access*, *…while single sign-on was down (Super Admin)*, or *…with a break-glass account's password*; the SSO tab shows the door as the row's reason |
+| A refused password | *Failed password sign-in…: local_login_disabled* — the person was told only "invalid email or password" |
+| Sessions kept through it | *Kept … signed in past the daily re-authentication — entra is down*, once per session |
+| Sessions it ended | *Password session opened while SSO was down ended…*, saying whether after a day or because its way in closed |
+| Break-glass accounts | Made or no longer a break-glass account, by whom — or from the server's command line |
+| Settings changes | Which switch moved (*Passwords turned off — break-glass accounts only*); for a connection, which settings changed by name, and before → after whether it is on, its linking policy, its rating and **Link Super Admin and break-glass accounts too** |
+
+**When nobody can sign in at all** — no break-glass account ready and every
+admin SSO-only — run this on the host, then sign in at `/login?password=1`:
+
+```bash
+python -m backend.scripts.reset_admin_password --email you@example.com --break-glass
+```
+
+It sets a password, marks the account as break-glass, clears its failed
+sign-in count and signs its old sessions out.
+
+> **Note:** *What this trades.* Somebody able to make your IdP unreachable
+> from the platform can open the password door for Super Admins — which is why
+> only Super Admins get in automatically, and everybody else needs a person to
+> open the window. Every sign-in through these doors, and every outage, is in
+> the activity log.
+
 ### Create accounts automatically
 
 Off is the right answer for an organisation that wants an explicit step before
@@ -237,17 +415,17 @@ first time a person your IdP knows and {brand} does not arrives.
 ### Ask for an email first
 
 Better once you have several connections: it stops people guessing which button
-is theirs, and it stops the sign-in page publishing your list of identity
-providers to anyone who loads it.
+is theirs, and it stops the sign-in page leading with your list of identity
+providers.
 
 Set **Email domains** on each connection first (connection editor → Login page).
-An address matching nothing falls back to the password form.
+An address matching nothing goes to the primary connection.
 
 > **Note:** *It will not tell you when you get this wrong.* Every miss — unknown
 > domain, disabled connection, a typo in the domain list — returns exactly the
 > same empty response, deliberately, so the page cannot be used to enumerate your
-> connections. The cost is that a mistyped domain looks like nothing happening.
-> Test with a real address after changing it.
+> connections. The cost is that a mistyped domain sends people to the primary
+> connection instead. Test with a real address after changing it.
 
 ---
 
@@ -318,12 +496,12 @@ A password attempt now records which refusal it was. The person still sees
 
 | Code | What happened | What to do |
 |---|---|---|
-| `no_local_password` | The account has no password — it signs in only through single sign-on | They used the password form, usually because their SSO sign-in failed first: look at the failure just before it. **Ask for an email first**, or switching passwords off, stops the form being offered |
+| `no_local_password` | The account has no password — it signs in only through single sign-on | They used the password option, usually because their SSO sign-in failed first: look at the failure just before it. Switching passwords off stops it being offered |
 | `invalid_credentials` | Wrong password for an account that has one | Nothing, unless it repeats |
 | `user_not_found` | No account uses that address | Nothing, unless it repeats |
 | `account_inactive` | The account is pending or suspended | Approve or reinstate it under Admin → Users |
 | `throttled` | Too many failures for that address in a short time | It clears by itself; a burst across many addresses is a password spray |
-| `local_login_disabled` | Passwords are switched off | Expected — point them at their SSO button |
+| `local_login_disabled` | Passwords are switched off and nothing opened one for this account | Expected — only break-glass accounts, Super Admins during a confirmed outage, and everyone while the emergency window is open may use one. Point them at their SSO button |
 
 Rows written before this change say `invalid_credentials` for all of the first
 four.
@@ -372,11 +550,13 @@ Each row explains its code in place. The full vocabulary for linking:
 | `unsafe_auto_link` | An account with that email exists but the linking policy refused it. The specific reasons follow | See the reasons below |
 | `strict_existing_sso` | That account already has an SSO identity, and this connection is **Strict** | Move this connection to *Allow verified*, or have them link it themselves |
 | `email_unverified` | Their IdP did not say the address is verified | Fix it in the IdP, or map a claim that does carry verification |
+| `unverified_connection` | The connection is below Verified, and such a connection never links itself to a Super Admin's or break-glass account — its claims, email included, are whatever the sender wrote. Everyone else, org admins included, still links | They sign in with their password and link it from their own account page; or make the connection Verified; or, accepting the risk, turn on **Link Super Admin and break-glass accounts too** on the connection (Identity) |
 | `policy:manual_only` | The connection never links automatically, by design | The person links it from their own account page |
 | `policy:disabled` | Linking is off for this connection | Change the policy, or expect a separate account |
 | `existing_status:pending` | The account exists but was never approved | Approve it under Admin → Users |
 | `existing_status:suspended` | The account is suspended | Reinstate it, if that is what you want |
 | `existing_deleted` | The account was deleted | Restore it, or let a new one be created |
+| `account_conflict` | Another account already holds that email in a way the sign-in could not resolve, even after reading again — for example a deleted account that still keeps it | Look the address up under Admin → Users. Two sign-ins racing for the same person — tabs restored together, a double click — never end here: the second signs in to the account the first created |
 | `sso_account_inactive` | Their linked account is no longer active | Same as suspended — check Admin → Users |
 | `link_target_inactive` | The account they are trying to link to is not active | Reactivate it first |
 
@@ -421,7 +601,11 @@ answered rather than the last time we tried. A brief outage is invisible. A
 long one ends sessions rather than extending them indefinitely, which is
 deliberate: an outage should spend that allowance down, not renew it. A
 re-check that has not answered within 10 seconds counts as the gateway being
-down for that renewal.
+down for that renewal. Once the platform has confirmed the outage (three
+minutes, see *When your identity provider is down*), the people whose
+sessions end land on the sign-in page, which says the gateway can't be
+reached and offers whatever password sign-in is open, instead of on a
+gateway sign-in that can only fail again.
 
 **Set the grace to at least twice the access-token lifetime.** The gateway is
 asked once per renewal, and a renewal comes round once per access-token
@@ -561,8 +745,8 @@ Common after an acquisition, or when contractors use a different directory.
      that either directory can now authenticate as them.
    - **Manual only** — the person links it themselves from their account page.
      Slower, and the consent is theirs.
-4. Turn on **Ask for an email first** once both are live. Two buttons is where
-   people start guessing.
+4. Set each connection's **Email domains**, and turn on **Ask for an email
+   first** once both are live. Two buttons is where people start guessing.
 5. Remember that platform-admin rules are bound to one connection. If admins
    arrive through both, each connection needs its own rule — and both must be
    verified.

@@ -217,7 +217,7 @@ function clearAutoPortalSentinel(): void {
 
 async function resolveProvider(
     slug: string,
-): Promise<SsoProviderSummary | null> {
+): Promise<{ provider: SsoProviderSummary | null; unreachable: boolean }> {
     // Straight through fetchWithTimeout with skipAuthRefresh, not the
     // authService wrapper: this runs INSIDE the refresh machinery, and
     // nothing called from here may re-enter it.
@@ -227,7 +227,10 @@ async function resolveProvider(
     })
     if (!res.ok) throw new Error(`login-context answered ${res.status}`)
     const ctx = (await res.json()) as LoginContext
-    return ctx.providers?.find((p) => p.slug === slug) ?? null
+    return {
+        provider: ctx.providers?.find((p) => p.slug === slug) ?? null,
+        unreachable: ctx.ssoOutage?.providers?.includes(slug) ?? false,
+    }
 }
 
 /** A fresh session exists: clear what the failures latched, and let the
@@ -276,9 +279,9 @@ async function hydrateAfterRecovery(user: AuthUser | undefined): Promise<void> {
  * as having succeeded. `'failed'` — the browser's half was tried (or is
  * in cooldown) and did not produce a session; the caller takes the user
  * to the sign-in page, which explains. `'not-applicable'` — this provider has no
- * browser half to run and its cookie could not be redeemed in place, or
- * it could not be resolved; the caller keeps its existing navigation
- * behaviour. `'gone'` — the catalog answered and
+ * browser half to run and its cookie could not be redeemed in place, it
+ * could not be resolved, or the server has it confirmed down; the caller
+ * keeps its existing navigation behaviour. `'gone'` — the catalog answered and
  * this slug is not in it (the connection was disabled or deleted, or
  * the master switch is off); the caller must land on the login PAGE,
  * because the provider's own login URL is now a dead route.
@@ -313,8 +316,9 @@ async function runSilentReauth(
     providerSlug: string,
 ): Promise<SilentReauthResult> {
     let provider: SsoProviderSummary | null
+    let unreachable: boolean
     try {
-        provider = await resolveProvider(providerSlug)
+        ({ provider, unreachable } = await resolveProvider(providerSlug))
     } catch {
         // Could not even ask which provider this is. Not a verdict about
         // the corporate session — keep the navigation fallback.
@@ -332,6 +336,11 @@ async function runSilentReauth(
         return 'gone'
     }
     if (provider.kind !== 'backchannel') return 'not-applicable'
+    // The server's probes have this gateway down: the attempt could only
+    // time out, with every tab's requests waiting on the lock meanwhile.
+    // The envelope's login_url already points at the sign-in page, which
+    // says so and offers whatever password door is open.
+    if (unreachable) return 'not-applicable'
     if (!isGatewayProvider(provider)) {
         // No browser half is published — a plain ambient row, whose
         // corporate cookie rides every request to us. The empty-body

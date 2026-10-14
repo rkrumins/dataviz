@@ -74,6 +74,7 @@ from .custom import (
 from .assurance import (
     ASSURANCE_DESCRIPTIONS,
     ASSURANCE_ORDER,
+    assurance_explained,
     assurance_for,
     at_least as assurance_at_least,
 )
@@ -171,6 +172,7 @@ __all__ = [
     "BROWSER_STORAGE_SOURCES",
     "SERVER_READ_SOURCES",
     "assurance_for",
+    "assurance_explained",
     "assurance_at_least",
     "ASSURANCE_ORDER",
     "ASSURANCE_DESCRIPTIONS",

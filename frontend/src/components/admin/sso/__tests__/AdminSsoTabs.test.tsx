@@ -126,11 +126,13 @@ describe('stat tiles', () => {
         ])
         render(<MemoryRouter><AdminSso /></MemoryRouter>)
 
+        // The tiles draw 0 before the list arrives, so wait for the count
+        // itself, not just its label.
         const live = await screen.findByText(/live connections/i)
-        expect(within(live.closest('div')!.parentElement!).getByText('1'))
+        expect(await within(live.closest('div')!.parentElement!).findByText('1'))
             .toBeInTheDocument()
         const drafts = screen.getByText(/drafts to rehearse/i)
-        expect(within(drafts.closest('div')!.parentElement!).getByText('1'))
+        expect(await within(drafts.closest('div')!.parentElement!).findByText('1'))
             .toBeInTheDocument()
     })
 

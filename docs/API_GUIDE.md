@@ -32,7 +32,7 @@ It gets in one of two ways:
 
 | | API key | Password |
 |---|---|---|
-| Who can use it | Anyone — people who sign in through an identity provider too — unless your administrator switched keys off | Accounts with a password |
+| Who can use it | Anyone — people who sign in through an identity provider too — unless your administrator switched keys off | Accounts with a password, while password sign-in is switched on |
 | What it reaches | What you chose when you created it — some workspaces, views or data sources, read-only or read & write — and never more than you can | Everything the account can |
 | What it can call | The data plane: views, graphs, drafts and publishing, data-source signals and jobs | Every route |
 | What the script handles | One header | Cookies, a CSRF header on writes, renewal every 15 minutes |
@@ -233,9 +233,8 @@ anything but `403 csrf_failed` — for example `404` for a workspace that doesn'
 
 | Answer | Why | What to do |
 |---|---|---|
-| `401` `"Invalid email or password"` | Wrong email or password | Check both. Only failures count toward the limit below |
+| `401` `"Invalid email or password"` | Wrong email or password — or password sign-in is switched off for single sign-on and this account may not use one. The two answers are the same on purpose | Check both. While passwords are off, only system (break-glass) accounts keep a password: ask your administrator before automating with one. Only failures count toward the limit below |
 | `429` with `Retry-After` | Too many failed sign-ins for this account in a short time (`RATELIMIT_LOGIN_PER_ACCOUNT`) | Wait the number of seconds in `Retry-After`, then check the password |
-| `403` `local_login_disabled` | Password sign-in is switched off for single sign-on | Only system (break-glass) accounts keep a password. Ask your administrator before automating with one |
 | `403` `csrf_failed` on sign-in | Your client sent an `Origin` or `Referer` that isn't the deployment's own address or in `CORS_ALLOWED_ORIGINS` | Send neither header, as curl and Python do by default |
 | Every later request is `401` | Over plain `http`, the cookies are `Secure` and your client drops them | Use `https`. Only a development stack with `AUTH_COOKIE_SECURE=false` works over `http` |
 
@@ -306,7 +305,7 @@ doesn't match the model, `422`), or an object that names the reason in one of th
 |---|---|---|
 | `type` | `feature_disabled`, `merge_conflict`, `ontology_violation`, `not_up_to_date`, `graph_too_large_to_sync` | Feature switches and the versioned graph |
 | `code` | `PROVIDER_BUSY`, `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `REQUEST_TIMEOUT`, `EXPORTS_BUSY`, `CONFLICT`, `VALIDATION` | The graph store's health, timeouts, exports, the feature-switch API |
-| `error` | `csrf_failed`, `local_login_disabled`, `session_foreign`, `sso_reauth_required`, `api_key_expired`, `api_key_out_of_scope` | Sign-in, the session and API keys |
+| `error` | `csrf_failed`, `local_login_disabled`, `session_foreign`, `sso_reauth_required`, `api_key_expired`, `api_key_out_of_scope` | Sign-in and sign-up, the session and API keys |
 
 A feature an administrator switched off answers the same way everywhere:
 

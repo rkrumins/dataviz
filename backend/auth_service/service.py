@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote, urlsplit
 
 import jwt as pyjwt
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .core.config import (
     JWT_EXPIRY_MINUTES,
@@ -42,7 +42,7 @@ from backend.common.identity_provenance import asserted_fields, build_snapshot
 from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
 from .activity import ActivityGate
 from .core import api_keys
-from .core.password import disabled_password_hash
+from .core.password import disabled_password_hash, verify_password
 from .core.tokens import (
     AUTH_TIME_CLAIM,
     AUTH_TIME_PROVEN_CLAIM,
@@ -61,6 +61,8 @@ from .app_auth_config import (
     AuthConfigProvider,
     AuthConfigSnapshot,
     StaticAuthConfigProvider,
+    password_window_open,
+    sso_outage_slugs,
 )
 from .csrf import mint_csrf_token
 from .interface import (
@@ -70,7 +72,6 @@ from .interface import (
     ApiKeyRejected,
     InvalidCredentials,
     InvalidRefreshToken,
-    LocalLoginDisabled,
     SessionTokens,
     SSOAuthError,
     SsoReauthRequired,
@@ -78,6 +79,7 @@ from .interface import (
     User,
 )
 from .providers import ProviderCredentials, get_provider
+from .providers.assurance import VERIFIED, at_least as assurance_at_least
 from .refresh import check_and_record_rotation
 
 logger = logging.getLogger(__name__)
@@ -105,6 +107,20 @@ def _build_reauth_url(
     safe_next = next_path or "/"
     url = f"{base}?next={quote(safe_next, safe='/')}"
     return f"{url}&force=1" if force else url
+
+
+def _reauth_url(
+    provider_slug: Optional[str], cfg: AuthConfigSnapshot, *, force: bool,
+) -> str:
+    """``_build_reauth_url``, unless that connection is confirmed down.
+
+    Re-authenticating against an identity provider that cannot answer
+    strands the person on its error page. While the prober says it is
+    down, the envelope sends them to the sign-in page instead, which says
+    so and offers whatever password door is open to them."""
+    if provider_slug and provider_slug in sso_outage_slugs(cfg):
+        return _build_reauth_url(None, next_path="/", force=False)
+    return _build_reauth_url(provider_slug, next_path="/", force=force)
 
 
 @dataclass(frozen=True)
@@ -221,6 +237,11 @@ class LocalIdentityService:
         must not end the user's sessions on their other devices.
       * ``revocation_checker(sid)`` -> bool — is this sid tombstoned?
         Read by :meth:`session_revoked`.
+      * ``super_admin_checker(session, user_id)`` -> bool — does the
+        account hold ``super_admin``? Asked while passwords are off and an
+        SSO outage is confirmed (see :meth:`_password_door`), and when a
+        connection below ``verified`` would link itself to an existing
+        account.
       * ``api_key_repo`` — the ``api_keys`` repository, for
         :meth:`validate_api_key`. ``None`` refuses every key.
       * ``api_key_claims_resolver(session, key)`` -> claims — what a request
@@ -250,6 +271,7 @@ class LocalIdentityService:
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         revocation_checker: Optional[Callable[[str], Awaitable[bool]]] = None,
+        super_admin_checker: Optional[Callable[..., Awaitable[bool]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
             Callable[..., Awaitable[tuple[bytes, str]]]
@@ -284,6 +306,10 @@ class LocalIdentityService:
         # reason as the killer and revoker: is this session's sid on the
         # revocation list? See ``session_revoked``.
         self._revocation_checker = revocation_checker
+        # (session, user_id) -> bool. Injected for the same isolation
+        # reason; read-only, with no side effects, because it is asked
+        # before anyone has proved who they are.
+        self._super_admin_checker = super_admin_checker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
         # operator's host allowlist — auth_service may not import
@@ -602,18 +628,28 @@ class LocalIdentityService:
             async def _get_user_by_email(em: str):
                 return await self._user_repo.get_user_by_email(session, em)
 
+            door: Optional[str] = "everyone"
             if not cfg.allow_local_login:
-                # One carve-out from the kill-switch: a system account
-                # (break-glass) keeps the password door while the
-                # platform enforces SSO — otherwise an IdP outage has
-                # no way back in. Unknown emails and every ordinary
-                # account get the identical refusal, before any
-                # password check, so this is not an account oracle.
-                candidate = await _get_user_by_email(email)
-                if candidate is None or not bool(
-                    getattr(candidate, "is_system_account", False)
-                ):
-                    raise LocalLoginDisabled()
+                door = await self._password_door(
+                    session, await _get_user_by_email(email), cfg,
+                )
+            if door is None:
+                # Passwords are off and nothing opens one for this account.
+                # The answer is the same 401 a wrong password gets, after a
+                # password check costing the same, so the form cannot be
+                # used to find out who the break-glass accounts or — during
+                # an outage — the Super Admins are. A 403 here would tell;
+                # checking the password first and then refusing would
+                # confirm it. The record says why.
+                verify_password(password, disabled_password_hash())
+                try:
+                    await self._emit_audit("user.login_failed", {
+                        "email": _normal_email(email),
+                        "reason": "local_login_disabled", **(client or {}),
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+                raise InvalidCredentials("Invalid email or password")
 
             identity = await provider.authenticate(
                 ProviderCredentials(email=email, password=password),
@@ -659,16 +695,23 @@ class LocalIdentityService:
                 claims_extra = await self._claims_resolver(session, orm.id)
 
             if self._outbox_emit is not None:
-                await self._outbox_emit(
-                    session, "user.logged_in",
-                    {"user_id": orm.id, "email": orm.email, "provider": "local"},
-                )
+                payload = {"user_id": orm.id, "email": orm.email, "provider": "local"}
+                if door != "everyone":
+                    # Which door let a password in while SSO is enforced.
+                    payload["via"] = door
+                await self._outbox_emit(session, "user.logged_in", payload)
 
             # Inside the scope, so the token and its record commit or fail
             # together. ``auth_time`` is None: this is a local password
-            # login, and the SSO re-auth ceiling does not apply to it.
+            # login, and the SSO re-auth ceiling does not apply to it. A
+            # session opened only because SSO is down carries ``pwfb``: it
+            # ends once that reason closes, and within a day regardless.
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=None,
+                pwfb=(
+                    int(time.time()) + SSO_SESSION_MAX_AGE_SECONDS
+                    if door in ("emergency_window", "admin_fallback") else None
+                ),
             )
 
         user = _orm_to_user(orm, role=_primary_role(roles))
@@ -680,6 +723,37 @@ class LocalIdentityService:
             refresh_token=refresh_token,
         )
         return user, tokens
+
+    async def _password_door(
+        self, session, account, cfg: AuthConfigSnapshot,
+    ) -> Optional[str]:
+        """Why ``account`` may use a password while passwords are off, or
+        None. Asked at sign-in and again at every renewal of a session
+        that only exists because SSO was down.
+
+          * ``break_glass`` — a system account, always. Checked first, so
+            its sessions are never treated as emergency ones and cut short.
+          * ``emergency_window`` — an admin opened passwords to everyone.
+          * ``admin_fallback`` — an SSO outage is confirmed and the account
+            holds ``super_admin``, so somebody can get in to support
+            everyone else.
+
+        ``password_access`` in ``app_auth_config`` is the same rule by
+        class of account, which is what the login page renders from.
+        """
+        if cfg.allow_local_login:
+            return "everyone"
+        if account is not None and bool(getattr(account, "is_system_account", False)):
+            return "break_glass"
+        if password_window_open(cfg):
+            return "emergency_window"
+        if (
+            account is not None and sso_outage_slugs(cfg)
+            and self._super_admin_checker is not None
+            and await self._super_admin_checker(session, account.id)
+        ):
+            return "admin_fallback"
+        return None
 
     async def logout(
         self,
@@ -787,8 +861,13 @@ class LocalIdentityService:
         # to exhaust the pool under load waiting for a connection that only
         # frees when this scope exits. So rejections are carried out of the
         # scope by ``_RefreshRejected`` and settled once it has closed.
+        # The posture is read BEFORE the session scope opens, for the same
+        # reason: on a cache miss its loader takes a connection of its own.
+        cfg = await self._auth_config_provider.get()
         try:
-            user, tokens, liveness = await self._refresh_within_session(claims)
+            user, tokens, liveness = await self._refresh_within_session(
+                claims, cfg,
+            )
         except _RefreshRejected as rejection:
             await self._revoke_family_committed(claims.family_id)
             await self._emit_audit(
@@ -821,7 +900,7 @@ class LocalIdentityService:
 
     async def _expired_sso_session(
         self, session, user_id: str, *, reason: str, elapsed_seconds: int,
-        provider_id: Optional[str],
+        provider_id: Optional[str], cfg: AuthConfigSnapshot,
     ) -> "_RefreshRejected":
         """The rejection for an SSO session past its idle or absolute ceiling.
 
@@ -835,7 +914,7 @@ class LocalIdentityService:
         provider_slug = await self._reauth_slug(session, user_id, provider_id)
         return _RefreshRejected(
             SsoReauthRequired(
-                _build_reauth_url(provider_slug, next_path="/", force=False),
+                _reauth_url(provider_slug, cfg, force=False),
                 provider=provider_slug or "sso",
             ),
             audit=("user.sso_session_expired", {
@@ -847,7 +926,7 @@ class LocalIdentityService:
         )
 
     async def _refresh_within_session(
-        self, claims,
+        self, claims, cfg: AuthConfigSnapshot,
     ) -> tuple[User, SessionTokens, Optional["_PendingLiveness"]]:
         # Mint the candidate successor before claiming. Its identity has
         # to be recorded in the same statement that consumes the
@@ -863,6 +942,8 @@ class LocalIdentityService:
             # expiry does not move because we rotated, and dropping it
             # here would make rotation a way to shed the ceiling.
             idp_exp=claims.idp_exp,
+            # The same for an outage session's deadline.
+            pwfb=claims.pwfb,
         )
 
         claims_extra: dict = {}
@@ -948,6 +1029,7 @@ class LocalIdentityService:
                     auth_time=auth_time,
                     auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
                     idp_exp=claims.idp_exp,
+                    pwfb=claims.pwfb,
                     jti=outcome.successor.successor_jti,
                     expires_at_epoch=outcome.successor.successor_exp,
                     mint_ms=outcome.successor.successor_mint_ms,
@@ -978,6 +1060,39 @@ class LocalIdentityService:
                     claims.sub, claims.family_id,
                 )
                 raise _RefreshRejected(InvalidRefreshToken("sessions_revoked"))
+
+            # ── Password sessions opened because SSO was down ────────
+            # Through the emergency window, or as a Super Admin during a
+            # confirmed outage. Each lasts only while its door is open, and
+            # a day at most; then it goes back through single sign-on —
+            # without forcing a fresh credential, so a warm IdP session
+            # signs the person straight back in on the page they were on.
+            # While the IdP is still down the envelope names the sign-in
+            # page instead (``_reauth_url``).
+            if claims.pwfb is not None:
+                now_s = int(time.time())
+                if now_s > claims.pwfb or await self._password_door(
+                    session, orm, cfg,
+                ) is None:
+                    provider_slug = await self._reauth_slug(session, orm.id, None)
+                    logger.info(
+                        "Password fallback session ended (user=%s, slug=%s)",
+                        orm.id, provider_slug,
+                    )
+                    raise _RefreshRejected(
+                        SsoReauthRequired(
+                            _reauth_url(provider_slug, cfg, force=False),
+                            provider=provider_slug or "sso",
+                        ),
+                        audit=("user.password_fallback_session_ended", {
+                            "user_id": orm.id,
+                            "provider_slug": provider_slug,
+                            "reason": (
+                                "expired" if now_s > claims.pwfb
+                                else "fallback_closed"
+                            ),
+                        }),
+                    )
 
             # ── Absolute + idle session ceilings ─────────────────────
             # Every session, SSO or local. Rotation mints a fresh 7-day
@@ -1022,7 +1137,7 @@ class LocalIdentityService:
                         raise await self._expired_sso_session(
                             session, orm.id, reason="idle",
                             elapsed_seconds=idle_seconds,
-                            provider_id=session_provider_id,
+                            provider_id=session_provider_id, cfg=cfg,
                         )
                     raise _RefreshRejected(
                         InvalidRefreshToken("session_idle"),
@@ -1042,7 +1157,7 @@ class LocalIdentityService:
                             raise await self._expired_sso_session(
                                 session, orm.id, reason="absolute",
                                 elapsed_seconds=age_seconds,
-                                provider_id=session_provider_id,
+                                provider_id=session_provider_id, cfg=cfg,
                             )
                         raise _RefreshRejected(
                             InvalidRefreshToken("session_expired"),
@@ -1082,23 +1197,58 @@ class LocalIdentityService:
                 provider_slug = await self._reauth_slug(
                     session, orm.id, session_provider_id,
                 )
-                logger.info(
-                    "SSO session expired (user=%s, slug=%s, age=%ds)",
-                    orm.id, provider_slug, sso_age,
-                )
-                raise _RefreshRejected(
-                    SsoReauthRequired(
-                        _build_reauth_url(provider_slug, next_path="/"),
-                        provider=provider_slug or "sso",
-                    ),
-                    audit=("user.sso_session_expired", {
-                        "user_id": orm.id,
-                        "provider_slug": provider_slug,
-                        "reason": "reauth_ceiling",
-                        "auth_time": auth_time,
-                        "elapsed_seconds": sso_age,
-                    }),
-                )
+                if (
+                    provider_slug in sso_outage_slugs(cfg)
+                    and sso_age <= 2 * SSO_SESSION_MAX_AGE_SECONDS
+                ):
+                    # Its identity provider is confirmed down: bouncing the
+                    # person to it would end a working session at a page
+                    # that cannot answer. Renewed instead — this ceiling
+                    # only, for at most one more ceiling period, measured
+                    # from the server's own record. The idle and absolute
+                    # limits above still applied; once the IdP is back the
+                    # next renewal meets this ceiling as normal.
+                    logger.warning(
+                        "SSO re-authentication deferred: %s is down "
+                        "(user=%s, age=%ds)", provider_slug, orm.id, sso_age,
+                    )
+                    # Recorded once per session: on the first renewal past
+                    # the ceiling — the token it consumed was minted before
+                    # it — not on each of the renewals it rides through.
+                    consumed_ms = (
+                        outcome.record.mint_ms if outcome.record is not None
+                        else claims.mint_ms
+                    )
+                    if (
+                        not is_replay and self._outbox_emit is not None
+                        and int(consumed_ms / 1000) - auth_time
+                        <= SSO_SESSION_MAX_AGE_SECONDS
+                    ):
+                        await self._outbox_emit(
+                            session, "user.sso_reauth_deferred", {
+                                "user_id": orm.id,
+                                "provider_slug": provider_slug,
+                                "auth_time": auth_time,
+                            },
+                        )
+                else:
+                    logger.info(
+                        "SSO session expired (user=%s, slug=%s, age=%ds)",
+                        orm.id, provider_slug, sso_age,
+                    )
+                    raise _RefreshRejected(
+                        SsoReauthRequired(
+                            _reauth_url(provider_slug, cfg, force=True),
+                            provider=provider_slug or "sso",
+                        ),
+                        audit=("user.sso_session_expired", {
+                            "user_id": orm.id,
+                            "provider_slug": provider_slug,
+                            "reason": "reauth_ceiling",
+                            "auth_time": auth_time,
+                            "elapsed_seconds": sso_age,
+                        }),
+                    )
 
             # ── Upstream credential ceiling ──────────────────────────
             # ``idp_exp`` is the corporate token's own expiry, captured
@@ -1250,6 +1400,57 @@ class LocalIdentityService:
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
         assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
+    ) -> tuple[User, SessionTokens]:
+        """Find-or-provision from a verified SSO identity, then issue a
+        session — :meth:`_complete_sso_login_once`, retried once if it
+        loses a race.
+
+        Two first sign-ins for one person can run at once: tabs restored
+        together, each running the page's automatic gateway sign-in, or a
+        double submit. Both read "no account", both create it (or link
+        it), and the one that commits second hits a unique constraint —
+        which surfaced as "the database is unavailable". Every write of an
+        attempt shares one transaction, so the loser leaves nothing
+        behind; run once more, it reads what the winner committed and
+        signs in as if it had arrived second. A conflict that survives the
+        re-read is not a race, and is refused like any sign-in that cannot
+        complete.
+        """
+        async def attempt() -> tuple[User, SessionTokens]:
+            return await self._complete_sso_login_once(
+                identity, provider_id=provider_id, provider_slug=provider_slug,
+                linking_policy=linking_policy,
+                link_intent_user_id=link_intent_user_id, assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
+            )
+
+        try:
+            return await attempt()
+        except IntegrityError as exc:
+            logger.info(
+                "SSO sign-in (provider_id=%s) lost a race to a concurrent "
+                "one; reading again: %s", provider_id, exc.orig,
+            )
+        try:
+            return await attempt()
+        except IntegrityError as exc:
+            logger.warning(
+                "SSO sign-in (provider_id=%s) still conflicts after a "
+                "re-read: %s", provider_id, exc.orig,
+            )
+            raise SSOAuthError("account_conflict") from exc
+
+    async def _complete_sso_login_once(
+        self,
+        identity,
+        *,
+        provider_id: str,
+        provider_slug: Optional[str] = None,
+        linking_policy: str = "strict",
+        link_intent_user_id: Optional[str] = None,
+        assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> tuple[User, SessionTokens]:
         """Find-or-provision from a verified SSO identity, then issue
         a session.
@@ -1376,6 +1577,8 @@ class LocalIdentityService:
                 session, identity, provider_id=provider_id,
                 linking_policy=linking_policy,
                 link_intent_user_id=link_intent_user_id,
+                assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
             )
             orm = decision.user
             link_metadata = {"groups": idp_groups, "attributes": attributes}
@@ -1766,6 +1969,8 @@ class LocalIdentityService:
         provider_id: str,
         linking_policy: str,
         link_intent_user_id: Optional[str] = None,
+        assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> "SsoDecision":
         """Decide what this identity means, without changing anything.
 
@@ -1825,10 +2030,29 @@ class LocalIdentityService:
         has_existing_identity = await self._user_identity_repo.has_any_identity(
             session, by_email.id,
         )
+        # A connection below verified still links an ordinary account —
+        # an org admin's included: its operator chose to trust it for
+        # everyone — but never one that runs the platform itself, a Super
+        # Admin or a break-glass account: its claims, email_verified
+        # included, are whatever the sender wrote. With nothing to answer
+        # "is this a Super Admin?", every account is treated as one. The
+        # operator can extend that trust to them too, on the connection
+        # (``link_admin_accounts``), knowing what it means.
+        weak_claim_on_admin = (
+            assurance is not None
+            and not assurance_at_least(assurance, VERIFIED)
+            and not link_admin_accounts
+            and (
+                bool(getattr(by_email, "is_system_account", False))
+                or self._super_admin_checker is None
+                or await self._super_admin_checker(session, by_email.id)
+            )
+        )
         deny_reasons = self._link_deny_reasons(
             by_email, linking_policy=linking_policy,
             email_verified=email_verified,
             has_existing_identity=has_existing_identity,
+            weak_claim_on_admin=weak_claim_on_admin,
         )
         if deny_reasons:
             return SsoDecision(
@@ -1849,6 +2073,8 @@ class LocalIdentityService:
         provider_id: str,
         linking_policy: str = "strict",
         link_intent_user_id: Optional[str] = None,
+        assurance: Optional[str] = None,
+        link_admin_accounts: bool = False,
     ) -> dict:
         """What ``complete_sso_login`` WOULD do with this identity.
 
@@ -1907,6 +2133,8 @@ class LocalIdentityService:
                 session, identity, provider_id=provider_id,
                 linking_policy=linking_policy,
                 link_intent_user_id=link_intent_user_id,
+                assurance=assurance,
+                link_admin_accounts=link_admin_accounts,
             )
             outcome["action"] = decision.action
             if decision.user is not None:
@@ -1980,13 +2208,18 @@ class LocalIdentityService:
     @staticmethod
     def _link_deny_reasons(
         existing, *, linking_policy: str, email_verified: bool,
-        has_existing_identity: bool,
+        has_existing_identity: bool, weak_claim_on_admin: bool = False,
     ) -> list[str]:
         """The collision-branch gate, in one place so the dry-run and the
         real path cannot disagree about why a link is refused."""
         reasons: list[str] = []
         if linking_policy in ("manual_only", "disabled"):
             reasons.append(f"policy:{linking_policy}")
+        if weak_claim_on_admin:
+            # A forged payload naming the break-glass Super Admin's email
+            # would otherwise sign its sender in as them. Administrators
+            # link such a connection from their own account page.
+            reasons.append("unverified_connection")
         if not email_verified:
             reasons.append("email_unverified")
         if existing.status != "active":
@@ -2244,8 +2477,11 @@ class LocalIdentityService:
             "provider_slug": provider_slug,
             "reason": reason,
         })
+        # Past the grace window of a gateway outage, the gateway's own login
+        # can only fail again: while it is confirmed down, the sign-in page.
+        cfg = await self._auth_config_provider.get()
         raise SsoReauthRequired(
-            _build_reauth_url(provider_slug, next_path="/"),
+            _reauth_url(provider_slug, cfg, force=True),
             provider=provider_slug or "sso",
         )
 
@@ -2362,6 +2598,7 @@ class LocalIdentityService:
         auth_time_proven: bool = False,
         idp_provider_id: Optional[str] = None,
         idp_exp: Optional[int] = None,
+        pwfb: Optional[int] = None,
     ) -> str:
         """Mint a refresh token and write the row that makes it usable.
 
@@ -2378,7 +2615,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
-            auth_time_proven=auth_time_proven, idp_exp=idp_exp,
+            auth_time_proven=auth_time_proven, idp_exp=idp_exp, pwfb=pwfb,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(

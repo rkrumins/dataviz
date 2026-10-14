@@ -278,6 +278,13 @@ class RefreshClaims:
     # unchanged through rotation, so rotating cannot extend it; the
     # refresh route ends the session past it. NULL everywhere else.
     idp_exp: int | None = None
+    # When a password session opened only because single sign-on was down
+    # must end (epoch seconds): through the emergency window, or as a Super
+    # Admin during a confirmed outage. Signed in and propagated unchanged
+    # through rotation like ``idp_exp``, so it can be neither shed nor
+    # extended; the refresh route also ends the session as soon as its
+    # reason to exist has closed. NULL for every other session.
+    pwfb: int | None = None
     # When this token was minted, in epoch MILLISECONDS. Compared
     # against the user's ``sessions_valid_from`` cutoff on /refresh so a
     # revocation cannot be walked around by rotating.
@@ -306,6 +313,7 @@ def create_refresh_token(
     auth_time: int | None = None,
     auth_time_proven: bool = False,
     idp_exp: int | None = None,
+    pwfb: int | None = None,
     jti: str | None = None,
     expires_at_epoch: int | None = None,
     mint_ms: int | None = None,
@@ -358,6 +366,8 @@ def create_refresh_token(
         payload[AUTH_TIME_PROVEN_CLAIM] = True
     if idp_exp is not None:
         payload["idp_exp"] = int(idp_exp)
+    if pwfb is not None:
+        payload["pwfb"] = int(pwfb)
     # ``fam`` and ``mat`` are as load-bearing here as ``aud`` is: the
     # family id drives reuse detection and the mint instant drives both
     # the revocation cutoff and the idle ceiling.
@@ -373,6 +383,7 @@ def create_refresh_token(
         exp=int(expires_at.timestamp()),
         auth_time=int(auth_time) if auth_time is not None else None,
         idp_exp=int(idp_exp) if idp_exp is not None else None,
+        pwfb=int(pwfb) if pwfb is not None else None,
         mint_ms=minted_ms,
         auth_time_proven=proven,
     )
@@ -419,6 +430,15 @@ def decode_refresh_token(
             idp_exp = int(idp_exp_raw)
         except (TypeError, ValueError):
             raise jwt.InvalidTokenError("Refresh token idp_exp is malformed")
+    pwfb_raw = payload.get("pwfb")
+    pwfb: int | None
+    if pwfb_raw is None:
+        pwfb = None
+    else:
+        try:
+            pwfb = int(pwfb_raw)
+        except (TypeError, ValueError):
+            raise jwt.InvalidTokenError("Refresh token pwfb is malformed")
     # Prefer the millisecond claim. Tokens minted before it existed fall
     # back to the standard second-granular ``iat``, which is enough to
     # place them safely on one side of a cutoff stamped later. A token
@@ -434,7 +454,7 @@ def decode_refresh_token(
             mint_ms = 0
     return RefreshClaims(
         sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
-        idp_exp=idp_exp, mint_ms=mint_ms,
+        idp_exp=idp_exp, pwfb=pwfb, mint_ms=mint_ms,
         auth_time_proven=auth_time is not None and payload.get(AUTH_TIME_PROVEN_CLAIM) is True,
     )
 

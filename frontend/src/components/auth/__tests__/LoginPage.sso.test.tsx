@@ -130,13 +130,26 @@ describe('SSO buttons carry a name', () => {
 describe('SSO buttons are visible on both themes', () => {
     it('does not draw its border in a colour the light theme shares', async () => {
         // `border-white/20` on a white card is not a faint control, it is
-        // an absent one. Anything here must name both themes.
-        renderLogin([provider()])
-        const link = await screen.findByRole('link', { name: /corp sso/i })
+        // an absent one. Anything here must name both themes. The first
+        // connection is the filled primary; the second is an ordinary
+        // button, outlined.
+        renderLogin([
+            provider(),
+            provider({ id: 'idp_2', slug: 'okta', displayName: 'Okta' }),
+        ])
+        const link = await screen.findByRole('link', { name: /okta/i })
 
         expect(link.className).not.toMatch(/(^|\s)border-white\//)
         expect(link.className).toMatch(/border-black\/10/)
         expect(link.className).toMatch(/dark:border-white\//)
+    })
+
+    it('fills the primary connection, which needs no border to be seen', async () => {
+        renderLogin([provider()])
+        const link = await screen.findByRole('link', { name: /corp sso/i })
+
+        expect(link.className).toMatch(/(^|\s)bg-accent-lineage(\s|$)/)
+        expect(link.className).not.toMatch(/(^|\s)border-white\//)
     })
 
     it('gives the amber dev-provider button a readable colour in light', async () => {
@@ -150,14 +163,18 @@ describe('SSO buttons are visible on both themes', () => {
     })
 })
 
-describe('the divider above them', () => {
+describe('the divider under them', () => {
     it('is drawn in a colour both themes can show', async () => {
         renderLogin([provider()])
         await screen.findByRole('link', { name: /corp sso/i })
 
         await waitFor(() => {
-            expect(screen.getByText(/or sign in with/i).parentElement!.className)
-                .toMatch(/border-black\/10 dark:border-white\/10/)
+            const rules = [...screen.getByText(/or continue with email/i).parentElement!.children]
+                .filter((el) => el.getAttribute('aria-hidden') === 'true')
+            expect(rules).toHaveLength(2)
+            for (const rule of rules) {
+                expect(rule.className).toMatch(/bg-black\/10 dark:bg-white\/10/)
+            }
         })
     })
 })

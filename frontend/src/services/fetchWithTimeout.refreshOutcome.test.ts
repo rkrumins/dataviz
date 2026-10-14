@@ -247,6 +247,26 @@ describe('the SSO re-auth envelope', () => {
 
         expect(window.location.href).toBe('/api/v1/auth/entra/login')
     })
+
+    it('follows a login_url that is the login page itself', async () => {
+        // The server answers this way when the session's identity provider
+        // is confirmed down, or an outage password session has ended:
+        // bouncing to a dead IdP strands the user, while the login page
+        // explains and offers what still works. Same envelope, same rule.
+        const toLoginPage = async () =>
+            new Response(
+                JSON.stringify({
+                    detail: { error: 'sso_reauth_required', login_url: '/login?next=/' },
+                }),
+                { status: 401 },
+            )
+        globalThis.fetch = mockFetch([toLoginPage]) as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href).toBe('/login?next=%2Fdashboard')
+        expect(sessionLost).toBe(0)
+    })
 })
 
 
