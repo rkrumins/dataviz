@@ -200,7 +200,7 @@ async def close_lapsed_password_fallback(
         if deadline > (now or datetime.now(timezone.utc)):
             return None
     except (TypeError, ValueError):
-        pass
+        pass  # Unreadable: it already reads as closed, so clear it like a lapsed one.
     result = await session.execute(
         update(AppAuthConfigORM)
         .where(

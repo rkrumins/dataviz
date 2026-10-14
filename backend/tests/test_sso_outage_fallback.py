@@ -664,8 +664,8 @@ async def test_a_ride_through_is_recorded_once_per_session():
     events: list[tuple[str, dict]] = []
     svc = _refresh_svc(store, _snapshot(sso_outage_slugs=("entra",)), events=events)
 
-    _user, tokens = await svc.refresh(rt)
-    _user, _tokens = await svc.refresh(tokens.refresh_token)
+    _, tokens = await svc.refresh(rt)
+    await svc.refresh(tokens.refresh_token)
 
     assert [p for t, p in events if t == "user.sso_reauth_deferred"] == [
         {"user_id": "usr_1", "provider_slug": "entra", "auth_time": stale},
@@ -903,7 +903,8 @@ async def test_extending_never_shortens_a_window(test_client, db_session):
 @pytest.mark.asyncio
 async def test_closing_is_recorded_only_when_a_window_was_open(test_client, db_session):
     await _enforce(test_client, db_session)
-    assert (await test_client.delete(WINDOW)).status_code == 200
+    r = await test_client.delete(WINDOW)
+    assert r.status_code == 200
     assert await _outbox(db_session, "auth.config.password_fallback_closed") == []
 
     opened = (await test_client.post(WINDOW, json={"hours": 2})).json()
