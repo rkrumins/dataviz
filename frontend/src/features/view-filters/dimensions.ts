@@ -98,7 +98,7 @@ export const DIMENSIONS: readonly FilterDimension[] = [
     isActive: s => s.sourceKind !== null,
     clear: s => ({ ...s, sourceKind: null }),
     chips: s => (s.sourceKind ? [{
-      key: 'sourceKind', dimension: 'sourceKind', prefix: 'Graph',
+      key: 'sourceKind', dimension: 'sourceKind', prefix: 'Versioning',
       value: SOURCE_KIND_LABELS[s.sourceKind], without: x => ({ ...x, sourceKind: null }),
     }] : []),
     summary: s => `${SOURCE_KIND_LABELS[s.sourceKind ?? 'versioned']} graphs`,

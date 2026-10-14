@@ -2,7 +2,7 @@
  * ExplorerFilterBar — toolbar combining category pills and filter dropdowns.
  *
  * Layout, one row that wraps when the width runs out:
- *   [Category pills] [saved filters] | [Versioned | External] [Date ▾] [People ▾] [Workspace ▾]
+ *   [Category pills] [saved filters] | [Versioning ▾] [Date ▾] [People ▾] [Workspace ▾]
  *     [Source ▾] [Type ▾] [Tag ▾] [Visibility ▾]   [trailing]
  *   [active filter chips … Clear all]
  *
@@ -41,7 +41,7 @@ import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
 import { useLiveFacets } from '@/features/view-filters/useLiveFacets'
 import { withCounts } from '@/features/view-filters/facetOptions'
 import { SOURCE_KIND_META } from '@/features/view-filters/sourceKindMeta'
-import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
+import { SourceKindMenu } from '@/features/view-filters/components/SourceKindMenu'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
 import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
 import type { CurrentPerson } from '@/features/view-filters/people'
@@ -212,12 +212,12 @@ export function ExplorerFilterBar({ state, onChange, today, currentUser, ctx, tr
 
         <div className="w-px h-5 bg-glass-border mx-1.5" />
 
-        {/* Versioned / External — two answers, both visible */}
-        <SourceKindToggle
+        {/* Versioning — versioned here, or kept by another system */}
+        <SourceKindMenu
           value={state.sourceKind}
           onChange={v => set({ sourceKind: v })}
           counts={sourceKinds}
-          className="mr-1"
+          countsPending={pending}
         />
 
         {/* Date — created or last changed, presets + calendar */}
