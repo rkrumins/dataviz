@@ -30,12 +30,72 @@ flowchart LR
 
 Search looks for every word you type in each view's name, description and
 tags, and in the names of its workspace and data source. A view has to match
-all the words. To find the views one person made, use the **Creator** filter
-instead (next section). When you click into the empty search box, your
-**Recent searches** in this browser appear; **Clear** empties the list.
+all the words. To find the views one person made or edited, use the
+**People** filter instead (next section), or type it (below). When you click
+into the empty search box, your **Recent searches** in this browser appear,
+with a few filters you can type; **Clear** empties the list.
 
-> **If you don't see the view:** the list says **No views match your search**.
-> Click **Show all views** to clear the search and filters, then try again.
+### Type a filter instead of picking it
+
+Anything in the search box written as `name:value` is a filter. When you finish
+it with a space, **Enter** or **Tab** it turns into the same chip its menu
+would make, and the rest of what you typed stays a search. While you type one,
+the box suggests its values with how many views each would show: pick one with
+the arrow keys and **Enter** or **Tab**.
+
+| Type | To see views… |
+| --- | --- |
+| `by:ada`, `by:me` | created or edited last by Ada, or by you |
+| `created-by:`, `edited-by:`, `published-by:` | by that person in only that role |
+| `is:versioned`, `is:external` | whose data is versioned in {brand}, or kept elsewhere |
+| `is:private`, `is:workspace`, `is:enterprise` | with that visibility |
+| `is:mine`, `is:fav`, `is:shared`, `is:recent`, `is:attention`, `is:deleted` | in that quick filter |
+| `updated:<7d`, `created:<30d` | changed, or made, in the past 7 or 30 days |
+| `updated:>90d` | not changed for more than 90 days |
+| `updated:today`, `created:2026-09`, `updated:2026-09-01..2026-09-15` | changed or made on that day, in that month, or in that range |
+| `updated:visit` | changed since your last visit |
+| `tag:pii`, `type:graph`, `ws:finance`, `source:warehouse` | with that tag, type, workspace or data source |
+
+Put a name with a space in quotes: `by:"Ada Lovelace"`. A name that matches
+more than one person, tag or source isn't guessed: it stays in the box, with a
+note under it, until you finish it from the suggestions or remove it.
+**Backspace** in an empty search box removes the last chip, with an **Undo**.
+
+### Save a set of filters
+
+Once you have a set of filters you will want again — say *Versioned · Updated
+past 7 days · By Ada Lovelace* — click **Save** after the quick filters at the
+top. The name is filled in from what the filters do; change it if you like,
+then click **Save**. The filter appears as a pill beside the quick filters, and
+one click puts the same filters back. A sort you chose is saved with them.
+
+- A pill is highlighted whenever the filters on screen are that set, however
+  you got there.
+- Its **⋯** menu can **Rename** it, **Save the current filters here** (when
+  you've changed them), **Copy link**, move it left or right, or **Delete** it.
+  A deleted filter comes back with **Undo**.
+- Saved filters belong to your account, so they are there in any browser you
+  sign in from. You can keep up to 30, each with its own name. The first five
+  show as pills; the rest are under **+N**, and all of them are in the filter
+  list (**Shift+F**).
+- A filter on **You** keeps meaning you: it shows your own views, not those of
+  whoever made the filter.
+
+### Filter by anything from one list
+
+Press **Shift+F**, or click the filter button at the end of the filter row, for every filter
+value in one searchable list: each person, tag, source, workspace, type, date
+period and visibility, with the number of views it would show and a check by
+the ones already on. Type to narrow it — a group's name such as `tag` or
+`people` lists that group. **Enter** applies the highlighted value and closes
+the list; **Ctrl+Enter** (**⌘+Enter** on a Mac) applies it and keeps the list
+open, to pick several in a row.
+
+> **If you don't see the view:** the list says **No views match your search**
+> (or **these filters**). Under it, each filter you have set is listed with how
+> many views removing just that one would bring back — click one to remove it.
+> **Show all views** clears the search and every filter; the message that
+> follows has an **Undo**.
 > Still missing? See
 > [I can't find a view someone shared](#i-cant-find-a-view-someone-shared).
 
@@ -53,11 +113,17 @@ The row under the search box starts with quick filters. Click one at a time:
 | **Attention** | Views that need attention: not updated for more than 90 days, or whose workspace or data source is inactive or no longer exists |
 | **Deleted** | Deleted views that can still be restored (see [Bring back a deleted view](#bring-back-a-deleted-view)) |
 
-After them come dropdowns you can combine: **Workspace**, **Source** (a data
-source), **Visibility**, **Type** (the canvas type, such as Context View),
-**Tag** and **Creator**. Each one you set shows as a chip under the row, such as
-*Workspace: Finance*. Click a chip's **×** to remove it, or **Clear all** to
-remove every dropdown filter.
+The row below holds the filters you can combine: **Versioned** and
+**External**, **Date**, **People**, **Workspace**, **Source** (a data source),
+**Type** (the canvas type, such as Context View), **Tag** and **Visibility**.
+Each one you set shows as a chip under the row, such as *Workspace: Finance* or
+*Edited by: You*. Click a chip's **×** to remove it, or **Clear all** to remove
+every filter in the row.
+
+Every choice in these menus shows how many views it would leave, counting your
+other filters, and so do the **Versioned** and **External** buttons. A choice
+that would leave none is greyed out, so you can see a dead end before you click
+it.
 
 - **Filter by a tag from a card.** Click any tag on a card to filter by it;
   click it again to remove it.
@@ -73,9 +139,78 @@ remove every dropdown filter.
 > group. Views you can open because of their **Workspace** or **Enterprise**
 > visibility are under **All**.
 
+### Versioned or external
+
+Click **Versioning** and choose **Versioned** to see only views whose data is
+versioned in {brand}: it is changed through drafts, review and publishing.
+Choose **External** for views on a graph that another system looks after, which
+{brand} reads but doesn't edit. Each shows how many views it would leave. The
+menu then reads **Versioned** or **External**; choose the same one again to see
+both.
+
+A view without a data source of its own is judged by its workspace's default
+data source. When your administrator has switched **Version control** off, the
+menu doesn't appear.
+
+### When a view was made or changed
+
+1. Click **Date**.
+2. At the top, choose **Created** (when the view was made) or **Updated** (its
+   last change of any kind: its settings, its layout or its data).
+3. Choose a period such as **Today**, **Past 7 days** or **Last month**, or type
+   a number of days next to **Past … days** and click **Apply**.
+4. For exact dates, click **Custom range…**, click the first and last day on the
+   calendar, then **Apply range**. Both days are included.
+
+The button then reads, for example, *Updated · Past 7 days*. Days are your own
+calendar days. A bookmarked list keeps the period, not the dates: a bookmark of
+*Past 7 days* still shows the past seven days when you open it next month. With
+**Recent** on as well, the list shows views that match both.
+
+Each period shows how many views it would show with your other filters. On the
+calendar, a dot under a day marks views created or changed that day; the darker
+the dot, the more of them.
+
+### Who made or changed a view
+
+1. Click **People**. **You** is always first, then everyone who has made or
+   edited a view you can open, with how many views each has.
+2. At the top, choose what they did:
+
+   | Choose | To see views they… |
+   | --- | --- |
+   | **Any** | created, or edited last (the default) |
+   | **Created** | created |
+   | **Edited** | edited last: the layout or the settings |
+   | **Published** | published the data behind last |
+
+3. Click one or more people. Pick several to see views by any of them.
+
+**Edited** and **Published** go by each view's *latest* change: a view records
+who changed it last, not everyone who ever did. **Published** is a choice of its
+own because publishing data changes every view on that data source, including
+views the publisher never opened.
+
+### What changed since your last visit
+
+When you come back after being away for half an hour or more, a line beside the
+**All Views** heading (above the results in a workspace's Views tab) says what
+changed while you were gone, for example *Since your last visit · Tue 14:02 —
+4 new · 11 updated*. Both numbers count with your other filters.
+
+- Click **4 new** to show only views created since then, or **11 updated** for
+  views changed since then (new ones included). Click it again to go back.
+- Those views also carry **New since your visit** or **Updated since your
+  visit** across the top of their card, or a dot before their name in list view.
+- **Mark as seen** clears the line and the labels until your next visit.
+
+Your last visit is remembered by this browser, separately for the Explorer and
+for each workspace's Views tab, so another computer has its own. The line steps
+aside while another date filter is on.
+
 ### Change the order and the layout
 
-- **Sort** with the menu on the right of the filter row. **Recently modified**
+- **Sort** with the menu on the right of the **All Views** heading. **Recently modified**
   is the default; you can also sort by **Recently updated data**, **Oldest
   updated data**, **Recently edited (settings)**, **Newest created**, **Oldest
   created**, **Most liked**, **Most opened**, **A → Z** and **Z → A**.
@@ -91,7 +226,6 @@ With no search or filter, the Explorer is arranged in sections:
 
 | Section | What it holds |
 | --- | --- |
-| **Featured Views** | Up to three pinned views, when there are any |
 | **Continue where you left off** | Views you opened recently, with when you visited. Click one to open it straight away |
 | **Trending** | Up to six of the most favourited views. A view nobody has favourited never appears here |
 | **All Views** | Every view you can open, with the total beside the heading. More cards load as you scroll |
@@ -108,6 +242,7 @@ you open anything.
 | Canvas type and name | The kind of canvas (Graph, Hierarchy or Context View) and the view's name |
 | Workspace and semantic layer | The workspace the view belongs to, and an icon for the semantic layer that describes its data. Hover either for details |
 | **Private**, **Workspace** or **Enterprise** | Who can open it. Hover for a plain-language answer |
+| **Versioned** or **External** | Whether its data is versioned in {brand} or looked after by another system. Hover for what that means |
 | Health badge | Shown only when something is wrong (table below) |
 | Data source | The data the view is drawn from |
 | **New to you** | Other people open this view, but you never have |
@@ -115,7 +250,8 @@ you open anything.
 | Heart and number | How many people have favourited it |
 | People and number | How many different people opened it in the last 30 days |
 | Eye and number | How many times it was opened in the last 30 days |
-| Initials | Who created it. Hover for their name and email |
+| Faces | Who shaped it: whoever created it, then whoever edited it last, then whoever published its latest data, each person once. Hover a face for their name and what they did when; click it to show only views by that person |
+| **New since your visit** or **Updated since your visit** | A coloured edge across the top: the view was created, or changed, since you were last here (see below) |
 | Time | When it last changed. Hover to see when its data and its settings last changed |
 
 Hover the people or eye number for the detail: who has opened it (for example
@@ -141,10 +277,13 @@ shows:
 - a warning if the view is stale or its data source is missing;
 - a preview of its layers (for a Context View) or its shape (for a Hierarchy);
 - **Description** and **Tags**;
-- **What this view is built on**: its workspace, data source, graph data
-  provider and semantic layer;
-- **Details**: who created it, and under **See all details** when it was
-  created, last updated, and when its data last changed (**Data Updated**);
+- **What this view is built on**: its workspace, data source (with whether it
+  is a versioned or an external graph), graph data provider and semantic
+  layer;
+- **Details**: who created it; **Contributors**, the faces of whoever else
+  edited it last or published its latest data (click one to show only views by
+  that person); and under **See all details** when it was created, last
+  updated, and when its data last changed (**Data Updated**);
 - **Usage**: how many people opened it in the last 30 days, how often, and
   whether you have.
 
@@ -244,11 +383,13 @@ another environment) isn't listed until that draft is published.
 | Key | What it does |
 | --- | --- |
 | `/` | Jump to the search box |
+| `Shift`+`F` | Filter by anything, from one list |
 | `?` | Show the keyboard shortcuts |
 | `Esc` | Clear the search, or close an overlay |
 | Arrow keys | Move between cards |
 | `Enter` | Preview the card you've moved to |
 | `f` | Favourite or unfavourite that card |
+| `Backspace` | In an empty search box: remove the last filter chip |
 
 ## Where to next
 

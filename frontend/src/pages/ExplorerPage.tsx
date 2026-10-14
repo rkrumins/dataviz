@@ -11,12 +11,13 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp,
+  Compass, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw, ListFilter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
-import { useExplorerViews, resolveCategoryParams, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useViewUsage } from '@/hooks/useContentInsights'
@@ -27,13 +28,11 @@ import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerFilterBar } from '@/components/explorer/ExplorerFilterBar'
 import { ExplorerStatsBar } from '@/components/explorer/ExplorerStatsBar'
 import { DensityToggle } from '@/components/explorer/DensityToggle'
-import { ExplorerSearchSuggestions } from '@/components/explorer/ExplorerSearchSuggestions'
+import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
 import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcutsDialog'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
-import { useTypewriter } from '@/hooks/useTypewriter'
 import { usePreferencesStore } from '@/store/preferences'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
-import { ExplorerHero } from '@/components/explorer/ExplorerHero'
 import { ExplorerRecentStrip } from '@/components/explorer/ExplorerRecentStrip'
 import { ExplorerEmptyState } from '@/components/explorer/ExplorerEmptyState'
 import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
@@ -56,6 +55,25 @@ import { AggregationProgressBanner } from '@/components/explorer/AggregationProg
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
+import { isInKeyboardScope } from '@/lib/keyboardScope'
+import { EMPTY_FILTERS, ME, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
+import { matchesFilterQuery, readFilterState, writeFilterState } from '@/features/view-filters/url'
+import { resolveFilters, toQueryParams } from '@/features/view-filters/params'
+import { useLocalDay } from '@/features/view-filters/useLocalDay'
+import { SinceLastVisitBanner } from '@/features/view-filters/components/SinceLastVisitBanner'
+import { visitMark as visitMarkOf } from '@/features/view-filters/visitMark'
+import { VISIT_RULE } from '@/features/view-filters/dateFilter'
+import { useVisitWindow, useVisitWindowsStore } from '@/store/visitWindows'
+import { currentPersonOf, peopleFromFacets } from '@/features/view-filters/people'
+import { activeDimensions, filterChips } from '@/features/view-filters/dimensions'
+import { searchTextOf } from '@/features/view-filters/tokens'
+import { FilterPalette } from '@/features/view-filters/components/FilterPalette'
+import { SavedFilterPills } from '@/features/view-filters/components/SavedFilterPills'
+import { useSavedViewFilters } from '@/features/view-filters/useSavedViewFilters'
+import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
+import { useRelaxations } from '@/features/view-filters/useRelaxations'
+import { invalidateViewAggregates } from '@/features/view-filters/invalidate'
+import { useViewFacets } from '@/hooks/useViewFacets'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -70,31 +88,22 @@ const STAGGER_STYLE = `
 }
 .card-stagger { animation: card-in 0.3s ease-out both; }
 
-/* Typewriter caret: hard on/off blink using steps(), so the cursor
-   feels like a proper terminal cursor rather than a smeared fade. */
-@keyframes typewriter-caret-blink {
-  0%, 49.99% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-.typewriter-caret-blink {
-  animation: typewriter-caret-blink 1.05s steps(1, end) infinite;
+/* The loading line under the toolbar: a short glint crossing the full width. */
+@keyframes explorer-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
 }
 `
 
 // ─── URL Param Helpers ──────────────────────────────────────────────────────
 
+/** The list's own settings in the address. The filters are read by
+ *  ``readFilterState`` (features/view-filters/url.ts), which the workspace tab's
+ *  "Browse in Explorer" link and saved filters write in the same spelling. */
 function parseSearchParams(params: URLSearchParams) {
   return {
-    search: params.get('q') ?? '',
-    visibility: params.get('visibility'),
-    workspaceIds: params.getAll('workspace'),
-    dataSourceId: params.get('dataSource'),
-    viewTypes: params.getAll('type'),
-    tags: params.getAll('tag'),
-    creatorIds: params.getAll('creator'),
     sort: (params.get('sort') as SortOption) ?? 'recently-modified',
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
-    category: params.get('category'),
   }
 }
 
@@ -104,7 +113,18 @@ export function ExplorerPage() {
   useDocumentTitle('Explorer')
   const [searchParams, setSearchParams] = useSearchParams()
   const parsed = parseSearchParams(searchParams)
+  // Re-read only when the address actually changes, so the object is stable
+  // between renders and everything memoised on it stays memoised.
+  const searchKey = searchParams.toString()
+  const filterState = useMemo(() => readFilterState(new URLSearchParams(searchKey)), [searchKey])
   const currentUser = useAuthStore(s => s.user)
+  const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
+  const today = useLocalDay()
+  // "Since your last visit": this browser's window for this person here. It
+  // stays put while the page is open, so the banner's counts stay the ones shown.
+  const visitKey = currentUser?.id ? `${currentUser.id}:explorer` : null
+  const visit = useVisitWindow(visitKey)
+  const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
   const { openViewEditor } = useViewEditorModal()
   // A view from another environment: the wizard's Import journey, from the button or a file
   // dropped anywhere on the page.
@@ -117,34 +137,24 @@ export function ExplorerPage() {
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
 
-  // Filter-aware stats for the summary bar. Mirrors the same filter
-  // params that drive ``useExplorerViews`` so the numbers describe the
-  // exact population the user is currently looking at. ``parsed.search``
-  // (URL-debounced) is used rather than the raw ``searchInput`` so the
+  // Filter-aware stats for the summary bar, through the SAME mapping the list
+  // uses (``toQueryParams``) so the numbers describe the exact population on
+  // screen. The committed (URL) search is used rather than the raw input so the
   // endpoint isn't hit on every keystroke.
-  const statsParams = useMemo(() => {
-    const categoryParams = resolveCategoryParams(parsed.category, currentUser?.id ?? null)
-    return {
-      search: parsed.search || undefined,
-      visibility: parsed.visibility || undefined,
-      workspaceIds: parsed.workspaceIds.length > 0 ? parsed.workspaceIds : undefined,
-      dataSourceId: parsed.dataSourceId || undefined,
-      viewTypes: parsed.viewTypes.length > 0 ? parsed.viewTypes : undefined,
-      tags: parsed.tags.length > 0 ? parsed.tags : undefined,
-      createdByIn: parsed.creatorIds.length > 0 ? parsed.creatorIds : undefined,
-      ...categoryParams,
-    }
-  }, [
-    parsed.search,
-    parsed.visibility,
-    parsed.workspaceIds,
-    parsed.dataSourceId,
-    parsed.viewTypes,
-    parsed.tags,
-    parsed.creatorIds,
-    parsed.category,
-    currentUser?.id,
-  ])
+  const visitFrom = visit?.from
+  const visitTo = visit?.to
+  const resolveCtx = useMemo(
+    () => ({
+      currentUserId: currentUser?.id ?? null,
+      today,
+      visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+    }),
+    [currentUser?.id, today, visitFrom, visitTo],
+  )
+  const statsParams = useMemo(
+    () => toQueryParams(resolveFilters(filterState, resolveCtx)),
+    [filterState, resolveCtx],
+  )
   const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
 
   // Tailwind gap class for the grid layout, driven by density preference.
@@ -153,26 +163,11 @@ export function ExplorerPage() {
     : density === 'spacious' ? 'gap-6'
     : 'gap-4'
 
-  const [searchInput, setSearchInput] = useState(parsed.search)
+  const [searchInput, setSearchInput] = useState(filterState.search)
   const searchRef = useRef<HTMLInputElement>(null)
-  const [searchFocused, setSearchFocused] = useState(false)
   const { recents, record: recordRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches()
-
-  // Typewriter placeholder — cycles tips while the field is empty + not
-  // focused so new users discover the search surface passively, with a
-  // live "someone is typing" feel rather than a jarring snap-replace.
-  // The hook pauses itself when ``enabled`` flips to false.
-  const placeholderPhrases = useMemo(() => [
-    'views by name, tag, or workspace…',
-    'a workspace — "production", "analytics"…',
-    'a tag — "finance", "pii", "kpi"…',
-    'a creator name or email…',
-    'views in a specific data source…',
-  ], [])
-  const typewriter = useTypewriter({
-    phrases: placeholderPhrases,
-    enabled: !searchFocused && !searchInput,
-  })
+  // The box can hold a token being typed (`by:al`), which is not search text.
+  const searchText = searchTextOf(searchInput)
 
   const [previewView, setPreviewView] = useState<View | null>(null)
   const [previewEditMode, setPreviewEditMode] = useState(false)
@@ -187,9 +182,13 @@ export function ExplorerPage() {
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   
   // no-op callback for aggregation banner (informational only — no longer gates view creation)
   const onAggregationStatus = useCallback((_isReady: boolean) => {}, [])
+
+  const { notify } = useAppNotifications()
+  const queryClient = useQueryClient()
 
   // ─── URL param setters ──────────────────────────────────────────────
 
@@ -202,38 +201,77 @@ export function ExplorerPage() {
     }, { replace: true })
   }, [setSearchParams])
 
-  /**
-   * Replace all values of a multi-value URL param (e.g. ``workspace``,
-   * ``tag``, ``type``, ``creator``). Generic helper so every multi-select
-   * dropdown in the filter bar uses the same plumbing instead of
-   * re-inventing the delete+append dance.
-   */
-  const setMultiParam = useCallback((key: string, values: string[]) => {
+  // react-router hands setSearchParams' updater the params of the last render
+  // and commits the navigation in a transition, so two writes before a
+  // re-render would both start from the same params and the second would undo
+  // the first — typing two tokens quickly kept only one. Writes compose on the
+  // latest state written instead.
+  const latestFilters = useRef(filterState)
+  useEffect(() => { latestFilters.current = filterState }, [filterState])
+
+  /** Write a filter set (or a change to the latest one) to the address; sort,
+   *  layout and anything else there are kept. */
+  const setFilterState = useCallback((next: ViewFilterState | ((prev: ViewFilterState) => ViewFilterState)) => {
+    const value = typeof next === 'function' ? next(latestFilters.current) : next
+    latestFilters.current = value
+    setSearchParams(prev => writeFilterState(prev, value), { replace: true })
+  }, [setSearchParams])
+
+  // A saved filter is its filters plus, when one was chosen, its sort — put on
+  // screen in one write, for the same reason setFilterState composes.
+  const applySavedQuery = useCallback((query: string) => {
+    const saved = new URLSearchParams(query)
+    const value = readFilterState(saved)
+    latestFilters.current = value
     setSearchParams(prev => {
-      const next = new URLSearchParams(prev)
-      next.delete(key)
-      values.forEach(v => next.append(key, v))
+      const next = writeFilterState(prev, value)
+      const sort = saved.get('sort')
+      if (sort) next.set('sort', sort)
       return next
     }, { replace: true })
+    setSearchInput(value.search)
   }, [setSearchParams])
+  const { filters: savedFilters } = useSavedViewFilters()
 
-  const setWorkspaceIds = useCallback((ids: string[]) => setMultiParam('workspace', ids), [setMultiParam])
-  const setViewTypes = useCallback((types: string[]) => setMultiParam('type', types), [setMultiParam])
-  const setTags = useCallback((tags: string[]) => setMultiParam('tag', tags), [setMultiParam])
-  const setCreatorIds = useCallback((ids: string[]) => setMultiParam('creator', ids), [setMultiParam])
-
+  // "Show all views": every filter goes, the person's sort and layout stay —
+  // with an Undo, because a carefully built filter set is one click from gone.
   const clearAllFilters = useCallback(() => {
-    setSearchParams({}, { replace: true })
+    const previous = filterState
+    setFilterState(EMPTY_FILTERS)
     setSearchInput('')
-  }, [setSearchParams])
+    if (isAnyFilterActive(previous)) {
+      notify('info', 'Filters cleared', {
+        label: 'Undo',
+        onClick: () => { setFilterState(previous); setSearchInput(previous.search) },
+      })
+    }
+  }, [filterState, setFilterState, notify])
+
+  // A person clicked in a card's contributor trail joins the People filter —
+  // as "You" when it is you, so the chip and a saved link read the same.
+  const pickPerson = useCallback((userId: string) => {
+    const id = userId === currentUser?.id ? ME : userId
+    if (filterState.contributorIds.includes(id)) return
+    setFilterState({ ...filterState, contributorIds: [...filterState.contributorIds, id] })
+  }, [filterState, setFilterState, currentUser?.id])
+
+  // Seen: the window closes, and a filter on it would now match nothing, so
+  // it goes too.
+  const markSeen = useCallback(() => {
+    if (!visitKey) return
+    markVisitSeen(visitKey)
+    const dropVisit = (rule: string | null) => (rule === VISIT_RULE ? null : rule)
+    if (filterState.created === VISIT_RULE || filterState.updated === VISIT_RULE) {
+      setFilterState({ ...filterState, created: dropVisit(filterState.created), updated: dropVisit(filterState.updated) })
+    }
+  }, [visitKey, markVisitSeen, filterState, setFilterState])
 
   // Debounced URL sync
   const searchSyncTimer = useRef<ReturnType<typeof setTimeout>>(null)
   useEffect(() => {
     if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current)
     searchSyncTimer.current = setTimeout(() => {
-      const currentQ = searchParams.get('q') ?? ''
-      if (searchInput !== currentQ) setParam('q', searchInput || null)
+      if (searchText !== latestFilters.current.search) setFilterState(prev => ({ ...prev, search: searchText }))
     }, 350)
     return () => { if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current) }
   }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -241,25 +279,18 @@ export function ExplorerPage() {
   // Record a search once it's been committed to the URL — only persist
   // real queries, not transient typing.
   useEffect(() => {
-    if (parsed.search) recordRecent(parsed.search)
-  }, [parsed.search, recordRecent])
+    if (filterState.search) recordRecent(filterState.search)
+  }, [filterState.search, recordRecent])
 
   // ─── Data fetching ──────────────────────────────────────────────────
 
   const filters: ExplorerFilters = {
-    search: searchInput,
-    visibility: parsed.visibility,
-    workspaceIds: parsed.workspaceIds,
-    dataSourceId: parsed.dataSourceId,
-    viewTypes: parsed.viewTypes,
-    tags: parsed.tags,
-    creatorIds: parsed.creatorIds,
+    // The live input — the hook debounces it before it reaches the wire.
+    ...resolveFilters({ ...filterState, search: searchText }, resolveCtx),
     sort: parsed.sort,
     // Favourites is driven exclusively by the "Favorites" category pill;
     // the server-side resolver maps that category to ``favouritedOnly=true``.
     favouritedOnly: false,
-    category: parsed.category,
-    currentUserId: currentUser?.id ?? null,
     limit: PAGE_SIZE,
     offset: 0,
   }
@@ -269,6 +300,10 @@ export function ExplorerPage() {
     totalCount,
     popularViews,
     isLoading,
+    error: listError,
+    errorStatus: listErrorStatus,
+    isFetching: listFetching,
+    isPlaceholderData: showingPreviousList,
     toggleFavourite,
     removeView: removeViewFromList,
     patchView,
@@ -297,14 +332,30 @@ export function ExplorerPage() {
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
 
-  const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
+  const hasActiveFilters = isAnyFilterActive(filterState)
 
-  const hasActiveFilters = !!(
-    parsed.search || parsed.visibility || parsed.workspaceIds.length ||
-    parsed.dataSourceId || parsed.viewTypes.length ||
-    parsed.tags.length || parsed.creatorIds.length ||
-    parsed.category
-  )
+  // The way out of an empty list: one count per active filter, asked only
+  // while the list is empty. The universe facets are the filter bar's own
+  // (same cache entry), here for the people's names.
+  const { facets: universeFacets } = useViewFacets()
+  const people = useMemo(() => peopleFromFacets(universeFacets), [universeFacets])
+  const lookups = useFilterLookups(people, today, currentUser?.id)
+  const listEmpty = !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters
+  const relaxations = useRelaxations(filterState, resolveCtx, lookups, { enabled: listEmpty })
+
+  // Backspace in an empty search box takes off the last chip — with an Undo,
+  // since one key too many shouldn't cost a filter you built.
+  const removeLastFilter = useCallback(() => {
+    const chips = filterChips(filterState, lookups)
+    const last = chips[chips.length - 1]
+    if (!last) return
+    const previous = filterState
+    setFilterState(last.without(filterState))
+    notify('info', `Removed ${last.prefix}: ${last.value}`, {
+      label: 'Undo',
+      onClick: () => setFilterState(previous),
+    })
+  }, [filterState, lookups, setFilterState, notify])
 
   const layout = parsed.layout
 
@@ -325,6 +376,9 @@ export function ExplorerPage() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // A filter menu owns the keys typed inside it — Escape there closes the
+      // menu, it must not also clear the search behind it.
+      if (isInKeyboardScope(e.target)) return
       const tag = (e.target as HTMLElement).tagName
       const inInput = ['INPUT', 'TEXTAREA'].includes(tag)
 
@@ -332,6 +386,13 @@ export function ExplorerPage() {
       if (e.key === '/' && !inInput) {
         e.preventDefault()
         searchRef.current?.focus()
+        return
+      }
+      // ⇧F → the filter palette. Shift itself, not the letter's case, so a
+      // plain f with Caps Lock on still favourites below.
+      if (e.shiftKey && e.key.toLowerCase() === 'f' && !inInput && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        setPaletteOpen(true)
         return
       }
       // ? → show keyboard shortcuts cheat-sheet. ``?`` is a Shift+/ on
@@ -372,7 +433,7 @@ export function ExplorerPage() {
       } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         setPreviewView(views[focusedIndex])
-      } else if (e.key === 'f' && focusedIndex >= 0 && focusedIndex < views.length) {
+      } else if (e.key.toLowerCase() === 'f' && !e.shiftKey && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         toggleFavourite(views[focusedIndex].id)
       }
@@ -396,8 +457,6 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
-  const { notify } = useAppNotifications()
-
   const copyViewLink = useCopyViewLink()
   const handleShare = useCallback((view: View) => {
     void copyViewLink(view.id)
@@ -416,8 +475,9 @@ export function ExplorerPage() {
   const handleVisibilityChanged = useCallback(
     (viewId: string) => (visibility: 'private' | 'workspace' | 'enterprise') => {
       patchView(viewId, { visibility })
+      invalidateViewAggregates(queryClient)
     },
-    [patchView],
+    [patchView, queryClient],
   )
 
   // BE rule (views.py: can_delete_view): creator OR
@@ -458,7 +518,8 @@ export function ExplorerPage() {
     })
     // Notification
     notify('success', `"${deletedName}" has been deleted`)
-  }, [deleteView, removeViewFromList, notify])
+    invalidateViewAggregates(queryClient)
+  }, [deleteView, removeViewFromList, notify, queryClient])
 
   const handleBulkDelete = useCallback(() => {
     if (selectedIds.size === 0) return
@@ -484,7 +545,8 @@ export function ExplorerPage() {
     setSelectedIds(new Set())
     setShowBulkDelete(false)
     notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
-  }, [selectedIds, removeViewFromList, notify])
+    invalidateViewAggregates(queryClient)
+  }, [selectedIds, removeViewFromList, notify, queryClient])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
@@ -495,6 +557,7 @@ export function ExplorerPage() {
     const failed = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[]
     setSelectedIds(new Set())
     refetch()
+    invalidateViewAggregates(queryClient)
     if (failed.length === 0) {
       notify('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     } else {
@@ -515,7 +578,7 @@ export function ExplorerPage() {
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, notify, refetch])
+  }, [selectedIds, notify, refetch, queryClient])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -524,22 +587,23 @@ export function ExplorerPage() {
    * the URL.
    */
   const handleTagClick = useCallback((tag: string) => {
-    const current = parsed.tags
+    const current = filterState.tags
     const next = current.includes(tag)
       ? current.filter(t => t !== tag)
       : [...current, tag]
-    setTags(next)
-  }, [parsed.tags, setTags])
+    setFilterState({ ...filterState, tags: next })
+  }, [filterState, setFilterState])
 
   const handleRestore = useCallback(async (view: View) => {
     try {
       await restoreViewApi(view.id)
       refetch()
+      invalidateViewAggregates(queryClient)
       notify('success', `"${view.name}" has been restored`)
     } catch {
       notify('error', `Failed to restore "${view.name}"`)
     }
-  }, [refetch, notify])
+  }, [refetch, notify, queryClient])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -597,154 +661,73 @@ export function ExplorerPage() {
           onShowAttention={() => setParam('category', 'needs-attention')}
         />
 
-        {/* ── Search bar ──────────────────────────────────────── */}
-        <div data-tour="explorer-search" className="mb-5 relative">
-          <div className={cn(
-            'relative flex items-center rounded-xl border bg-canvas-elevated overflow-hidden',
-            'transition-[border-color,box-shadow] duration-200',
-            searchFocused
-              ? 'border-accent-lineage/50 shadow-[0_0_0_3px_rgba(var(--accent-lineage-rgb,99,102,241),0.08)]'
-              : 'border-glass-border',
-          )}>
-            <Search className={cn(
-              'w-4.5 h-4.5 ml-4 shrink-0 transition-colors duration-150',
-              searchFocused ? 'text-accent-lineage' : 'text-ink-muted'
-            )} />
-            {/* Input wrapper — lets the typewriter overlay sit atop the
-                input without blocking pointer events. The real input is
-                still the focus/typing surface; the overlay only paints
-                the animated placeholder. */}
-            <div className="flex-1 relative">
-              <input
-                ref={searchRef}
-                type="text"
-                /* Fallback for no-JS / reduced-motion: a static prompt. */
-                placeholder={(!searchFocused && !searchInput) ? '' : 'Search views by name, tag, workspace...'}
-                value={searchInput}
-                onChange={e => setSearchInput(e.target.value)}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
-                className="w-full bg-transparent py-2.5 px-3 text-sm text-ink outline-none placeholder:text-ink-muted/50 font-medium"
+        {/* ── Search bar — words search, and typed tokens (by:ada,
+            is:versioned, updated:<7d) become the filters their menus set ── */}
+        <ExplorerSearchBox
+          value={searchInput}
+          onChange={setSearchInput}
+          onCommit={text => setFilterState(prev => ({ ...prev, search: searchTextOf(text) }))}
+          inputRef={searchRef}
+          state={filterState}
+          onApplyFilters={setFilterState}
+          ctx={resolveCtx}
+          currentUser={me}
+          recents={recents}
+          onClearRecents={clearRecents}
+          onRemoveRecent={removeRecent}
+          onRemoveLastFilter={removeLastFilter}
+        />
+
+        {/* ── Filters: one row, wrapping when the width runs out — the quick
+            views and saved filters, then every filter, with the palette at its
+            end. How the results are shown sits on their own header below. ─── */}
+        <div data-tour="explorer-filters" className="mb-6">
+          <ExplorerFilterBar
+            state={filterState}
+            onChange={setFilterState}
+            today={today}
+            currentUser={me}
+            ctx={resolveCtx}
+            saved={(
+              <SavedFilterPills
+                state={filterState}
+                sort={searchParams.get('sort')}
+                lookups={lookups}
+                onApply={applySavedQuery}
               />
-              {!searchFocused && !searchInput && (
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute inset-0 px-3 py-2.5 flex items-center text-sm font-medium text-ink-muted/60 overflow-hidden whitespace-nowrap"
-                >
-                  <span>Search </span>
-                  {/* The animated text and the caret's blink are driven by the
-                      hook writing DIRECTLY to these refs — it holds no React
-                      state, so this ticking animation re-renders NOTHING. See
-                      useTypewriter's performance contract: driving it through
-                      state re-rendered this whole page (and every result card)
-                      ~30x/sec forever, which in React 19 dev leaked millions of
-                      PerformanceMeasure objects into an uncapped timeline. */}
-                  <span ref={typewriter.textRef} className="ml-1" />
-                  <span
-                    ref={typewriter.caretRef}
-                    className="ml-[2px] inline-block w-[2px] h-[1.1em] translate-y-[1px] bg-accent-lineage/70 rounded-[1px] typewriter-caret-blink"
-                  />
-                </div>
-              )}
-            </div>
-            {searchInput && (
+            )}
+            trailing={(
               <button
-                onClick={() => setSearchInput('')}
-                title="Clear search"
-                aria-label="Clear search"
-                className="mr-1.5 p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors duration-150"
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                title="Filter by anything (Shift+F)"
+                aria-label="Filter by anything"
+                aria-keyshortcuts="Shift+F"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border px-2 py-1 text-xs font-medium text-ink-muted hover:text-ink hover:border-accent-lineage/40 transition-colors duration-150"
               >
-                <X className="w-3.5 h-3.5" />
+                <ListFilter className="h-3.5 w-3.5" />
+                <kbd className="text-[10px] font-semibold">⇧F</kbd>
               </button>
             )}
-            <kbd className="hidden sm:block mr-3 rounded border border-glass-border bg-black/[0.03] dark:bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium text-ink-muted">
-              /
-            </kbd>
-          </div>
+          />
+        </div>
 
-          {/* Search suggestions dropdown — recent + examples. Only
-              visible while the input is focused and empty so it never
-              competes with live results. */}
-          {searchFocused && !searchInput && (
-            <ExplorerSearchSuggestions
-              recentSearches={recents}
-              onPick={q => {
-                setSearchInput(q)
-                setSearchFocused(false)
-                searchRef.current?.blur()
-              }}
-              onClearRecents={clearRecents}
-              onRemoveRecent={removeRecent}
-            />
+        {/* A thin line while a filter change loads. The previous results stay on
+            screen (no skeleton flash), so without it nothing says they are
+            about to change. */}
+        <div className="relative -mt-4 mb-4 h-0.5 overflow-hidden rounded-full" aria-hidden>
+          {listFetching && showingPreviousList && (
+            <div className="absolute inset-y-0 w-1/3 rounded-full bg-gradient-to-r from-transparent via-accent-lineage to-transparent animate-[explorer-progress_1.1s_ease-in-out_infinite]" />
           )}
         </div>
 
-        {/* ── Unified toolbar: filters + sort + layout ─────────── */}
-        <div data-tour="explorer-filters" className="flex items-start gap-3 mb-6">
-          <div className="flex-1 min-w-0">
-            <ExplorerFilterBar
-              visibility={parsed.visibility}
-              onVisibilityChange={v => setParam('visibility', v)}
-              workspaceIds={parsed.workspaceIds}
-              onWorkspaceIdsChange={setWorkspaceIds}
-              dataSourceId={parsed.dataSourceId}
-              onDataSourceIdChange={v => setParam('dataSource', v)}
-              viewTypes={parsed.viewTypes}
-              onViewTypesChange={setViewTypes}
-              tags={parsed.tags}
-              onTagsChange={setTags}
-              creatorIds={parsed.creatorIds}
-              onCreatorIdsChange={setCreatorIds}
-              category={parsed.category}
-              onCategoryChange={v => setParam('category', v)}
-            />
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <ExplorerSortControl
-              sort={parsed.sort}
-              onSortChange={v => setParam('sort', v)}
-            />
-            <div className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
-              <button
-                onClick={() => setParam('layout', 'grid')}
-                title="Grid view"
-                aria-label="Grid view"
-                className={cn(
-                  'p-1.5 rounded-md transition-colors duration-150',
-                  layout === 'grid' ? 'bg-accent-lineage/12 text-accent-lineage' : 'text-ink-muted hover:text-ink'
-                )}
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => setParam('layout', 'list')}
-                title="List view (sortable columns)"
-                aria-label="List view"
-                className={cn(
-                  'p-1.5 rounded-md transition-colors duration-150',
-                  layout === 'list' ? 'bg-accent-lineage/12 text-accent-lineage' : 'text-ink-muted hover:text-ink'
-                )}
-              >
-                <List className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <DensityToggle />
-          </div>
-        </div>
-
         {/* ── Headline Banner for Aggregation ───────────────────── */}
-        {activeWorkspaceId && parsed.dataSourceId && (
+        {activeWorkspaceId && filterState.dataSourceId && (
           <AggregationProgressBanner 
             workspaceId={activeWorkspaceId}
-            dataSourceId={parsed.dataSourceId}
+            dataSourceId={filterState.dataSourceId}
             onStatusChange={onAggregationStatus}
           />
-        )}
-
-        {/* ── Featured / Pinned ────────────────────────────────── */}
-        {!hasActiveFilters && pinnedViews.length > 0 && (
-          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} onPreview={openViewPreview} />
         )}
 
         {/* ── Recently Viewed ──────────────────────────────────── */}
@@ -790,14 +773,58 @@ export function ExplorerPage() {
 
         {/* ── Results ──────────────────────────────────────────── */}
         <section data-tour="explorer-results">
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 mb-4">
             <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
               <Compass className="w-3.5 h-3.5 text-indigo-500" />
             </div>
             <h2 className="text-sm font-bold text-ink">
-              {hasActiveFilters ? `Results${parsed.search ? ` for "${parsed.search}"` : ''}` : 'All Views'}
+              {hasActiveFilters ? `Results${filterState.search ? ` for "${filterState.search}"` : ''}` : 'All Views'}
             </h2>
-            <span className="text-[11px] text-ink-muted">{totalCount}</span>
+            <span className="text-[11px] text-ink-muted tabular-nums" aria-live="polite" aria-atomic="true">
+              <span className="sr-only">Showing </span>{totalCount}<span className="sr-only"> view{totalCount === 1 ? '' : 's'}</span>
+            </span>
+            {visit && filterState.category !== 'deleted' && (
+              <SinceLastVisitBanner
+                state={filterState}
+                ctx={resolveCtx}
+                window={visit}
+                onApply={setFilterState}
+                onMarkSeen={markSeen}
+                variant="inline"
+                className="ml-1"
+              />
+            )}
+            <div className="ml-auto flex items-center gap-1.5">
+              <ExplorerSortControl
+                sort={parsed.sort}
+                onSortChange={v => setParam('sort', v)}
+              />
+              <div className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
+                <button
+                  onClick={() => setParam('layout', 'grid')}
+                  title="Grid view"
+                  aria-label="Grid view"
+                  className={cn(
+                    'p-1.5 rounded-md transition-colors duration-150',
+                    layout === 'grid' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
+                  )}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setParam('layout', 'list')}
+                  title="List view (sortable columns)"
+                  aria-label="List view"
+                  className={cn(
+                    'p-1.5 rounded-md transition-colors duration-150',
+                    layout === 'list' ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted hover:text-ink'
+                  )}
+                >
+                  <List className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <DensityToggle />
+            </div>
           </div>
 
           {/* Results slot with layout-swap crossfade. Each possible
@@ -822,6 +849,24 @@ export function ExplorerPage() {
                 </div>
               )}
             </motion.div>
+          ) : listError && (views.length === 0 || showingPreviousList) ? (
+            <motion.div
+              key="error"
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2 }}
+            >
+              <ListErrorState
+                message={listError}
+                // 503 + the Versioned/External filter: the server couldn't reach
+                // the version store. Every other filter still works, so offer the
+                // one change that gets a list back.
+                sourceKindUnavailable={listErrorStatus === 503 && filterState.sourceKind !== null}
+                onRemoveSourceKind={() => setFilterState({ ...filterState, sourceKind: null })}
+                onRetry={() => refetch()}
+              />
+            </motion.div>
           ) : views.length === 0 ? (
             <motion.div
               key="empty"
@@ -832,11 +877,14 @@ export function ExplorerPage() {
             >
               <ExplorerEmptyState
                 type={totalCount === 0 && !hasActiveFilters ? 'no-views' : 'no-results'}
-                searchTerm={parsed.search}
+                searchTerm={filterState.search}
                 hasFilters={hasActiveFilters}
-                activeCategory={parsed.category}
+                activeCategory={filterState.category}
                 onClearFilters={clearAllFilters}
                 onCreateView={() => openViewEditor()}
+                relaxations={relaxations}
+                onRelax={next => { setFilterState(next); setSearchInput(next.search) }}
+                activeFilterCount={activeDimensions(filterState).length}
               />
             </motion.div>
           ) : layout === 'grid' ? (
@@ -873,6 +921,8 @@ export function ExplorerPage() {
                       isSelected={selectedIds.has(v.id)}
                       density={density}
                       providerInfo={resolveProvider(v.dataSourceId)}
+                      onPickPerson={pickPerson}
+                      visitMark={visitMarkOf(v, visit)}
                       onToggleSelect={() => setSelectedIds(prev => {
                         const next = new Set(prev)
                         if (next.has(v.id)) next.delete(v.id)
@@ -915,6 +965,8 @@ export function ExplorerPage() {
                   isSelected={selectedIds.has(v.id)}
                   density={density}
                   providerInfo={resolveProvider(v.dataSourceId)}
+                  onPickPerson={pickPerson}
+                  visitMark={visitMarkOf(v, visit)}
                   onToggleSelect={() => setSelectedIds(prev => {
                     const next = new Set(prev)
                     if (next.has(v.id)) next.delete(v.id)
@@ -945,13 +997,17 @@ export function ExplorerPage() {
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
         initialEditMode={previewEditMode}
-        onSaved={() => refetch()}
+        // The save refreshed the lists; the drawer holds its own copy of the view.
+        onSaved={updated => setPreviewView(prev => prev && {
+          ...prev, name: updated.name, description: updated.description, tags: updated.tags, visibility: updated.visibility,
+        })}
+        onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
-        onExport={exportEnabled && parsed.category !== 'deleted'
+        onExport={exportEnabled && filterState.category !== 'deleted'
           ? () => setExportSelection(Array.from(selectedIds, id => ({
               id, name: views.find(v => v.id === id)?.name ?? id,
             })))
@@ -979,13 +1035,71 @@ export function ExplorerPage() {
         isOpen={showBulkDelete}
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}
-        permanent={parsed.category === 'deleted'}
+        permanent={filterState.category === 'deleted'}
       />
       <KeyboardShortcutsDialog
         isOpen={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
+      {paletteOpen && (
+        <FilterPalette
+          state={filterState}
+          onChange={setFilterState}
+          ctx={resolveCtx}
+          currentUser={me}
+          saved={savedFilters.map(f => ({
+            id: f.id, name: f.name, active: matchesFilterQuery(f.query, filterState),
+            apply: () => applySavedQuery(f.query),
+          }))}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
+    </div>
+  )
+}
+
+// ─── List error ─────────────────────────────────────────────────────────────
+
+/**
+ * A failed load used to fall through to "No views match your search" — telling
+ * someone their filters were wrong when the server was. Say what happened, and
+ * when it is the Versioned/External filter that can't be answered, offer the one
+ * change that gets the list back.
+ */
+function ListErrorState({ message, sourceKindUnavailable, onRemoveSourceKind, onRetry }: {
+  message: string
+  sourceKindUnavailable: boolean
+  onRemoveSourceKind: () => void
+  onRetry: () => void
+}) {
+  return (
+    <div role="alert" className="flex flex-col items-center rounded-2xl border border-amber-500/30 bg-amber-500/5 px-6 py-12 text-center">
+      <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl border border-amber-500/30 bg-amber-500/10">
+        <AlertTriangle className="h-5 w-5 text-amber-500" />
+      </div>
+      <h3 className="text-sm font-bold text-ink">
+        {sourceKindUnavailable ? "Can't tell versioned from external right now" : "The views didn't load"}
+      </h3>
+      <p className="mt-1 max-w-md text-xs text-ink-muted">{message}</p>
+      <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+        {sourceKindUnavailable && (
+          <button
+            type="button"
+            onClick={onRemoveSourceKind}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-accent-lineage to-violet-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:shadow-md transition-shadow"
+          >
+            <X className="h-3.5 w-3.5" /> Remove the Versioned/External filter
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-glass-border px-4 py-2 text-xs font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+        >
+          <RefreshCw className="h-3.5 w-3.5" /> Try again
+        </button>
+      </div>
     </div>
   )
 }

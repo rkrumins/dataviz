@@ -28,17 +28,11 @@ import {
   listViews, favouriteView, unfavouriteView,
   type View, type ViewListParams, type ViewListResponse,
 } from '@/services/viewApiService'
+import { httpStatusOf } from '@/services/graphRequestFailure'
+import { toQueryParams, type ResolvedViewFilters } from '@/features/view-filters/params'
 
 /** Stable empty slice so ``popularViews`` keeps one reference across renders. */
 const EMPTY_VIEWS: View[] = []
-
-/** Stable JSON key for array deps — prevents infinite re-render loops from new array refs. */
-function useStableKey(value: unknown): string {
-  const key = JSON.stringify(value)
-  const ref = useRef(key)
-  if (ref.current !== key) ref.current = key
-  return ref.current
-}
 
 // ─── Sort Options ───────────────────────────────────────────────────────────
 
@@ -109,19 +103,13 @@ function sortViews(views: View[], sort: SortOption): View[] {
 
 // ─── Filter Params ──────────────────────────────────────────────────────────
 
-export interface ExplorerFilters {
-  search: string
-  visibility: string | null         // 'enterprise' | 'workspace' | 'private' | null (all)
-  workspaceIds: string[]            // Multi-select — sent as ``workspaceIds`` on API
-  dataSourceId: string | null
-  viewTypes: string[]               // Multi-select — sent as ``viewTypes`` on API
-  tags: string[]                    // Multi-select — sent as ``tags`` on API (OR semantics)
-  creatorIds: string[]              // Multi-select — sent as ``createdByIn`` on API
+/**
+ * The resolved filter set (see ``resolveFilters`` in features/view-filters) plus
+ * the list's own knobs. ``search`` is the LIVE input here — the hook debounces it.
+ */
+export interface ExplorerFilters extends ResolvedViewFilters {
   sort: SortOption
   favouritedOnly: boolean
-  /** 'my-views' | 'my-favourites' | 'recently-added' | 'shared-with-me' | 'needs-attention' | 'deleted' | null */
-  category: string | null
-  currentUserId: string | null      // For 'my-views' — sent as ``createdBy`` on API
   limit: number                     // Page size
   offset: number                    // Unused externally; hook manages offset internally
 }
@@ -133,6 +121,13 @@ export interface UseExplorerViewsResult {
   isLoading: boolean                // Initial fetch
   isLoadingMore: boolean            // Subsequent page fetch
   error: string | null
+  /** HTTP status of the failed request, when there was one (a 503 means the
+   *  server couldn't tell versioned from external sources). */
+  errorStatus: number | null
+  /** A request for the current filters is in flight. */
+  isFetching: boolean
+  /** The list on screen belongs to the PREVIOUS filters while the new ones load. */
+  isPlaceholderData: boolean
   toggleFavourite: (viewId: string) => void
   removeView: (viewId: string) => void
   /** Apply a settled server change to one view in place. Cheaper and
@@ -142,54 +137,6 @@ export interface UseExplorerViewsResult {
   refetch: () => void
   loadMore: () => void
   hasMore: boolean
-}
-
-// ─── Category → server params resolver ─────────────────────────────────────
-
-/**
- * Translate a user-selected category to the concrete API params the backend
- * understands. Centralising this here keeps the hook body simple and makes
- * the client/server contract explicit — no hidden client-side filtering.
- *
- * Exported so the stats bar and any future catalog-level consumers can
- * translate the same way without reimplementing the mapping.
- */
-export function resolveCategoryParams(
-  category: string | null,
-  currentUserId: string | null,
-): Partial<ViewListParams> {
-  switch (category) {
-    case 'my-views':
-      // If we have no user id the Explorer page falls back to showing
-      // nothing (not "all") so the filter label stays truthful.
-      return currentUserId ? { createdBy: currentUserId } : { createdBy: '__no_user__' }
-    case 'my-favourites':
-      return { favouritedOnly: true }
-    case 'recently-added': {
-      // IMPORTANT: quantise the cutoff to a 5-minute bucket so the
-      // string value is stable across re-renders. Without this, every
-      // render produces a fresh ``Date.now()`` → fresh ISO string →
-      // fresh React Query key → refetch → state update → re-render →
-      // infinite fetch loop. The 5-minute window means the "last 7
-      // days" cutoff can drift by at most 5 minutes, which is fine
-      // for a human-facing "recent" filter.
-      const QUANTUM_MS = 5 * 60 * 1000
-      const now = Math.floor(Date.now() / QUANTUM_MS) * QUANTUM_MS
-      const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000)
-      return { createdAfter: sevenDaysAgo.toISOString() }
-    }
-    case 'shared-with-me':
-      // Server-side truth: views reachable through an explicit grant
-      // (direct or via group), excluding your own. The old visibilityIn
-      // approximation showed every workspace/enterprise view instead.
-      return { category: 'shared-with-me' }
-    case 'needs-attention':
-      return { attentionOnly: true }
-    case 'deleted':
-      return { deletedOnly: true }
-    default:
-      return {}
-  }
 }
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -225,50 +172,21 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current) }
   }, [filters.search])
 
-  // Stabilise array deps so buildParams (and thus the query key) doesn't churn on identical values.
-  const workspaceIdsKey = useStableKey(filters.workspaceIds)
-  const viewTypesKey = useStableKey(filters.viewTypes)
-  const tagsKey = useStableKey(filters.tags)
-  const creatorIdsKey = useStableKey(filters.creatorIds)
-  const stableVisibility = filters.visibility
-  const stableDataSourceId = filters.dataSourceId
-  const stableFavouritedOnly = filters.favouritedOnly
-  const stableCategory = filters.category
-  const stableCurrentUserId = filters.currentUserId
+  // Every filter goes through the shared ``toQueryParams`` — the same mapping the
+  // stats bar and the facet counts use — then is held as a JSON string, so the
+  // query key changes exactly when the request would, not when a caller hands in a
+  // new array with the same contents.
+  const filterKey = JSON.stringify(toQueryParams({ ...filters, search: debouncedSearch }))
   const stableLimit = filters.limit
   const stableSort = filters.sort
 
-  // Build the full set of API params for a given page offset. Category
-  // params are merged last so they can override defaults (e.g. the
-  // ``deleted`` category sets ``deletedOnly: true``).
-  const buildParams = useCallback((pageOffset: number): ViewListParams => {
-    const wsIds: string[] = JSON.parse(workspaceIdsKey)
-    const vTypes: string[] = JSON.parse(viewTypesKey)
-    const tagList: string[] = JSON.parse(tagsKey)
-    const creators: string[] = JSON.parse(creatorIdsKey)
-    const categoryParams = resolveCategoryParams(stableCategory, stableCurrentUserId)
-
-    const params: ViewListParams = {
-      search: debouncedSearch || undefined,
-      visibility: stableVisibility || undefined,
-      favouritedOnly: stableFavouritedOnly || undefined,
-      dataSourceId: stableDataSourceId || undefined,
-      workspaceIds: wsIds.length > 0 ? wsIds : undefined,
-      viewTypes: vTypes.length > 0 ? vTypes : undefined,
-      tags: tagList.length > 0 ? tagList : undefined,
-      createdByIn: creators.length > 0 ? creators : undefined,
-      sort: stableSort || undefined,
-      limit: stableLimit,
-      offset: pageOffset,
-      ...categoryParams,
-    }
-
-    return params
-  }, [
-    debouncedSearch, stableVisibility, stableFavouritedOnly,
-    stableDataSourceId, workspaceIdsKey, viewTypesKey, tagsKey,
-    creatorIdsKey, stableSort, stableLimit, stableCategory, stableCurrentUserId,
-  ])
+  // Build the full set of API params for a given page offset.
+  const buildParams = useCallback((pageOffset: number): ViewListParams => ({
+    ...(JSON.parse(filterKey) as ViewListParams),
+    sort: stableSort || undefined,
+    limit: stableLimit,
+    offset: pageOffset,
+  }), [filterKey, stableSort, stableLimit])
 
   // The full filter set (minus offset — that's the page param) is the query
   // key, so any filter change is a distinct query: keepPreviousData shows the
@@ -298,7 +216,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   })
 
   const {
-    data, isPending, error, refetch: rqRefetch,
+    data, isPending, error, refetch: rqRefetch, isFetching,
     fetchNextPage, hasNextPage, isFetchingNextPage, isPlaceholderData,
   } = query
 
@@ -406,6 +324,9 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
     isLoading: isPending,
     isLoadingMore: isFetchingNextPage,
     error: error ? (error instanceof Error ? error.message : 'Failed to load views') : null,
+    errorStatus: error ? httpStatusOf(error) : null,
+    isFetching,
+    isPlaceholderData,
     toggleFavourite,
     removeView,
     patchView,

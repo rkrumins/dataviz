@@ -155,6 +155,138 @@ used from a network it isn't limited to — even when it only asks about itself.
 
 ---
 
+## [Unreleased] — Find views by how their data is kept, when they changed, and who changed them
+
+### Added
+
+**Versioned or External.** The **Versioning** menu in the Explorer's filter row narrows the list to
+views whose data is versioned in {brand} (changed through drafts, review and publishing) or kept by
+another system. Every card and list row says which it is, and so does the preview's *What this
+view is built on*. A view with no data source of its own is judged by its workspace's default
+source. The menu and labels follow the **Version control** switch: off, they are hidden.
+
+**Date.** One menu filters on when a view was **Created** or last **Updated** — any change, to its
+settings, its layout or its data. Pick a period (Today, Past 7 days, This month, Last quarter…),
+type any number of past days, or choose a custom range on a two-month calendar. Days are the
+reader's own calendar days, both ends included. The address keeps the period rather than the
+dates, so a bookmarked *Past 7 days* means the past seven days whenever it is opened.
+
+**People.** Replaces **Creator**: pick one or more people and say what they did — **Any**
+(created it or edited it last), **Created**, **Edited** or **Published** (published the data
+behind it last). You are always first in the list, and a bookmark of *views I edited* means the
+same to whoever opens it. Old links filtered by creator still work.
+
+**The workspace Views tab filters like the Explorer.** Search, Versioned/External, Date, People
+and Source sit in its toolbar, with the same chips underneath. Its People list comes from the
+server, so it names everyone, not just the people behind the first 50 views. **Browse in
+Explorer** now opens the Explorer with the tab's filters.
+
+**Every filter shows what it would leave.** Each option in the Versioning, Workspace, Source, Type,
+Tag, Visibility and People menus shows how many views it would leave given your other filters; a
+choice that would leave none is greyed out. The Source menu also marks each source Versioned or
+External and names its workspace.
+
+**No dead ends.** When nothing matches, the Explorer and the workspace Views tab list each active
+filter with how many views removing just that one would bring back — click one to drop it — instead
+of only offering to clear everything. **Clear all filters** now has an **Undo**.
+
+**Counts in the Date menu.** Each period shows how many views it would show, and the calendar
+marks the busy days with a dot.
+
+**Who shaped a view.** Cards and list rows show the faces of whoever created a view, edited it last
+and published its latest data, each person once; hover one for what they did and when, click it to
+show only views by that person. The preview lists them as **Contributors**.
+
+**Type filters into the search box.** `by:ada`, `is:versioned`, `updated:<7d`, `tag:pii`,
+`created:2026-09` and the like turn into the same chips their menus make as soon as they are
+finished, with suggestions and counts while you type; the rest of what you type stays a search. A
+value that matches nothing, or more than one thing, is never guessed. **Backspace** in an empty box
+removes the last chip, with an **Undo**. The workspace Views tab takes them too.
+
+**Filter by anything (Shift+F).** One searchable list of every filter value in the Explorer — each
+person, tag, source, workspace, type, date period and visibility — with live counts and a check by
+those already on. **Ctrl/⌘+Enter** picks several in a row.
+
+**Saved filters.** Save any set of filters (and the sort, if you chose one) under a name filled in
+from what it does — *Versioned · Updated past 7 days · By Ada Lovelace* — and it becomes a pill beside
+the Explorer's quick filters: one click puts it back, and the pill lights up whenever its filters
+are on screen. Rename it, point it at the current filters, copy its link, reorder it or delete it
+(with an **Undo**) from its **⋯** menu. Saved filters belong to your account, up to 30 each.
+
+**Since your last visit.** Back after half an hour or more, the Explorer (beside the **All Views**
+heading) and each workspace's Views tab say how many views are new or updated since you were last
+there, counted with your filters; click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
+since your visit** until **Mark as seen**.
+
+API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
+`updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
+`/views/facets` takes every list filter plus `fields`, counts each dimension with the OTHER filters
+applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
+`GET /views/count` returns how many views a filter set leaves; `GET /views/histogram` counts views
+created or updated per hour (or ten minutes) over a window, with the same filters. Views carry
+`createdByAvatarId`, `updatedByAvatarId` and `dataUpdatedByAvatarId`. `/views/saved-filters` lists,
+creates, renames, reorders (`PUT /order`) and deletes the caller's own saved filters.
+
+### Changed
+
+- **A failed load says so.** The Explorer used to answer a server error with "No views match your
+  search". It now shows the error, with **Try again** — and, when the Versioned/External filter
+  can't be answered, a button that removes just that filter.
+- **The preview's data-source line names version control.** It said *Managed graph* or *External
+  graph* from how the source was first connected, which called many versioned sources external.
+- **Clearing every filter keeps your sort and layout.**
+- **Sort, Grid/List and density sit on the right of the All Views heading,** beside what they
+  change, so the filter row above holds only filters.
+- **The workspace Views tab counts the whole workspace.** Its summary counted only the first 50
+  views the page loaded, so in a large workspace every number was short.
+- An invalid `createdAfter` is now refused with a 422 instead of being compared as text.
+- **A version store that goes down is asked again every 30 seconds, not on every request.** The
+  versioned-sources lookup kept serving its last answer after a failed refresh but retried on the
+  very next call, so with view lists now asking, each request would have waited on a connection.
+
+### Removed
+
+- **Featured Views.** The Explorer's banner of pinned views is gone. Nothing in the app pins a
+  view, it looked only at the first page of results, and the same views were in **All Views**
+  below it, where a pinned view still says **Pinned**.
+
+### Fixed
+
+- **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
+- **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
+  a narrower created date instead of combining with it.
+- **The bar for selected views sits in the middle of the list.** It started at the middle of the
+  window instead, so it hung to the right, further still beside the sidebar.
+- **A person's hover card opens above them in the lower half of the screen,** instead of running
+  off its foot.
+- **A view's tags are the same wherever you look.** The view wizard opened every view with no tags,
+  so tags added in the Explorer were missing there, and a tag added in the wizard replaced all of
+  them; tags couldn't be cleared from the wizard, and a description changed there was never saved.
+  The Explorer's and the workspace tab's preview, the view page, the canvas and the wizard each kept
+  their own copy of a view, so a change made in one reached the others only after a reload. A save
+  now refreshes them all, and the preview shows what it saved straight away. Emptying the
+  description in the preview's **Edit details** now clears it.
+
+### Upgrading
+
+- One migration, `20261013_0116_saved_filters`, adds the `saved_view_filters` table. It only adds;
+  run it with the usual `alembic upgrade head`.
+
+### Known limitations
+
+- **Edited** and **Published** match each view's latest change only: a view records who changed it
+  last, not everyone who has.
+- One role applies to everyone picked in **People**.
+- A view with no data source of its own (it reads its workspace's default) is never stamped by a
+  publish, so for it **Updated** sees only settings and layout edits, and **Published** never
+  matches.
+- While the version store can't be reached, views carry no Versioned/External label and that filter
+  can't be applied; the rest of the Explorer works.
+- Your last visit is remembered by each browser, not your account, so another computer counts from
+  its own last visit.
+
+---
+
 ## [Unreleased] — Who did what, where and why: one activity log, and analytics that see the data
 
 ### Added

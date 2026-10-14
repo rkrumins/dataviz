@@ -1,7 +1,7 @@
 /**
  * ExplorerBulkActions — Floating action bar shown when views are selected.
  */
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, Eye, X, ChevronDown, FileDown } from 'lucide-react'
 import { usePlatformPublishPolicy } from '@/hooks/usePublishGate'
@@ -73,112 +73,143 @@ export function ExplorerBulkActions({
     return () => document.removeEventListener('mousedown', handler)
   }, [showVisMenu])
 
+  // The bar floats at the foot of the window, centred on the column it is rendered
+  // in rather than on the window, whose left the sidebar takes. The centring sits on
+  // a wrapper: on the bar itself, the slide-in animation's transform replaced the
+  // `-translate-x-1/2`, and the bar started at the middle instead of straddling it.
+  const anchorRef = useRef<HTMLSpanElement>(null)
+  const [centre, setCentre] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    const column = anchorRef.current?.parentElement
+    if (!column) return
+    const measure = () => {
+      const r = column.getBoundingClientRect()
+      setCentre(r.left + r.width / 2)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(column)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
+
   return (
-    <AnimatePresence>
-      {selectedCount > 0 && (
-        <motion.div
-          initial={{ y: 100, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 100, opacity: 0 }}
-          transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50"
-        >
-          <div className={cn(
-            'flex items-center gap-3 px-5 py-3',
-            'bg-white dark:bg-slate-900 rounded-2xl shadow-lg',
-            'border border-glass-border',
-          )}>
-            <span className="text-sm font-semibold text-ink">
-              {selectedCount} view{selectedCount !== 1 ? 's' : ''} selected
-            </span>
-
-            <div className="w-px h-5 bg-glass-border" />
-
-            {/* Visibility dropdown */}
-            <div className="relative" ref={menuRef}>
-              <button
-                onClick={() => setShowVisMenu(prev => !prev)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
-              >
-                <Eye className="w-3.5 h-3.5" />
-                Change Visibility
-                <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', showVisMenu && 'rotate-180')} />
-              </button>
-
-              <AnimatePresence>
-                {showVisMenu && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 8 }}
-                    transition={{ duration: 0.15 }}
-                    className="absolute bottom-full mb-2 left-0 w-56 rounded-xl border border-glass-border bg-white dark:bg-slate-900 shadow-xl overflow-hidden"
-                  >
-                    <div className="px-3 py-2 border-b border-glass-border/50">
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">
-                        Set visibility for {selectedCount} view{selectedCount !== 1 ? 's' : ''}
-                      </span>
-                    </div>
-                    {options.map(opt => {
-                      const Icon = opt.icon
-                      return (
-                        <button
-                          key={opt.value}
-                          onClick={() => {
-                            onChangeVisibility(opt.value)
-                            setShowVisMenu(false)
-                          }}
-                          className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                        >
-                          <div className="w-7 h-7 rounded-lg bg-accent-lineage/10 flex items-center justify-center shrink-0">
-                            <Icon className="w-3.5 h-3.5 text-accent-lineage" />
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-ink">{opt.label}</div>
-                            <div className="text-[11px] text-ink-muted">{opt.description}</div>
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {onExport && (
-              <button
-                onClick={onExport}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
-              >
-                <FileDown className="w-3.5 h-3.5" />
-                Export
-              </button>
-            )}
-
-            {onDelete && (
-              <>
-                <button
-                  onClick={onDelete}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete ({selectedCount})
-                </button>
+    <>
+      <span ref={anchorRef} hidden />
+      <div
+        className="pointer-events-none fixed bottom-6 z-50 -translate-x-1/2"
+        style={{ left: centre ?? '50%' }}
+      >
+        <AnimatePresence>
+          {selectedCount > 0 && (
+            <motion.div
+              initial={{ y: 100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 100, opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="pointer-events-auto"
+            >
+              <div className={cn(
+                'flex items-center gap-3 px-5 py-3',
+                'bg-white dark:bg-slate-900 rounded-2xl shadow-lg',
+                'border border-glass-border',
+              )}>
+                <span className="text-sm font-semibold text-ink">
+                  {selectedCount} view{selectedCount !== 1 ? 's' : ''} selected
+                </span>
 
                 <div className="w-px h-5 bg-glass-border" />
-              </>
-            )}
 
-            <button
-              onClick={onClearSelection}
-              className="p-1.5 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
-              title="Clear selection"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+                {/* Visibility dropdown */}
+                <div className="relative" ref={menuRef}>
+                  <button
+                    onClick={() => setShowVisMenu(prev => !prev)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    Change Visibility
+                    <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', showVisMenu && 'rotate-180')} />
+                  </button>
+
+                  <AnimatePresence>
+                    {showVisMenu && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 8 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute bottom-full mb-2 left-0 w-56 rounded-xl border border-glass-border bg-white dark:bg-slate-900 shadow-xl overflow-hidden"
+                      >
+                        <div className="px-3 py-2 border-b border-glass-border/50">
+                          <span className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">
+                            Set visibility for {selectedCount} view{selectedCount !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {options.map(opt => {
+                          const Icon = opt.icon
+                          return (
+                            <button
+                              key={opt.value}
+                              onClick={() => {
+                                onChangeVisibility(opt.value)
+                                setShowVisMenu(false)
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                            >
+                              <div className="w-7 h-7 rounded-lg bg-accent-lineage/10 flex items-center justify-center shrink-0">
+                                <Icon className="w-3.5 h-3.5 text-accent-lineage" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-ink">{opt.label}</div>
+                                <div className="text-[11px] text-ink-muted">{opt.description}</div>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {onExport && (
+                  <button
+                    onClick={onExport}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    Export
+                  </button>
+                )}
+
+                {onDelete && (
+                  <>
+                    <button
+                      onClick={onDelete}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Delete ({selectedCount})
+                    </button>
+
+                    <div className="w-px h-5 bg-glass-border" />
+                  </>
+                )}
+
+                <button
+                  onClick={onClearSelection}
+                  className="p-1.5 rounded-xl text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+                  title="Clear selection"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </>
   )
 }

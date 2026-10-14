@@ -530,6 +530,57 @@ To update a view that already exists, use `"action": "update"` and `"target": {"
 The actions, merge strategy, staging into a draft and the limits are in
 [View portability](/docs/feature-view-portability).
 
+### Find views by when they changed and who changed them
+
+**Needs:** only to be signed in. Every answer counts only the views you can open.
+
+1. List the versioned views someone edited since the start of the month:
+
+   ```bash
+   api GET "/api/v1/views/?updatedAfter=2026-10-01&contributorIn=$USER_ID&contributorRole=edited&sourceKind=versioned&limit=50" |
+     jq '{total, names: [.items[].name]}'
+   ```
+
+   - **Dates.** `createdAfter`, `createdBefore`, `updatedAfter` and `updatedBefore` take an ISO
+     date (midnight UTC) or date-time. *After* includes its instant; *before* doesn't.
+   - **"Updated".** It is a view's last change of any kind: its settings, its layout or its data.
+   - **People.** `contributorIn` is repeatable, up to 50 ids. `contributorRole` is `created`,
+     `edited` (the view's latest edit) or `published` (whoever last published its data). Leave the
+     role out for created or edited.
+   - **Kind.** `sourceKind` is `versioned` or `external`. It answers `503` while the version store
+     can't be reached; leave it out and the rest still works.
+
+2. Count them without loading the rows; the answer is the list's `total`:
+
+   ```bash
+   api GET "/api/v1/views/count?updatedAfter=2026-10-01&sourceKind=versioned"
+   ```
+
+3. Ask what each choice would leave. Every facet is counted with all the filters except its own.
+   Each facet you ask for costs a query, so ask only for the `fields` you will use:
+
+   ```bash
+   api GET "/api/v1/views/facets?updatedAfter=2026-10-01&fields=contributors&fields=tags" | jq '.contributors[:3]'
+   ```
+
+4. See when they changed: views per UTC hour over a window of up to 400 days.
+
+   ```bash
+   api GET "/api/v1/views/histogram?field=updated&after=2026-07-15T00:00:00Z&before=2026-10-13T00:00:00Z" |
+     jq '{total, first: .buckets[0]}'
+   ```
+
+   Buckets are labelled `YYYY-MM-DDTHH`; fold them into your own time zone's days. For a time zone
+   on the half hour, ask for `grain=10min`.
+
+Each person's saved Explorer filters are at `/api/v1/views/saved-filters`:
+
+- `GET` lists them and `POST {name, query}` adds one.
+- `PUT /order {ids}` reorders them.
+- `PUT /{id}` renames one or replaces its query, and `DELETE /{id}` removes it.
+
+A saved filter's `query` is the Explorer's address query, such as `sourceKind=versioned&updated=7d`.
+
 ### Bulk import and export graph data
 
 **Needs:** version control on for the data source, and the **Version control** switch on

@@ -172,6 +172,40 @@ class ViewFavouriteORM(Base):
         return f"<ViewFavourite view={self.view_id!r} user={self.user_id!r}>"
 
 
+class SavedViewFilterORM(Base):
+    """A person's named Explorer filter set, kept on the server so it follows
+    them to any browser.
+
+    ``query`` is the Explorer's own address query in its canonical spelling,
+    stored as given: applying a filter is writing it back to the address, so
+    the server never has to understand it. ``user_id`` has no FK — users are
+    the identity domain's (DOMAIN_OWNERSHIP.md) — and every read and write goes
+    through it (``saved_view_filter_repo``), so one person never reaches
+    another's. Names are stored trimmed; the repository refuses one that
+    differs from another of the same person's only in case.
+    """
+    __tablename__ = "saved_view_filters"
+
+    id = Column(Text, primary_key=True, default=lambda: f"svf_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    query = Column(Text, nullable=False, default="")
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped when the name or query changes — not by a reorder, nor by a
+    # delete closing up the positions behind it, which move whole lists.
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_saved_view_filters_user_name"),
+        # The read is always "this person's filters, in their order".
+        Index("idx_saved_view_filters_user_pos", "user_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SavedViewFilter id={self.id!r} user={self.user_id!r} name={self.name!r}>"
+
+
 # ------------------------------------------------------------------ #
 # management_db_config  (single-row config table)                      #
 # ------------------------------------------------------------------ #

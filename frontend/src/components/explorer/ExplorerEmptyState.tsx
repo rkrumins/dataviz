@@ -7,6 +7,9 @@ import { Compass, SearchX, FilterX, Plus, LayoutGrid, Check } from 'lucide-react
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { DocsLink } from '@/components/help/DocsLink'
+import type { Relaxation } from '@/features/view-filters/useRelaxations'
+import type { ViewFilterState } from '@/features/view-filters/model'
+import { RelaxationList } from '@/features/view-filters/components/RelaxationList'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -19,6 +22,11 @@ interface ExplorerEmptyStateProps {
   activeCategory?: string | null
   onClearFilters?: () => void
   onCreateView?: () => void
+  /** One way out per active filter: how many views removing just it would show. */
+  relaxations?: Relaxation[]
+  onRelax?: (next: ViewFilterState) => void
+  /** How many filters "Clear all filters" would remove. */
+  activeFilterCount?: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -41,6 +49,9 @@ export function ExplorerEmptyState({
   activeCategory,
   onClearFilters,
   onCreateView,
+  relaxations,
+  onRelax,
+  activeFilterCount,
 }: ExplorerEmptyStateProps) {
   /* ── No views exist yet ── */
   if (type === 'no-views') {
@@ -122,7 +133,7 @@ export function ExplorerEmptyState({
       </div>
 
       <h3 className="text-xl font-bold text-ink mb-3">
-        No views match your search
+        {searchTerm ? 'No views match your search' : 'No views match these filters'}
       </h3>
 
       <div className="flex flex-col items-center gap-4 max-w-md">
@@ -144,8 +155,11 @@ export function ExplorerEmptyState({
           </p>
         )}
 
-        {/* Contextual suggestions */}
-        {!activeCategory && hasFilters && (
+        {/* One way out per filter, best first — rather than only "clear
+            everything" to undo the one filter that over-narrowed. */}
+        {relaxations && relaxations.length > 0 && onRelax ? (
+          <RelaxationList relaxations={relaxations} onRelax={onRelax} className="w-full max-w-md" />
+        ) : !activeCategory && hasFilters && (
           <div className="flex items-center gap-2.5 text-sm text-ink-muted">
             <FilterX className="h-4 w-4 shrink-0" />
             <span>Try removing some filters to broaden results</span>
@@ -171,7 +185,7 @@ export function ExplorerEmptyState({
               )}
             >
               <FilterX className="h-3.5 w-3.5" />
-              Clear all filters
+              Clear all filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
             </button>
           )}
 

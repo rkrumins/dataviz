@@ -62,7 +62,8 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { providerService } from '@/services/providerService'
-import { resolveSourceMode } from '@/services/workspaceService'
+import { useFeature } from '@/store/features'
+import { KIND_TEXT } from '@/features/sync-status/deriveSync'
 import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
 import { PROVIDER_HEALTH_META, useProviderHealth } from '@/store/providerHealthModel'
 import { useAnyWorkspacePermission, useNavPermission } from '@/store/auth'
@@ -137,6 +138,7 @@ export function ViewBuiltOn({ view }: { view: View }) {
     // Health rides the ONE canonical resolver (providerStatus → shared meta);
     // `unknown` is a non-fact, so it is dropped rather than printed.
     const health = useProviderHealth(view.providerId)
+    const versioningEnabled = useFeature('versioningEnabled')
 
     // A destination only counts if the route would open. Both pages sit behind
     // the same nav spec their <RequireNav> guard reads, so asking here is
@@ -166,13 +168,14 @@ export function ViewBuiltOn({ view }: { view: View }) {
     }
 
     if (view.dataSourceName) {
-        // Both halves are free or absent: provenance comes off the member's
-        // store row, and the data-change time was already on the view.
+        // Both halves are free or absent: the server sends whether the source is
+        // versioned, and the data-change time was already on the view. Version
+        // control is the fact named here — it is what the Explorer's badge and
+        // filter use. The provenance this used to read (`sourceMode`) said
+        // "External graph" for a source that was in fact versioned, which put
+        // the drawer at odds with the card it was opened from.
         const parts: string[] = []
-        if (dataSourceRow) {
-            parts.push(resolveSourceMode(dataSourceRow) === 'managed'
-                ? 'Managed graph' : 'External graph')
-        }
+        if (view.sourceKind && versioningEnabled) parts.push(KIND_TEXT[view.sourceKind].label)
         if (view.dataUpdatedAt) parts.push(`Data updated ${timeAgo(view.dataUpdatedAt)}`)
         const catalogId = dataSourceRow?.catalogItemId
         rungs.push({

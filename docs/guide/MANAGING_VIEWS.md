@@ -281,13 +281,20 @@ later updates the same View as its next version. The whole journey is in
 Each workspace has a **Views** tab for working with its whole collection: open
 **Workspaces** in the sidebar, choose the workspace, then **Views**.
 
-- **The summary** counts the workspace's Views and owners, and its **Private**,
-  **Workspace** and **Enterprise** chips filter the list. **Need attention**
+- **The summary** counts all the workspace's Views and owners, and its
+  **Private**, **Workspace** and **Enterprise** chips filter the list. **Need attention**
   appears when Views haven't been updated in 90 days or point at a workspace or
   data source that is inactive or gone.
 - **Publication requests** lists pending requests for the people who can answer
   them, and holds the workspace's publishing settings for its admins.
 - **Recent activity** shows what changed across the workspace.
+- **Filter the list** with the same controls as the Explorer: search (which
+  takes typed filters such as `by:me` or `updated:<7d`), **Versioned** or
+  **External**, **Date**, **People** and **Source** (see
+  [Narrow the list](/guide/browsing-views#narrow-the-list)). After a while
+  away, a line says how many Views are new or updated since your last visit to
+  this workspace. **Browse in Explorer** opens the Explorer with the
+  same filters.
 - **Select several Views** to **Change Visibility**, **Export** or **Delete**
   them together. (Delete is offered only when you may delete every selected
   View.)

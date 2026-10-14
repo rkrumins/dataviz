@@ -13,7 +13,8 @@ from .endpoints import (
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
-    groups, workspace_members, view_grants, view_versions, view_transfer, role_bindings,
+    groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
+    role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
     admin_idp_groups,
@@ -182,6 +183,13 @@ api_router.include_router(
     view_transfer.router,
     prefix="/views/transfer",
     tags=["views:transfer"],
+)
+# A person's saved Explorer filters. Before views.router like the routes above:
+# `/views/saved-filters` must never reach a `/{view_id}` route.
+api_router.include_router(
+    view_saved_filters.router,
+    prefix="/views/saved-filters",
+    tags=["views:saved-filters"],
 )
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
