@@ -556,8 +556,11 @@ describe('trusting it unverified', () => {
     it('says the full price in the warning copy', () => {
         renderForm(browserJwt({ trust_unsigned: true }))
         expect(screen.getByText(/no verification at all/i)).toBeInTheDocument()
+        // Any user — Super Admins and break-glass accounts only once they
+        // linked it themselves or the connection's opt-in says so.
+        expect(screen.getByText('any user')).toBeInTheDocument()
         expect(
-            screen.getByText(/any user,\s*including an administrator/i),
+            screen.getByText(/link super admin and\s*break-glass accounts too/i),
         ).toBeInTheDocument()
         expect(screen.getByText(/user\.sso_unsigned_accepted/)).toBeInTheDocument()
         expect(

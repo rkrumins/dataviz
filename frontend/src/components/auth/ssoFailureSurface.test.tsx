@@ -56,6 +56,11 @@ vi.mock('@/store/branding', () => ({
 vi.mock('@/store/features', () => ({ useFeature: () => false }))
 vi.mock('@/lib/useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 
+const ENTRA = {
+    id: 'idp_1', slug: 'entra', displayName: 'Corporate Entra',
+    kind: 'oidc', priority: 100,
+}
+
 function renderAt(search: string) {
     return render(
         <MemoryRouter initialEntries={[`/login${search}`]}>
@@ -129,6 +134,31 @@ describe('SSO failure banner', () => {
         await waitFor(() => expect(listProviders).toHaveBeenCalled())
         expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
+
+    it('offers the password as the way past a provider that just failed', async () => {
+        const user = userEvent.setup()
+        listProviders.mockResolvedValue([ENTRA])
+        renderAt('?sso_error=1&ref=abc12345')
+
+        await user.click(await screen.findByRole('button', { name: /use your password instead/i }))
+
+        expect(await screen.findByLabelText(/^password$/i)).toBeInTheDocument()
+        // The reference stays: it is still what an administrator needs.
+        expect(screen.getByText('abc12345')).toBeInTheDocument()
+    })
+
+    it('offers no password the server would refuse', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: false, emailFirstLogin: false, providers: [ENTRA],
+            passwordAccess: 'break_glass', ssoOutage: null, passwordFallbackUntil: null,
+        })
+        renderAt('?sso_error=1&ref=abc12345')
+
+        await screen.findByRole('link', { name: /continue with corporate entra/i })
+        expect(screen.getByRole('alert')).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /use your password instead/i }))
+            .not.toBeInTheDocument()
+    })
 })
 
 
@@ -143,6 +173,36 @@ describe('collision modal', () => {
 
         const link = await screen.findByRole('link', { name: /identities/i })
         expect(link).toHaveAttribute('href', '/me/identities')
+    })
+
+    it('"Sign in with password" closes onto the password step, the address filled in', async () => {
+        // The recovery path is sign in with the password, then link. On an
+        // SSO-first page the password is a step of its own, so the modal
+        // has to open it — closing onto the first step would leave the
+        // person hunting for a field that is not there.
+        const user = userEvent.setup()
+        listProviders.mockResolvedValue([ENTRA])
+        renderAt('?error_code=unsafe_auto_link&email=a%40corp.example')
+
+        await user.click(await screen.findByRole('button', { name: /sign in with password/i }))
+
+        expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
+        expect(await screen.findByLabelText(/^password$/i)).toBeInTheDocument()
+        expect(screen.getByText('a@corp.example')).toBeInTheDocument()
+    })
+
+    it('points at the administrator when the password is not for everyone', async () => {
+        // Signing in with a password to make the link would be refused.
+        loginContext.mockResolvedValue({
+            allowLocalLogin: false, emailFirstLogin: false, providers: [ENTRA],
+            passwordAccess: 'break_glass', ssoOutage: null, passwordFallbackUntil: null,
+        })
+        renderAt('?error_code=unsafe_auto_link&email=a%40corp.example')
+
+        expect(await screen.findByText(/ask your administrator/i)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /sign in with password/i }))
+            .not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /close/i })).toBeInTheDocument()
     })
 })
 

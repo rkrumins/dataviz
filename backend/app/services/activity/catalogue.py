@@ -22,6 +22,7 @@ aggregation control plane can load this without the web tier's auth setup.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from backend.app.common.activity_context import (
@@ -172,9 +173,134 @@ def _summary_sso_mapping_updated(p: dict) -> str:
     return line
 
 
+#: The door a password came through while single sign-on is enforced, as
+#: ``user.logged_in`` records it in ``via``. Absent when passwords are on.
+_PASSWORD_DOORS = {
+    "break_glass": "with a break-glass account's password",
+    "admin_fallback": "with a password while single sign-on was down (Super Admin)",
+    "emergency_window": "with a password through emergency access",
+}
+
+
 def _summary_login(p: dict) -> str:
+    door = _PASSWORD_DOORS.get(p.get("via") or "")
+    if door:
+        return f"Signed in {door}"
     provider = p.get("provider") or p.get("provider_slug") or "local"
     return f"Signed in via {provider}"
+
+
+def _utc(value: Any) -> str:
+    """An ISO timestamp as ``2026-10-13 18:05 UTC``; anything else as is."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return str(value or "?")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _quoted_reason(p: dict) -> str:
+    why = p.get("stated_reason") or p.get("reason")
+    return f" — “{why}”" if why else ""
+
+
+def _summary_fallback_opened(p: dict) -> str:
+    hours = p.get("hours")
+    span = f" for {hours} hour{'s' if hours != 1 else ''}," if hours else ""
+    return (f"Emergency password access opened{span} until {_utc(p.get('until'))}"
+            f"{_quoted_reason(p)}")
+
+
+def _summary_fallback_extended(p: dict) -> str:
+    was = p.get("previous_until")
+    return (f"Emergency password access extended to {_utc(p.get('until'))}"
+            + (f" (was {_utc(was)})" if was else "") + _quoted_reason(p))
+
+
+def _summary_fallback_closed(p: dict) -> str:
+    was = p.get("was_until")
+    if was:
+        return f"Emergency password access closed early (was open until {_utc(was)})"
+    return "Emergency password access closed"
+
+
+#: ``auth.config.updated`` ``changes``: each switch, and what it means on
+#: (index 1) and off (index 0).
+_POSTURE_SWITCHES = {
+    "sso_enabled": ("Single sign-on turned off", "Single sign-on turned on"),
+    "allow_local_login": (
+        "Passwords turned off — break-glass accounts only",
+        "Passwords turned on for everyone",
+    ),
+    "allow_jit_provisioning": (
+        "Accounts no longer created at first sign-in",
+        "Accounts created at first sign-in",
+    ),
+    "email_first_login": (
+        "Ask for an email first turned off", "Ask for an email first turned on",
+    ),
+}
+
+
+def _summary_auth_config(p: dict) -> str:
+    changes = p.get("changes") if isinstance(p.get("changes"), dict) else None
+    if changes is None:
+        # Recorded before changes were: the state after, not the change.
+        return "SSO / login config changed"
+    parts = [
+        words[1 if bool(changes[key][1]) else 0]
+        for key, words in _POSTURE_SWITCHES.items() if key in changes
+    ] or ["SSO / login settings saved with no change"]
+    acknowledged = p.get("admins_without_sso_acknowledged") or []
+    if acknowledged:
+        n = len(acknowledged)
+        parts.append(
+            f"acknowledged {n} Super Admin{'s' if n != 1 else ''} without SSO",
+        )
+    return "; ".join(parts)
+
+
+def _summary_idp_provider_updated(p: dict) -> str:
+    slug = p.get("slug") or p.get("provider_id") or "?"
+    parts = []
+    enabled = p.get("enabled")
+    if isinstance(enabled, list) and len(enabled) == 2:
+        parts.append("turned on" if enabled[1] else "turned off")
+    admins = p.get("link_admin_accounts")
+    if isinstance(admins, list) and len(admins) == 2:
+        parts.append(
+            "Link Super Admin and break-glass accounts too "
+            + ("on" if admins[1] else "off"),
+        )
+    assurance = p.get("assurance")
+    if isinstance(assurance, list) and len(assurance) == 2:
+        parts.append(f"now {str(assurance[1]).capitalize()} (was {assurance[0]})")
+    policy = p.get("linking_policy")
+    if isinstance(policy, list) and len(policy) == 2:
+        parts.append(f"account linking {policy[0]} → {policy[1]}")
+    others = [k for k in (p.get("changed_settings") or []) if k != "link_admin_accounts"]
+    if others:
+        more = f" and {len(others) - 5} more" if len(others) > 5 else ""
+        parts.append("settings changed: " + ", ".join(others[:5]) + more)
+    line = f"IdP provider '{slug}' updated"
+    return f"{line} — {'; '.join(parts)}" if parts else line
+
+
+def _summary_system_account(p: dict) -> str:
+    who = p.get("user_id") or "?"
+    where = " from the server's command line" if p.get("via") == "cli" else ""
+    if p.get("is_system_account"):
+        return f"{who} made a break-glass account{where}"
+    return f"{who} is no longer a break-glass account{where}"
+
+
+#: Why a password session opened while SSO was down came to an end.
+_FALLBACK_SESSION_ENDS = {
+    "expired": "after 24 hours",
+    "fallback_closed": "its way in closed",
+}
 
 
 def _summary_login_failed(p: dict) -> str:
@@ -263,7 +389,18 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         "critical",
         lambda p: f"Every session of {p.get('user_id') or '?'} ended by an admin",
     ),
-    "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
+    "auth.config.updated": ("critical", _summary_auth_config),
+    "auth.config.password_fallback_opened": ("critical", _summary_fallback_opened),
+    "auth.config.password_fallback_extended": (
+        "critical", _summary_fallback_extended,
+    ),
+    "idp.outage.detected": (
+        "critical",
+        lambda p: (
+            f"SSO connection '{p.get('slug') or '?'}' unreachable — Super "
+            "Admins may sign in with a password"
+        ),
+    ),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
     "rbac.workspace.deleted": (
@@ -296,7 +433,22 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.sso_mapping.created": ("info", _summary_sso_mapping("created")),
     "rbac.sso_mapping.updated": ("info", _summary_sso_mapping_updated),
     "idp.provider.created": ("info", _summary_idp_provider("created")),
-    "idp.provider.updated": ("info", _summary_idp_provider("updated")),
+    "idp.provider.updated": ("info", _summary_idp_provider_updated),
+    "idp.outage.resolved": (
+        "info",
+        lambda p: f"SSO connection '{p.get('slug') or '?'}' reachable again",
+    ),
+    "auth.config.password_fallback_closed": ("info", _summary_fallback_closed),
+    # "info", as it projected before it had a summary: a new severity would
+    # mean re-projecting the whole ledger (``PROJECTION_VERSION``).
+    "user.system_account_changed": ("info", _summary_system_account),
+    "auth.config.password_fallback_expired": (
+        "info",
+        lambda p: (
+            "Emergency password access closed by itself at "
+            f"{_utc(p.get('until'))}"
+        ),
+    ),
     "sso.backchannel_host_allowed": ("info", _summary_backchannel_host("allowed")),
     "branding.updated": ("info", lambda p: "Branding settings updated"),
     "user.approved": ("info", _summary_user_status("approved")),
@@ -329,6 +481,27 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     # Why a session stopped renewing — context for the sign-in that
     # usually follows, not a failure in itself.
     "user.session_refused": ("info", _summary_session_refused),
+    "user.password_fallback_session_ended": (
+        "info",
+        lambda p: (
+            f"Password session opened while SSO was down ended for "
+            f"{p.get('user_id') or '?'}"
+            + (f" ({_FALLBACK_SESSION_ENDS[p['reason']]})"
+               if p.get("reason") in _FALLBACK_SESSION_ENDS else "")
+            + f" — back through {p.get('provider_slug') or 'single sign-on'}"
+        ),
+    ),
+    # A session renewed past its daily re-authentication because its
+    # identity provider was confirmed down: an exception to policy, so it
+    # is a warning, recorded once per session rather than per renewal.
+    "user.sso_reauth_deferred": (
+        "warning",
+        lambda p: (
+            f"Kept {p.get('user_id') or '?'} signed in past the daily "
+            f"re-authentication — {p.get('provider_slug') or 'their IdP'} is "
+            "down (for up to one more day)"
+        ),
+    ),
     "user.sso_session_ended_upstream": ("info", _summary_session_ended_upstream),
     "user.sso_unsigned_accepted": (
         "warning",
@@ -520,6 +693,15 @@ LABELS: dict[str, str] = {
     "user.logged_out": "Signed out",
     "user.login_failed": "Failed sign-in",
     "user.sso_login_failed": "Failed SSO sign-in",
+    "user.sso_reauth_deferred": "Kept signed in through an SSO outage",
+    "user.password_fallback_session_ended": "Emergency password session ended",
+    "user.system_account_changed": "Changed a break-glass account",
+    "auth.config.password_fallback_opened": "Opened emergency password access",
+    "auth.config.password_fallback_extended": "Extended emergency password access",
+    "auth.config.password_fallback_closed": "Closed emergency password access",
+    "auth.config.password_fallback_expired": "Emergency password access lapsed",
+    "idp.outage.detected": "SSO connection went down",
+    "idp.outage.resolved": "SSO connection came back",
     "user.role_changed": "Changed a global role",
     "user.approved": "Approved an account",
     "user.suspended": "Suspended an account",

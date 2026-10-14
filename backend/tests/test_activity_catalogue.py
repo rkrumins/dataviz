@@ -198,3 +198,100 @@ def test_the_catalogue_lists_what_a_workspace_admin_can_see():
     assert entries["aggregation.job.triggered"]["label"] == "Triggered aggregation"
     assert entries["rbac.group.member_added"]["workspaceVisible"] is False
     assert entries["user.logged_in"]["workspaceVisible"] is False
+
+
+# ── Sign-ins and SSO settings, said as what happened ─────────────────
+
+
+def test_a_password_sign_in_says_which_door_let_it_in():
+    def line(**p):
+        return catalogue.summarize("user.logged_in", {"provider": "local", **p})[1]
+
+    assert line() == "Signed in via local"
+    assert line(via="emergency_window") == "Signed in with a password through emergency access"
+    assert line(via="admin_fallback") == (
+        "Signed in with a password while single sign-on was down (Super Admin)"
+    )
+    assert line(via="break_glass") == "Signed in with a break-glass account's password"
+
+
+def test_the_emergency_window_reads_as_what_happened():
+    until = "2026-10-13T18:05:00+00:00"
+    assert catalogue.summarize("auth.config.password_fallback_opened", {
+        "until": until, "hours": 4, "stated_reason": "Okta outage",
+    }) == (
+        "critical",
+        "Emergency password access opened for 4 hours, until 2026-10-13 18:05 UTC"
+        " — “Okta outage”",
+    )
+    assert catalogue.summarize("auth.config.password_fallback_extended", {
+        "until": until, "previous_until": "2026-10-13T14:05:00+00:00",
+    }) == (
+        "critical",
+        "Emergency password access extended to 2026-10-13 18:05 UTC"
+        " (was 2026-10-13 14:05 UTC)",
+    )
+    assert catalogue.summarize(
+        "auth.config.password_fallback_closed", {"was_until": until},
+    )[1] == "Emergency password access closed early (was open until 2026-10-13 18:05 UTC)"
+    assert catalogue.summarize(
+        "auth.config.password_fallback_expired", {"until": until},
+    )[1] == "Emergency password access closed by itself at 2026-10-13 18:05 UTC"
+    # Recorded before the reason moved to ``stated_reason``.
+    assert catalogue.summarize("auth.config.password_fallback_opened", {
+        "until": until, "hours": 1, "reason": "Entra",
+    })[1].endswith("for 1 hour, until 2026-10-13 18:05 UTC — “Entra”")
+
+
+def test_a_settings_save_says_which_switch_moved():
+    def line(p):
+        return catalogue.summarize("auth.config.updated", p)[1]
+
+    assert line({
+        "changes": {"allow_local_login": [True, False]},
+        "admins_without_sso_acknowledged": ["ana@corp.example"],
+    }) == "Passwords turned off — break-glass accounts only; acknowledged 1 Super Admin without SSO"
+    assert line({"changes": {}}) == "SSO / login settings saved with no change"
+    # Recorded before changes were: the state after says nothing about a change.
+    assert line({"allow_local_login": False}) == "SSO / login config changed"
+
+
+def test_a_connection_edit_says_what_changed():
+    assert catalogue.summarize("idp.provider.updated", {
+        "slug": "portal",
+        "changed_settings": ["jwks_url", "link_admin_accounts", "trust_unsigned"],
+        "assurance": ["verified", "unverified"],
+        "link_admin_accounts": [False, True],
+    }) == (
+        "info",
+        "IdP provider 'portal' updated — Link Super Admin and break-glass accounts too on;"
+        " now Unverified (was verified); settings changed: jwks_url, trust_unsigned",
+    )
+    assert catalogue.summarize("idp.provider.updated", {
+        "slug": "entra", "enabled": [True, False],
+    })[1] == "IdP provider 'entra' updated — turned off"
+    assert catalogue.summarize(
+        "idp.provider.updated", {"slug": "entra"},
+    )[1] == "IdP provider 'entra' updated"
+
+
+def test_outage_session_and_break_glass_events_read_plainly():
+    assert catalogue.summarize("user.sso_reauth_deferred", {
+        "user_id": "usr_1", "provider_slug": "entra",
+    }) == (
+        "warning",
+        "Kept usr_1 signed in past the daily re-authentication — entra is down"
+        " (for up to one more day)",
+    )
+    assert catalogue.summarize("user.password_fallback_session_ended", {
+        "user_id": "usr_1", "provider_slug": "entra", "reason": "expired",
+    })[1] == (
+        "Password session opened while SSO was down ended for usr_1"
+        " (after 24 hours) — back through entra"
+    )
+    assert catalogue.summarize("user.system_account_changed", {
+        "user_id": "usr_1", "is_system_account": True, "via": "cli",
+    })[1] == "usr_1 made a break-glass account from the server's command line"
+    assert catalogue.label_of("auth.config.password_fallback_extended") == (
+        "Extended emergency password access"
+    )

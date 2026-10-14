@@ -593,6 +593,44 @@ async def test_a_posted_assertion_signs_in_and_links_by_email(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("opt_in, expected", [(False, 401), (True, 200)])
+async def test_an_unsigned_row_claims_a_break_glass_account_only_when_told_to(
+    test_client, db_session, registry, sso_events, monkeypatch, opt_in, expected,
+):
+    """A Trust-unsigned row links ordinary accounts by email. A system
+    (break-glass) account — the way in when single sign-on is down — only
+    once the operator has set ``link_admin_accounts`` on the connection,
+    read from the row by the route."""
+    import json as _json
+
+    from backend.app.db.repositories import user_repo
+
+    _routes(monkeypatch)
+    await _make_row(
+        db_session, jwks_url="", trust_unsigned=True,
+        **({"link_admin_accounts": True} if opt_in else {}),
+    )
+    glass = await user_repo.create_user(
+        db_session, email=CLAIMS["email"], password_hash="x",
+        first_name="Ada", last_name="Lovelace", status="active",
+    )
+    glass.is_system_account = True
+    await db_session.commit()
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _json.dumps(
+            {**CLAIMS, "email_verified": True, "jti": f"glass-{opt_in}"},
+        )},
+    )
+    assert resp.status_code == expected, resp.text
+    if opt_in:
+        assert resp.json()["user"]["id"] == glass.id
+    else:
+        assert resp.json()["detail"]["reasons"] == ["unverified_connection"]
+
+
+@pytest.mark.asyncio
 async def test_the_route_burns_the_assertion_across_requests(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):

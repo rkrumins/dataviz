@@ -201,6 +201,24 @@ describe('standing aside', () => {
         fetchWithTimeout.mockRejectedValue(new Error('offline'))
         expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
     })
+
+    it('a gateway the server has confirmed down is not called at all', async () => {
+        // Every tab's requests wait on this, and an attempt could only
+        // time out. The envelope's login_url is the sign-in page, which
+        // says why and offers whatever password door is open.
+        fetchWithTimeout.mockImplementation(async () => new Response(
+            JSON.stringify({
+                allowLocalLogin: false, emailFirstLogin: false,
+                providers: [GATEWAY],
+                ssoOutage: { since: '2026-10-14T09:00:00Z', providers: ['corp-gateway'] },
+            }),
+            { status: 200 },
+        ))
+        expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+        expect(loginWithBackchannel).not.toHaveBeenCalled()
+        expect(readReauthFailure()).toBeNull()
+    })
 })
 
 describe('a connection that no longer exists', () => {

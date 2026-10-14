@@ -484,3 +484,65 @@ async def test_a_caller_that_forwards_nothing_is_treated_as_signed_out(
 
     with pytest.raises(SsoReauthRequired):
         await _service(store).refresh(token)
+
+
+# ── a gateway the prober has confirmed down ──────────────────────────
+
+class _GatewayIdentity(_StubUserIdentityRepo):
+    """The session's identity is on the gateway itself."""
+
+    async def list_for_user(self, session, user_id):
+        from types import SimpleNamespace
+        return [SimpleNamespace(
+            id="uid_1", provider_id=PROVIDER_ID,
+            provider=SimpleNamespace(slug="corp"),
+            last_login_at="2026-05-20T00:00:00Z",
+        )]
+
+
+def _posture_service(store, *, outage):
+    from backend.auth_service.app_auth_config import (
+        AuthConfigSnapshot, StaticAuthConfigProvider,
+    )
+    return LocalIdentityService(
+        session_factory=_session_factory,
+        user_repo=_StubUserRepo(),
+        user_identity_repo=_GatewayIdentity(has_identity=True),
+        refresh_store_factory=lambda s: store,
+        auth_config_provider=StaticAuthConfigProvider(AuthConfigSnapshot(
+            sso_enabled=True, allow_local_login=False,
+            allow_jit_provisioning=True, version=1,
+            updated_at="2026-01-01T00:00:00Z", sso_outage_slugs=outage,
+        )),
+    )
+
+
+@pytest.mark.asyncio
+async def test_past_the_grace_of_a_confirmed_outage_the_bounce_is_the_sign_in_page(
+    registry,
+):
+    """The gateway's own login can only fail again while it is down. The
+    sign-in page says so, and offers whatever password door is open."""
+    registry.providers[PROVIDER_ID] = _Probe(outcome="unavailable")
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()) - GRACE - 60)
+
+    with pytest.raises(SsoReauthRequired) as err:
+        await _posture_service(store, outage=("corp",)).refresh(
+            token, ambient_cookies=COOKIES,
+        )
+    assert err.value.login_url == "/login?next=/"
+    assert store.revoked_family == "fam1"
+
+
+@pytest.mark.asyncio
+async def test_with_the_gateway_answering_the_bounce_is_its_own_login(registry):
+    registry.providers[PROVIDER_ID] = _Probe(outcome="revoked")
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()))
+
+    with pytest.raises(SsoReauthRequired) as err:
+        await _posture_service(store, outage=()).refresh(
+            token, ambient_cookies=COOKIES,
+        )
+    assert err.value.login_url == "/api/v1/auth/corp/login?next=/&force=1"

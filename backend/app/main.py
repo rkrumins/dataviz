@@ -1028,6 +1028,7 @@ async def lifespan(_app: FastAPI):
     async def _load_auth_config() -> AuthConfigSnapshot:
         async with get_async_session() as session:
             snap = await _app_auth_config_repo.get_snapshot(session)
+        outage = await _read_sso_outage(snap.sso_enabled)
         return AuthConfigSnapshot(
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
@@ -1037,11 +1038,33 @@ async def lifespan(_app: FastAPI):
             # (False) silently won at runtime — the admin page showed
             # email-first ON while the login page never led with email.
             email_first_login=snap.email_first_login,
+            password_fallback_until=snap.password_fallback_until,
+            sso_outage_slugs=outage[0],
+            sso_outage_since=outage[1],
             version=snap.version,
             updated_at=snap.updated_at,
         )
 
+    async def _read_sso_outage(sso_enabled: bool):
+        """Confirmed-down connections, read after the posture in a session
+        of its own; a failed read means "no outage" and never fails the
+        posture read, whose failsafe opens passwords."""
+        if not sso_enabled:
+            return (), None
+        from backend.app.services.idp_reachability import read_confirmed_outage
+        return await read_confirmed_outage(get_async_session)
+
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
+    # Asked while passwords are off and an SSO outage is confirmed — Super
+    # Admins may then sign in with a password to support everyone else —
+    # and when a connection below verified would link itself to an existing
+    # account, which is never a Super Admin's. Read-only, on the caller's
+    # session — it runs before anyone has proved who they are, so it must
+    # have no side effects.
+    async def _is_super_admin(session, user_id: str) -> bool:
+        from backend.app.db.repositories import binding_repo
+        return user_id in await binding_repo.super_admin_user_ids(session)
 
     async def _fetch_avatar_image(
         url: str, *, provider_id: str | None = None,
@@ -1116,6 +1139,7 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
         revocation_checker=_is_session_revoked,
+        super_admin_checker=_is_super_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
     )
@@ -1643,6 +1667,23 @@ async def lifespan(_app: FastAPI):
             name="analytics-warmer",
         )
 
+    # IdP reachability → idp_provider_reachability, the evidence the
+    # automatic password fallback and the SSO session ride-through act on
+    # (see ``services/idp_reachability.py``). Same owner role as the relay:
+    # one prober for the deployment, an advisory lock per pass, so each
+    # outage is detected — and audited — once.
+    _app.state._idp_reachability_shutdown = asyncio.Event()
+    _app.state._idp_reachability_task = None
+    if runs_scheduler():
+        from .services.idp_reachability import run_idp_reachability_loop
+        _app.state._idp_reachability_task = asyncio.create_task(
+            run_idp_reachability_loop(
+                get_jobs_session,
+                _app.state._idp_reachability_shutdown,
+            ),
+            name="idp-reachability",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
     # GET /admin/idp-providers/status. Runs in every process that serves the
     # API, because the cache lives in this process: gated on the scheduler
@@ -1794,6 +1835,21 @@ async def lifespan(_app: FastAPI):
                 await _warm_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Stop the IdP reachability prober before DB pool teardown, same shape.
+    _reach_shutdown = getattr(_app.state, "_idp_reachability_shutdown", None)
+    _reach_task = getattr(_app.state, "_idp_reachability_task", None)
+    if _reach_shutdown is not None:
+        _reach_shutdown.set()
+    if _reach_task is not None and not _reach_task.done():
+        try:
+            await asyncio.wait_for(_reach_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _reach_task.cancel()
+            try:
+                await _reach_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose; shutdown carries on
 
     # Stop the IdP health sweep before DB pool teardown, same shape as the
     # relay above. The loop waits on the shutdown event rather than

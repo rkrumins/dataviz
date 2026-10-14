@@ -569,10 +569,12 @@ sequenceDiagram
     FE->>R: POST /api/v1/auth/login {email, password}
     R->>Svc: login(email, password)
     Svc->>Svc: auth_config.get() — allow_local_login?
-    alt allow_local_login = false
-        Svc-->>R: raise LocalLoginDisabled
-        R-->>FE: 403 {"error":"local_login_disabled"}
-    else allow_local_login = true
+    alt allow_local_login = false and no door opens for this account
+        Note over Svc: doors: break-glass account, emergency window,<br/>Super Admin during a confirmed SSO outage
+        Svc->>Svc: dummy password check (same cost)
+        Svc-->>R: raise InvalidCredentials (audit reason local_login_disabled)
+        R-->>FE: 401 "Invalid email or password"
+    else allow_local_login = true, or a door opens
         Svc->>Local: authenticate(email, password)
         Local->>DB: get_user_by_email
         DB-->>Local: user row
@@ -1178,9 +1180,10 @@ redirect. New services should NEVER call `fetch()` directly.
 | 401 (structured) | `{"error":"sso_reauth_required","login_url":"…"}` | 24h ceiling hit | `tryRefresh()` navigates to the IdP transparently |
 | 403 (CSRF) | `"CSRF token missing"` | Race after logout | clear local state + reload |
 | 403 (permission) | `{"detail":"Missing permission: X"}` | UI shouldn't have shown the action | `auth:access-denied` dispatched; AppLayout modal renders |
-| 403 (`local_login_disabled`) | `{"error":"local_login_disabled"}` | Platform is in SSO-only mode | login page shows the SSO buttons only |
+| 401 on `/auth/login` | `"Invalid email or password"` | Wrong password — or SSO-only mode and this account may not use a password (deliberately the same answer) | the login page offers the password step only when `login-context.passwordAccess` allows it |
 | 409 (`last_authenticator`) | `{"error":"last_authenticator","message":…}` | Trying to unlink the only auth method | inline error + offer "set a password" CTA |
-| 409 (`would_lock_out_admin`) | `{"error":…,"adminsWithoutSso":[…]}` | Settings PATCH refused | render the offender list + suggest "Link an SSO identity for these admins first" |
+| 409 (`would_lock_out_admin`) | `{"error":…,"adminsWithoutSso":[{"id","email","role"}…]}` | Turning passwords off would leave these administrators (`super_admin` or `org_admin`) without a way in | render the list with "Make break-glass" per row, and "Turn off anyway" — resend with `acknowledgeAdminsWithoutSso: true` |
+| 409 (`no_break_glass_account`) | `{"error":"no_break_glass_account","message":…}` | Passwords can't be turned off (or the last break-glass account unmarked) until a ready break-glass account exists | point at Admin → Users → Mark as system account, or the host's `reset_admin_password --break-glass` |
 
 ### 7.5 Reacting to `auth:session-lost`
 
@@ -1650,7 +1653,7 @@ by `source_event_id` UNIQUE.
 | `AUTH_COOKIE_DOMAIN` | (none) | cookie `Domain` |
 | `AUTH_COOKIE_SAMESITE` | `lax` | cookie `SameSite` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | 24h re-auth |
-| `SSO_OUTBOUND_TLS_CA_CERTS` | (none — system trust store) | Trust anchor for every outbound SSO call: OIDC discovery/token/JWKS, SAML metadata, gateway redeem/exchange/liveness, avatar fetches. PEM bundle path; `file:` URIs tolerated. An unloadable path logs ERROR and falls back to the system store — corporate-CA hosts keep failing until fixed |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none — public trust store) | Extra CAs trusted, in addition to the public roots, by every outbound SSO call: OIDC discovery/token/JWKS, SAML metadata, gateway redeem/exchange/liveness, avatar fetches, the outage prober. PEM bundle path; `file:` URIs tolerated. An unloadable path logs ERROR and falls back to the system store — corporate-CA hosts keep failing until fixed |
 | `ENV` | `dev` | prod-guard on custom IdP + .env auto-load |
 | `AUTH_CUSTOM_PROVIDER_ENABLED` | `false` | dev IdP gate |
 | `CREDENTIAL_ENCRYPTION_KEY` | (none) | Fernet for provider settings + connection creds |

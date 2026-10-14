@@ -183,10 +183,18 @@ That changes what we need from you:
   environment sign, give each environment its own connection row with
   the matching posture, or run Trust unsigned — the one posture that
   accepts both shapes — and accept the Unverified rating (the
-  connection can no longer grant platform-admin roles, and every login
-  through it is audited as `user.sso_unsigned_accepted`). The
-  operator's rehearsal states which case your reply was and what
+  connection can no longer grant platform-admin roles, never links
+  itself to a Super Admin's or break-glass account unless the operator
+  allows it, and every login through it is audited as
+  `user.sso_unsigned_accepted`).
+  The operator's rehearsal states which case your reply was and what
   judged it.
+- **Moving from unsigned to signed replies: keep the subject.** People
+  already signed in through the connection are matched by the subject
+  your replies carry (`sub`, or whichever claim the operator maps to the
+  person's ID). The signed token must name each person exactly as the
+  unsigned replies did; a different subject reads as a new identity, and
+  an account that already holds the old one is not linked to it.
 - **Expect each token to sign in at most once.** The application burns
   the `jti` (or the token's own hash) on first use, so keep tokens
   short-lived and mint one per call rather than caching an answer.
@@ -250,6 +258,20 @@ survive an unreachable gateway for a configurable grace period measured
 from the last time you actually answered — not from the last time we
 tried. A brief outage is invisible; a sustained one ends sessions rather
 than extending them.
+
+An outage is also **detected and announced**. Once a minute, one of the
+application's servers sends a request to your gateway URL carrying no
+session handle and none of the headers configured for the legs, and reads
+any answer below 500 as "up" — a 401 or a 405 is exactly right. A 5xx, a
+timeout or a refused connection, sustained for three minutes after your
+gateway was last seen answering, is read as an outage: the sign-in page
+says your service can't be reached, people whose sessions end are sent
+there rather than to you, the application's administrators can sign in
+with a password, and they can open password sign-in to everyone while you
+recover. It is over after five minutes of answers. That is one more reason
+not to answer 401 during an outage: it reads as healthy, so nobody is told.
+(In the browser-side exchange shape the server never calls your gateway,
+so nothing is probed.)
 
 ---
 
@@ -388,7 +410,8 @@ What the application never does:
 The application re-confirms the session on every renewal, which happens
 once per access-token lifetime — a few minutes by default, and a
 deployment setting. So: roughly one leg-1 call per signed-in person per
-renewal interval, plus one full exchange per sign-in.
+renewal interval, plus one full exchange per sign-in, plus one request a
+minute with no handle to tell whether you are up (§3).
 
 If you have an endpoint that *validates* a handle without minting a new
 token, say so — it is cheaper for this purpose and we would rather call

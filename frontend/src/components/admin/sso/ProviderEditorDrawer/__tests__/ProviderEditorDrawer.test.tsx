@@ -302,3 +302,57 @@ describe('danger zone', () => {
         expect(await screen.findByText(/this connection is live/i)).toBeInTheDocument()
     })
 })
+
+describe('linking administrators through an unverified connection', () => {
+    const unverified = {
+        kind: 'backchannel',
+        settings: { exchange_mode: 'browser', trust_unsigned: true },
+        assurance: 'unverified',
+        assuranceReason: 'Trust unsigned is on.',
+    } as Partial<IdpProvider>
+
+    it('is an explicit opt-in that saves on the connection', async () => {
+        const user = userEvent.setup()
+        renderDrawer(unverified)
+
+        const toggle = screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i })
+        expect(toggle).not.toBeChecked()
+        await user.click(toggle)
+        await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(updateProvider).toHaveBeenCalled())
+        expect(updateProvider.mock.calls[0][1].settings.link_admin_accounts).toBe(true)
+    })
+
+    it('turned off, clears the key', async () => {
+        const user = userEvent.setup()
+        renderDrawer({
+            ...unverified,
+            settings: { ...unverified.settings, link_admin_accounts: true },
+        })
+        await user.click(screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i }))
+        await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(updateProvider).toHaveBeenCalled())
+        expect(updateProvider.mock.calls[0][1].settings.link_admin_accounts).toBeNull()
+    })
+
+    it('is offered on an Asserted connection too — anything below Verified', () => {
+        // A proxy's header is trusted but not checked, so it gets the same
+        // protection, and the same way out of it.
+        renderDrawer({
+            kind: 'custom_profile',
+            settings: { source: 'header', header_name: 'X-Remote-User' },
+            assurance: 'asserted',
+            assuranceReason: 'Trusts the header your proxy sets.',
+        } as Partial<IdpProvider>)
+        const toggle = screen.getByRole('checkbox', { name: /link super admin and break-glass accounts too/i })
+        expect(toggle.closest('label')).toHaveTextContent(/this connection is asserted, not verified/i)
+    })
+
+    it('is not offered on a verified connection, which links by policy anyway', () => {
+        renderDrawer()
+        expect(screen.queryByRole('checkbox', { name: /link super admin and break-glass accounts too/i }))
+            .not.toBeInTheDocument()
+    })
+})

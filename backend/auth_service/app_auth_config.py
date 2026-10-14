@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional, Protocol
 
 
@@ -33,6 +34,59 @@ class AuthConfigSnapshot:
     # because a dataclass cannot put a defaulted field before a bare one;
     # the default keeps existing keyword construction working.
     email_first_login: bool = False
+    # The emergency window an admin opens for everyone while SSO is down:
+    # an ISO-8601 deadline, or None. Compared with the clock at use, never
+    # cached as a boolean, so it closes on time whatever the cache holds.
+    password_fallback_until: Optional[str] = None
+    # Connections the reachability prober has CONFIRMED down (slugs), and
+    # when the earliest of those outages began. Empty when the evidence is
+    # missing, stale or unreadable: a prober that has stopped never opens
+    # a password door.
+    sso_outage_slugs: tuple[str, ...] = ()
+    sso_outage_since: Optional[str] = None
+
+
+# The fields below are read with ``getattr``, like ``email_first_login`` in
+# the router: a posture provider may hand back the repository's snapshot,
+# which carries the window but not the outage (tests wire it that way).
+
+
+def password_window_open(cfg, now: Optional[datetime] = None) -> bool:
+    """Whether the emergency window is open right now. An unreadable
+    deadline reads as closed — it opens a door, so it fails shut."""
+    raw = getattr(cfg, "password_fallback_until", None)
+    if not raw:
+        return False
+    try:
+        until = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > (now or datetime.now(timezone.utc))
+
+
+def sso_outage_slugs(cfg) -> tuple[str, ...]:
+    """Connections confirmed down, or none."""
+    return tuple(getattr(cfg, "sso_outage_slugs", ()) or ())
+
+
+def password_access(cfg) -> str:
+    """Who may sign in with a password right now, as a class of account.
+
+      * ``everyone`` — the Passwords switch is on, or the emergency window
+        is open.
+      * ``administrators`` — passwords are off but an SSO outage is
+        confirmed: break-glass accounts and Super Admins.
+      * ``break_glass`` — passwords are off: system accounts only.
+
+    The login page renders from this and ``LocalIdentityService.login``
+    enforces it, so the two cannot disagree about who is let in."""
+    if cfg.allow_local_login or password_window_open(cfg):
+        return "everyone"
+    if sso_outage_slugs(cfg):
+        return "administrators"
+    return "break_glass"
 
 
 # The product's posture when nothing has configured one — a fresh
@@ -166,6 +220,9 @@ class StaticAuthConfigProvider:
 
 __all__ = [
     "AuthConfigSnapshot",
+    "password_access",
+    "password_window_open",
+    "sso_outage_slugs",
     "AuthConfigProvider",
     "CachedAuthConfigProvider",
     "StaticAuthConfigProvider",

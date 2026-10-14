@@ -9,6 +9,184 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Single sign-on first, with a way in when the identity provider is down
+
+### Changed
+
+**The sign-in page leads with single sign-on.** With a connection live, the first thing on the
+page is **Continue with** the primary connection — the first in login-page order (**Priority**,
+lowest first), marked **Primary** in Administration → SSO → Providers. Typing an email and pressing
+Enter routes it: to the connection whose **Email domains** list its domain, otherwise to the
+primary. Enter no longer trips the browser's "please fill in this field" on a password nobody
+needed, and **Ask for an email first** no longer answers an unmapped domain with "We don't
+recognise that email's domain". Passwords are the deliberate fallback: while **Passwords** is on,
+**Can't use single sign-on? Sign in with email and password** opens a password step that carries
+the email and works with password managers, and it is offered prominently whenever a single
+sign-on attempt fails. Deployments with no connection keep the single email-and-password form.
+
+**Turning Passwords off needs a ready break-glass account.** The switch is refused until an
+active Super Admin with a password is marked as a system account — the door that survives an
+identity-provider outage. Administrators without an SSO identity — Super Admins and org admins —
+are no longer a hard refusal: the confirm lists them by name and role, each with **Make
+break-glass**, and **Turn off anyway** proceeds. Both
+checks run on the switch-off only, so saving another switch while passwords are off is never
+blocked by them. The last ready break-glass account cannot be unmarked while passwords are off.
+
+**A refused password sign-in looks like a wrong password.** While passwords are off, an account
+that may not use one now gets `401 "Invalid email or password"`, after a password check that costs
+the same, instead of `403 local_login_disabled` — so the form cannot be used to find out which
+accounts are break-glass accounts or Super Admins. The activity log still records
+`local_login_disabled`. Password sign-up keeps its 403.
+
+### Added
+
+**Automatic fallback when an identity provider goes down.** The control plane checks every OIDC,
+SAML and Enterprise gateway connection each minute — the discovery document and signing keys, the
+single sign-on URL, or the gateway URL through the back-channel allowlist — and confirms an outage
+only for a connection it has seen working, after three minutes of failure on fresh evidence; it
+ends after five minutes of health. While one lasts:
+
+- the sign-in page says *We can't reach {connection} right now*;
+- Super Admins with a password can sign in with it, through **Administrator sign-in**, so somebody
+  can always get in to support everyone else — break-glass accounts always could;
+- people already signed in through that connection keep working past their daily
+  re-authentication, for up to a day more, instead of being sent to an IdP that cannot answer;
+- through an Enterprise gateway, sessions keep their outage grace as before, and the ones that
+  end land on the sign-in page with the notice instead of the gateway's own sign-in. The page's
+  automatic gateway sign-in, and the app's in-place re-sign-in, skip a gateway that is down
+  instead of waiting on it.
+
+Browser reports never count, and when detection is not running nothing opens by itself.
+
+**Emergency password access.** Administration → SSO → Settings opens password sign-in to everyone
+for 1 to 24 hours, with a reason; it closes itself, and **Close now** ends it early. While it is
+open, **Extend** keeps it open for up to 24 hours from now — as often as an outage needs, never
+more than a day ahead, so somebody decides again at least daily; extended before it lapses,
+nobody who signed in through it is sent back to a dead identity provider. Sessions opened
+through it, or by a Super Admin during an outage, end at their first renewal once single sign-on
+is back — usually a brief redirect that lands people where they were — and never last more than a
+day. The same page shows **Single sign-on status** (what detection last saw, and when it is not
+running), **Break-glass accounts** and their readiness, and the admins a switch-off would affect.
+
+**One command when nobody can sign in.** `python -m backend.scripts.reset_admin_password --email …
+--break-glass` sets a password, marks the account as break-glass, clears its failed sign-in count
+and signs its old sessions out — then sign in at `/login?password=1`.
+
+**Outages and fallback sign-ins in the activity log, said as what happened.** An outage
+confirmed and over (`idp.outage.detected` / `resolved`); the emergency window opened, extended,
+closed early or closed by itself at its deadline (`auth.config.password_fallback_opened` /
+`_extended` / `_closed` / `_expired`), with who did it and the reason in the log's *why*; each
+password sign-in made while passwords are off, by its door — *Signed in with a password through
+emergency access*, *…while single sign-on was down (Super Admin)*, *…with a break-glass account's
+password* (`via` on `user.logged_in`; the SSO activity tab shows it as the row's reason); each
+session kept past its daily re-authentication because its IdP was down, once per session
+(`user.sso_reauth_deferred`); each emergency session that ended, and why; and accounts made or
+no longer break-glass, including from the command line.
+
+**Settings changes say what changed.** `auth.config.updated` records which switch moved, before →
+after (*Passwords turned off — break-glass accounts only*), not only the values after the save. A
+connection edit (`idp.provider.updated`) names the settings that changed — names only, never
+values — and, before → after, whether it was turned on or off, its linking policy, its rating, and
+**Link Super Admin and break-glass accounts too**.
+
+**How to get a connection to Verified, and how to trust your corporate CA.** Running Single
+Sign-On → *Getting a connection to Verified* says what decides each connection's rating and walks
+an unsigned Enterprise gateway to Verified step by step — including keeping the same subject so
+people already linked are still recognised. Deployment → *Corporate TLS trust for SSO* covers
+building and checking the PEM bundle, setting it on both services that need it for Compose,
+Kubernetes and Helm, rotating it, and what the logs say when it cannot be loaded.
+
+### Security
+
+**An unverified connection can no longer claim a Super Admin's or break-glass account.** Its
+claims — `email_verified` included — are whatever the sender wrote, yet under an auto-linking
+policy (**Strict**, the default) a hand-written payload naming an existing account's email
+linked to that account — the break-glass Super Admin among them — for anyone able to reach the
+sign-in endpoint. A connection below verified now never links itself to a system (break-glass)
+account or one holding `super_admin` (`unsafe_auto_link`, reason `unverified_connection`);
+Super Admins link it from their own account page. Every other account still links — an org
+admin's included, since `org_admin` has neither `system:admin` nor user management — new
+accounts are still created, and people already linked still sign in, so an unsigned gateway
+keeps working as before for everyone it was trusted for: the risk its card states (and can now
+fold away once read). An operator who accepts the risk for Super Admins and break-glass accounts
+as well turns on **Link Super Admin and break-glass accounts too** on the connection — offered
+on any connection below Verified, Unverified or Asserted — and every existing account links as
+before.
+
+**Only a Super Admin changes who is in a group that grants Super Admin.** Org admins manage
+groups, and a member inherits every binding its group holds, so an org admin could add themselves
+— or anyone — to a group bound to `super_admin` and so make a Super Admin. Adding or removing
+members of such a group, or deleting it, now needs `system:admin` (403
+`group_grants_super_admin`); every other group is managed as before. It matters more now that an
+org admin's account links through a connection below Verified.
+
+### Fixed
+
+- **Two first sign-ins for the same person at once** — tabs restored together, each running the
+  automatic gateway sign-in, or a double submit — no longer fail with "Database is temporarily
+  unavailable" (`duplicate key value violates unique constraint "uq_users_email"` in the log). The
+  second reads again and signs in to the account the first created; a conflict that survives the
+  re-read is refused as `account_conflict`, with a reference, like any sign-in that cannot complete.
+- **`SSO_OUTBOUND_TLS_CA_CERTS` adds your corporate CAs to the public roots** instead of
+  replacing them. A bundle holding only the corporate chain — the documented way to use it — used
+  to make every public identity provider (Entra, Okta) fail TLS the moment it was set.
+- **An Enterprise gateway whose exchange runs in the browser** no longer shows *No gateway_url
+  configured; this provider cannot sign anyone in* on its card. That shape has no gateway URL by
+  design: the health check now looks at the browser exchange URL and, when the connection verifies
+  against one, whether its JWKS URL is an allowed destination.
+- **An unverified connection's warning says why, and how to fix it.** Instead of the same sentence
+  for every case, the card names the setting to blame — *Trust unsigned*, TLS verification off, an
+  unsigned portal payload — and what to change, with **Open its settings** beside it.
+- Starting a sign-in against an identity provider whose discovery or metadata cannot be fetched
+  lands on the sign-in page with a reference (`idp_unreachable` in the activity log), instead of a
+  bare `503` JSON body.
+- Turning **Passwords** off showed only a toast when Super Admins had no SSO identity; the list
+  of who now reaches the page.
+- `POST /auth/resolve` answers whenever single sign-on is on, not only under **Ask for an email
+  first**; misses still all look the same.
+- The IdP health card no longer claims the signing keys were checked when only the discovery
+  document was fetched.
+
+### Upgrading
+
+- **The sign-in page changes for every deployment with a live connection.** It leads with single
+  sign-on; people who sign in with a password use the password link. Set **Priority** so the
+  connection most people use is first.
+- **Super Admins with a password can sign in during a confirmed outage even while passwords are
+  off.** If that is not acceptable, remove their passwords and keep break-glass accounts only.
+- **Clients that read `403 local_login_disabled` from `POST /auth/login`** now get the `401` a
+  wrong password gets.
+- **Passwords off without a break-glass account** stays off; the new check applies to the next
+  switch-off. Check **Break-glass accounts** on the Settings page.
+- **A Super Admin or break-glass account first signing in through an unverified connection**
+  (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
+  account page instead of being linked automatically. Everyone else, org admins included, links
+  as before; a Verified connection links Super Admins automatically too. To keep the old
+  behaviour on an unverified connection, turn on **Link Super Admin and break-glass accounts
+  too** under its **Identity**. The same holds for an Asserted connection (a portal reading a
+  proxy's header).
+- **Set `SSO_OUTBOUND_TLS_CA_CERTS` on `aggregation-controlplane` as well as `viz-service`.**
+  The outage prober runs there; without the bundle it can never reach a connection behind your
+  corporate CA, so it never confirms that connection's outage. A bundle is read once per
+  process: after replacing it at the same path, restart both. Deployment → *Corporate TLS trust
+  for SSO* has Compose, Kubernetes and Helm steps.
+- The migration `20261014_1000_sso_fallback` adds three nullable columns to `app_auth_config`
+  and the `idp_provider_reachability` table.
+
+### Known limitations
+
+- Portal and dev connections, and gateways whose exchange runs in the browser, are not probed:
+  cover their outages with the emergency window.
+- Each Enterprise gateway in server mode receives one request a minute with no session handle;
+  a 401 or 405 reads as healthy. The integration contract tells gateway teams.
+- Anyone able to make the IdP unreachable from the server can open the password door for Super
+  Admins, which is why only Super Admins get in automatically.
+- A closed emergency window keeps working on other servers for up to 30 seconds.
+- Deactivating or deleting the last break-glass account is not blocked; the Settings page flags
+  it.
+
+---
+
 ## [Unreleased] — Find views by how their data is kept, when they changed, and who changed them
 
 ### Added

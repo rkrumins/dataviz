@@ -128,6 +128,65 @@ afterEach(() => { vi.restoreAllMocks() })
 
 const renderLogin = () => render(<MemoryRouter><LoginPage /></MemoryRouter>)
 
+// ── a refusal leaves a way around ────────────────────────────────────
+//
+// First in the file on purpose: these move between the page's steps, and
+// a step change waits on an animation frame. The fake-timer tests further
+// down start jsdom's animation-frame interval on the fake clock, and
+// `useRealTimers()` drops it with callbacks still counted — so no frame
+// fires again in this file after them.
+
+describe('a refused sign-in leaves a way around', () => {
+    it('a refused silent attempt offers the password when everyone may use one', async () => {
+        // The fail-around: single sign-on did not work for this person
+        // today, and the password step is one press away.
+        storeLoginWithBackchannel.mockResolvedValue(false)
+        renderLogin()
+        await userEvent.click(await screen.findByRole('button', {
+            name: /use your password instead/i,
+        }))
+        expect(await screen.findByLabelText(/^password$/i)).toBeInTheDocument()
+    })
+
+    it('offers no password after a refused attempt when it is not for everyone', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: false, emailFirstLogin: false, providers: [GATEWAY],
+            passwordAccess: 'break_glass', ssoOutage: null, passwordFallbackUntil: null,
+        })
+        storeLoginWithBackchannel.mockResolvedValue(false)
+        renderLogin()
+        expect(await screen.findByText(
+            /signing in with your corporate gateway session did not work/i,
+        )).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /use your password instead/i }))
+            .not.toBeInTheDocument()
+    })
+
+    it('a refused sign-in from Enter comes back with its reason and a way around', async () => {
+        // The hand-off is in-page for a gateway, so a refusal returns to
+        // the first step — not a dead "Taking you to…" panel.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: true, providers: [GATEWAY],
+        })
+        storeLoginWithBackchannel.mockResolvedValue(false)
+        lastDenialRef.current = { code: 'sso_disabled' }
+        renderLogin()
+        await userEvent.type(
+            await screen.findByLabelText(/^email$/i), 'ada@corp.example{enter}',
+        )
+
+        expect(await screen.findByText(/could not sign in with corporate gateway/i))
+            .toBeInTheDocument()
+        expect(await screen.findByLabelText(/^email$/i)).toHaveValue('ada@corp.example')
+        expect(screen.queryByText(/taking you to/i)).not.toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /use your password instead/i }))
+        expect(await screen.findByLabelText(/^password$/i)).toBeInTheDocument()
+    })
+})
+
 // ── it happens without being asked ───────────────────────────────────
 
 describe('silent sign-in', () => {
@@ -223,15 +282,18 @@ describe('silent sign-in', () => {
         expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
     })
 
-    it('leaves a working form behind when it fails', async () => {
+    it('leaves a working page behind when it fails', async () => {
         // Off-domain machines and browsers with no Negotiate policy for
-        // this host are ordinary, not exceptional.
+        // this host are ordinary, not exceptional. The first step is
+        // still there: the connection's button and the address field.
         runAuthenticateTrigger.mockRejectedValue(new Error('no ticket'))
         renderLogin()
         await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalled())
         expect(navigate).not.toHaveBeenCalled()
         expect(assign).not.toHaveBeenCalled()
-        expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        expect(await screen.findByLabelText(/^email$/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /continue with corporate gateway/i }))
+            .toBeInTheDocument()
     })
 
     it('stays silent about a failure nobody asked for', async () => {
@@ -332,7 +394,7 @@ describe('silent sign-in', () => {
             providers: [GATEWAY, { ...GATEWAY, id: 'idp_3', slug: 'other' }],
         })
         renderLogin()
-        await screen.findByLabelText(/password/i)
+        await screen.findByLabelText(/^email$/i)
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
     })
 
@@ -374,9 +436,10 @@ describe('silent sign-in', () => {
         expect(
             screen.queryByText('Signing in with that session did not work.'),
         ).not.toBeInTheDocument()
-        // And the ordinary form is still there.
-        expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+        // And the ordinary first step is still there.
+        expect(screen.getByLabelText(/^email$/i)).toBeInTheDocument()
     })
+
 
     it('a failed recovery with nothing to press offers a retry', async () => {
         // Local login off, catalog empty (the connection was disabled or
@@ -487,11 +550,11 @@ describe('email-first with a gateway connection', () => {
         )
     })
 
-    it('a miss says so and reveals the ways in, instead of doing nothing', async () => {
-        // The domain matches no connection (none configured, or a typo).
-        // This used to be a silent return — with the password form and
-        // the button row tucked behind disclosures, Enter did nothing
-        // at all, which reads as a broken page.
+    it('a miss goes to the primary connection — never an error', async () => {
+        // The domain matches no connection (none mapped, or a typo). This
+        // used to be a silent return, and then "We don't recognise that
+        // email's domain". Now Enter goes to the primary connection — the
+        // gateway here — whose sign-in runs right on this page.
         window.sessionStorage.setItem(
             'nx_portal_autologin_tried', String(Date.now()),
         )
@@ -500,20 +563,16 @@ describe('email-first with a gateway connection', () => {
         const emailInput = await screen.findByLabelText(/^email$/i)
         await userEvent.type(emailInput, 'ada@personal.example{enter}')
 
-        expect(await screen.findByText(
-            /don't recognise that email's domain/i,
-        )).toBeInTheDocument()
-        // Every way in is on the table now: the password form opens…
-        expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
-        // …the gateway button stands, and nothing signed in silently.
-        expect(screen.getByRole('button', { name: /corporate gateway/i }))
-            .toBeInTheDocument()
-        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+        await waitFor(() => {
+            expect(storeLoginWithBackchannel).toHaveBeenCalledWith('corp-gateway', {})
+        })
+        expect(screen.queryByText(/recognise/i)).not.toBeInTheDocument()
+        expect(assign).not.toHaveBeenCalled()
     })
 
     it('a failed resolve is a miss, not a crash', async () => {
         // The endpoint is rate-limited like /login; a 429 (or outage)
-        // lands in the same spoken miss rather than a silent return.
+        // is the same miss, and lands on the primary too.
         window.sessionStorage.setItem(
             'nx_portal_autologin_tried', String(Date.now()),
         )
@@ -522,10 +581,8 @@ describe('email-first with a gateway connection', () => {
         const emailInput = await screen.findByLabelText(/^email$/i)
         await userEvent.type(emailInput, 'ada@corp.example{enter}')
 
-        expect(await screen.findByText(
-            /don't recognise that email's domain/i,
-        )).toBeInTheDocument()
-        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+        await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
+        expect(screen.queryByText(/recognise/i)).not.toBeInTheDocument()
     })
 })
 
@@ -566,7 +623,7 @@ describe('silent sign-in with no browser half', () => {
             await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
             await new Promise(r => setTimeout(r, 20))
             expect(screen.queryByText(/did not work/i)).not.toBeInTheDocument()
-            expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+            expect(await screen.findByLabelText(/^email$/i)).toBeInTheDocument()
         },
     )
 
@@ -601,6 +658,42 @@ describe('silent sign-in with no browser half', () => {
         await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
         expect(storeLoginWithBackchannel).toHaveBeenCalledTimes(1)
         expect(storeLoginWithBackchannel).toHaveBeenCalledWith('corp-gateway', {})
+    })
+})
+
+describe('a gateway the server has confirmed down', () => {
+    // The attempt could only time out behind a page that says "signing
+    // you in"; the outage notice is the answer, with the door that is open.
+    function down(row: Record<string, unknown>) {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: false, emailFirstLogin: false,
+            passwordAccess: 'administrators',
+            ssoOutage: { since: '2026-10-14T09:00:00Z', providers: [row.slug] },
+            providers: [row],
+        })
+    }
+
+    it('is not attempted silently, and the page says why', async () => {
+        down({
+            id: 'idp_3', slug: 'corp-cookie', displayName: 'Corporate Portal',
+            kind: 'backchannel', priority: 100, config: {},
+        })
+        renderLogin()
+        expect(await screen.findByText(
+            /can.t reach Corporate Portal right now/i,
+        )).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /administrator sign-in/i }))
+            .toBeInTheDocument()
+        await new Promise(r => setTimeout(r, 20))
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('nor is its sign-in trigger', async () => {
+        down(GATEWAY)
+        renderLogin()
+        await screen.findByText(/can.t reach Corporate Gateway right now/i)
+        await new Promise(r => setTimeout(r, 20))
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
     })
 })
 
@@ -777,13 +870,15 @@ describe('a refused link', () => {
     })
 })
 
-// ── the email-first CTA ──────────────────────────────────────────────
+// ── the routed CTA ───────────────────────────────────────────────────
 
 describe('the routed CTA for a gateway provider', () => {
     it('is a button running the browser half, never a dead link', async () => {
         // The anchor the redirect kinds get navigates to
         // /auth/{slug}/login — a route a gateway provider cannot serve
-        // without the browser's calls having run first.
+        // without the browser's calls having run first. Once the address
+        // routes, "Continue" says where it goes; it stays the form's
+        // submit button, and pressing it runs the browser half.
         window.sessionStorage.setItem(
             'nx_portal_autologin_tried', String(Date.now()),
         )
@@ -797,10 +892,17 @@ describe('the routed CTA for a gateway provider', () => {
         await userEvent.type(
             await screen.findByLabelText(/^email$/i), 'ada@corp.example',
         )
-        const cta = await screen.findByText(/continue with corporate gateway/i)
-        expect(cta.closest('a')).toBeNull()
+        // The gateway's own button carries the same words; the routed
+        // CTA is the one that submits the address.
+        let cta: HTMLElement | undefined
+        await waitFor(() => {
+            cta = screen.getAllByRole('button', { name: /continue with corporate gateway/i })
+                .find((b) => b.getAttribute('type') === 'submit')
+            expect(cta).toBeDefined()
+        })
+        expect(cta!.closest('a')).toBeNull()
 
-        await userEvent.click(cta)
+        await userEvent.click(cta!)
         await waitFor(() => {
             expect(storeLoginWithBackchannel)
                 .toHaveBeenCalledWith('corp-gateway', {})

@@ -273,6 +273,10 @@ workspace — and anyone you add to the group later gets it too. Deleting a
 group revokes every workspace binding and view share it held; its members lose
 that access on their next request.
 
+> **Note:** Only a **Super Admin** can add or remove members of a group that
+> grants Super Admin, or delete it. Joining such a group makes someone a Super
+> Admin, so an **Org Admin** who tries is told only a Super Admin can.
+
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
 > groups to an invite link, so new people land in them.
@@ -414,9 +418,17 @@ everyone to sign in again" sweeps skip it. The seeded administrator is marked
 automatically on a fresh install; reserve the mark for operational accounts,
 because it is the door that survives an identity-provider outage.
 
-Unmarking re-runs the lockout check: while passwords are off, the mark cannot
-be removed from an active Super Admin who has no linked SSO identity — it is
-the only thing keeping them able to sign in.
+A system account is **ready** when it is an active Super Admin with a
+password: one that can sign in during an outage and fix things. Passwords
+cannot be switched off until one is ready, and **Break-glass accounts** on
+the SSO Settings page lists them. With no administrator able to sign in, the
+host's `python -m backend.scripts.reset_admin_password --email … --break-glass`
+sets a password and the mark in one step.
+
+Unmarking re-runs the lockout checks: while passwords are off, the mark cannot
+be removed from the last ready break-glass account, nor from an active Super
+Admin who has no linked SSO identity — it is the only thing keeping them able
+to sign in.
 
 ### Locked out
 
