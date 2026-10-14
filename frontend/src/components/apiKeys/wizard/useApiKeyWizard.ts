@@ -22,6 +22,7 @@ import {
     type ApiKeyResources,
     type CreatedApiKey,
     type PreviewApiKeyBody,
+    type StepUpReason,
 } from '@/services/apiKeyService'
 import {
     cidrProblem, customDateProblem, describePermissions, describeResources, expiryDays, expiryFields,
@@ -72,7 +73,8 @@ export function useApiKeyWizard({ options, resumed }: {
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [passwordFailed, setPasswordFailed] = useState(false)
-    const [refusedStepUp, setRefusedStepUp] = useState(false)
+    /** The server refused to let this sign-in confirm a key, and why. */
+    const [refused, setRefused] = useState<{ reason: StepUpReason | null } | null>(null)
     const [created, setCreated] = useState<CreatedApiKey | null>(null)
     const [preview, setPreview] = useState<PreviewState | null>(null)
 
@@ -80,7 +82,8 @@ export function useApiKeyWizard({ options, resumed }: {
     const setStep = useCallback((step: WizardStep) => update({ step }), [update])
 
     const max = options.policy.maxLifetimeDays
-    const stepUpAvailable = options.stepUpAvailable && !refusedStepUp
+    const stepUpAvailable = options.stepUpAvailable && refused === null
+    const stepUpReason = refused ? refused.reason : (options.stepUpReason ?? null)
     const viaProvider = options.stepUp.method === 'sso' && !options.stepUp.fresh
 
     const pickPreset = useCallback((preset: Preset) => update(presetPatch(preset, max)), [update, max])
@@ -162,7 +165,7 @@ export function useApiKeyWizard({ options, resumed }: {
                 return
             }
             if (err instanceof ApiKeyError && err.code === 'step_up_unavailable') {
-                setRefusedStepUp(true)
+                setRefused({ reason: err.reason })
             } else if (err instanceof ApiKeyError && err.code === 'step_up_failed') {
                 setPasswordFailed(true)
                 setPassword('')
@@ -185,6 +188,7 @@ export function useApiKeyWizard({ options, resumed }: {
         setPassword,
         passwordFailed,
         stepUpAvailable,
+        stepUpReason,
         viaProvider,
         busy,
         error,

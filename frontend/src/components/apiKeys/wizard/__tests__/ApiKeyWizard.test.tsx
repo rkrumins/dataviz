@@ -286,6 +286,25 @@ describe('confirming it is you', () => {
         expect(screen.queryByRole('radio', { name: /^custom/i })).not.toBeInTheDocument()
     })
 
+    it('says it is password sign-in being off, up front, and not where to switch it on', async () => {
+        await wizard({ stepUpAvailable: false, stepUpReason: 'passwords_off' })
+        expect(screen.getByText(/password sign-in is switched off/i)).toBeInTheDocument()
+        expect(screen.queryByText(/Administration → Features → Authentication/)).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /^next/i })).not.toBeInTheDocument()
+    })
+
+    it('explains a refusal because password sign-in is off, and stops offering to create', async () => {
+        svc.create.mockRejectedValue(new ApiKeyError(403, 'Refused', {
+            error: 'step_up_unavailable', method: 'password', reason: 'passwords_off',
+        }))
+        await wizard()
+        await toReview()
+        await userEvent.type(screen.getByLabelText('Your password'), 'pw')
+        await userEvent.click(screen.getByRole('button', { name: /^create key$/i }))
+        expect(await screen.findByText(/password sign-in is switched off/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /^create key$/i })).toBeDisabled()
+    })
+
     it('explains a refusal to confirm, and stops offering to create', async () => {
         svc.create.mockRejectedValue(new ApiKeyError(403, 'Unavailable', { error: 'step_up_unavailable' }))
         await wizard()

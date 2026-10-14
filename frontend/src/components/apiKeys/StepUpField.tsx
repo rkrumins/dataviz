@@ -11,25 +11,40 @@
 import { AlertTriangle, CheckCircle2, Lock, ShieldAlert, ShieldCheck } from 'lucide-react'
 
 import { BigInput, FieldLabel, Hint } from '@/components/admin/InviteWizard/ui'
-import type { ApiKeyOptions } from '@/services/apiKeyService'
+import type { ApiKeyOptions, StepUpReason } from '@/services/apiKeyService'
 
-/** Why minting is refused when the sign-in cannot be confirmed — shared with the page's banner. */
-export const STEP_UP_UNAVAILABLE =
-    'Your sign-in provider can’t confirm a fresh sign-in, so keys can’t be created or rotated from this session. '
-    + 'An administrator can allow it under Administration → Features → Authentication.'
+/** Why minting is refused when the sign-in cannot be confirmed, by the server's
+ *  reason — shared with the page's banner. */
+export function stepUpUnavailable(reason?: StepUpReason | null): { title: string; body: string } {
+    if (reason === 'passwords_off') {
+        return {
+            title: 'A password can’t confirm it’s you here',
+            body: 'Password sign-in is switched off, so keys can’t be created, rotated or renewed with a password. '
+                + 'Sign in with single sign-on to manage them.',
+        }
+    }
+    return {
+        title: 'This sign-in can’t confirm it’s you',
+        body: 'Your sign-in provider can’t confirm a fresh sign-in, so keys can’t be created or rotated from this session. '
+            + 'An administrator can allow it under Administration → Features → Authentication.',
+    }
+}
 
-export function StepUpField({ stepUp, available, password, onPasswordChange, failed }: {
+export function StepUpField({ stepUp, available, reason, password, onPasswordChange, failed }: {
     stepUp: ApiKeyOptions['stepUp']
     available: boolean
+    /** Why not, when it is not available. */
+    reason?: StepUpReason | null
     password: string
     onPasswordChange: (password: string) => void
     /** The last password was refused. */
     failed?: boolean
 }) {
     if (!available) {
+        const why = stepUpUnavailable(reason)
         return (
-            <Panel tone="danger" icon={ShieldAlert} title="This sign-in can’t confirm it’s you">
-                {STEP_UP_UNAVAILABLE}
+            <Panel tone="danger" icon={ShieldAlert} title={why.title}>
+                {why.body}
             </Panel>
         )
     }

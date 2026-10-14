@@ -110,6 +110,11 @@ used from a network it isn't limited to — even when it only asks about itself.
   only OIDC and SAML can prove one: a portal's `auth_time`, which it maps from its own payload,
   never does. The session also names the provider it came from (`idp`), so a confirmation is asked
   of that provider.
+- **A password confirms a key only while password sign-in is on.** With **Passwords** switched off,
+  a password session — including one opened through the emergency window or the Super Admin
+  outage door — can't create, rotate or renew a key: refused before the password is checked
+  (`step_up_unavailable`, reason `passwords_off`), so a key never outlives the emergency it was
+  made in. The create form says so up front.
 
 ### Upgrading
 

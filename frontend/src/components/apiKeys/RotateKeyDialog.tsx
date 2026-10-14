@@ -29,6 +29,7 @@ import {
     type ApiKeyDetail,
     type ApiKeyOptions,
     type CreatedApiKey,
+    type StepUpReason,
 } from '@/services/apiKeyService'
 import { AccessMatrix } from './AccessMatrix'
 import { CloseConfirm } from './CloseConfirm'
@@ -70,7 +71,8 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
     const [customDate, setCustomDate] = useState(resumed?.customDate ?? '')
     const [password, setPassword] = useState('')
     const [passwordFailed, setPasswordFailed] = useState(false)
-    const [refusedStepUp, setRefusedStepUp] = useState(false)
+    /** The server refused to let this sign-in confirm a key, and why. */
+    const [refused, setRefused] = useState<{ reason: StepUpReason | null } | null>(null)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [created, setCreated] = useState<CreatedApiKey | null>(null)
@@ -87,7 +89,8 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
     }, [renew, apiKey.id])
 
     const max = options.policy.maxLifetimeDays
-    const stepUpAvailable = options.stepUpAvailable && !refusedStepUp
+    const stepUpAvailable = options.stepUpAvailable && refused === null
+    const stepUpReason = refused ? refused.reason : (options.stepUpReason ?? null)
     const viaProvider = options.stepUp.method === 'sso' && !options.stepUp.fresh
     const dateProblem = expiry === 'custom' ? customDateProblem(customDate, max) : null
     const canSubmit = !busy && stepUpAvailable && dateProblem === null
@@ -126,7 +129,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
                 return
             }
             if (err instanceof ApiKeyError && err.code === 'step_up_unavailable') {
-                setRefusedStepUp(true)
+                setRefused({ reason: err.reason })
             } else if (err instanceof ApiKeyError && err.code === 'step_up_failed') {
                 setPasswordFailed(true)
                 setPassword('')
@@ -172,7 +175,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
                 ) : (
                     <div className="space-y-7">
                         {!stepUpAvailable && (
-                            <StepUpField stepUp={options.stepUp} available={false} password="" onPasswordChange={() => {}} />
+                            <StepUpField stepUp={options.stepUp} available={false} reason={stepUpReason} password="" onPasswordChange={() => {}} />
                         )}
 
                         {apiKey.status === 'paused' && (

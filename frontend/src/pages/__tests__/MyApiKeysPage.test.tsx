@@ -111,6 +111,14 @@ describe('the list', () => {
         expect(within(row).queryByRole('button', { name: /rotate/i })).not.toBeInTheDocument()
     })
 
+    it('says it is password sign-in being off when that is why keys cannot be made', async () => {
+        options.mockResolvedValue(opts({ stepUpAvailable: false, stepUpReason: 'passwords_off' }))
+        render(<MyApiKeysPage />)
+        expect(await screen.findByText(/password sign-in is switched off/i)).toBeInTheDocument()
+        expect(screen.queryByText(/Administration → Features → Authentication/)).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
+    })
+
     it('reads older history on request', async () => {
         render(<MyApiKeysPage />)
         await screen.findByText('nightly sync')

@@ -121,6 +121,10 @@ export interface ApiKeyDetail extends ApiKey {
 
 export type ApiKeyLastUse = Pick<ApiKey, 'lastUsedAt' | 'lastUsedIp' | 'lastUsedUserAgent'>
 
+/** Why a sign-in cannot confirm a new key, when it cannot: its provider cannot
+ *  confirm a fresh sign-in, or password sign-in is switched off. */
+export type StepUpReason = 'provider' | 'passwords_off'
+
 export interface ApiKeyOptions {
     policy: {
         enabled: boolean
@@ -132,6 +136,8 @@ export interface ApiKeyOptions {
     /** False: this session cannot prove it is you, and the deployment does not
      *  accept a fresh round trip instead — creating or rotating is refused. */
     stepUpAvailable: boolean
+    /** Why not, when stepUpAvailable is false. */
+    stepUpReason?: StepUpReason | null
     activeKeys: number
     workspaces: WorkspaceAccess[]
     /** The address the server sees this browser at. */
@@ -241,6 +247,8 @@ export class ApiKeyError extends Error {
     readonly method: 'password' | 'sso' | null
     /** step_up_required with method sso: where to sign in again. */
     readonly loginUrl: string | null
+    /** step_up_unavailable: why this sign-in cannot confirm a key. */
+    readonly reason: StepUpReason | null
     /** Selected resources the owner cannot give a key, by type. */
     readonly unknown: Partial<Record<keyof ApiKeySelection, string[]>> | null
 
@@ -250,6 +258,7 @@ export class ApiKeyError extends Error {
         this.code = typeof detail?.error === 'string' ? detail.error : null
         this.method = detail?.method === 'password' || detail?.method === 'sso' ? detail.method : null
         this.loginUrl = typeof detail?.loginUrl === 'string' ? detail.loginUrl : null
+        this.reason = typeof detail?.reason === 'string' ? detail.reason as StepUpReason : null
         this.unknown = detail?.unknown && typeof detail.unknown === 'object'
             ? detail.unknown as ApiKeyError['unknown']
             : null

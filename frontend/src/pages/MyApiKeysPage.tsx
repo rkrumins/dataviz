@@ -26,7 +26,7 @@ import { EditKeyDialog } from '@/components/apiKeys/EditKeyDialog'
 import { KeyCard, PastKeyRow } from '@/components/apiKeys/KeyCard'
 import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
-import { STEP_UP_UNAVAILABLE } from '@/components/apiKeys/StepUpField'
+import { stepUpUnavailable } from '@/components/apiKeys/StepUpField'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
 import { expiryCountdown, isLive, isRenewable, siteUrl, stillCalled } from '@/components/apiKeys/apiKeyFormat'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
@@ -193,8 +193,8 @@ function ApiKeysContent() {
                 </Banner>
             )}
             {options?.policy.enabled && !options.stepUpAvailable && (
-                <Banner tone="warn" icon={ShieldAlert} title="This sign-in can’t confirm it’s you">
-                    {STEP_UP_UNAVAILABLE}
+                <Banner tone="warn" icon={ShieldAlert} title={stepUpUnavailable(options.stepUpReason).title}>
+                    {stepUpUnavailable(options.stepUpReason).body}
                 </Banner>
             )}
 

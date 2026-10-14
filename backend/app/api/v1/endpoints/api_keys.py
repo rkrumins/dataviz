@@ -63,6 +63,7 @@ from backend.app.db.models import (
 from backend.app.db.repositories import (
     api_key_repo,
     api_key_usage_repo,
+    app_auth_config_repo,
     notification_repo,
     outbox_event_repo,
     user_repo,
@@ -347,6 +348,12 @@ class ApiKeyOptions(_Model):
     #: does not accept a round trip instead: minting will be refused with
     #: ``step_up_unavailable`` until it can.
     step_up_available: bool = Field(True, alias="stepUpAvailable")
+    #: Why not, when it is False: ``provider`` (a sign-in provider that cannot
+    #: confirm a fresh sign-in) or ``passwords_off`` (password sign-in is
+    #: switched off, so a password confirms nothing).
+    step_up_reason: Optional[Literal["provider", "passwords_off"]] = Field(
+        None, alias="stepUpReason",
+    )
 
 
 class PickerItem(_Model):
@@ -427,20 +434,28 @@ class AdminRevokeRequest(_Model):
 
 
 class _PolicyValues:
-    def __init__(self, enabled: bool, max_lifetime_days, sso_window_days, sso_round_trip=False):
+    def __init__(
+        self, enabled: bool, max_lifetime_days, sso_window_days, sso_round_trip=False,
+        passwords_allowed=True,
+    ):
         self.enabled = enabled
         self.max_lifetime_days = max_lifetime_days
         self.sso_window_days = sso_window_days
         self.sso_round_trip = sso_round_trip
+        #: The Passwords switch (``allow_local_login``) — never the emergency
+        #: window, which opens password sign-in only until it closes.
+        self.passwords_allowed = passwords_allowed
 
 
 async def _policy(session: AsyncSession) -> _PolicyValues:
     values = await feature_flags.get_all(session)
+    posture = await app_auth_config_repo.get_snapshot(session)
     return _PolicyValues(
         enabled=bool(values.get(ENABLED_FLAG, fail_safe_default(ENABLED_FLAG))),
         max_lifetime_days=api_key_auth._days(values.get(MAX_LIFETIME_FLAG, "none")),
         sso_window_days=api_key_auth._days(values.get(SSO_WINDOW_FLAG, "30")),
         sso_round_trip=values.get(SSO_ROUND_TRIP_FLAG, fail_safe_default(SSO_ROUND_TRIP_FLAG)) is True,
+        passwords_allowed=posture.allow_local_login,
     )
 
 
@@ -582,6 +597,26 @@ _UNAVAILABLE = (
     "rotated here. An administrator can allow it under Administration → Features → "
     "Authentication."
 )
+_PASSWORDS_OFF = (
+    "Password sign-in is switched off here, so a password can't confirm it's you: API keys "
+    "can't be created, rotated or renewed with one. Sign in with single sign-on to manage them."
+)
+
+
+def _minting_refusal(method: str, policy: _PolicyValues) -> Optional[HTTPException]:
+    """Why this session may not confirm a new key at all, whatever it would
+    prove — asked before anything is checked, so a right password and a wrong
+    one get the same answer, and neither counts against the account.
+
+    Only the Passwords switch makes a password a lasting way in. The
+    emergency window opens password sign-in for a few hours while an
+    identity provider is down, and a Super Admin may use one during a
+    confirmed outage; a key made then would outlive both."""
+    if method == "password" and not policy.passwords_allowed:
+        return _refused(
+            "step_up_unavailable", _PASSWORDS_OFF, method="password", reason="passwords_off",
+        )
+    return None
 
 
 async def _sso_step_up(
@@ -659,7 +694,7 @@ async def _sso_step_up(
             "Confirm it's you: sign in again with your identity provider, then try again.",
             method="sso", loginUrl=target.login_url,
         )
-    return None, _refused("step_up_unavailable", _UNAVAILABLE, method="sso")
+    return None, _refused("step_up_unavailable", _UNAVAILABLE, method="sso", reason="provider")
 
 
 async def _step_up(
@@ -672,7 +707,11 @@ async def _step_up(
     (``password``, or a method of ``_sso_step_up``), for the record."""
     payload = _session_claims(request)
     account = await user_repo.get_user_by_id(session, user.id)
-    if _step_up_method(payload, account) == "sso":
+    how = _step_up_method(payload, account)
+    refusal = _minting_refusal(how, policy)
+    if refusal is not None:
+        raise refusal
+    if how == "sso":
         method, refusal = await _sso_step_up(request, user, payload, policy)
         if refusal is not None:
             raise refusal
@@ -1035,15 +1074,17 @@ async def get_api_key_options(
         sign_in_url = (await _identity_service(request).step_up_target(
             user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
         )).login_url
-    available, fresh = True, False
-    if method == "sso":
+    fresh = False
+    refusal = _minting_refusal(method, policy)
+    if refusal is None and method == "sso":
         # Past step-up now, or after signing in again — not "never, here".
         # A gateway that can be asked is asked when the form is submitted.
         confirmed, refusal = await _sso_step_up(
             request, user, payload, policy, ask_gateway=False,
         )
         fresh = confirmed is not None
-        available = refusal is None or refusal.detail["error"] != "step_up_unavailable"
+    # A refusal that says why is one signing in again would not change.
+    reason = refusal.detail.get("reason") if refusal is not None else None
     return ApiKeyOptions(
         policy=Policy(
             enabled=policy.enabled,
@@ -1060,7 +1101,8 @@ async def get_api_key_options(
         ],
         client_ip=_client_ip(request),
         sso_sign_in_url=sign_in_url,
-        step_up_available=available,
+        step_up_available=reason is None,
+        step_up_reason=reason,
     )
 
 

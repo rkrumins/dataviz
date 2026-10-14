@@ -325,8 +325,12 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   is accepted only in the `Authorization: Bearer` header — never in a URL — and never logged.
 - **Minting needs a fresh sign-in.** Creating or rotating a key asks for the password, or for
   the identity provider the session came from (named by a signed `idp` claim) to vouch for
-  the person now. A provider that signs someone back in silently from a session it still
-  holds proves nothing about who is at the keyboard, so:
+  the person now. A password counts only while the Passwords switch (`allow_local_login`) is
+  on: with it off, it is refused before it is checked (`step_up_unavailable`, reason
+  `passwords_off`) — even while the emergency window or the Super Admin outage door lets
+  people sign in with one, since a key would outlive the emergency. A provider that signs
+  someone back in silently from a session it still holds proves nothing about who is at the
+  keyboard, so:
   - OIDC (`prompt=login` with `max_age`) and SAML (`ForceAuthn`) connections must have dated
     a sign-in in the last 15 minutes, and the sign-in page asks them to. The proof is a
     signed `auth_time_proven` claim beside `auth_time` in both session tokens, carried

@@ -68,7 +68,11 @@ Creating, rotating or renewing a key asks you to prove you are at the
 keyboard — a session left open on a shared machine must not be enough to walk
 away with a credential.
 
-- **With a password**, type it.
+- **With a password**, type it — while password sign-in is switched on. When
+  your administrator has switched it off to enforce single sign-on, a
+  password confirms nothing, even while an emergency window lets people sign
+  in with one during an identity-provider outage: a key made then would
+  outlive the emergency. Sign in through single sign-on to manage your keys.
 - **Through an identity provider**, you need to have signed in there within
   the last 15 minutes, and the provider must say when. OIDC and SAML
   connections do. If it has been longer, **Sign in again** takes you to your

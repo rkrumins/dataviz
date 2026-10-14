@@ -157,7 +157,7 @@ export function ApiKeyWizard({ options, resumed, onClose, onCreated }: {
                                     <RevealPanel created={w.created} acknowledged={acknowledged} onAcknowledge={setAcknowledged} />
                                 ) : blocked ? (
                                     <div className="max-w-xl mx-auto py-6">
-                                        <StepUpField stepUp={options.stepUp} available={false} password="" onPasswordChange={() => {}} />
+                                        <StepUpField stepUp={options.stepUp} available={false} reason={options.stepUpReason} password="" onPasswordChange={() => {}} />
                                     </div>
                                 ) : w.step === 'purpose' ? (
                                     <PurposeStep w={w} options={options} />

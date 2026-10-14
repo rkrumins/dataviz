@@ -183,6 +183,7 @@ export function ReviewStep({ w, options, onEdit }: {
                 <StepUpField
                     stepUp={options.stepUp}
                     available={w.stepUpAvailable}
+                    reason={w.stepUpReason}
                     password={w.password}
                     onPasswordChange={w.setPassword}
                     failed={w.passwordFailed}

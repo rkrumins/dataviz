@@ -30,7 +30,7 @@ from backend.app.db.models import (
     UserIdentityORM,
     UserORM,
 )
-from backend.app.db.repositories import api_key_repo, api_key_usage_repo
+from backend.app.db.repositories import api_key_repo, api_key_usage_repo, app_auth_config_repo
 from backend.app.services import api_key_housekeeping
 from backend.auth_service.cookies import ACCESS_COOKIE_NAME, CSRF_COOKIE_NAME
 from backend.auth_service.core.password import hash_password
@@ -169,6 +169,63 @@ async def test_minting_with_a_password_session_needs_the_password(client, monkey
     assert limited.status_code == 429
 
 
+async def _passwords_off(db_session, *, window_open: bool = False) -> None:
+    """Switch Passwords off, as an administrator enforcing single sign-on
+    does — and, with ``window_open``, open the emergency window as one does
+    while the identity provider is down."""
+    await app_auth_config_repo.update_config(db_session, allow_local_login=False)
+    if window_open:
+        until = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        await app_auth_config_repo.set_password_fallback(
+            db_session, until=until, by=OTHER, reason="identity provider down",
+        )
+    await db_session.commit()
+
+
+async def test_with_passwords_off_a_password_confirms_no_key(client, db_session, monkeypatch):
+    """Only the Passwords switch makes a password a lasting way in. While it
+    is off — even with the emergency window open, when people sign in with
+    one for a few hours — a password session makes no key that would outlive
+    the emergency: not created, rotated or renewed. Refused before the
+    password is looked at, so a right one and a wrong one get the same
+    answer, and nothing is counted against the account."""
+    monkeypatch.setattr(api_keys_endpoints, "RATELIMIT_LOGIN_PER_ACCOUNT", "2 per 15 minutes")
+    live = await mint(db_session, views="read")
+    lapsed = await mint(db_session, views="read", expires_at=days_ago(1))
+    headers = _sign_in(client)
+    await _passwords_off(db_session, window_open=True)
+
+    refusals = [
+        await _create(client, headers),
+        await _create(client, headers, currentPassword="not it"),
+        await _create(client, headers, currentPassword="still not it"),
+        await client.post(
+            f"/api/v1/me/api-keys/{live.id}/rotate",
+            json={"currentPassword": PASSWORD}, headers=headers,
+        ),
+    ]
+    api_keys_endpoints.limiter.reset()
+    refusals.append(await client.post(
+        f"/api/v1/me/api-keys/{lapsed.id}/rotate",
+        json={"currentPassword": PASSWORD}, headers=headers,
+    ))
+    for refused in refusals:
+        assert refused.status_code == 403, refused.text
+        detail = refused.json()["detail"]
+        assert (detail["error"], detail["method"], detail["reason"]) == (
+            "step_up_unavailable", "password", "passwords_off",
+        )
+
+    options = (await client.get("/api/v1/me/api-keys/options")).json()
+    assert options["stepUp"] == {"method": "password", "fresh": False}
+    assert (options["stepUpAvailable"], options["stepUpReason"]) == (False, "passwords_off")
+
+    # Passwords back on: the same session, and nothing was held against it.
+    await app_auth_config_repo.update_config(db_session, allow_local_login=True)
+    await db_session.commit()
+    assert (await _create(client, headers)).status_code == 201
+
+
 async def _identity(db_session, kind: str) -> None:
     db_session.add(IdpProviderORM(
         id="idp_corp", slug="corp", display_name="Corp", kind=kind,
@@ -179,6 +236,14 @@ async def _identity(db_session, kind: str) -> None:
         last_login_at=days_ago(0),
     ))
     await db_session.commit()
+
+
+async def test_with_passwords_off_a_proven_sso_sign_in_still_mints(client, db_session):
+    await _identity(db_session, "oidc")
+    await _passwords_off(db_session)
+    fresh = _sign_in(client, signin="sso", auth_time=int(time.time()) - 60, proven=True)
+    created = await _create(client, fresh, currentPassword=None)
+    assert created.status_code == 201, created.text
 
 
 async def test_an_sso_session_must_prove_a_recent_sign_in(client, db_session):

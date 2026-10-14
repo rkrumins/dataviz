@@ -33,13 +33,15 @@ from backend.app.db.models import (
 )
 from backend.app.db.repositories import (
     api_key_repo,
+    app_auth_config_repo,
     grant_repo,
     user_identity_repo,
     user_repo,
 )
 from backend.app.db.repositories.refresh_token_repo import make_refresh_store
-from backend.app.services import api_key_service, api_key_usage
+from backend.app.services import api_key_service, api_key_usage, idp_reachability
 from backend.app.services.feature_flags import feature_flags
+from backend.auth_service.app_auth_config import AuthConfigSnapshot, CachedAuthConfigProvider
 from backend.auth_service.core import api_keys
 from backend.auth_service.ratelimit import reset_account_limiter_for_tests
 from backend.auth_service.service import LocalIdentityService
@@ -212,6 +214,24 @@ async def api_key_app(db_session, monkeypatch):
     # The resource fence looks resources up in a session of its own.
     monkeypatch.setattr(db_engine, "get_async_session", _sessions)
 
+    async def _posture() -> AuthConfigSnapshot:
+        # As ``main._load_auth_config``: the stored switches and the
+        # prober's confirmed outages — read on every call, so a test sets
+        # them the way an administrator or the prober does.
+        snap = await app_auth_config_repo.get_snapshot(db_session)
+        slugs, since = await idp_reachability.read_confirmed_outage(_sessions)
+        return AuthConfigSnapshot(
+            sso_enabled=snap.sso_enabled,
+            allow_local_login=snap.allow_local_login,
+            allow_jit_provisioning=snap.allow_jit_provisioning,
+            email_first_login=snap.email_first_login,
+            password_fallback_until=snap.password_fallback_until,
+            sso_outage_slugs=slugs,
+            sso_outage_since=since,
+            version=snap.version,
+            updated_at=snap.updated_at,
+        )
+
     previous = getattr(app.state, "identity_service", None)
     app.state.identity_service = LocalIdentityService(
         session_factory=_sessions,
@@ -221,6 +241,7 @@ async def api_key_app(db_session, monkeypatch):
         api_key_repo=api_key_repo,
         api_key_claims_resolver=api_key_service.claims_for_key,
         api_key_rejection_hook=api_key_service.record_rejection,
+        auth_config_provider=CachedAuthConfigProvider(_posture, ttl_seconds=0),
     )
     api_key_service.reset_for_tests()
     api_key_auth.reset_for_tests()

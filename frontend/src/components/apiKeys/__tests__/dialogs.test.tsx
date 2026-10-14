@@ -66,6 +66,17 @@ describe('rotating a live key', () => {
         expect(svc.rotate.mock.calls[0][1]).toMatchObject({ graceSeconds: 86400, neverExpires: false, expiresAt: expect.any(String) })
     })
 
+    it('says it is password sign-in being off when the rotation is refused for it', async () => {
+        svc.rotate.mockRejectedValue(new ApiKeyError(403, 'Refused', {
+            error: 'step_up_unavailable', method: 'password', reason: 'passwords_off',
+        }))
+        rotateDialog(apiKey())
+        await userEvent.type(screen.getByLabelText('Your password'), 'pw')
+        await userEvent.click(screen.getByRole('button', { name: /^rotate key$/i }))
+        expect(await screen.findByText(/password sign-in is switched off/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /^rotate key$/i })).toBeDisabled()
+    })
+
     it('says so when the key was already replaced', async () => {
         svc.rotate.mockRejectedValue(new ApiKeyError(409, 'Conflict', { error: 'api_key_rotated' }))
         rotateDialog(apiKey())
