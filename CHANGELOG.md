@@ -191,11 +191,11 @@ org admin's account links through a connection below Verified.
 
 ### Added
 
-**Versioned or External.** Two buttons in the Explorer's filter row narrow the list to views whose
-data is versioned in {brand} (changed through drafts, review and publishing) or kept by another
-system. Every card and list row says which it is, and so does the preview's *What this view is
-built on*. A view with no data source of its own is judged by its workspace's default source. The
-buttons and labels follow the **Version control** switch: off, they are hidden.
+**Versioned or External.** The **Versioning** menu in the Explorer's filter row narrows the list to
+views whose data is versioned in {brand} (changed through drafts, review and publishing) or kept by
+another system. Every card and list row says which it is, and so does the preview's *What this
+view is built on*. A view with no data source of its own is judged by its workspace's default
+source. The menu and labels follow the **Version control** switch: off, they are hidden.
 
 **Date.** One menu filters on when a view was **Created** or last **Updated** — any change, to its
 settings, its layout or its data. Pick a period (Today, Past 7 days, This month, Last quarter…),
@@ -213,10 +213,10 @@ and Source sit in its toolbar, with the same chips underneath. Its People list c
 server, so it names everyone, not just the people behind the first 50 views. **Browse in
 Explorer** now opens the Explorer with the tab's filters.
 
-**Every filter shows what it would leave.** Each option in the Workspace, Source, Type, Tag,
-Visibility and People menus, and the Versioned and External buttons, shows how many views it would
-leave given your other filters; a choice that would leave none is greyed out. The Source menu also
-marks each source Versioned or External and names its workspace.
+**Every filter shows what it would leave.** Each option in the Versioning, Workspace, Source, Type,
+Tag, Visibility and People menus shows how many views it would leave given your other filters; a
+choice that would leave none is greyed out. The Source menu also marks each source Versioned or
+External and names its workspace.
 
 **No dead ends.** When nothing matches, the Explorer and the workspace Views tab list each active
 filter with how many views removing just that one would bring back — click one to drop it — instead

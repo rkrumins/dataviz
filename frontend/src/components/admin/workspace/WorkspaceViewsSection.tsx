@@ -79,7 +79,7 @@ import { SOURCE_KIND_META } from '@/features/view-filters/sourceKindMeta'
 import { RelaxationList } from '@/features/view-filters/components/RelaxationList'
 import { useLocalDay } from '@/features/view-filters/useLocalDay'
 import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
-import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
+import { SourceKindMenu } from '@/features/view-filters/components/SourceKindMenu'
 import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
 import { ExplorerSearchBox } from '@/components/explorer/ExplorerSearchBox'
 import { searchTextOf } from '@/features/view-filters/tokens'
@@ -740,10 +740,11 @@ export default function WorkspaceViewsSection({
                     }}
                     fixedWorkspace
                 />
-                <SourceKindToggle
+                <SourceKindMenu
                     value={fstate.sourceKind}
                     onChange={v => patchFilters({ sourceKind: v })}
                     counts={sourceKinds}
+                    countsPending={countsPending}
                 />
                 <DateFilterMenu
                     created={fstate.created}

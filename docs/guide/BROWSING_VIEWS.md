@@ -141,15 +141,16 @@ it.
 
 ### Versioned or external
 
-Click **Versioned** to see only views whose data is versioned in {brand}: it is
-changed through drafts, review and publishing. Click **External** for views on a
-graph that another system looks after, which {brand} reads but doesn't edit.
-Click the highlighted one again to see both. Hover either for a reminder of what
-it means.
+Click **Versioning** and choose **Versioned** to see only views whose data is
+versioned in {brand}: it is changed through drafts, review and publishing.
+Choose **External** for views on a graph that another system looks after, which
+{brand} reads but doesn't edit. Each shows how many views it would leave. The
+menu then reads **Versioned** or **External**; choose the same one again to see
+both.
 
 A view without a data source of its own is judged by its workspace's default
-data source. When your administrator has switched **Version control** off, these
-buttons don't appear.
+data source. When your administrator has switched **Version control** off, the
+menu doesn't appear.
 
 ### When a view was made or changed
 

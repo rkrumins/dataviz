@@ -678,9 +678,9 @@ export function ExplorerPage() {
           onRemoveLastFilter={removeLastFilter}
         />
 
-        {/* ── Filters: the quick views and saved filters, then every filter with
-            the palette at its end. How the results are shown sits on their own
-            header below. ───────────────────────────────────────── */}
+        {/* ── Filters: one row, wrapping when the width runs out — the quick
+            views and saved filters, then every filter, with the palette at its
+            end. How the results are shown sits on their own header below. ─── */}
         <div data-tour="explorer-filters" className="mb-6">
           <ExplorerFilterBar
             state={filterState}
