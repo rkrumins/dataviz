@@ -51,12 +51,12 @@ export function SourceKindToggle({ value, onChange, counts, className }: {
               aria-pressed={on}
               onClick={() => onChange(on ? null : kind)}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium',
+                'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium',
                 'transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                 on ? cn(meta.active, 'bg-canvas-elevated shadow-sm') : 'border-transparent text-ink-muted hover:text-ink',
               )}
             >
-              <Icon className={cn('h-3.5 w-3.5', on ? '' : meta.glyph)} aria-hidden />
+              <Icon className={cn('h-3 w-3', on ? '' : meta.glyph)} aria-hidden />
               {SOURCE_KIND_LABELS[kind]}
               {count !== undefined && (
                 <span className={cn('tabular-nums text-[10px] font-semibold', on ? '' : 'text-ink-muted', count === 0 && 'opacity-50')}>
