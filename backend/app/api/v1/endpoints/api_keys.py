@@ -670,8 +670,8 @@ def _minting_refusal(
 
 
 async def _sso_step_up(
-    request: Request, user: User, payload: dict, policy: _PolicyValues, *,
-    ask_gateway: bool = True,
+    request: Request, user: User, session: AsyncSession, payload: dict,
+    policy: _PolicyValues, *, ask_gateway: bool = True,
 ) -> tuple[Optional[str], Optional[HTTPException]]:
     """How a session signed in through an identity provider confirms it is
     the person: ``(method, None)`` when it does, else ``(None, refusal)``.
@@ -706,10 +706,15 @@ async def _sso_step_up(
     )
     if target.confirms == "gateway_live":
         if target.unreachable:
-            # Nothing waits, holding a connection, for a gateway that is down.
+            # Nothing waits on a gateway that is down.
             return None, _provider_down()
         if not ask_gateway:
             return "gateway_live", None
+        # The gateway has up to its deadline to answer. This request has
+        # only read so far, and decides again under the principal's lock
+        # afterwards: end its transaction, so neither its connection nor the
+        # locks its reads took are held while the gateway answers.
+        await session.commit()
         answer = await identity.confirm_live_session(
             provider_id, ambient_cookies=dict(request.cookies),
             ambient_headers=dict(request.headers),
@@ -762,7 +767,7 @@ async def _step_up(
     if refusal is not None:
         raise refusal
     if how == "sso":
-        method, refusal = await _sso_step_up(request, user, payload, policy)
+        method, refusal = await _sso_step_up(request, user, session, payload, policy)
         if refusal is not None:
             raise refusal
         return method
@@ -1136,7 +1141,7 @@ async def get_api_key_options(
         # Past step-up now, or after signing in again — not "never, here".
         # A gateway that can be asked is asked when the form is submitted.
         confirmed, refusal = await _sso_step_up(
-            request, user, payload, policy, ask_gateway=False,
+            request, user, session, payload, policy, ask_gateway=False,
         )
         fresh = confirmed is not None
     # A refusal that says why is one signing in again would not change.

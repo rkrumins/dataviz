@@ -67,7 +67,8 @@ default, it lets people on portal connections, which can't date a sign-in, make 
 gateway (server exchange with an ambient token), creating or rotating a key asks it, then and
 there, whether the company session behind the request is still live: confirmed makes the key, ended
 signs in through the gateway again without leaving the page, and no answer makes nothing (`503
-gateway_unreachable`; try again). Where only the browser reaches the gateway, a sign-in through it in
+gateway_unreachable`; try again). No database connection is held while the gateway answers. Where
+only the browser reaches the gateway, a sign-in through it in
 the last 15 minutes counts, and an older one signs in through it again the same way. The request is
 sent again only if the same person is still signed in. Every key's record says how it was
 confirmed.
@@ -127,7 +128,7 @@ used from a network it isn't limited to — even when it only asks about itself.
 - **Nothing waits on an identity provider that is down.** While the reachability prober has the
   session's provider confirmed down, creating, rotating or renewing a key through it is answered at
   once — `503 idp_unreachable` with `Retry-After`, and no sign-in link — rather than asking a gateway
-  that can't answer (holding the request, and a database connection, for up to 10 seconds) or
+  that can't answer (holding the request for up to 10 seconds) or
   sending the person to an error page or the sign-in page's password doors. The create form says so
   up front, and **Sign in to resume** is hidden until the provider is back. A sign-in the provider
   proved in the last 15 minutes still counts.

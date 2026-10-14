@@ -39,6 +39,7 @@ from backend.app.db.repositories import idp_provider_repo
 from backend.auth_service.cookies import CSRF_COOKIE_NAME
 from backend.auth_service.csrf import CSRF_HEADER_NAME
 from backend.auth_service.providers import outbound
+from backend.auth_service.service import LocalIdentityService
 from backend.tests.test_sso_backchannel_browser_exchange import (
     _REAL_ASYNC_CLIENT,
     _assertion,
@@ -219,8 +220,8 @@ async def test_while_the_gateway_is_confirmed_down_nothing_waits_on_it(
 ):
     """Once the prober has confirmed the gateway down, a step-up that would
     ask it is answered at once — 503, try again later — rather than holding
-    the request, and a database connection, for the gateway's deadline; and
-    nobody is sent to sign in through it. The form says so up front. Once it
+    the request for the gateway's deadline; and nobody is sent to sign in
+    through it. The form says so up front. Once it
     is back, the same request mints."""
     gateway_id = await _server_gateway(db_session)
     headers = await _sign_in_through_the_gateway(client)
@@ -260,6 +261,32 @@ async def test_rotating_and_renewing_ask_the_gateway_too(client, db_session, gat
     rotated = await client.post(rotate, json={}, headers=headers)
     assert rotated.status_code == 200, rotated.text
     assert await _confirmed_by(db_session, "identity.api_key.rotated") == ["gateway_live"]
+
+
+async def test_no_database_connection_waits_on_the_gateway(
+    client, db_session, gateway, monkeypatch,
+):
+    """The gateway has up to its deadline to answer. The request's own
+    transaction — it has only read so far — is over before the gateway is
+    asked: its connection is back in the pool meanwhile, and the locks its
+    reads took are released, however long the answer takes."""
+    await _server_gateway(db_session)
+    headers = await _sign_in_through_the_gateway(client)
+    in_a_transaction = []
+    ask = LocalIdentityService.confirm_live_session
+
+    async def _asked(self, *args, **kwargs):
+        in_a_transaction.append(db_session.in_transaction())
+        return await ask(self, *args, **kwargs)
+
+    monkeypatch.setattr(LocalIdentityService, "confirm_live_session", _asked)
+    created = await client.post("/api/v1/me/api-keys", json=_draft(), headers=headers)
+    assert created.status_code == 201, created.text
+    rotated = await client.post(
+        f"/api/v1/me/api-keys/{created.json()['key']['id']}/rotate", json={}, headers=headers,
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert in_a_transaction == [False, False]
 
 
 async def test_the_session_is_checked_against_its_own_gateway(client, db_session, gateway):
