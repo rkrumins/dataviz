@@ -112,6 +112,9 @@ SSO_ROUND_TRIP_FLAG = "apiKeySsoRoundTripStepUp"
 #: How long a gateway may take to say whether a company session is live
 #: before a step-up is answered "try again", and how soon to.
 _GATEWAY_RETRY_SECONDS = 30
+#: How soon to try again while the provider a step-up needs is confirmed
+#: down: the reachability prober looks once a minute.
+_OUTAGE_RETRY_SECONDS = 60
 #: How far ahead of this server's clock a provider's may be.
 _CLOCK_SKEW_SECONDS = 60
 _STEP_UP_SCOPE = "stepup"
@@ -350,11 +353,12 @@ class ApiKeyOptions(_Model):
     step_up_available: bool = Field(True, alias="stepUpAvailable")
     #: Why not, when it is False: ``provider`` (a sign-in provider that cannot
     #: confirm a fresh sign-in), ``passwords_off`` (password sign-in is
-    #: switched off, so a password confirms nothing) or ``system_account`` (a
-    #: break-glass account, which holds no keys).
-    step_up_reason: Optional[Literal["provider", "passwords_off", "system_account"]] = Field(
-        None, alias="stepUpReason",
-    )
+    #: switched off, so a password confirms nothing), ``system_account`` (a
+    #: break-glass account, which holds no keys) or ``idp_unreachable`` (the
+    #: session's provider is confirmed down, until it is back).
+    step_up_reason: Optional[Literal[
+        "provider", "passwords_off", "system_account", "idp_unreachable",
+    ]] = Field(None, alias="stepUpReason")
 
 
 class PickerItem(_Model):
@@ -607,6 +611,29 @@ _SYSTEM_ACCOUNT = (
     "This is a break-glass account, kept for when nobody else can sign in, so it can't have API "
     "keys. Make them from your own account."
 )
+_PROVIDER_DOWN = (
+    "Your sign-in provider isn't answering, so it can't confirm it's you: API keys can't be "
+    "created, rotated or renewed through it until it's back. Try again later."
+)
+
+
+def _provider_down() -> HTTPException:
+    """The provider the session came from is confirmed down: nothing it could
+    say would arrive. Try again later — rather than wait on it, or be sent to
+    its error page, or to the sign-in page and its password doors."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"error": "idp_unreachable", "message": _PROVIDER_DOWN, "reason": "idp_unreachable"},
+        headers={"Retry-After": str(_OUTAGE_RETRY_SECONDS)},
+    )
+
+
+def _sign_in_again(target, message: str) -> HTTPException:
+    """Sign in again through the session's provider, then try again — or,
+    while it is confirmed down, try again later (``_provider_down``)."""
+    if target.unreachable:
+        return _provider_down()
+    return _refused("step_up_required", message, method="sso", loginUrl=target.login_url)
 
 
 def _minting_refusal(
@@ -657,9 +684,11 @@ async def _sso_step_up(
     Otherwise a sign-in the provider can make fresh is asked for
     (``step_up_required``); a provider that cannot — a portal, without the
     switch — gets a plain "unavailable" rather than an endless loop of
-    signing in again. ``ask_gateway`` False — the create form, before
-    anything is submitted — takes a gateway that can be asked as confirming
-    without asking it."""
+    signing in again. While the provider is confirmed down, anything that
+    would ask it or send the person to it is answered at once: try again
+    later (``_provider_down``). ``ask_gateway`` False — the create form,
+    before anything is submitted — takes a gateway that can be asked as
+    confirming without asking it."""
     if _fresh(payload, proven=True):
         return "sso_proven", None
     provider_id = payload.get(SIGNIN_PROVIDER_CLAIM)
@@ -668,6 +697,9 @@ async def _sso_step_up(
         user.id, next_path=_STEP_UP_NEXT, provider_id=provider_id,
     )
     if target.confirms == "gateway_live":
+        if target.unreachable:
+            # Nothing waits, holding a connection, for a gateway that is down.
+            return None, _provider_down()
         if not ask_gateway:
             return "gateway_live", None
         answer = await identity.confirm_live_session(
@@ -688,26 +720,21 @@ async def _sso_step_up(
                 },
                 headers={"Retry-After": str(_GATEWAY_RETRY_SECONDS)},
             )
-        return None, _refused(
-            "step_up_required",
-            "Your company sign-in has ended: sign in again, then try again.",
-            method="sso", loginUrl=target.login_url,
+        return None, _sign_in_again(
+            target, "Your company sign-in has ended: sign in again, then try again.",
         )
     if target.confirms == "gateway_sign_in":
         if _vouched_recently(payload):
             return "gateway_sign_in", None
-        return None, _refused(
-            "step_up_required",
+        return None, _sign_in_again(
+            target,
             "Confirm it's you: sign in again through your company sign-in, then try again.",
-            method="sso", loginUrl=target.login_url,
         )
     if policy.sso_round_trip and _fresh(payload):
         return "sso_round_trip", None
     if policy.sso_round_trip or (target.confirms == "proven" and not _fresh(payload)):
-        return None, _refused(
-            "step_up_required",
-            "Confirm it's you: sign in again with your identity provider, then try again.",
-            method="sso", loginUrl=target.login_url,
+        return None, _sign_in_again(
+            target, "Confirm it's you: sign in again with your identity provider, then try again.",
         )
     return None, _refused("step_up_unavailable", _UNAVAILABLE, method="sso", reason="provider")
 
@@ -1086,9 +1113,11 @@ async def get_api_key_options(
     method = _step_up_method(payload, account)
     sign_in_url = None
     if (await _identity_facts(session, {user.id})).get(user.id, (0, None))[0]:
-        sign_in_url = (await _identity_service(request).step_up_target(
+        target = await _identity_service(request).step_up_target(
             user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
-        )).login_url
+        )
+        # Not while it is confirmed down: that page cannot answer.
+        sign_in_url = None if target.unreachable else target.login_url
     fresh = False
     refusal = _minting_refusal(account, method, policy)
     if refusal is None and method == "sso":

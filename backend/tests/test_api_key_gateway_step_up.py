@@ -40,7 +40,14 @@ from backend.tests.test_sso_backchannel_browser_exchange import (
     _jwk,
     _make_row,
 )
-from tests.common.api_key_world import OWNER, api_key_app, days_ago, error, mint
+from tests.common.api_key_world import (
+    OWNER,
+    api_key_app,
+    confirmed_down,
+    days_ago,
+    error,
+    mint,
+)
 
 GATEWAY_LOGIN = "/api/v1/auth/corp-gateway/login?next=/me/api-keys&force=1"
 BROWSER_LOGIN = "/api/v1/auth/corp-browser/login?next=/me/api-keys&force=1"
@@ -94,7 +101,7 @@ def gateway(monkeypatch):
     return _Gateway(monkeypatch)
 
 
-async def _server_gateway(db_session) -> None:
+async def _server_gateway(db_session) -> str:
     row = await idp_provider_repo.create_provider(
         db_session, slug="corp-gateway", display_name="Corporate Gateway",
         kind="backchannel", claim_mapping={}, linking_policy="strict",
@@ -107,6 +114,7 @@ async def _server_gateway(db_session) -> None:
     )
     await idp_provider_repo.publish_provider(db_session, row.id)
     await db_session.commit()
+    return row.id
 
 
 async def _sign_in_through_the_gateway(client) -> dict:
@@ -199,6 +207,38 @@ async def test_a_gateway_that_does_not_answer_mints_nothing(
     assert error(refused) == "gateway_unreachable"
     assert refused.headers["retry-after"] == "30"
     assert await _keys(db_session) == 0
+
+
+async def test_while_the_gateway_is_confirmed_down_nothing_waits_on_it(
+    client, db_session, gateway,
+):
+    """Once the prober has confirmed the gateway down, a step-up that would
+    ask it is answered at once — 503, try again later — rather than holding
+    the request, and a database connection, for the gateway's deadline; and
+    nobody is sent to sign in through it. The form says so up front. Once it
+    is back, the same request mints."""
+    gateway_id = await _server_gateway(db_session)
+    headers = await _sign_in_through_the_gateway(client)
+    down = await confirmed_down(db_session, gateway_id)
+    asked = gateway.redeemed
+
+    options = (await client.get("/api/v1/me/api-keys/options")).json()
+    assert (options["stepUpAvailable"], options["stepUpReason"]) == (False, "idp_unreachable")
+    assert options["ssoSignInUrl"] is None
+
+    refused = await client.post("/api/v1/me/api-keys", json=_draft(), headers=headers)
+    assert refused.status_code == 503, refused.text
+    detail = refused.json()["detail"]
+    assert (detail["error"], detail["reason"]) == ("idp_unreachable", "idp_unreachable")
+    assert "loginUrl" not in detail
+    assert refused.headers["retry-after"] == "60"
+    assert gateway.redeemed == asked
+    assert await _keys(db_session) == 0
+
+    await db_session.delete(down)
+    await db_session.commit()
+    created = await client.post("/api/v1/me/api-keys", json=_draft(), headers=headers)
+    assert created.status_code == 201, created.text
 
 
 async def test_rotating_and_renewing_ask_the_gateway_too(client, db_session, gateway):

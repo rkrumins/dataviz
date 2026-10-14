@@ -23,6 +23,13 @@ export function stepUpUnavailable(reason?: StepUpReason | null): { title: string
                 + 'any it has don’t work while it is one. Make them from your own account.',
         }
     }
+    if (reason === 'idp_unreachable') {
+        return {
+            title: 'Your sign-in provider isn’t answering',
+            body: 'It can’t confirm it’s you while it’s down, so keys can’t be created, rotated or renewed through it. '
+                + 'Try again once it’s back — nothing has changed about the keys you have.',
+        }
+    }
     if (reason === 'passwords_off') {
         return {
             title: 'A password can’t confirm it’s you here',

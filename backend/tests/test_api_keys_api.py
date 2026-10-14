@@ -40,6 +40,7 @@ from tests.common.api_key_world import (
     OTHER,
     OWNER,
     api_key_app,
+    confirmed_down,
     days_ago,
     error,
     mint,
@@ -310,6 +311,40 @@ async def test_an_sso_session_must_prove_a_recent_sign_in(client, db_session):
 
     proven = _sign_in(client, signin="sso", auth_time=int(time.time()) - 60, proven=True)
     assert (await _create(client, proven, currentPassword=None)).status_code == 201
+
+
+async def test_while_the_identity_provider_is_confirmed_down_nobody_is_sent_to_it(
+    client, db_session,
+):
+    """Once the prober has confirmed the provider down, a session that would
+    have to sign in there again is told to try later — 503, never a trip to a
+    page that cannot answer — and the form says so up front, with no "Sign in
+    to resume". A sign-in the provider proved minutes ago still counts."""
+    await _identity(db_session, "oidc")
+    provider = await db_session.get(IdpProviderORM, "idp_corp")
+    provider.lifecycle = "live"
+    down = await confirmed_down(db_session, "idp_corp")
+
+    stale = _sign_in(client, signin="sso", auth_time=int(time.time()) - 3600, proven=True)
+    refused = await _create(client, stale, currentPassword=None)
+    assert refused.status_code == 503, refused.text
+    detail = refused.json()["detail"]
+    assert (detail["error"], detail["reason"]) == ("idp_unreachable", "idp_unreachable")
+    assert "loginUrl" not in detail
+    assert refused.headers["retry-after"] == "60"
+    options = (await client.get("/api/v1/me/api-keys/options")).json()
+    assert (options["stepUpAvailable"], options["stepUpReason"]) == (False, "idp_unreachable")
+    assert options["ssoSignInUrl"] is None
+
+    fresh = _sign_in(client, signin="sso", auth_time=int(time.time()) - 60, proven=True)
+    assert (await _create(client, fresh, currentPassword=None)).status_code == 201
+
+    await db_session.delete(down)
+    await db_session.commit()
+    _sign_in(client, signin="sso", auth_time=int(time.time()) - 3600, proven=True)
+    options = (await client.get("/api/v1/me/api-keys/options")).json()
+    assert (options["stepUpAvailable"], options["stepUpReason"]) == (True, None)
+    assert options["ssoSignInUrl"] == "/api/v1/auth/corp/login?next=/me/api-keys&force=1"
 
 
 async def test_a_provider_that_cannot_prove_a_sign_in_needs_the_switch(client, db_session):

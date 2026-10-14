@@ -122,6 +122,13 @@ used from a network it isn't limited to — even when it only asks about itself.
   (`api_key_owner_inactive`) and work again if the mark is removed. Nothing is revoked. The
   inventory's **Owner suspended** tab is now **Owner inactive**. The seeded administrator is
   marked on a fresh install, so make keys from a personal account.
+- **Nothing waits on an identity provider that is down.** While the reachability prober has the
+  session's provider confirmed down, creating, rotating or renewing a key through it is answered at
+  once — `503 idp_unreachable` with `Retry-After`, and no sign-in link — rather than asking a gateway
+  that can't answer (holding the request, and a database connection, for up to 10 seconds) or
+  sending the person to an error page or the sign-in page's password doors. The create form says so
+  up front, and **Sign in to resume** is hidden until the provider is back. A sign-in the provider
+  proved in the last 15 minutes still counts.
 - **With Passwords off, a password is no way back in.** A key pauses when its owner has no way to
   sign in; an owner with no single sign-on identity now has none while **Passwords** is switched
   off — the emergency window closes, so it doesn't count — and their keys pause

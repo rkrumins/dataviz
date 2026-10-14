@@ -495,7 +495,10 @@ class LocalIdentityService:
         report when the person authenticated. A gateway cannot be made to,
         but can be asked: when the company session reaches this server
         (server exchange with an ambient token source), now; when only the
-        browser holds it, by signing in through it. A portal can do neither."""
+        browser holds it, by signing in through it. A portal can do neither.
+
+        While the prober has that provider confirmed down, the target says so
+        (``unreachable``)."""
         async with self._session_factory() as session:
             provider = None
             if provider_id and self._user_identity_repo is not None:
@@ -516,8 +519,12 @@ class LocalIdentityService:
             )
         else:
             confirms = "none"
-        url = _build_reauth_url(getattr(provider, "slug", None), next_path=next_path, force=True)
-        return StepUpTarget(login_url=url, confirms=confirms)
+        slug = getattr(provider, "slug", None)
+        url = _build_reauth_url(slug, next_path=next_path, force=True)
+        down = sso_outage_slugs(await self._auth_config_provider.get())
+        return StepUpTarget(
+            login_url=url, confirms=confirms, unreachable=bool(slug) and slug in down,
+        )
 
     async def confirm_live_session(
         self, provider_id: str, *, ambient_cookies: dict, ambient_headers: dict,

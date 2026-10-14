@@ -122,6 +122,15 @@ describe('the list', () => {
         expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
     })
 
+    it('says it is the sign-in provider being down when that is why keys cannot be made', async () => {
+        options.mockResolvedValue(opts({ stepUpAvailable: false, stepUpReason: 'idp_unreachable', ssoSignInUrl: null }))
+        render(<MyApiKeysPage />)
+        expect(await screen.findByText('Your sign-in provider isn’t answering')).toBeInTheDocument()
+        expect(screen.getByText(/once it’s back/i)).toBeInTheDocument()
+        expect(screen.queryByText(/Administration → Features → Authentication/)).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
+    })
+
     it('says a break-glass account holds no keys, and to make them from your own account', async () => {
         options.mockResolvedValue(opts({ stepUpAvailable: false, stepUpReason: 'system_account' }))
         render(<MyApiKeysPage />)

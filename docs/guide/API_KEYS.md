@@ -90,6 +90,11 @@ away with a credential.
   fresh sign-in round trip for API keys**. The review step tells you when that
   is the case.
 
+While your identity provider is down — the platform confirms that after a few
+minutes of it not answering — keys can't be created, rotated or renewed
+through it, and the page says so: try again once it's back. A sign-in it
+confirmed in the last 15 minutes, before it went down, still counts.
+
 ### What it can do, before and after
 
 Open a key to see **what it can do right now**: per workspace, and per view

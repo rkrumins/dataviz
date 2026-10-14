@@ -24,6 +24,7 @@ from backend.app.db.engine import (
     get_readonly_db_session,
 )
 from backend.app.db.models import (
+    IdpProviderReachabilityORM,
     ProviderORM,
     RoleBindingORM,
     UserORM,
@@ -130,6 +131,22 @@ async def mint(
 
 def days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+async def confirmed_down(session, provider_id: str) -> IdpProviderReachabilityORM:
+    """The reachability prober's record of a connection confirmed down: seen
+    working, unreachable for longer than it takes to confirm, checked just
+    now. Delete it, and the connection is back."""
+    now = datetime.now(timezone.utc)
+    row = IdpProviderReachabilityORM(
+        provider_id=provider_id,
+        last_ok_at=(now - timedelta(minutes=10)).isoformat(),
+        unreachable_since=(now - timedelta(minutes=5)).isoformat(),
+        checked_at=now.isoformat(),
+    )
+    session.add(row)
+    await session.commit()
+    return row
 
 
 def prime(**flags) -> None:

@@ -137,9 +137,13 @@ LIVE_SESSION_ANSWERS = ("confirmed", "absent", "rejected", "unreachable")
 @dataclass(frozen=True)
 class StepUpTarget:
     """Where to send someone to prove it is them again, and how the provider
-    their session signed in through can confirm it (``STEP_UP_CONFIRMS``)."""
+    their session signed in through can confirm it (``STEP_UP_CONFIRMS``).
+    ``unreachable``: that provider is confirmed down (``sso_outage_slugs``),
+    so neither sending anyone to it nor asking it can confirm anything until
+    it is back."""
     login_url: str
     confirms: str
+    unreachable: bool = False
 
 
 # ── Service protocol ─────────────────────────────────────────────────

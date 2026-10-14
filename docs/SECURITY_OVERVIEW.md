@@ -345,6 +345,11 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
     signed the session in within the last 15 minutes.
   - Portal connections can do neither, so their users cannot make keys unless an
     administrator accepts a fresh round trip instead.
+  - While the reachability prober has the session's provider **confirmed down**, a step-up
+    that would ask it or send the person to it is answered at once — `503 idp_unreachable`,
+    `Retry-After`, no sign-in link — so no request waits on a gateway that is down, and nobody
+    is sent to an error page or to the sign-in page's password doors. A sign-in the provider
+    proved before it went down still counts.
 
   Every `created` and `rotated` event records how it was confirmed (`step_up`). A person may
   hold 25 keys still in date, and a rotation that keeps the old key working for a while
