@@ -430,6 +430,11 @@ be removed from the last ready break-glass account, nor from an active Super
 Admin who has no linked SSO identity — it is the only thing keeping them able
 to sign in.
 
+A system account holds no [API keys](/guide/api-keys): it can't create any,
+and keys it made before it was marked stop working while it is one, and work
+again if the mark is removed. Nothing should run as the account you keep for
+emergencies, so make keys from your own account instead.
+
 ### Locked out
 
 If the only administrator forgets their password there is no way in through the

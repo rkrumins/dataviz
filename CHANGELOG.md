@@ -115,6 +115,13 @@ used from a network it isn't limited to — even when it only asks about itself.
   outage door — can't create, rotate or renew a key: refused before the password is checked
   (`step_up_unavailable`, reason `passwords_off`), so a key never outlives the emergency it was
   made in. The create form says so up front.
+- **A break-glass account holds no keys.** Like a cloud account's root user, the account kept for
+  when nobody else can sign in shouldn't have anything running as it: a system account can't
+  create, rotate or renew a key, however it signed in (`step_up_unavailable`, reason
+  `system_account`), and keys it made before it was marked stop while it is one
+  (`api_key_owner_inactive`) and work again if the mark is removed. Nothing is revoked. The
+  inventory's **Owner suspended** tab is now **Owner inactive**. The seeded administrator is
+  marked on a fresh install, so make keys from a personal account.
 
 ### Upgrading
 

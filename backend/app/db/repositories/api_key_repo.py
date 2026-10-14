@@ -145,7 +145,13 @@ def status_expr(
     return case(
         (ApiKeyORM.revoked_at.is_not(None), "revoked"),
         (_expired_clause(now, max_lifetime_days), "expired"),
-        (or_(UserORM.deleted_at.is_not(None), UserORM.status != "active"), "owner_inactive"),
+        (
+            or_(
+                UserORM.deleted_at.is_not(None), UserORM.status != "active",
+                UserORM.is_system_account.is_(True),
+            ),
+            "owner_inactive",
+        ),
         (paused, "paused"),
         else_="active",
     )

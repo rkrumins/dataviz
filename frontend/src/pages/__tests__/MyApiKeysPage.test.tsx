@@ -119,6 +119,14 @@ describe('the list', () => {
         expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
     })
 
+    it('says a break-glass account holds no keys, and to make them from your own account', async () => {
+        options.mockResolvedValue(opts({ stepUpAvailable: false, stepUpReason: 'system_account' }))
+        render(<MyApiKeysPage />)
+        expect(await screen.findByText('A break-glass account holds no keys')).toBeInTheDocument()
+        expect(screen.getByText(/from your own account/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /create key/i })).toBeDisabled()
+    })
+
     it('reads older history on request', async () => {
         render(<MyApiKeysPage />)
         await screen.findByText('nightly sync')

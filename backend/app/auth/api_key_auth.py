@@ -85,7 +85,7 @@ _REFUSALS: dict[str, tuple[str, str]] = {
     "expired": ("api_key_expired", "This API key has expired."),
     "owner_inactive": (
         "api_key_owner_inactive",
-        "The account this API key belongs to is not active.",
+        "The account this API key belongs to is not active, or is a break-glass account.",
     ),
     "owner_reauth_required": (
         "owner_reauth_required",

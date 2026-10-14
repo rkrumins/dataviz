@@ -55,7 +55,7 @@ type Tab = AdminKeyStatus | 'all'
 const TABS: { value: Tab; label: string; count: (s: AdminApiKeyStats) => number }[] = [
     { value: 'active', label: 'Active', count: (s) => s.byStatus.active },
     { value: 'paused', label: 'Paused', count: (s) => s.byStatus.paused },
-    { value: 'owner_inactive', label: 'Owner suspended', count: (s) => s.byStatus.ownerInactive },
+    { value: 'owner_inactive', label: 'Owner inactive', count: (s) => s.byStatus.ownerInactive },
     { value: 'expired', label: 'Expired', count: (s) => s.byStatus.expired },
     { value: 'revoked', label: 'Revoked', count: (s) => s.byStatus.revoked },
     { value: 'all', label: 'All', count: (s) => s.total },

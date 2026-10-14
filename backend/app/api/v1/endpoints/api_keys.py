@@ -349,9 +349,10 @@ class ApiKeyOptions(_Model):
     #: ``step_up_unavailable`` until it can.
     step_up_available: bool = Field(True, alias="stepUpAvailable")
     #: Why not, when it is False: ``provider`` (a sign-in provider that cannot
-    #: confirm a fresh sign-in) or ``passwords_off`` (password sign-in is
-    #: switched off, so a password confirms nothing).
-    step_up_reason: Optional[Literal["provider", "passwords_off"]] = Field(
+    #: confirm a fresh sign-in), ``passwords_off`` (password sign-in is
+    #: switched off, so a password confirms nothing) or ``system_account`` (a
+    #: break-glass account, which holds no keys).
+    step_up_reason: Optional[Literal["provider", "passwords_off", "system_account"]] = Field(
         None, alias="stepUpReason",
     )
 
@@ -601,17 +602,30 @@ _PASSWORDS_OFF = (
     "Password sign-in is switched off here, so a password can't confirm it's you: API keys "
     "can't be created, rotated or renewed with one. Sign in with single sign-on to manage them."
 )
+_SYSTEM_ACCOUNT = (
+    "This is a break-glass account, kept for when nobody else can sign in, so it can't have API "
+    "keys. Make them from your own account."
+)
 
 
-def _minting_refusal(method: str, policy: _PolicyValues) -> Optional[HTTPException]:
+def _minting_refusal(
+    account: Optional[UserORM], method: str, policy: _PolicyValues,
+) -> Optional[HTTPException]:
     """Why this session may not confirm a new key at all, whatever it would
     prove — asked before anything is checked, so a right password and a wrong
     one get the same answer, and neither counts against the account.
 
-    Only the Passwords switch makes a password a lasting way in. The
-    emergency window opens password sign-in for a few hours while an
-    identity provider is down, and a Super Admin may use one during a
-    confirmed outage; a key made then would outlive both."""
+    A break-glass account holds no keys, however it signed in: like a cloud
+    account's root user, it is for when nobody else can get in, and a key
+    would let something run as it every day. And only the Passwords switch
+    makes a password a lasting way in. The emergency window opens password
+    sign-in for a few hours while an identity provider is down, and a Super
+    Admin may use one during a confirmed outage; a key made then would
+    outlive both."""
+    if account is not None and account.is_system_account:
+        return _refused(
+            "step_up_unavailable", _SYSTEM_ACCOUNT, method=method, reason="system_account",
+        )
     if method == "password" and not policy.passwords_allowed:
         return _refused(
             "step_up_unavailable", _PASSWORDS_OFF, method="password", reason="passwords_off",
@@ -708,7 +722,7 @@ async def _step_up(
     payload = _session_claims(request)
     account = await user_repo.get_user_by_id(session, user.id)
     how = _step_up_method(payload, account)
-    refusal = _minting_refusal(how, policy)
+    refusal = _minting_refusal(account, how, policy)
     if refusal is not None:
         raise refusal
     if how == "sso":
@@ -1075,7 +1089,7 @@ async def get_api_key_options(
             user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
         )).login_url
     fresh = False
-    refusal = _minting_refusal(method, policy)
+    refusal = _minting_refusal(account, method, policy)
     if refusal is None and method == "sso":
         # Past step-up now, or after signing in again — not "never, here".
         # A gateway that can be asked is asked when the form is submitted.

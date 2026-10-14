@@ -190,7 +190,10 @@ def lifecycle_refusal(
     """Why this key may not act now — ``revoked``, ``expired``,
     ``owner_inactive`` or ``owner_reauth_required`` — or ``None`` if it may.
 
-    The owner must still be someone who could sign in. With an SSO identity,
+    The owner must still be someone who could sign in, and not a break-glass
+    (system) account: one is kept for when nobody else can sign in, and
+    nothing should run as it day to day, so its keys stop while it is one —
+    and come back if it stops being one. With an SSO identity,
     that means their identity provider has vouched for them recently: the
     platform hears about a leaver only when they next try to sign in, so a
     key must not outlive that silence for long. With neither a password nor
@@ -201,7 +204,10 @@ def lifecycle_refusal(
     expiry = effective_expiry(key, max_lifetime_days=max_lifetime_days)
     if expiry is not None and expiry <= now:
         return "expired"
-    if owner.deleted_at is not None or owner.status != "active":
+    if (
+        owner.deleted_at is not None or owner.status != "active"
+        or getattr(owner, "is_system_account", False)
+    ):
         return "owner_inactive"
     if identity_count:
         if sso_signin_window_days is not None:

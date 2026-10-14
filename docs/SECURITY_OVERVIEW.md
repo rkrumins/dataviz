@@ -371,10 +371,12 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   stream ends after five minutes, and the client's reconnect (with `Last-Event-ID`) checks
   the key again.
 - **Checked on every request.** A revoked or expired key, a suspended owner, or a key used
-  from a network it isn't limited to is refused with `401`. So is the key of a person who signs
-  in through an identity provider and hasn't for a set time (30 days by default): the key
-  pauses, and resumes at their next sign-in, so a leaver's keys stop without anyone
-  remembering them. An owner left with no way to sign in pauses too.
+  from a network it isn't limited to is refused with `401`. So is the key of an owner marked as a
+  break-glass (system) account: one is kept for when nobody else can sign in, so nothing should
+  run as it, and it can't make keys either. So is the key of a person who signs in through an
+  identity provider and hasn't for a set time (30 days by default): the key pauses, and resumes
+  at their next sign-in, so a leaver's keys stop without anyone remembering them. An owner left
+  with no way to sign in pauses too.
 - **No cookies beside a key.** A request carrying a key has its cookies removed before any
   route sees them, so it acts as the key alone. It needs no CSRF token — a browser cannot add
   an `Authorization` header to a cross-site request without the API's consent — but a write

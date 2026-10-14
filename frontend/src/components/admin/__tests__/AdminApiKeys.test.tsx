@@ -80,7 +80,7 @@ describe('the inventory', () => {
         renderPage()
         const tabs = await screen.findByRole('tablist', { name: 'Status' })
         await waitFor(() => expect(within(tabs).getByRole('tab', { name: /paused/i })).toHaveTextContent('2'))
-        expect(within(tabs).getByRole('tab', { name: /owner suspended/i })).toHaveTextContent('1')
+        expect(within(tabs).getByRole('tab', { name: /owner inactive/i })).toHaveTextContent('1')
         expect(within(tabs).getByRole('tab', { name: /^all/i })).toHaveTextContent('31')
         await userEvent.click(within(tabs).getByRole('tab', { name: /expired/i }))
         await waitFor(() => expect(lastList()).toMatchObject({ status: 'expired', offset: 0 }))

@@ -260,6 +260,26 @@ async def test_a_suspended_owners_keys_stop_at_once(client, db_session):
     await _refused(client, key.headers, "api_key_owner_inactive")
 
 
+async def test_a_break_glass_accounts_keys_stop_while_it_is_one(client, db_session):
+    """A break-glass account is kept for when nobody else can sign in, and
+    nothing should run as it day to day. While an account is one, its keys
+    stop — reversibly: nothing is revoked, and unmarking it brings them back.
+    A key can still say what it is and why it stopped."""
+    key = await mint(db_session, views="read")
+    assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
+    owner = await db_session.get(UserORM, OWNER)
+    owner.is_system_account = True
+    await db_session.commit()
+    await _refused(client, key.headers, "api_key_owner_inactive")
+    described = await client.get("/api/v1/api-keys/self", headers=key.headers)
+    assert described.status_code == 200
+    assert (described.json()["status"], described.json()["userId"]) == ("owner_inactive", None)
+
+    owner.is_system_account = False
+    await db_session.commit()
+    assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
+
+
 async def test_an_sso_owner_who_stops_signing_in_has_their_keys_paused(client, db_session):
     db_session.add(user_row("usr_sso", password=False))
     db_session.add(RoleBindingORM(

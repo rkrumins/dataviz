@@ -122,8 +122,9 @@ export interface ApiKeyDetail extends ApiKey {
 export type ApiKeyLastUse = Pick<ApiKey, 'lastUsedAt' | 'lastUsedIp' | 'lastUsedUserAgent'>
 
 /** Why a sign-in cannot confirm a new key, when it cannot: its provider cannot
- *  confirm a fresh sign-in, or password sign-in is switched off. */
-export type StepUpReason = 'provider' | 'passwords_off'
+ *  confirm a fresh sign-in, password sign-in is switched off, or the account is
+ *  a break-glass account, which holds no keys. */
+export type StepUpReason = 'provider' | 'passwords_off' | 'system_account'
 
 export interface ApiKeyOptions {
     policy: {

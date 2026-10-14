@@ -290,13 +290,14 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
 
     owners = {
         "usr_pw": {}, "usr_nopw": {}, "usr_off": {"status": "suspended"}, "usr_deleted": {},
-        "usr_sso_fresh": {}, "usr_sso_stale": {}, "usr_sso_never": {},
+        "usr_sso_fresh": {}, "usr_sso_stale": {}, "usr_sso_never": {}, "usr_sys": {},
     }
-    passwords = {"usr_pw", "usr_off", "usr_deleted", "usr_sso_stale"}
+    passwords = {"usr_pw", "usr_off", "usr_deleted", "usr_sso_stale", "usr_sys"}
     users = {}
     for uid, extra in owners.items():
         users[uid] = await _user(db_session, uid, password=uid in passwords, **extra)
     users["usr_deleted"].deleted_at = ago(1)
+    users["usr_sys"].is_system_account = True
     last_login = {"usr_sso_fresh": ago(1), "usr_sso_stale": ago(40), "usr_sso_never": None}
     _idp(db_session)
     for uid, last in last_login.items():
@@ -333,5 +334,7 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
             )
             shown = _SHOWN.get(refusal, refusal)
             assert in_sql[key.id] == shown, (key.user_id, cap, window, key.expires_at)
+            if key.user_id == "usr_sys":
+                assert shown != "active", (cap, window, key.expires_at)
             seen.add(shown)
     assert seen == {"active", "paused", "owner_inactive", "expired", "revoked"}

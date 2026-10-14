@@ -238,6 +238,36 @@ async def _identity(db_session, kind: str) -> None:
     await db_session.commit()
 
 
+async def test_a_break_glass_account_makes_no_keys(client, db_session):
+    """Like a cloud account's root user, which should hold no access keys: a
+    break-glass account makes none, with its password or through single
+    sign-on, and the form says so up front. It can still end a key it has."""
+    existing = await mint(db_session, views="read")
+    owner = await db_session.get(UserORM, OWNER)
+    owner.is_system_account = True
+    await db_session.commit()
+    await _identity(db_session, "oidc")
+    password = _sign_in(client)
+    refusals = [
+        await _create(client, password),
+        await client.post(
+            f"/api/v1/me/api-keys/{existing.id}/rotate",
+            json={"currentPassword": PASSWORD}, headers=password,
+        ),
+    ]
+    sso = _sign_in(client, signin="sso", auth_time=int(time.time()) - 60, proven=True)
+    refusals.append(await _create(client, sso, currentPassword=None))
+    for refused in refusals:
+        assert refused.status_code == 403, refused.text
+        detail = refused.json()["detail"]
+        assert (detail["error"], detail["reason"]) == ("step_up_unavailable", "system_account")
+
+    options = (await client.get("/api/v1/me/api-keys/options")).json()
+    assert (options["stepUpAvailable"], options["stepUpReason"]) == (False, "system_account")
+    revoked = await client.delete(f"/api/v1/me/api-keys/{existing.id}", headers=sso)
+    assert revoked.status_code == 204, revoked.text
+
+
 async def test_with_passwords_off_a_proven_sso_sign_in_still_mints(client, db_session):
     await _identity(db_session, "oidc")
     await _passwords_off(db_session)

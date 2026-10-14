@@ -156,7 +156,7 @@ checked again each time.
 | 401 | `api_key_revoked` | Revoked. It will not work again. |
 | 401 | `api_key_expired` | Past its expiry, or older than your administrator's maximum. |
 | 401 | `owner_reauth_required` | Paused: you have not signed in through your identity provider for too long. Sign in and it resumes. |
-| 401 | `api_key_owner_inactive` | Your account is suspended. |
+| 401 | `api_key_owner_inactive` | Your account is suspended, deleted, or marked as a break-glass (system) account — which holds no keys. |
 | 401 | `api_key_ip_not_allowed` | Used from outside the networks it is limited to. |
 | 401 | `api_keys_disabled` | Your administrator has switched API keys off. |
 | 403 | `api_key_not_allowed` | This endpoint cannot be called with a key. |

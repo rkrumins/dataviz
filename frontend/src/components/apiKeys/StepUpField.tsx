@@ -16,6 +16,13 @@ import type { ApiKeyOptions, StepUpReason } from '@/services/apiKeyService'
 /** Why minting is refused when the sign-in cannot be confirmed, by the server's
  *  reason — shared with the page's banner. */
 export function stepUpUnavailable(reason?: StepUpReason | null): { title: string; body: string } {
+    if (reason === 'system_account') {
+        return {
+            title: 'A break-glass account holds no keys',
+            body: 'This is a break-glass account, kept for when nobody else can sign in, so it can’t have API keys — '
+                + 'any it has don’t work while it is one. Make them from your own account.',
+        }
+    }
     if (reason === 'passwords_off') {
         return {
             title: 'A password can’t confirm it’s you here',

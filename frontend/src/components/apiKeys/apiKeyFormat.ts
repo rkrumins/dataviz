@@ -37,7 +37,7 @@ export const STATUS_LABEL: Record<ApiKeyStatus, string> = {
     paused: 'Paused — sign in to resume',
     expired: 'Expired',
     revoked: 'Revoked',
-    owner_inactive: 'Owner suspended',
+    owner_inactive: 'Owner inactive',
     ip_not_allowed: 'Used from an address it does not allow',
 }
 
