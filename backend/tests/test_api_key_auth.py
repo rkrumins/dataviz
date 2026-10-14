@@ -423,10 +423,17 @@ async def test_no_key_is_honoured_while_authorization_is_switched_off(
 
 async def test_endpoints_off_the_surface_are_refused(client, db_session):
     key = await mint(db_session, views="write", data="write")
-    for path in ("/api/v1/users/me", "/api/v1/admin/users", "/api/v1/views/audience"):
-        response = await client.get(path, headers=key.headers)
-        assert response.status_code == 403, path
-        assert error(response) == "api_key_not_allowed", path
+    calls = [("GET", path) for path in (
+        "/api/v1/users/me", "/api/v1/admin/users", "/api/v1/views/audience",
+    )] + [
+        # Opening or closing the emergency password window: a door for
+        # people, never for a key.
+        (method, "/api/v1/admin/sso/config/password-fallback") for method in ("POST", "DELETE")
+    ]
+    for method, path in calls:
+        response = await client.request(method, path, headers=key.headers)
+        assert response.status_code == 403, (method, path)
+        assert error(response) == "api_key_not_allowed", (method, path)
         assert 'error="insufficient_scope"' in response.headers["www-authenticate"]
 
 
