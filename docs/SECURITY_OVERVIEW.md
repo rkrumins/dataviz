@@ -376,7 +376,10 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   run as it, and it can't make keys either. So is the key of a person who signs in through an
   identity provider and hasn't for a set time (30 days by default): the key pauses, and resumes
   at their next sign-in, so a leaver's keys stop without anyone remembering them. An owner left
-  with no way to sign in pauses too.
+  with no way to sign in pauses too, and a password is no way in while password sign-in is
+  switched off — an emergency window, which closes, doesn't count. Requests read that switch
+  from the cached sign-in posture, so it reaches them within 30 seconds; a server that can't
+  read the posture and has none cached takes passwords as on, as its sign-in page does.
 - **No cookies beside a key.** A request carrying a key has its cookies removed before any
   route sees them, so it acts as the key alone. It needs no CSRF token — a browser cannot add
   an `Authorization` header to a cross-site request without the API's consent — but a write

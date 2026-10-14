@@ -320,8 +320,11 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
     await db_session.flush()
 
     seen = set()
-    for cap, window in ((None, 30), (30, 30), (30, None), (None, None)):
-        base, status = api_key_repo._inventory(now, cap, window)
+    for cap, window, passwords in (
+        (None, 30, True), (30, 30, True), (30, None, True), (None, None, True),
+        (None, 30, False), (30, None, False),
+    ):
+        base, status = api_key_repo._inventory(now, cap, window, passwords)
         in_sql = dict((await db_session.execute(
             base.with_only_columns(ApiKeyORM.id, status)
         )).all())
@@ -331,10 +334,14 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
                 identity_count=int(key.user_id in last_login),
                 idp_last_login_at=last_login.get(key.user_id),
                 now=now, sso_signin_window_days=window, max_lifetime_days=cap,
+                passwords_allowed=passwords,
             )
             shown = _SHOWN.get(refusal, refusal)
-            assert in_sql[key.id] == shown, (key.user_id, cap, window, key.expires_at)
+            assert in_sql[key.id] == shown, (key.user_id, cap, window, passwords, key.expires_at)
             if key.user_id == "usr_sys":
+                assert shown != "active", (cap, window, key.expires_at)
+            if key.user_id == "usr_pw" and not passwords:
+                # A password is no way back in while password sign-in is off.
                 assert shown != "active", (cap, window, key.expires_at)
             seen.add(shown)
     assert seen == {"active", "paused", "owner_inactive", "expired", "revoked"}

@@ -280,6 +280,39 @@ async def test_a_break_glass_accounts_keys_stop_while_it_is_one(client, db_sessi
     assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
 
 
+async def test_with_passwords_off_a_password_is_no_way_back_in(client, db_session):
+    """An owner must still be someone who could sign in. With password
+    sign-in switched off, an owner whose only way in is a password has
+    none — not even the emergency window, which closes — so their keys
+    pause, like those of an SSO owner who stopped signing in. They resume
+    when the owner signs in through an identity provider, or when
+    passwords come back on."""
+    from backend.app.db.repositories import app_auth_config_repo
+
+    key = await mint(db_session, views="read")
+    assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
+    await app_auth_config_repo.update_config(db_session, allow_local_login=False)
+    await db_session.commit()
+    await _refused(client, key.headers, "owner_reauth_required")
+
+    db_session.add(IdpProviderORM(
+        id="idp_corp", slug="corp", display_name="Corp", kind="oidc",
+        settings="{}", linking_policy="strict",
+    ))
+    identity = UserIdentityORM(
+        user_id=OWNER, provider_id="idp_corp", external_id="sub-owner",
+        last_login_at=days_ago(0),
+    )
+    db_session.add(identity)
+    await db_session.commit()
+    assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
+
+    await db_session.delete(identity)
+    await app_auth_config_repo.update_config(db_session, allow_local_login=True)
+    await db_session.commit()
+    assert (await client.get("/api/v1/views/v_a_mine", headers=key.headers)).status_code == 200
+
+
 async def test_an_sso_owner_who_stops_signing_in_has_their_keys_paused(client, db_session):
     db_session.add(user_row("usr_sso", password=False))
     db_session.add(RoleBindingORM(

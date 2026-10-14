@@ -421,12 +421,16 @@ class LocalIdentityService:
         One read per request — the key, its owner and the owner's identity
         facts together — so revocation, expiry, suspension and the SSO pause
         take effect on the very next request, as they do for a session.
-        A malformed token is refused before any lookup.
+        Whether a password still counts as a way in comes from the platform
+        posture, cached, so switching Passwords off takes effect within the
+        cache's lifetime (30 s). A malformed token is refused before any
+        lookup.
         """
         if self._api_key_repo is None or not api_keys.looks_valid(token):
             raise ApiKeyRejected("malformed")
         token_hash = api_keys.hash_token(token)
         now = datetime.now(timezone.utc)
+        passwords_allowed = (await self._auth_config_provider.get()).allow_local_login
         refusal: Optional[ApiKeyRejected] = None
         identity: Optional[ApiKeyIdentity] = None
         try:
@@ -436,6 +440,7 @@ class LocalIdentityService:
                     raise ApiKeyRejected("unknown")
                 reason = _api_key_refusal(
                     row, now=now, client_ip=client_ip, policy=policy,
+                    passwords_allowed=passwords_allowed,
                 )
                 if reason is not None:
                     # Recorded even where the key is let through to describe
@@ -2835,6 +2840,7 @@ def _api_key_expiry(key, policy: ApiKeyPolicy) -> Optional[str]:
 
 def _api_key_refusal(
     row, *, now: datetime, client_ip: Optional[str], policy: ApiKeyPolicy,
+    passwords_allowed: bool,
 ) -> Optional[str]:
     """Why this key may not act now, or ``None`` if it may: the lifecycle
     rules shared with every page that shows a key's status, then the
@@ -2846,6 +2852,7 @@ def _api_key_refusal(
         now=now,
         sso_signin_window_days=policy.sso_signin_window_days,
         max_lifetime_days=policy.max_lifetime_days,
+        passwords_allowed=passwords_allowed,
     )
     if reason is None and not api_keys.address_allowed(client_ip, row.key.allowed_cidrs):
         return "ip_not_allowed"

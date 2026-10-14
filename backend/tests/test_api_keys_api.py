@@ -238,6 +238,16 @@ async def _identity(db_session, kind: str) -> None:
     await db_session.commit()
 
 
+async def test_with_passwords_off_a_password_owners_keys_show_paused(client, db_session):
+    """The owner's list agrees with what every request gets."""
+    key = await mint(db_session, views="read")
+    await _passwords_off(db_session)
+    _sign_in(client)
+    mine = await client.get("/api/v1/me/api-keys")
+    assert mine.status_code == 200, mine.text
+    assert {k["id"]: k["status"] for k in mine.json()}[key.id] == "paused"
+
+
 async def test_a_break_glass_account_makes_no_keys(client, db_session):
     """Like a cloud account's root user, which should hold no access keys: a
     break-glass account makes none, with its password or through single
@@ -853,6 +863,15 @@ async def admin(test_client, db_session, monkeypatch):
 def _ids(response) -> list[str]:
     assert response.status_code == 200, response.text
     return [item["id"] for item in response.json()["items"]]
+
+
+async def test_the_inventory_counts_keys_paused_while_passwords_are_off(admin, db_session):
+    await mint(db_session, OWNER, views="read")
+    await _passwords_off(db_session)
+    stats = (await admin.get("/api/v1/admin/api-keys/stats")).json()
+    assert (stats["byStatus"]["active"], stats["byStatus"]["paused"]) == (0, 1)
+    paused = await admin.get("/api/v1/admin/api-keys?status=paused")
+    assert len(_ids(paused)) == 1
 
 
 async def test_the_inventorys_counts_agree_with_its_lists(admin, db_session):

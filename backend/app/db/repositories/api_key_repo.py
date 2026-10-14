@@ -120,7 +120,7 @@ def _identity_facts():
 
 def status_expr(
     facts, *, now: datetime, max_lifetime_days: Optional[int],
-    sso_window_days: Optional[int],
+    sso_window_days: Optional[int], passwords_allowed: bool,
 ):
     """The status a key shows, in SQL — ``api_keys.lifecycle_refusal`` in its
     own order — so the inventory's filters and counts agree with every badge
@@ -137,7 +137,7 @@ def status_expr(
         UserORM.password_hash == "",
         UserORM.password_hash == disabled_password_hash(),
     )
-    paused = and_(~has_identity, no_password)
+    paused = and_(~has_identity, no_password) if passwords_allowed else ~has_identity
     if sso_window_days is not None:
         cutoff = (now - timedelta(days=sso_window_days)).isoformat()
         stale = or_(facts.c.last_login_at.is_(None), facts.c.last_login_at < cutoff)
@@ -157,12 +157,12 @@ def status_expr(
     )
 
 
-def _inventory(now: datetime, max_lifetime_days, sso_window_days):
+def _inventory(now: datetime, max_lifetime_days, sso_window_days, passwords_allowed):
     """Keys joined to what their status depends on, and that status."""
     facts = _identity_facts()
     status = status_expr(
         facts, now=now, max_lifetime_days=max_lifetime_days,
-        sso_window_days=sso_window_days,
+        sso_window_days=sso_window_days, passwords_allowed=passwords_allowed,
     )
     joined = (
         select(ApiKeyORM, UserORM)
@@ -511,6 +511,7 @@ async def list_all(
     order: str = "desc",
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
+    passwords_allowed: bool = True,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[tuple[ApiKeyORM, UserORM]], int]:
@@ -523,6 +524,7 @@ async def list_all(
     base = _filtered(
         owner_id=owner_id, status=status, focus=focus, unused_days=unused_days,
         search=search, max_lifetime_days=max_lifetime_days, sso_window_days=sso_window_days,
+        passwords_allowed=passwords_allowed,
     )
     total = int((await session.execute(
         select(func.count()).select_from(base.subquery())
@@ -576,10 +578,11 @@ def _filtered(
     search: Optional[str] = None,
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
+    passwords_allowed: bool = True,
 ):
     """The inventory, narrowed by ``list_all``'s filters."""
     now = _now()
-    base, key_status = _inventory(now, max_lifetime_days, sso_window_days)
+    base, key_status = _inventory(now, max_lifetime_days, sso_window_days, passwords_allowed)
     conditions = []
     if owner_id:
         conditions.append(ApiKeyORM.user_id == owner_id)
@@ -606,11 +609,12 @@ async def stats(
     search: Optional[str] = None,
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
+    passwords_allowed: bool = True,
 ) -> dict[str, int]:
     """The inventory's counts — per status, and per focus — in one row, over
     the same owner and search filters the list takes."""
     now = _now()
-    base, key_status = _inventory(now, max_lifetime_days, sso_window_days)
+    base, key_status = _inventory(now, max_lifetime_days, sso_window_days, passwords_allowed)
 
     def _count(condition):
         return func.coalesce(func.sum(case((condition, 1), else_=0)), 0)

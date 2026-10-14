@@ -56,7 +56,7 @@ function ApiKeysContent() {
     const keysEnabled = useFeature('apiKeysEnabled')
     // Paused keys resume through the provider the owner signs in with — by
     // name, when there is only the one.
-    const { identities } = useAccountIdentity()
+    const { identities, passwordSet } = useAccountIdentity()
     const provider = identities.length === 1 ? identities[0].provider.displayName : 'your identity provider'
     const [keys, setKeys] = useState<ApiKey[] | null>(null)
     const [options, setOptions] = useState<ApiKeyOptions | null>(null)
@@ -105,6 +105,9 @@ function ApiKeysContent() {
 
     const now = new Date()
     const paused = liveKeys.filter((k) => k.status === 'paused')
+    // With password sign-in off, a password is no way back in: for someone
+    // with nothing else, that is why their keys are paused.
+    const pausedForPasswords = options?.stepUpReason === 'passwords_off' && passwordSet === true && identities.length === 0
     const expiringSoon = liveKeys
         .filter((k) => k.status === 'active' && ['soon', 'urgent'].includes(expiryCountdown(k.expiresAt, now).tone))
         .sort((a, b) => (a.expiresAt ?? '').localeCompare(b.expiresAt ?? ''))
@@ -125,7 +128,9 @@ function ApiKeysContent() {
             icon: PauseCircle,
             tone: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
             title: paused.length === 1 ? `“${paused[0].name}” is paused` : `${paused.length} of your keys are paused`,
-            body: `Paused until you sign in through ${provider} again — nothing was revoked. Keys that act as you pause after ${options?.policy.ssoSignInWindowDays ? `${options.policy.ssoSignInWindowDays} days` : 'a while'} without a sign-in there.`,
+            body: pausedForPasswords
+                ? 'Paused while password sign-in is switched off, as a password is your only way in — nothing was revoked. Your keys resume when it is switched back on, or once you sign in through single sign-on.'
+                : `Paused until you sign in through ${provider} again — nothing was revoked. Keys that act as you pause after ${options?.policy.ssoSignInWindowDays ? `${options.policy.ssoSignInWindowDays} days` : 'a while'} without a sign-in there.`,
             action: resumeUrl ? (
                 <a href={resumeUrl} className={ACTION}>
                     <LogIn className="w-3.5 h-3.5" aria-hidden /> Sign in to resume

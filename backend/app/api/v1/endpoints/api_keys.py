@@ -485,6 +485,7 @@ def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str
         now=datetime.now(timezone.utc),
         sso_signin_window_days=policy.sso_window_days,
         max_lifetime_days=policy.max_lifetime_days,
+        passwords_allowed=policy.passwords_allowed,
     )
     return _STATUS_BY_REFUSAL.get(reason, reason)
 
@@ -1584,6 +1585,7 @@ class _InventoryFilters:
             owner_id=self.owner_id, status=self.status, focus=self.focus,
             unused_days=self.unused_days, search=self.q, sort=self.sort, order=self.order,
             max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
+            passwords_allowed=policy.passwords_allowed,
         )
 
 
@@ -1633,6 +1635,7 @@ async def api_key_stats(
     counts = await api_key_repo.stats(
         session, owner_id=owner_id, search=q,
         max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
+        passwords_allowed=policy.passwords_allowed,
     )
     return AdminApiKeyStats(
         total=counts["total"],

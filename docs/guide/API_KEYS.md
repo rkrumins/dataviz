@@ -155,7 +155,7 @@ checked again each time.
 | 401 | `invalid_api_key` | Not a key this platform issued, or mistyped. |
 | 401 | `api_key_revoked` | Revoked. It will not work again. |
 | 401 | `api_key_expired` | Past its expiry, or older than your administrator's maximum. |
-| 401 | `owner_reauth_required` | Paused: you have not signed in through your identity provider for too long. Sign in and it resumes. |
+| 401 | `owner_reauth_required` | Paused: you have not signed in through your identity provider for too long — or have no way to sign in, such as only a password while password sign-in is switched off. Sign in and it resumes. |
 | 401 | `api_key_owner_inactive` | Your account is suspended, deleted, or marked as a break-glass (system) account — which holds no keys. |
 | 401 | `api_key_ip_not_allowed` | Used from outside the networks it is limited to. |
 | 401 | `api_keys_disabled` | Your administrator has switched API keys off. |
@@ -178,6 +178,12 @@ have not signed in through it for a while — 30 days unless your administrator
 chose otherwise — and **resume** the next time you do. Nothing is revoked.
 This is how the keys of someone who has left, and so can no longer sign in,
 stop working without anyone having to remember them.
+
+If you sign in only with a password, your keys pause while your administrator
+has password sign-in switched off — an emergency window that lets passwords
+back in during an identity-provider outage doesn't count, since it closes —
+and resume when it is switched back on, or once you sign in through single
+sign-on. The switch reaches your keys within 30 seconds.
 
 Suspending an account stops its keys at once. Signing out everywhere or
 changing your password does **not** stop your keys: revoke them if one may

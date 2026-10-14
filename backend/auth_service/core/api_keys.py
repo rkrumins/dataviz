@@ -186,6 +186,7 @@ def lifecycle_refusal(
     now: datetime,
     sso_signin_window_days: Optional[int],
     max_lifetime_days: Optional[int],
+    passwords_allowed: bool,
 ) -> Optional[str]:
     """Why this key may not act now — ``revoked``, ``expired``,
     ``owner_inactive`` or ``owner_reauth_required`` — or ``None`` if it may.
@@ -197,7 +198,10 @@ def lifecycle_refusal(
     that means their identity provider has vouched for them recently: the
     platform hears about a leaver only when they next try to sign in, so a
     key must not outlive that silence for long. With neither a password nor
-    an identity, nobody can sign in as them at all.
+    an identity, nobody can sign in as them at all — and a password counts
+    only while password sign-in is switched on (``passwords_allowed``, the
+    Passwords switch; never the emergency window, which closes): with it
+    off, an owner with no identity has no lasting way in.
     """
     if key.revoked_at:
         return "revoked"
@@ -214,7 +218,7 @@ def lifecycle_refusal(
             last = parse_instant(idp_last_login_at)
             if last is None or now - last > timedelta(days=sso_signin_window_days):
                 return "owner_reauth_required"
-    elif not is_password_set(getattr(owner, "password_hash", None)):
+    elif not (passwords_allowed and is_password_set(getattr(owner, "password_hash", None))):
         return "owner_reauth_required"
     return None
 

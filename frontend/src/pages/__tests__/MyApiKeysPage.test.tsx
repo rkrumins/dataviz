@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MyApiKeysPage } from '../MyApiKeysPage'
 import { apiKey, inDays, options as opts, usage } from '@/components/apiKeys/__tests__/fixtures'
 
-const { list, options, revoke, get, rotate, notify, feature } = vi.hoisted(() => ({
+const { list, options, revoke, get, rotate, notify, feature, account } = vi.hoisted(() => ({
     list: vi.fn(),
     options: vi.fn(),
     revoke: vi.fn(),
@@ -18,6 +18,7 @@ const { list, options, revoke, get, rotate, notify, feature } = vi.hoisted(() =>
     rotate: vi.fn(),
     notify: vi.fn(),
     feature: { on: true },
+    account: { passwordSet: null as boolean | null },
 }))
 
 vi.mock('@/services/apiKeyService', async (importOriginal) => ({
@@ -30,6 +31,7 @@ vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     AccountCard: ({ children, title, blurb }: { children?: React.ReactNode; title?: string; blurb?: string }) => (
         <section aria-label={title}><p>{blurb}</p>{children}</section>
     ),
+    useAccountIdentity: () => ({ passwordSet: account.passwordSet, identities: [], refresh: async () => {} }),
 }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/lib/useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
@@ -42,6 +44,7 @@ beforeEach(() => {
     vi.clearAllMocks()
     sessionStorage.clear()
     feature.on = true
+    account.passwordSet = null
     list.mockResolvedValue([KEY, REVOKED])
     options.mockResolvedValue(opts())
     revoke.mockResolvedValue(undefined)
@@ -162,6 +165,18 @@ describe('what needs doing first', () => {
         expect(within(card).getByRole('button', { name: /^rotate$/i })).toBeInTheDocument()
         expect(within(card).queryByRole('button', { name: /renew/i })).not.toBeInTheDocument()
         expect(card).toHaveTextContent(/nothing was revoked/i)
+    })
+
+    it('says why a password-only owner\'s keys are paused while password sign-in is off', async () => {
+        account.passwordSet = true
+        options.mockResolvedValue(opts({ stepUpAvailable: false, stepUpReason: 'passwords_off', ssoSignInUrl: null }))
+        list.mockResolvedValue([apiKey({ status: 'paused' })])
+        render(<MyApiKeysPage />)
+        const banner = (await screen.findByText(/“nightly sync” is paused/i)).closest('li') as HTMLElement
+        expect(banner).toHaveTextContent(/while password sign-in is switched off/i)
+        expect(banner).toHaveTextContent(/switched back on, or once you sign in through single sign-on/i)
+        expect(banner).toHaveTextContent(/nothing was revoked/i)
+        expect(banner).not.toHaveTextContent(/30 days/)
     })
 
     it('offers nothing to sign in through when there is nowhere to sign in', async () => {

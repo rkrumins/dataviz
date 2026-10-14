@@ -122,6 +122,13 @@ used from a network it isn't limited to — even when it only asks about itself.
   (`api_key_owner_inactive`) and work again if the mark is removed. Nothing is revoked. The
   inventory's **Owner suspended** tab is now **Owner inactive**. The seeded administrator is
   marked on a fresh install, so make keys from a personal account.
+- **With Passwords off, a password is no way back in.** A key pauses when its owner has no way to
+  sign in; an owner with no single sign-on identity now has none while **Passwords** is switched
+  off — the emergency window closes, so it doesn't count — and their keys pause
+  (`owner_reauth_required`) until passwords come back on or they sign in through single sign-on.
+  Nothing is revoked. Requests read the switch from the cached sign-in posture, within 30 seconds;
+  a server that can't read the posture and has none cached takes passwords as on. The owner's page
+  and the inventory show the keys as paused.
 
 ### Upgrading
 
