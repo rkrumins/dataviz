@@ -42,6 +42,7 @@ from backend.app.auth import api_key_errors, api_key_surface
 from backend.app.common import activity_context
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db import engine as db_engine
+from backend.app.jobs.metrics import increment as metrics_increment
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.core.api_keys import (
@@ -97,6 +98,29 @@ _REFUSALS: dict[str, tuple[str, str]] = {
     ),
 }
 
+#: What ``api_key_requests_total`` counts a refused key request as: the code
+#: the caller was refused with. A fixed set, so the series stay bounded
+#: however many keys there are; a code missing here counts as ``other``.
+_COUNTED_REFUSALS = frozenset({
+    *(code for code, _message in _REFUSALS.values()),
+    "api_keys_disabled", "api_keys_unavailable", "rate_limited",
+    "api_key_not_allowed", "api_key_read_only", "api_key_out_of_scope",
+})
+
+
+def _count(refusal: Optional[HTTPException]) -> None:
+    """One request made with a key, by its outcome — for operators, so a wave
+    of paused keys or a stranger guessing tokens shows on a graph. Never by
+    key: that is the activity log's job, and an unbounded label."""
+    if refusal is None:
+        outcome = "accepted"
+    elif refusal.status_code == status.HTTP_404_NOT_FOUND:
+        outcome = "not_found"  # the fence: named something outside the path's workspace
+    else:
+        code = refusal.detail.get("error") if isinstance(refusal.detail, dict) else None
+        outcome = code if code in _COUNTED_REFUSALS else "other"
+    metrics_increment("api_key_requests_total", outcome=outcome)
+
 
 @dataclass(frozen=True)
 class ApiKeyContext:
@@ -142,7 +166,9 @@ async def authenticate(request: Request) -> Optional[ApiKeyContext]:
         context = await _authenticate(request, token)
     except HTTPException as exc:
         request.state.api_key = exc
+        _count(exc)
         raise
+    _count(None)
     request.state.api_key = context
     request.state.api_key_id = context.key_id
     request.state.user_id = context.user.id

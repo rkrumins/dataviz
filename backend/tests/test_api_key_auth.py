@@ -29,6 +29,7 @@ from backend.app.db.models import (
     UserORM,
 )
 from backend.app.db.repositories import api_key_repo
+from backend.app.jobs import metrics
 from backend.app.services import api_key_service, api_key_usage
 from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.services.permission_service import PermissionClaims
@@ -941,6 +942,57 @@ async def test_every_request_a_key_makes_is_counted_by_what_became_of_it(client,
     assert api_key_usage.recorder._pending == {
         (key.id, today): [5, 1, 1, 2], (expired.id, today): [1, 0, 1, 0],
     }
+
+
+class _Counted:
+    """A metrics backend keeping what ``api_key_requests_total`` is told."""
+
+    def __init__(self):
+        self.outcomes: list[str] = []
+        self.labels: set[str] = set()
+
+    def increment(self, name, labels, value=1.0):
+        if name == "api_key_requests_total":
+            self.labels |= set(labels)
+            self.outcomes += [labels["outcome"]] * int(value)
+
+    def observe(self, name, labels, value):
+        pass
+
+    def gauge_set(self, name, labels, value):
+        pass
+
+    def gauge_inc(self, name, labels, value=1.0):
+        pass
+
+    def gauge_dec(self, name, labels, value=1.0):
+        pass
+
+
+async def test_operators_count_key_requests_by_outcome_never_by_key(
+    client, db_session, monkeypatch,
+):
+    """``api_key_requests_total{outcome}``: every request made with a key,
+    once — accepted, or the code it was refused with. Never a key's id: a
+    fixed set of outcomes keeps the series bounded however many keys exist."""
+    counted = _Counted()
+    monkeypatch.setattr(metrics, "_backend", counted)
+    key = await mint(db_session, views="read")
+    expired = await mint(db_session, views="read", expires_at=days_ago(1))
+    stranger = {"Authorization": f"Bearer {api_keys.generate().token}"}
+
+    await client.get("/api/v1/views/v_a_mine", headers=key.headers)
+    await client.get("/api/v1/admin/users", headers=key.headers)
+    await client.put("/api/v1/views/v_a_mine", json={"name": "x"}, headers=key.headers)
+    await client.get("/api/v1/views/v_a_mine", headers=expired.headers)
+    await client.get("/api/v1/views/v_a_mine", headers=stranger)
+    await client.get("/api/v1/views/v_a_ws")   # no key: a browser's business, not counted here
+
+    assert counted.outcomes == [
+        "accepted", "api_key_not_allowed", "api_key_read_only", "api_key_expired",
+        "invalid_api_key",
+    ]
+    assert counted.labels == {"outcome"}
 
 
 # ── Imports that name a view ────────────────────────────────────────

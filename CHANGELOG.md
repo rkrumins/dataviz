@@ -77,6 +77,12 @@ confirmed.
 administrator revokes it (with their note), and when a revoked key is presented again or a key is
 used from a network it isn't limited to — even when it only asks about itself.
 
+**Key traffic on your dashboards.** `api_key_requests_total{outcome}` on the API's `/metrics` counts
+every request made with a key: accepted, or the code it was refused with. A wave of paused keys, a
+stranger guessing tokens or key checks failing can now raise an alert, and Observability suggests
+three. The count is never per key, so the series stay bounded; each key's own use is under
+**Administration → API keys**.
+
 ### Changed
 
 - **The API Guide leads with keys.** It, and the search and versioning references, show the key
