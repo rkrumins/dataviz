@@ -6,7 +6,9 @@ stand on — so both are pinned here, below any HTTP.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +41,16 @@ def test_service_account_keys_have_their_own_prefix():
 def test_keys_do_not_repeat():
     tokens = {api_keys.generate().token for _ in range(500)}
     assert len(tokens) == 500
+
+
+def test_the_pattern_the_guide_gives_secret_scanners_finds_every_key():
+    """The API Keys guide tells people what to add to their secret scanner: it
+    must go on finding every key this code makes."""
+    guide = (Path(__file__).parents[2] / "docs" / "guide" / "API_KEYS.md").read_text(encoding="utf-8")
+    found = re.search(r"^(nxpat_\S+)$", guide, re.MULTILINE)
+    assert found, "the guide no longer gives secret scanners a pattern"
+    pattern = re.compile(found.group(1))
+    assert all(pattern.fullmatch(api_keys.generate().token) for _ in range(500))
 
 
 def test_only_the_hash_is_derived_and_it_is_stable():

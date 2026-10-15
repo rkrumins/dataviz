@@ -143,6 +143,10 @@ used from a network it isn't limited to — even when it only asks about itself.
   Nothing is revoked. Requests read the switch from the cached sign-in posture, within 30 seconds;
   a server that can't read the posture and has none cached takes passwords as on. The owner's page
   and the inventory show the keys as paused.
+- **Secret scanners can stop a key being committed.** The API Keys guide gives the pattern every
+  key matches, `nxpat_[0-9A-Za-z]{38}`, to add to GitHub secret scanning with push protection,
+  gitleaks or GitGuardian. A test keeps it matching what the server issues. The guide also says a
+  key is read only from `Authorization`, so a proxy that sets or strips that header stops keys.
 
 ### Upgrading
 

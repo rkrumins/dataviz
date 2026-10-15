@@ -117,6 +117,12 @@ curl -H "Authorization: Bearer nxpat_…" \
 Never put a key in a URL: addresses end up in logs and browser history. Keys
 in a query string are not accepted.
 
+A key is read from this header and nowhere else. If a proxy or company
+gateway in front of the API sets, replaces or strips `Authorization` — some
+single sign-on proxies put their own token there — your key never arrives.
+Ask your administrator for a route to the API that passes the header through
+untouched.
+
 To check a key without changing anything, ask it about itself:
 
 ```bash
@@ -234,6 +240,18 @@ you find a key where it should not be, end it:
 ```bash
 curl -X DELETE -H "Authorization: Bearer nxpat_…" https://your-host/api/v1/api-keys/self
 ```
+
+Better still, stop a key reaching a repository at all. Every key is `nxpat_`
+followed by 38 letters and digits, the last six a checksum of the rest, so
+this pattern finds one:
+
+```text
+nxpat_[0-9A-Za-z]{38}
+```
+
+Add it as a custom pattern to GitHub secret scanning — with push protection
+on, a push that contains a key is blocked — or as a rule for gitleaks or
+GitGuardian.
 
 ---
 
