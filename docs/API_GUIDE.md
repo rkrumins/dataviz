@@ -461,7 +461,7 @@ views you can read and imports into each — a dry run unless you pass `--apply`
 checkout of the repository; it needs only Python's standard library:
 
 ```bash
-export SYNODIC_BASE_URL=$B SYNODIC_EMAIL=you@example.com     # it asks for the password
+export SYNODIC_BASE_URL=$B SYNODIC_API_KEY=nxpat_…     # a key that may change views; or SYNODIC_EMAIL, and it asks for the password
 python -m backend.scripts.publish_view_library governance.library.json --data-source "$DS"
 python -m backend.scripts.publish_view_library governance.library.json --data-source "$DS" --apply
 ```

@@ -6,9 +6,14 @@ data source is therefore a fan-out. The script lists the views of the data sourc
 (``GET /api/v1/views/?dataSourceId=…``) and imports the pack into each one
 (``POST /api/v1/views/{id}/library/import``), as the Property Manager's Import does for one view.
 
-There are no API tokens, so the script signs in with an email and password. The session comes back
-as cookies, and every write echoes the ``nx_csrf`` cookie as the ``X-CSRF-Token`` header. The
-password is read from ``--password``, ``SYNODIC_PASSWORD`` or a prompt, and is never printed.
+With an API key that may change views in ``SYNODIC_API_KEY``, nothing signs in: the key is checked
+first (``GET /api/v1/api-keys/self``), so a paused, expired or revoked one stops the run before any
+view, and every request then carries it as ``Authorization: Bearer``. The key is read only from the
+environment, never from the command line, where others on the machine could see it, and is never
+printed. Without one, the script signs in with an email and password, which needs password sign-in
+switched on. The session comes back as cookies, and every write echoes the ``nx_csrf`` cookie as
+the ``X-CSRF-Token`` header. The password is read from ``--password``, ``SYNODIC_PASSWORD`` or a
+prompt, and is never printed.
 
 A run is a dry run unless ``--apply`` is given: each view answers what the import would do, and
 nothing changes. Only the standard library is used, so the script runs from any machine with
@@ -17,14 +22,14 @@ single file.
 
 Usage::
 
-    export SYNODIC_EMAIL=you@example.com SYNODIC_PASSWORD=…
+    export SYNODIC_API_KEY=nxpat_…   # or: export SYNODIC_EMAIL=you@example.com SYNODIC_PASSWORD=…
     python -m backend.scripts.publish_view_library pack.library.json --view view_abc
     python -m backend.scripts.publish_view_library pack.library.json --data-source ds_abc
     python -m backend.scripts.publish_view_library pack.library.json --data-source ds_abc --apply
 
 Exit status: 0 when every view took the pack with nothing refused; 1 when a view refused an item or
 answered with an HTTP error, or the data source has no view you can read; 2 when the arguments, the
-pack file or the sign-in are wrong.
+pack file, the API key or the sign-in are wrong.
 """
 from __future__ import annotations
 
@@ -51,7 +56,7 @@ _LOCALHOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 class PublishError(Exception):
-    """A pack that isn't one, or a sign-in that didn't take."""
+    """A pack that isn't one, or a sign-in or API key that didn't take."""
 
 
 class HttpError(Exception):
@@ -89,10 +94,12 @@ def _detail(raw: bytes) -> str:
 
 
 class Api:
-    """The calls a publish makes, on one signed-in session."""
+    """The calls a publish makes, on one signed-in session or with one API key."""
 
-    def __init__(self, base_url: str, *, handlers: Sequence[urllib.request.BaseHandler] = ()) -> None:
+    def __init__(self, base_url: str, *, api_key: Optional[str] = None,
+                 handlers: Sequence[urllib.request.BaseHandler] = ()) -> None:
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self.jar = http.cookiejar.CookieJar(policy=_CookiePolicy())
         self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), *handlers)
 
@@ -111,6 +118,8 @@ class Api:
         request.add_header("Accept", "application/json")
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        if self.api_key:
+            request.add_header("Authorization", f"Bearer {self.api_key}")
         token = self.csrf_token()
         if method != "GET" and token:
             request.add_header("X-CSRF-Token", token)
@@ -142,6 +151,23 @@ def sign_in(api: Api, email: str, password: str) -> None:
     api.call("POST", "/api/v1/auth/login", body={"email": email, "password": password})
     if api.csrf_token() is None:
         raise PublishError("signed in, but no nx_csrf cookie came back: is --base-url the API's address?")
+
+
+# What ``GET /api/v1/api-keys/self`` calls a key that can't act, said plainly.
+_KEY_STATUS = {
+    "paused": "is paused until its owner signs in again",
+    "expired": "has expired",
+    "owner_inactive": "belongs to an account that isn't active",
+}
+
+
+def check_key(api: Api) -> None:
+    """Ask the key about itself, the one route a key that can't act still answers: one that is
+    paused, expired or revoked stops here, before any view, as a wrong password does."""
+    key = api.call("GET", "/api/v1/api-keys/self") or {}
+    status = key.get("status")
+    if status != "active":
+        raise PublishError(f"API key “{key.get('name')}” {_KEY_STATUS.get(status, f'is {status}')}")
 
 
 def views_of_data_source(api: Api, data_source_id: str) -> List[Dict[str, str]]:
@@ -219,7 +245,9 @@ def render(outcomes: List[Outcome], *, apply: bool) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Publish a view library pack (display rules and saved queries) to one view, "
-                    "or to every view of a data source. A dry run unless --apply is given.")
+                    "or to every view of a data source. A dry run unless --apply is given. Uses "
+                    "the API key in $SYNODIC_API_KEY when it is set; otherwise signs in with "
+                    "--email and a password.")
     parser.add_argument("pack", help="the .library.json file to publish")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--view", metavar="VIEW_ID", help="publish to this view")
@@ -238,14 +266,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="who signs in (default: $SYNODIC_EMAIL)")
     parser.add_argument("--password", help="their password (default: $SYNODIC_PASSWORD, else a prompt)")
     args = parser.parse_args(argv)
-    if not args.email:
-        parser.error("give --email or set SYNODIC_EMAIL")
+    api_key = os.environ.get("SYNODIC_API_KEY")
+    if not api_key and not args.email:
+        parser.error("set SYNODIC_API_KEY, or give --email or set SYNODIC_EMAIL")
 
     try:
         pack = read_pack(args.pack)
-        password = args.password or os.environ.get("SYNODIC_PASSWORD") or getpass.getpass("Password: ")
-        api = Api(args.base_url)
-        sign_in(api, args.email, password)
+        api = Api(args.base_url, api_key=api_key)
+        if api_key:
+            check_key(api)
+        else:
+            password = args.password or os.environ.get("SYNODIC_PASSWORD") or getpass.getpass("Password: ")
+            sign_in(api, args.email, password)
     except (PublishError, HttpError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

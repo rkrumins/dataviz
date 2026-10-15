@@ -813,6 +813,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_FORCE` | (empty) | `backend/scripts/docker_seed.py` |
 | `SEED_SCALE` | `1` | `backend/scripts/docker_seed.py` |
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
+| `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |

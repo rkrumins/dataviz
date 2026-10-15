@@ -1,9 +1,10 @@
 """The library publish script against a stand-in server, through its real HTTP stack.
 
 A urllib handler answers in place of the network, so the script's cookie jar, CSRF header and
-error handling run as they would against the API: it signs in, echoes the CSRF cookie on every
-write, dry-runs unless told to apply, fans a data source out to every view the list returns, and
-exits non-zero when anything is refused.
+error handling run as they would against the API: it signs in — or, given an API key, checks the
+key and sends it instead — echoes the CSRF cookie on every write, dry-runs unless told to apply,
+fans a data source out to every view the list returns, and exits non-zero when anything is
+refused.
 """
 from __future__ import annotations
 
@@ -28,6 +29,10 @@ PACK = {
     "savedQueries": [{"name": "Tables", "predicate": {"kind": "entityType", "values": ["table"]}}],
 }
 VIEWS = [{"id": "v1", "name": "Finance"}, {"id": "v2", "name": "Sales"}, {"id": "v3", "name": "Ops"}]
+KEY = "nxpat_" + "a" * 38
+PAUSED_KEY = "nxpat_" + "b" * 38
+#: What ``GET /api/v1/api-keys/self`` says of each key the stand-in knows.
+KEYS = {KEY: "active", PAUSED_KEY: "paused"}
 
 
 def _answer(added: int = 2, refused: int = 0, **over) -> dict:
@@ -67,8 +72,14 @@ class FakeApi(urllib.request.HTTPHandler):
                 "nx_access=access-token; Path=/; HttpOnly",
                 f"{self.csrf_cookie}=csrf-token; Path=/",
             ]
-        signed_in = "nx_access=access-token" in r["headers"].get("cookie", "")
-        if not signed_in:
+        key = r["headers"].get("authorization", "").removeprefix("Bearer ") or None
+        if key is not None:
+            if key not in KEYS:
+                return 401, {"detail": {"error": "invalid_api_key",
+                                        "message": "The API key is not valid."}}, []
+            if r["path"] == "/api/v1/api-keys/self" and r["method"] == "GET":
+                return 200, {"id": "key_1", "name": "ci publisher", "status": KEYS[key]}, []
+        elif "nx_access=access-token" not in r["headers"].get("cookie", ""):
             return 401, {"detail": "Not authenticated"}, []
         if r["path"] == "/api/v1/views/" and r["method"] == "GET":
             offset = int(r["query"].get("offset", 0))
@@ -77,7 +88,8 @@ class FakeApi(urllib.request.HTTPHandler):
             return 200, {"items": page, "total": len(self.views), "hasMore": more,
                          "nextOffset": offset + 2 if more else None}, []
         if r["path"].endswith("/library/import") and r["method"] == "POST":
-            if r["headers"].get("x-csrf-token") != "csrf-token":
+            # A key request carries no session to forge, so no CSRF token either.
+            if key is None and r["headers"].get("x-csrf-token") != "csrf-token":
                 return 403, {"detail": {"error": "csrf_failed",
                                         "message": "CSRF token missing or invalid"}}, []
             view_id = r["path"].split("/")[4]
@@ -112,12 +124,32 @@ def run(monkeypatch, capsys):
     """Run the script against ``server``: (exit status, stdout, stderr)."""
     monkeypatch.setenv("SYNODIC_PASSWORD", PASSWORD)
     monkeypatch.delenv("SYNODIC_EMAIL", raising=False)
+    monkeypatch.delenv("SYNODIC_API_KEY", raising=False)
 
     def go(server: FakeApi, *args: str):
-        monkeypatch.setattr(script, "Api", lambda base_url: _RealApi(base_url, handlers=(server,)))
+        monkeypatch.setattr(script, "Api",
+                            lambda base_url, **kw: _RealApi(base_url, handlers=(server,), **kw))
         status = script.main([*args, "--base-url", BASE, "--email", "me@example.com"])
         out, err = capsys.readouterr()
         assert PASSWORD not in out + err
+        return status, out, err
+
+    return go
+
+
+@pytest.fixture
+def run_with_key(monkeypatch, capsys):
+    """As ``run``, with an API key in ``SYNODIC_API_KEY`` and no email or password anywhere."""
+    monkeypatch.delenv("SYNODIC_EMAIL", raising=False)
+    monkeypatch.delenv("SYNODIC_PASSWORD", raising=False)
+
+    def go(server: FakeApi, key: str, *args: str):
+        monkeypatch.setenv("SYNODIC_API_KEY", key)
+        monkeypatch.setattr(script, "Api",
+                            lambda base_url, **kw: _RealApi(base_url, handlers=(server,), **kw))
+        status = script.main([*args, "--base-url", BASE])
+        out, err = capsys.readouterr()
+        assert key not in out + err
         return status, out, err
 
     return go
@@ -187,6 +219,34 @@ def test_a_wrong_password_stops_before_any_view(run, pack_file, monkeypatch):
     assert status == 2
     assert "HTTP 401: Invalid email or password" in err
     assert [r["path"] for r in server.requests] == ["/api/v1/auth/login"]
+
+
+def test_an_api_key_publishes_without_signing_in(run_with_key, pack_file):
+    """With an API key, nothing signs in — so it works where password sign-in is off. The key is
+    checked first, then every request carries it, and no write needs a CSRF token."""
+    server = FakeApi()
+    status, out, _ = run_with_key(server, KEY, str(pack_file), "--data-source", "ds1", "--apply")
+
+    assert status == 0
+    assert server.requests[0]["path"] == "/api/v1/api-keys/self"
+    assert "/api/v1/auth/login" not in [r["path"] for r in server.requests]
+    assert all(r["headers"]["authorization"] == f"Bearer {KEY}" for r in server.requests)
+    assert not any("x-csrf-token" in r["headers"] for r in server.requests)
+    assert [r["path"].split("/")[4] for r in _imports(server)] == ["v1", "v2", "v3"]
+    assert "Nothing changed" not in out
+
+
+@pytest.mark.parametrize("key, says", [
+    (PAUSED_KEY, "is paused until its owner signs in again"),
+    ("nxpat_" + "c" * 38, "HTTP 401: The API key is not valid."),
+])
+def test_a_key_that_cannot_act_stops_before_any_view(run_with_key, pack_file, key, says):
+    server = FakeApi()
+    status, _, err = run_with_key(server, key, str(pack_file), "--data-source", "ds1")
+
+    assert status == 2
+    assert says in err
+    assert [r["path"] for r in server.requests] == ["/api/v1/api-keys/self"]
 
 
 def test_a_file_that_isnt_a_pack_is_refused_before_signing_in(run, tmp_path):

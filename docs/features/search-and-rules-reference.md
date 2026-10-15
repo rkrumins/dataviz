@@ -622,14 +622,17 @@ with open("tiering.library.json", "w", encoding="utf-8") as f:
 
 ### Dry-run, then apply, to one View
 
-`backend/scripts/publish_view_library.py` signs in, imports a pack and prints
-what each View did. It uses only the Python standard library, so it runs from
-any machine with Python 3.9 or later — from the repository as a module, or
-copied on its own.
+`backend/scripts/publish_view_library.py` imports a pack and prints what each
+View did. It uses only the Python standard library, so it runs from any
+machine with Python 3.9 or later — from the repository as a module, or copied
+on its own. Give it an [API key](/guide/api-keys) that may change views: it
+checks the key, then sends it with every request, and nothing signs in, so it
+works where password sign-in is off. Without a key it signs in with an email
+and password.
 
 ```bash
 export SYNODIC_BASE_URL=https://lineage.example.com
-export SYNODIC_EMAIL=you@example.com SYNODIC_PASSWORD='…'   # or --email / --password; prompted when unset
+export SYNODIC_API_KEY=nxpat_…   # or SYNODIC_EMAIL and SYNODIC_PASSWORD (or --email / --password; prompted when unset)
 
 python -m backend.scripts.publish_view_library tiering.library.json --view view_abc           # dry run
 python -m backend.scripts.publish_view_library tiering.library.json --view view_abc --apply   # import
@@ -642,7 +645,8 @@ python -m backend.scripts.publish_view_library tiering.library.json --view view_
 | `--apply` | off | Import. Without it the run is a dry run and nothing changes |
 | `--branch BRANCH_ID` | — | Write the rules to this draft of each View. The id isn't checked: a wrong one makes rules nobody sees |
 | `--base-url` | `$SYNODIC_BASE_URL`, else `http://localhost:8000` | The API |
-| `--email` / `--password` | `$SYNODIC_EMAIL` / `$SYNODIC_PASSWORD`, else a prompt | The password is never printed |
+| `$SYNODIC_API_KEY` | — | An API key to use instead of signing in. Read only from the environment, so it stays off command lines, and never printed. A paused, expired or revoked key stops the run before any View |
+| `--email` / `--password` | `$SYNODIC_EMAIL` / `$SYNODIC_PASSWORD`, else a prompt | Used when no API key is set. The password is never printed |
 
 ### Publish a pack to every view of a data source
 

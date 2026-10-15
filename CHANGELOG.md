@@ -84,6 +84,10 @@ used from a network it isn't limited to — even when it only asks about itself.
   keep working unchanged.
 - **Sign out everywhere** and **End sessions** say that API keys keep working, and where to revoke
   them.
+- **`publish_view_library.py` takes an API key.** With `SYNODIC_API_KEY` set, the view library
+  publisher checks the key and sends it instead of signing in, so it works where password sign-in
+  is off. The key is read only from the environment, never from the command line. Without one, it
+  signs in with an email and password as before.
 
 ### Security
 
@@ -186,7 +190,6 @@ used from a network it isn't limited to — even when it only asks about itself.
 - **The inventory's counts take a moment on a large deployment.** A key's status depends on its
   owner's latest identity-provider sign-in, read for every owner: measured on Postgres 16, the
   counts take about 0.4 seconds at 100,000 keys from 30,000 owners with a million identities.
-- `publish_view_library.py` still signs in with a password.
 
 ---
 
