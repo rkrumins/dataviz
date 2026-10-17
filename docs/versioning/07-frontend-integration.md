@@ -231,7 +231,7 @@ for every canvas (mounted once in `CanvasRouter`). It renders **nothing** for a 
 source, and an **"Enable version control"** empty state when `needsSeed` (no graph, or a genesis-only
 non-blank graph — managers only; a `kind === 'blank'` model is excluded because it's genesis-only by
 design) (`CanvasVersioningBar.tsx:98-132`). On a draft it shows an amber strip: `BranchSwitcher`,
-`RefreshingBadge`, `AggregationSyncChip`, the committed `ChangeCountChips` + an *"N unsaved"* staged
+`RefreshingBadge`, `ReadRouteChip` (the watermark's `readRoute`: "Serving from FalkorDB · provider" or "Serving from Postgres (catching up)", plus "· draft overlay"; on main it shows only while Postgres serves), `AggregationSyncChip`, the committed `ChangeCountChips` + an *"N unsaved"* staged
 hint (`:162-185`), `ViewPrIndicator`, a **Reviews** button, the committed-diff `ChangeHighlightControl`
 (toggles `committedDiffHidden`), **Publish** (`CommitDialog`), and **Discard** (`useAbandonDraft`). A
 `PullBeforeMergeBanner` appears when the draft is `behindMain` (`:84-87, 228-236`).

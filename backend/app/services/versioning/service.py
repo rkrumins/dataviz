@@ -2583,6 +2583,11 @@ class GraphVersioningService:
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": projected >= committed,
+                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
+                # while the projection holds the head, else Postgres; a draft always overlays
+                # whatever serves main.
+                "read_route": {"main": "falkordb" if projected >= committed else "postgres",
+                               "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,

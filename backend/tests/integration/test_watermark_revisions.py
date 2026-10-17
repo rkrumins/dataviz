@@ -43,6 +43,7 @@ async def _run(data_sources: dict) -> None:
         await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
         wm = (await c.get(f"{ws1}/graphs/{gid}/watermark")).json()
         assert wm["fresh"] is True
+        assert wm["readRoute"] == {"main": "falkordb", "drafts": "overlay"}
         assert wm["projectedRevision"]["commitId"] == published["commitId"] == wm["committedRevision"]["commitId"]
         assert (await svc.projection_watermark(gid))["committed_revision"]["commit_id"] == published["commitId"]
 

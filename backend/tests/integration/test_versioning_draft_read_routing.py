@@ -19,7 +19,9 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning import config as vconfig
+from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 from backend.app.services.context_engine import ContextEngine
@@ -44,7 +46,9 @@ async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     ds = "ds_" + os.urandom(4).hex()
-    G = await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u")
+    # Pinned to a key, so the projector (a fake FalkorDB below) can catch it up.
+    G = await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u",
+                               falkor_graph_name="gvt_" + os.urandom(3).hex())
     gid, main = G["graph_id"], G["main_branch_id"]
     await svc.apply_ops(graph_id=gid, actor="u", message="seed", ops=[
         {"op": "create", "entity_kind": "node", "entity_id": "N1",
@@ -69,6 +73,16 @@ async def _run() -> None:
         assert isinstance(eng.provider, DraftOverlayProvider)
         assert eng.provider._branch == draft and eng._branch_id == draft
         assert isinstance(eng.provider._base, VersionedBranchProvider) and eng.provider._base._branch == main
+
+        # The watermark's readRoute names the store this rule picks, from the same real watermark:
+        # stale main is served from Postgres, and a draft always overlays whatever serves main.
+        assert (await svc.projection_watermark(gid))["read_route"] == {"main": "postgres", "drafts": "overlay"}
+        assert isinstance((await _for_workspace(ds, "main")).provider, VersionedBranchProvider)
+        # Once the projection holds the head, both say FalkorDB (the live provider).
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
+        assert (await svc.projection_watermark(gid))["read_route"] == {"main": "falkordb", "drafts": "overlay"}
+        assert isinstance((await _for_workspace(ds, "main")).provider, _StubProvider)
+        assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
 
         # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live provider
         async def _fresh(self, graph_id):

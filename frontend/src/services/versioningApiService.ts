@@ -140,6 +140,9 @@ export interface Watermark {
   nextRetryAt?: string | null
   /** Why the last liveness check lowered the watermark (the key lost what it held), else null. */
   livenessError?: string | null
+  /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
+   *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
+  readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a

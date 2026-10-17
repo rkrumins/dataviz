@@ -849,10 +849,20 @@ class RevisionModel(_ApiModel):
     message: Optional[str] = None
 
 
+class ReadRouteModel(_ApiModel):
+    """Which store serves reads (ContextEngine.for_workspace's rule): main from FalkorDB while the
+    projection holds the head, else Postgres; a draft is always its overlay on whatever serves main."""
+    main: Literal["falkordb", "postgres"]
+    drafts: Literal["overlay"] = "overlay"
+
+
 class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
     fresh: bool          # projected >= committed
+    # Set on GET …/watermark (and the rebuild response); the slim watermark on state and
+    # neighbors reads leaves it null — those carry their own `source`.
+    read_route: Optional[ReadRouteModel] = Field(default=None, alias="readRoute")
     # Projection lifecycle: idle | projecting | rebuilding | evicted. Only projecting/rebuilding mean
     # the cache is ACTIVELY catching up — the "refreshing…" badge keys off this, not bare staleness
     # (an idle-but-behind graph just means no FalkorDB worker is running; reads use Postgres).
@@ -1786,6 +1796,7 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                 if wm.get("falkor_provider") else None)
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
                           fresh=wm["fresh"], status=wm["status"],
+                          read_route=ReadRouteModel(**wm["read_route"]),
                           target=wm.get("target", 0),
                           last_error=wm.get("last_error"),
                           last_projected_at=wm.get("last_projected_at"),

@@ -12,10 +12,10 @@
  * whole band of chrome for two controls, stacked under a page header that named the
  * view and above a canvas toolbar that named it again. Reviews moved up into the page
  * header (ViewReviewsButton) and the switcher moved down into the Context View's
- * toolbar, which had a title slot going spare. What is left here on main is two
- * TRANSIENT chips — projection sync and rollup sync — so the row
- * is `empty:hidden`: when every child renders null there is no bar, no border and no
- * padding, and the canvas takes the space back.
+ * toolbar, which had a title slot going spare. What is left here on main is three
+ * TRANSIENT chips — projection sync, reads served from Postgres until it lands, and
+ * rollup sync — so the row is `empty:hidden`: when every child renders null there is
+ * no bar, no border and no padding, and the canvas takes the space back.
  *
  * `showBranchSwitcher` is false only for the canvas that hosts the switcher itself
  * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
@@ -41,6 +41,7 @@ import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
+import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
@@ -280,6 +281,8 @@ export function CanvasVersioningBar({
       >
         {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
+        {/* Which store serves reads: says nothing while published is on FalkorDB. */}
+        <ReadRouteChip workspaceId={workspaceId} graphId={graphId} isDraft={isDraft} />
         {/* Publish → rollup visibility for hand-built models: when the published head
             advances, poll aggregation readiness and show Syncing → Synced. */}
         <AggregationSyncChip dataSourceId={dataSourceId} mainHeadSeq={mainHead} enabled={isBlankModel} />
