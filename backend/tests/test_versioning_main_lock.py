@@ -12,7 +12,8 @@ unbounded.
   enablement has not finished, before they read anything; each is retried. Bulk import into a
   graph created in the same transaction takes no lock.
 * A busy graph reaches the caller as LockBusy through ContextEngine and ``/commands/batch``,
-  instead of a ``success: false``.
+  instead of a ``success: false``. Once a batch command has committed, the busy command is a
+  ``lock_busy`` result instead and the batch stops, so a retry does not resend what landed.
 
 Pure unit tests: fakes stand in for the session. The same runs on Postgres in
 integration/test_versioning_main_lock.py.
@@ -345,3 +346,41 @@ async def test_a_batch_lets_a_busy_graph_through(monkeypatch, op, payload):
     with pytest.raises(LockBusy):
         await batch_commands(request=BatchCommandRequest(commands=[{"op": op, "payload": payload}]),
                              _=None, engine=engine)
+
+
+class _BusyAfterFirstProvider(_BusyProvider):
+    """The first create_node commits; every later write finds the graph busy."""
+
+    def __init__(self, exc):
+        super().__init__(exc)
+        self.created = 0
+
+    async def create_node(self, *_a, **_k):
+        if self.created:
+            raise self.exc
+        self.created += 1
+        return True
+
+
+@pytest.mark.parametrize("fail_fast", [True, False])
+async def test_a_batch_busy_after_a_commit_reports_what_landed(monkeypatch, fail_fast):
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.common.models.graph import BatchCommandRequest
+
+    engine = _busy_engine(monkeypatch, LockBusy())
+    engine.provider = _BusyAfterFirstProvider(LockBusy())
+    invalidated = []
+
+    async def invalidate(e):
+        invalidated.append(e)
+    monkeypatch.setattr(graph_ep, "_invalidate_cache", invalidate)
+    node = {"op": "create_node", "payload": {"entityType": "dataset", "displayName": "n"}}
+    resp = await graph_ep.batch_commands(
+        request=BatchCommandRequest(commands=[node, node, node], failFast=fail_fast),
+        _=None, engine=engine)
+    assert [r.success for r in resp.results] == [True, False, False]
+    assert resp.results[0].created_urn
+    assert resp.results[1].error.startswith("lock_busy")
+    assert resp.results[2].error.startswith("Skipped")
+    assert (resp.succeeded, resp.failed) == (1, 1)
+    assert invalidated == [engine]

@@ -4113,6 +4113,9 @@ async def batch_commands(
     stops on the first failure and returns partial results. If fail_fast=false,
     all commands are attempted and results are collected.
 
+    A busy graph (LockBusy) is a 503 only while no command has committed;
+    after that it is the failing command's result and the batch stops.
+
     All node/edge mutations are validated against the active ontology before
     any write is attempted.  Validation failures count as command failures.
     """
@@ -4172,8 +4175,21 @@ async def batch_commands(
                     ref=cmd.ref, op=cmd.op, success=False,
                     error=f"Unsupported op: {cmd.op}",
                 ))
-        except LockBusy:
-            raise                                  # 503 + Retry-After for the whole batch
+        except LockBusy as exc:
+            if succeeded == 0:
+                raise                              # nothing landed: 503 + Retry-After is safe to retry
+            # Earlier commands committed, so a 503 would get them resent. Report which
+            # landed and stop, even when fail_fast=false: the graph is busy.
+            failed += 1
+            results.append(BatchCommandResult(
+                ref=cmd.ref, op=cmd.op, success=False, error=f"lock_busy (retryable): {exc}",
+            ))
+            for skipped in request.commands[len(results):]:
+                results.append(BatchCommandResult(
+                    ref=skipped.ref, op=skipped.op, success=False,
+                    error="Skipped: graph busy; retry only the commands that did not succeed",
+                ))
+            break
         except Exception as exc:
             failed += 1
             results.append(BatchCommandResult(
