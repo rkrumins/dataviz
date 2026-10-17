@@ -10,7 +10,9 @@ mechanisms (matching the locked "inline nudge + reconciling worker" decision):
 
 ``ProjectionStateORM`` is the durable queue, so a lost wake-up is still caught by
 the poll loop. Per-``graph_id`` serialization keeps the two mechanisms from
-projecting the same graph concurrently. Mirrors the aggregation worker runtime.
+projecting the same graph concurrently. Mirrors the aggregation worker runtime. A **liveness
+loop** (every ``LIVENESS_SECS``) lowers the watermark of an idle graph whose FalkorDB key is gone
+or restored behind it, so the poll reseeds it.
 
 The **transfer** lane (import / export / publish, and a dedicated package-inspect slot) and the
 **bootstrap** lane (bootstraps, purges) run jobs from ``graphver.jobs`` through one
@@ -191,6 +193,8 @@ class ProjectionWorker:
                 loops.append(self._sweep_loop())
             if self._cache is not None:
                 loops.append(self._evict_loop())
+            if config.LIVENESS_SECS > 0:
+                loops.append(self._liveness_loop())
         if "transfer" in self._lanes:
             if self._transfers is not None:
                 loops.append(self._slot_loop(self._transfers, slots=config.TRANSFER_SLOTS,
@@ -345,6 +349,20 @@ class ProjectionWorker:
                 logger.exception("eviction loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._evict_secs)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _liveness_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                reset = await self._proj.check_liveness()
+                if reset:
+                    logger.warning("liveness reset the projection watermark of %d graph(s)",
+                                   len(reset))
+            except Exception:
+                logger.exception("projection liveness loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.LIVENESS_SECS)
             except asyncio.TimeoutError:
                 pass
 

@@ -155,9 +155,16 @@ Finally revert the manifest change (`--appendonly yes`) so the next reschedule i
 
 Then bring each restored graph up to date:
 
-- **Version-controlled sources** — open a view of the source and run **Check sync** on the
-  **Data health** tab of its versioning panel. If it finds differences, Postgres wins: use
-  **Rebuild fast read layer**.
+- **Version-controlled sources** — first have every one of them on the restored instance
+  reseeded from Postgres. A platform admin calls
+  `POST /api/v1/admin/versioning/watermarks/reset` with `{"provider": "<provider id>"}` — the
+  restored instance's provider id, or `default` for the graph store the platform's environment
+  configures. The answer says how many graphs it reset (`graphsReset`); the versioning worker
+  reseeds them in place, writing only what differs, and their reads come from Postgres until
+  each one catches up. The snapshot is older than the watermarks the platform kept, and a graph
+  projected before this release cannot tell on its own. Then, for a source you want to check,
+  open a view of it and run **Check sync** on the **Data health** tab of its versioning panel.
+  If it finds differences, Postgres wins: use **Rebuild fast read layer**.
 - **Directly loaded sources** — load again whatever changed after the snapshot was taken,
   then signal the change
   ([Tell the platform a source changed](/docs/runbooks#tell-the-platform-a-source-changed)).
@@ -170,6 +177,9 @@ Then bring each restored graph up to date:
   keys nobody routes to.
 - After the master is back, let the replica resync from it (it will, automatically); don't
   restore the replica separately.
+- Then reset the provider's watermarks as in [step 3](#3-boot-once-with-aof-off-then-re-enable).
+  The reset is per provider, not per shard: graphs on the shards you did not restore are
+  reseeded too, which costs scans, not data.
 
 ### 5. Rebuild instead of restoring
 
@@ -177,7 +187,9 @@ Then bring each restored graph up to date:
   enough: open a view of the source and use **Rebuild fast read layer** on the **Data health**
   tab of its versioning panel (shown to people who manage the source). It drops the graph,
   seeds it again from Postgres and queues its rollups. This is always correct, by the
-  invariant above.
+  invariant above. A version-controlled graph whose key is simply gone — dropped, or lost with
+  its node — needs nothing: the versioning worker notices within `GRAPHVER_LIVENESS_SECS`
+  (60 seconds by default) and seeds it again.
 - **Directly loaded source** — there's nothing in Postgres to rebuild from. Run the loader or
   import again, then signal the change so caches and rollups catch up
   ([Tell the platform a source changed](/docs/runbooks#tell-the-platform-a-source-changed)).
@@ -187,8 +199,9 @@ Then bring each restored graph up to date:
 Snapshots are in a **multi-region** bucket, so they survive a regional outage. Recovery is:
 promote the Cloud SQL cross-region replica, stand up the cluster in the secondary region, then
 restore the snapshots (the fast path) or rebuild the version-controlled sources from the
-promoted database. Directly loaded sources come back only from the snapshots or by loading
-them again. [FalkorDB Deployment §6](/docs/falkordb-deployment#6-disaster-recovery-cross-region)
+promoted database. Either way, reset the watermarks of each FalkorDB provider afterwards, as in
+[step 3](#3-boot-once-with-aof-off-then-re-enable). Directly loaded sources come back only from
+the snapshots or by loading them again. [FalkorDB Deployment §6](/docs/falkordb-deployment#6-disaster-recovery-cross-region)
 covers the cold-standby manifests.
 
 ## Where to next

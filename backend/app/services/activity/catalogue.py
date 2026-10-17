@@ -662,6 +662,10 @@ _EVENT_META.update({
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
+    "platform.versioning.watermarks_reset": ("warning", lambda p: (
+        "Reseeded every versioned graph on FalkorDB provider "
+        f"{_detail(p, 'provider') or '?'} from Postgres"
+    )),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
@@ -713,6 +717,7 @@ LABELS: dict[str, str] = {
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
     "platform.node_identity.updated": "Changed node identity",
+    "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",

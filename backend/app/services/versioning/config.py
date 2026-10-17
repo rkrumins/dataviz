@@ -139,6 +139,9 @@ PROJECTION_RETRY_MAX_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_MAX_SE
 # Read by the web pods too: project_now and rebuild_now run passes in-process.
 PROJECTION_WAIT_REPLICAS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_REPLICAS", "0"))
 PROJECTION_WAIT_MS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_MS", "2000"))
+# Every LIVENESS_SECS the projection lane reads each idle graph's marker: a missing key resets its
+# watermark to 0, a marker behind it to the marker's seq, and the poll reseeds. 0 turns it off.
+LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the

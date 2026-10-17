@@ -50,7 +50,7 @@ from .models import (
     ProjectionStateORM,
     _now,
 )
-from .service import ConcurrencyError, GraphVersioningService, _is_edge_payload
+from .service import ConcurrencyError, GraphVersioningService, _is_edge_payload, bootstrap_unfinished
 from backend.common.derived_artifacts import is_derived_label
 
 # Reuse the existing reader's schema helpers verbatim so the projection is
@@ -60,6 +60,7 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
     _admit_native_keys,
     _compute_searchable_text,
     _index_ddl_deferred_reason,
+    _is_missing_graph_error,
     _is_native_value,
     _text_properties,
     _native_property_budget,
@@ -112,7 +113,8 @@ _READ_TIMEOUT_MS = int(1000 * min(170.0, max(
 
 
 async def _q(client, cypher: str, params: Optional[dict] = None,
-             *, timeout_ms: int = _WRITE_TIMEOUT_MS, read_only: bool = False):
+             *, timeout_ms: int = _WRITE_TIMEOUT_MS, read_only: bool = False,
+             missing: str = "fallback"):
     """Run one query with a server-side kill budget AND a client-side hang
     net (belt over the pool-level socket timeouts, and the bound for client
     fakes without them). Falls back to the timeout-less call for client
@@ -147,6 +149,8 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     ``GRAPH.QUERY``. That is the old behaviour exactly, including the shape
     of what an aggregate returns, rather than a guessed empty result: a
     ``count(n)`` answers ``[[0]]``, not ``[]``, and callers index it.
+    ``missing="raise"`` re-raises that error instead, for a caller asking
+    whether the key exists, which the fallback would answer by creating it.
     """
     # A WRITE here is bounded by the cluster's failure detector. This helper
     # talks to the graph client directly, so the provider's own boundary
@@ -175,7 +179,7 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     try:
         return await _send(read_only)
     except Exception as exc:
-        if not read_only or "empty key" not in str(exc).lower():
+        if not read_only or missing == "raise" or "empty key" not in str(exc).lower():
             raise
         return await _send(False)
 
@@ -206,6 +210,40 @@ async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
     if acked is None or acked < want:
         return (f"replica_unconfirmed: {'unknown' if acked is None else acked}/{want} "
                 f"replica(s) acknowledged seq {seq}")
+    return None
+
+
+#: Reads a key's pass marker (:func:`read_projection_marker`).
+_MARKER_READ = "MATCH (m:_GVProjMeta) RETURN m.seq"
+
+
+async def read_projection_marker(client) -> Tuple[Optional[bool], Optional[int]]:
+    """``(key exists, marker seq)`` for a projection key, read with ``GRAPH.RO_QUERY`` only:
+    ``GRAPH.QUERY`` would create a missing key. A key no publishing pass has marked answers
+    ``(True, None)``; a client without ``ro_query`` cannot tell, ``(None, None)``. Any error but
+    the missing key propagates: unreachable is not lost."""
+    if getattr(client, "ro_query", None) is None:
+        return None, None
+    try:
+        res = await _q(client, _MARKER_READ, read_only=True, missing="raise", timeout_ms=5000)
+    except Exception as exc:
+        if _is_missing_graph_error(exc):
+            return False, None
+        raise
+    rows = getattr(res, "result_set", None) or []
+    return True, (int(rows[0][0]) if rows and rows[0][0] is not None else None)
+
+
+def liveness_reset_to(exists: bool, marker_seq: Optional[int], projected: int) -> Optional[int]:
+    """Where liveness lowers an idle graph's watermark, or None to leave it: to 0 when the key is
+    gone, to the marker's seq when the key lost the passes after it (a restore, a lost AOF tail;
+    the marker is written last, so the key holds everything up to it). A key without a marker
+    (projected before markers, bootstrapped, seeded from a package) is judged only by whether it
+    exists — the operator's watermark reset covers a restore of one."""
+    if not exists:
+        return 0
+    if marker_seq is not None and marker_seq < projected:
+        return marker_seq
     return None
 
 
@@ -864,6 +902,73 @@ class FalkorProjector:
             await nudge_projection(graph_id)
             result["skipped"] = "superseded"
         return result
+
+    async def check_liveness(self) -> List[Dict[str, object]]:
+        """Lower the watermark of every idle graph whose FalkorDB key lost what the watermark says
+        it holds (:func:`liveness_reset_to`), so the poll reseeds it or re-applies the lost window
+        instead of reads being served from it. Graphs at genesis, tombstoned or still being
+        enabled for version control are not checked; a key that cannot be read is left alone.
+        Each reset is fenced like a pass: it lands only while the row's epoch and watermark are
+        still the ones read. Returns the resets."""
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
+                       ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
+                       ProjectionStateORM.epoch)
+                .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                .where(
+                    ProjectionStateORM.status == "idle",
+                    # Past genesis (main's eviction rule): a key at genesis may be the data
+                    # source's own graph, and a reseed from genesis would empty it.
+                    ProjectionStateORM.projected_commit_seq > 1,
+                    ProjectionStateORM.falkor_graph_name.isnot(None),
+                    ProjectionStateORM.falkor_graph_name
+                    != literal("gv_").concat(ProjectionStateORM.graph_id),
+                    GraphORM.deleted_at.is_(None),
+                    ~select(1).where(*bootstrap_unfinished(ProjectionStateORM.graph_id))
+                    .correlate(ProjectionStateORM).exists(),
+                )
+            )).all()
+        sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
+
+        async def _one(gid, name, provider_id, projected, epoch) -> Optional[Dict[str, object]]:
+            async with sem:
+                try:
+                    exists, seq = await read_projection_marker(
+                        await self._graph_client(name, provider_id))
+                except Exception as exc:
+                    logger.warning("liveness: cannot read the projection of %s (%s): %s",
+                                   gid, name, exc)
+                    return None
+            if exists is None:
+                return None
+            to_seq = liveness_reset_to(exists, seq, projected)
+            if to_seq is None:
+                return None
+            reason = ("liveness: projection key missing" if not exists
+                      else f"liveness: marker seq {seq} < projected {projected}")
+            async with self._session() as s:
+                row = (await s.execute(
+                    update(ProjectionStateORM)
+                    .where(ProjectionStateORM.graph_id == gid,
+                           ProjectionStateORM.epoch == epoch,
+                           ProjectionStateORM.projected_commit_seq == projected,
+                           ProjectionStateORM.status == "idle")
+                    .values(projected_commit_seq=to_seq, epoch=ProjectionStateORM.epoch + 1,
+                            last_error=reason, failed_attempts=0, next_retry_at=None,
+                            updated_at=_now())
+                    .returning(ProjectionStateORM.graph_id)
+                    .execution_options(synchronize_session=False)
+                )).first()
+            if row is None:
+                return None                     # a pass or a reset got there first
+            logger.error("%s for graph %s (%s): watermark %s -> %s",
+                         reason, gid, name, projected, to_seq)
+            await nudge_projection(gid)
+            return {"graph_id": gid, "projected": projected, "reset_to": to_seq, "reason": reason}
+
+        done = await asyncio.gather(*[_one(*r) for r in rows])
+        return [d for d in done if d is not None]
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
                                 rollups_stale: bool = False) -> None:

@@ -32,7 +32,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, N
                     Sequence, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
-                        text, update, or_, tuple_)
+                        literal, text, update, or_, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -2647,6 +2647,38 @@ class GraphVersioningService:
             ps.failed_attempts = 0
             ps.next_retry_at = None
             return True
+
+    async def reset_projection_watermarks(self, *, provider: str, actor: str) -> List[str]:
+        """Disaster recovery: make the projector reseed every live graph on FalkorDB ``provider``
+        (``'default'`` for the env instance) — after a restore, a shard rebuild or a region loss,
+        when the keys may hold less than their watermarks say and graphs without a pass marker
+        cannot tell. Lowers each projected watermark to 0 and bumps its epoch, so a pass in flight
+        cannot publish over it; the poll then reseeds each key in place, writing only what
+        differs. Graphs the poll does not project (unpinned, tombstoned, still being enabled for
+        version control) are left alone. Returns the ids reset."""
+        ps = ProjectionStateORM
+        async with self._session() as s:
+            ids = (await s.execute(
+                update(ps)
+                .where(
+                    func.coalesce(func.nullif(ps.falkor_provider, ""),
+                                  config.DEFAULT_FALKOR_PROVIDER) == provider,
+                    ps.projected_commit_seq > 0,
+                    ps.falkor_graph_name.isnot(None),
+                    ps.falkor_graph_name != literal("gv_").concat(ps.graph_id),
+                    select(1).where(GraphORM.id == ps.graph_id, GraphORM.deleted_at.is_(None))
+                    .correlate(ps).exists(),
+                    ~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists(),
+                )
+                .values(projected_commit_seq=0, epoch=ps.epoch + 1,
+                        last_error="watermark reset by operator (DR)",
+                        failed_attempts=0, next_retry_at=None, updated_at=_now())
+                .returning(ps.graph_id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all()
+        logger.warning("%s reset the projection watermarks of %d graph(s) on FalkorDB provider %s",
+                       actor, len(ids), provider)
+        return list(ids)
 
     async def neighbors_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
