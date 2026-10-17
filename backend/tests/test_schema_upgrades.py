@@ -577,3 +577,72 @@ async def test_the_one_active_import_migration_round_trips(store):
             await conn.run_sync(_run_ingest_active("upgrade"))      # idempotent
         finally:
             await trans.rollback()
+
+
+# ── reseeding status (20261017_2000_gv_ps_reseeding) ──────────────────────────────────────────
+_PS_RESEEDING = _VERSIONS / "20261017_2000_gv_ps_reseeding.py"
+_PS = f'"{models._SCHEMA}"."projection_state"'
+
+
+def test_the_reseeding_status_is_declared_and_migrated():
+    check = next(c for c in models.ProjectionStateORM.__table__.constraints
+                 if getattr(c, "name", "") == "ck_proj_status")
+    assert "'reseeding'" in str(check.sqltext)
+    reseeding = _migration(_PS_RESEEDING)
+    assert reseeding.revision == _PS_RESEEDING.stem
+    assert reseeding.down_revision == "20261017_1950_gv_ingest_active"
+
+
+async def _status_check(conn):
+    return (await conn.execute(text(
+        "SELECT oid, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_proj_status' "
+        f"AND conrelid = CAST('{_PS}' AS regclass)"))).one()
+
+
+@e2e
+async def test_a_store_alembic_never_reached_allows_reseeding(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"ALTER TABLE {_PS} DROP CONSTRAINT ck_proj_status"))
+            await conn.execute(text(
+                f"ALTER TABLE {_PS} ADD CONSTRAINT ck_proj_status "
+                "CHECK (status IN ('idle','projecting','rebuilding','evicted'))"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            oid, definition = await _status_check(conn)
+            assert "'reseeding'" in definition, definition
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+            assert (await _status_check(conn))[0] == oid
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_reseeding_migration_round_trips(store):
+    """Down, a graph waiting for its reseed reads idle: its watermark is 0, so the poll still
+    reseeds it."""
+    migration = _migration(_PS_RESEEDING)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f"INSERT INTO {_PS} (graph_id, projected_commit_seq, target_commit_seq, status, "
+                "owns_falkor_graph, updated_at) "
+                "VALUES ('g_schema_reseeding', 0, 3, 'reseeding', false, '2026-10-17')"))
+            await conn.run_sync(run("downgrade"))
+            assert "'reseeding'" not in (await _status_check(conn))[1]
+            assert (await conn.execute(text(
+                f"SELECT status FROM {_PS} WHERE graph_id = 'g_schema_reseeding'"))).scalar() == "idle"
+            await conn.run_sync(run("upgrade"))
+            assert "'reseeding'" in (await _status_check(conn))[1]
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

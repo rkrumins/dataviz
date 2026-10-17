@@ -251,7 +251,9 @@ class ProjectionStateORM(VersioningBase):
     graph_id = Column(Text, primary_key=True)
     projected_commit_seq = Column(BigInteger, nullable=False, default=0)
     target_commit_seq = Column(BigInteger, nullable=False, default=0)
-    status = Column(Text, nullable=False, default="idle")  # idle|projecting|rebuilding|evicted
+    # idle|projecting|rebuilding|evicted, or reseeding: an operator reset the watermark (DR) and
+    # the next pass reseeds the key; that pass's claim makes it rebuilding.
+    status = Column(Text, nullable=False, default="idle")
     falkor_graph_name = Column(Text, nullable=True)
     falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)
     shard_map = Column(JSONB, nullable=True)
@@ -282,7 +284,7 @@ class ProjectionStateORM(VersioningBase):
 
     __table_args__ = _plain(
         CheckConstraint(
-            "status IN ('idle','projecting','rebuilding','evicted')",
+            "status IN ('idle','projecting','rebuilding','evicted','reseeding')",
             name="ck_proj_status",
         ),
         # One versioned graph per FalkorDB graph: two projecting into one key would each reconcile
@@ -738,6 +740,12 @@ def _ensure_schema_upgrades(conn) -> None:
             ensure_ingest_active_index(conn, strict=False)
     except Exception:
         logger.exception("uq_jobs_ingest_active was not built; the next start tries again")
+    # 20261017_2000_gv_ps_reseeding.
+    try:
+        with conn.begin_nested():
+            ensure_ps_reseeding_status(conn)
+    except Exception:
+        logger.exception("the reseeding status was not allowed; the next start tries again")
 
 
 def ensure_ps_fencing_columns(conn) -> None:
@@ -756,6 +764,25 @@ def ensure_ps_fencing_columns(conn) -> None:
     conn.execute(text(
         f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS next_retry_at TEXT"))
+
+
+def ensure_ps_reseeding_status(conn) -> None:
+    """Let ``ck_proj_status`` allow ``reseeding``. A no-op without the table, and once it does:
+    rebuilding the check takes the table's ACCESS EXCLUSIVE lock, and every worker start runs
+    this. ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    ps = f'"{_SCHEMA}"."projection_state"'
+    current = conn.execute(text(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ck_proj_status' AND conrelid = CAST(:ps AS regclass)"),
+        {"ps": ps}).scalar()
+    if current is not None and "'reseeding'" in current:
+        return
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_proj_status"))
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status "
+        "CHECK (status IN ('idle','projecting','rebuilding','evicted','reseeding'))"))
 
 
 def ensure_ps_key_index(conn, *, strict: bool) -> None:

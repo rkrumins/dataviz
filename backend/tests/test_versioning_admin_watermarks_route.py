@@ -8,6 +8,7 @@ the provider's watermarks; the projection worker then reseeds each key in place 
 * It is a platform administrator's action (``system:admin``), recorded in the activity log with
   who did it, and it is not open to API keys.
 * It resets by provider only, and names its operator from the signed-in user.
+* A dry run counts the graphs a reset would reseed, for the confirm dialog, and changes nothing.
 """
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -44,13 +45,32 @@ async def test_the_reset_names_the_provider_and_its_operator_and_is_recorded():
         out = await va.reset_watermarks(va.WatermarkResetRequest(provider="falkor-eu"),
                                         user=SimpleNamespace(id="usr_admin"), session=object())
 
-    assert svc.calls == [{"provider": "falkor-eu", "actor": "usr_admin"}]
+    assert svc.calls == [{"provider": "falkor-eu", "actor": "usr_admin", "dry_run": False}]
     assert out == {"provider": "falkor-eu", "graphsReset": 2}
     assert len(recorded) == 1
     event_type, fields = recorded[0]
     assert event_type == "platform.versioning.watermarks_reset"
     assert fields["details"] == {"provider": "falkor-eu", "graphsReset": 2}
     assert fields["best_effort"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_counts_the_graphs_and_is_not_recorded():
+    svc, recorded = _Svc(), []
+
+    async def record(session, event_type, **fields):
+        recorded.append(event_type)
+        return True
+
+    body = va.WatermarkResetRequest.model_validate({"provider": "falkor-eu", "dryRun": True})
+    with patch.object(va, "get_versioning_service", return_value=svc), \
+            patch.object(va.recorder, "record_for_request", record):
+        out = await va.reset_watermarks(body, user=SimpleNamespace(id="usr_admin"),
+                                        session=object())
+
+    assert svc.calls == [{"provider": "falkor-eu", "actor": "usr_admin", "dry_run": True}]
+    assert out == {"provider": "falkor-eu", "graphsToReset": 2}
+    assert recorded == []
 
 
 def _route():

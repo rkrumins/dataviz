@@ -7,7 +7,8 @@ cache, with ``ro_query`` and a key that can go missing).
 * A healthy key, an unreachable one and an unmarked one are left alone, as are tombstoned graphs,
   graphs still being enabled for version control, and graphs at genesis.
 * A pass that claims the row between liveness's read and its reset wins: the reset does not land.
-* ``reset_projection_watermarks`` resets exactly the provider's live, pinned, projected graphs.
+* ``reset_projection_watermarks`` resets exactly the provider's live, pinned, projected graphs, to
+  ``reseeding`` rather than to an error, and its dry run counts the same graphs.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -234,7 +235,7 @@ def test_a_pass_that_claims_first_wins():
 async def _run_the_operator_reset_is_scoped_to_a_provider() -> None:
     svc, fake = GraphVersioningService(), LiveFalkor()
     provider, other = "p_" + os.urandom(4).hex(), "p_" + os.urandom(4).hex()
-    mine, _, _ = await _seed(svc, fake, provider=provider)
+    mine, proj, _ = await _seed(svc, fake, provider=provider)
     theirs, _, _ = await _seed(svc, fake, provider=other)
     deleted, _, _ = await _seed(svc, fake, provider=provider)
     bootstrapping, _, _ = await _seed(svc, fake, provider=provider)
@@ -244,12 +245,22 @@ async def _run_the_operator_reset_is_scoped_to_a_provider() -> None:
                      status="failed"))
     before = {gid: await _row(gid) for gid in (mine, theirs, deleted, bootstrapping)}
 
+    # The confirm dialog's count: the same graphs, and nothing changes.
+    assert await svc.reset_projection_watermarks(provider=provider, actor="usr_admin",
+                                                 dry_run=True) == [mine]
+    assert await _row(mine) == before[mine]
+
     assert await svc.reset_projection_watermarks(provider=provider, actor="usr_admin") == [mine]
     row = await _row(mine)
     assert row["projected"] == 0 and row["epoch"] == before[mine]["epoch"] + 1, row
-    assert row["last_error"] == "watermark reset by operator (DR)", row
+    # Reseeding, not failed: no error is recorded.
+    assert (row["status"], row["last_error"]) == ("reseeding", None), row
     for gid in (theirs, deleted, bootstrapping):
         assert await _row(gid) == before[gid], gid
+
+    await proj.project_graph(mine)
+    row = await _row(mine)
+    assert (row["projected"], row["status"], row["last_error"]) == (3, "idle", None), row
     await db.dispose_engine()
 
 

@@ -14,7 +14,7 @@
  * purpose: a full node and a stalled publish are the same incident seen from
  * two ends, and an operator has to read that pair in one glance.
  */
-import { Boxes, GitBranch, MemoryStick, SlidersHorizontal } from 'lucide-react'
+import { Boxes, GitBranch, MemoryStick, RotateCcw, SlidersHorizontal } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
@@ -31,7 +31,7 @@ const TYPE_LABEL: Record<string, string> = {
     mock: 'Mock',
 }
 
-function ProviderCard({ p }: { p: GraphProvider }) {
+function ProviderCard({ p, onReseed }: { p: GraphProvider; onReseed?: (p: GraphProvider) => void }) {
     const meta = STATUS_META[p.status] ?? STATUS_META.unknown
     const Icon = meta.icon
     return (
@@ -62,6 +62,15 @@ function ProviderCard({ p }: { p: GraphProvider }) {
                         : `${p.versionedGraphs} versioned graph${p.versionedGraphs === 1 ? '' : 's'}`
                             + (p.versionedBytes != null ? ` \u00b7 ${formatBytes(p.versionedBytes)}` : '')}
                 </p>
+            )}
+            {onReseed && p.type === 'falkordb' && (
+                <button
+                    type="button"
+                    onClick={() => onReseed(p)}
+                    className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded"
+                >
+                    <RotateCcw className="w-3 h-3" /> Reseed from Postgres
+                </button>
             )}
         </div>
     )
@@ -414,7 +423,7 @@ function PublishingStalled({ projection, providers, nodeFilling }: {
     )
 }
 
-export function GraphProvidersPanel({ providers, services, projection, capacity, onAdjustLimits }: {
+export function GraphProvidersPanel({ providers, services, projection, capacity, onAdjustLimits, onReseed }: {
     providers: GraphProvider[] | null
     services?: ServiceEntry[] | null
     projection?: ProjectionSection | null
@@ -425,6 +434,9 @@ export function GraphProvidersPanel({ providers, services, projection, capacity,
     /** Offered on every row the sweep placed, when the viewer may change a
      *  node's limits (system administrators); absent otherwise. */
     onAdjustLimits?: (endpoint: string) => void
+    /** Offered on every FalkorDB provider when the viewer may reseed its
+     *  versioned graphs from Postgres (system administrators); absent otherwise. */
+    onReseed?: (p: GraphProvider) => void
 }) {
     const shards = graphShardMemory(services, capacity)
     const list = providers ?? []
@@ -448,7 +460,7 @@ export function GraphProvidersPanel({ providers, services, projection, capacity,
             </div>
             {list.length > 0 && (
                 <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {list.map(p => <ProviderCard key={p.id} p={p} />)}
+                    {list.map(p => <ProviderCard key={p.id} p={p} onReseed={onReseed} />)}
                 </div>
             )}
             <MemoryHeadroom shards={shards} onAdjustLimits={onAdjustLimits} />

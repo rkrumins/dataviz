@@ -8,12 +8,12 @@
  * Read-only observability (v1): verdicts come from work signals in shared
  * state, so the page is equally truthful on docker-compose and GKE.
  */
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Activity, AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
-import type { OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
+import type { GraphProvider, OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
 import { useSystemStatus } from './useSystemStatus'
 import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
@@ -24,6 +24,7 @@ import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
 import { VersionedGraphsPanel } from './VersionedGraphsPanel'
+import { ReseedProviderDialog } from './ReseedProviderDialog'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -165,6 +166,9 @@ export function AdminInfrastructure() {
         }, { replace: true })
     }, [setSearchParams])
 
+    // The provider whose versioned graphs are being reseeded from Postgres.
+    const [reseedFor, setReseedFor] = useState<GraphProvider | null>(null)
+
     const hero = data ? HERO[data.status] : null
     const HeroIcon = hero?.icon ?? Loader2
     const updatedAgo = dataUpdatedAt ? formatAgeMs(Date.now() - dataUpdatedAt) : null
@@ -246,6 +250,7 @@ export function AdminInfrastructure() {
                         projection={data.projection}
                         capacity={capacity.data ?? null}
                         onAdjustLimits={isSystemAdmin ? openLimits : undefined}
+                        onReseed={isSystemAdmin ? setReseedFor : undefined}
                     />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
@@ -312,6 +317,9 @@ export function AdminInfrastructure() {
                 </div>
             ) : null}
 
+            {isSystemAdmin && reseedFor && (
+                <ReseedProviderDialog provider={reseedFor} onClose={() => setReseedFor(null)} />
+            )}
             {isSystemAdmin && limitsFor && (
                 <GraphStoreLimitsDialog open endpoint={limitsFor} onClose={closeLimits} />
             )}

@@ -24,6 +24,8 @@ router = APIRouter()
 class WatermarkResetRequest(BaseModel):
     provider: str = Field(..., min_length=1,
                           description="FalkorDB provider id; 'default' for the env instance")
+    dry_run: bool = Field(False, alias="dryRun",
+                          description="Count the graphs it would reseed, and change nothing")
 
 
 @router.post("/watermarks/reset",
@@ -36,9 +38,12 @@ async def reset_watermarks(
     """Run after restoring a FalkorDB instance or shard, or rebuilding a region: its keys may
     hold an older state than the platform's watermarks say, and graphs projected before pass
     markers existed cannot tell. Every live versioned graph on the provider is reseeded in place
-    by the projection worker; reads fall back to Postgres until each one catches up."""
+    by the projection worker; reads fall back to Postgres until each one catches up. A dry run
+    answers how many that is, for the confirm, and is not recorded."""
     ids = await get_versioning_service().reset_projection_watermarks(
-        provider=body.provider, actor=user.id)
+        provider=body.provider, actor=user.id, dry_run=body.dry_run)
+    if body.dry_run:
+        return {"provider": body.provider, "graphsToReset": len(ids)}
     await recorder.record_for_request(
         session, "platform.versioning.watermarks_reset",
         details={"provider": body.provider, "graphsReset": len(ids)},

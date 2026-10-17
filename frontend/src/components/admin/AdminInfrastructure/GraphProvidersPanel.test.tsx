@@ -336,3 +336,21 @@ describe('GraphProvidersPanel — versioned graphs per provider', () => {
     expect(screen.queryByText(/versioned graph/i)).not.toBeInTheDocument()
   })
 })
+
+describe('GraphProvidersPanel — reseed from Postgres', () => {
+  const NEO: GraphProvider = { id: 'p3', name: 'Neo', type: 'neo4j', status: 'healthy', error: null, isActive: true }
+
+  it('offers a reseed on each FalkorDB provider, and only there', () => {
+    const onReseed = vi.fn()
+    render(<GraphProvidersPanel providers={[...PROVIDERS, NEO]} onReseed={onReseed} />)
+    const buttons = screen.getAllByRole('button', { name: /Reseed from Postgres/ })
+    expect(buttons).toHaveLength(1)
+    fireEvent.click(buttons[0])
+    expect(onReseed).toHaveBeenCalledWith(PROVIDERS[0])
+  })
+
+  it('offers nothing to a viewer who may not reseed', () => {
+    render(<GraphProvidersPanel providers={PROVIDERS} />)
+    expect(screen.queryByRole('button', { name: /Reseed from Postgres/ })).not.toBeInTheDocument()
+  })
+})

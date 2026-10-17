@@ -118,7 +118,7 @@ export interface Watermark {
   committed: number
   projected: number
   fresh: boolean
-  status?: string   // idle | projecting | rebuilding | evicted — only projecting/rebuilding = actively catching up
+  status?: string   // idle | projecting | rebuilding | evicted | reseeding (an operator reset; a reseed is queued) — only projecting/rebuilding = actively catching up
   /** Seq the projection is catching up TO (0 when no projection state exists). */
   target?: number
   /** Why the last projection pass stopped — `idle && !fresh && lastError` = it FAILED

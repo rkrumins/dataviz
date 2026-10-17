@@ -1,7 +1,8 @@
 """``probe_projection_lag`` — the Infrastructure page's projection rollup.
 
 * It counts only graphs whose data source is live, in six buckets that read consistently: in sync
-  and failed never overlap, and a graph behind with an error counts as failed, not catching up.
+  and failed never overlap, a graph behind with an error counts as failed, not catching up, and
+  one waiting for an operator's reseed counts as rebuilding.
 * Its worst list holds at most 8 graphs, most behind first, and only ones that are behind, failing
   or being projected; each row is named from the data-source directory.
 * Without the live data sources it says nothing rather than counting every orphan.
@@ -97,8 +98,10 @@ async def test_the_rollup_counts_live_graphs_and_names_the_worst(monkeypatch):
     assert "= 'idle' AND graphver.projection_state.last_error IS NULL) AS lagging" in agg_sql
     assert "count(*) FILTER (WHERE graphver.projection_state.last_error IS NOT NULL) AS failed" \
         in agg_sql
-    for bucket in ("projecting", "rebuilding", "evicted"):
+    for bucket in ("projecting", "evicted"):
         assert f"= '{bucket}') AS {bucket}" in agg_sql, bucket
+    # A graph an operator reset waits for its reseed: rebuilding, not failed.
+    assert "IN ('rebuilding', 'reseeding')) AS rebuilding" in agg_sql, agg_sql
     # The worst list: only graphs that need attention, most behind first, at most 8.
     assert "graphver.projection_state.last_error IS NOT NULL" in worst_sql
     assert "'projecting'" in worst_sql and "'rebuilding'" in worst_sql

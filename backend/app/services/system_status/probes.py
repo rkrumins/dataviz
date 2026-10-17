@@ -1298,7 +1298,8 @@ def _projection_rows():
         "fresh": and_(lag <= 0, ~err),
         "lagging": and_(lag > 0, status == "idle", ~err),
         "projecting": status == "projecting",
-        "rebuilding": status == "rebuilding",
+        # reseeding = an operator reset the watermark; the pass that reseeds it is a rebuild.
+        "rebuilding": status.in_(("rebuilding", "reseeding")),
         "evicted": status == "evicted",
         "failed": err,
     }

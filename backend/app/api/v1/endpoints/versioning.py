@@ -864,8 +864,9 @@ class WatermarkModel(_ApiModel):
     # Set on GET …/watermark (and the rebuild response); the slim watermark on state and
     # neighbors reads leaves it null — those carry their own `source`.
     read_route: Optional[ReadRouteModel] = Field(default=None, alias="readRoute")
-    # Projection lifecycle: idle | projecting | rebuilding | evicted. Only projecting/rebuilding mean
-    # the cache is ACTIVELY catching up — the "refreshing…" badge keys off this, not bare staleness
+    # Projection lifecycle: idle | projecting | rebuilding | evicted | reseeding (an operator reset
+    # it; a reseed is queued). Only projecting/rebuilding mean the cache is ACTIVELY catching
+    # up — the "refreshing…" badge keys off this, not bare staleness
     # (an idle-but-behind graph just means no FalkorDB worker is running; reads use Postgres).
     status: str = "idle"
     # Failure surface + live progress for the Data health tab: `target` is the seq the projection

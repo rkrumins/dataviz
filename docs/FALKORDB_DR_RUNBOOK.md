@@ -156,12 +156,14 @@ Finally revert the manifest change (`--appendonly yes`) so the next reschedule i
 Then bring each restored graph up to date:
 
 - **Version-controlled sources** — first have every one of them on the restored instance
-  reseeded from Postgres. A platform admin calls
-  `POST /api/v1/admin/versioning/watermarks/reset` with `{"provider": "<provider id>"}` — the
-  restored instance's provider id, or `default` for the graph store the platform's environment
-  configures. The answer says how many graphs it reset (`graphsReset`); the versioning worker
-  reseeds them in place, writing only what differs, and their reads come from Postgres until
-  each one catches up. The snapshot is older than the watermarks the platform kept, and a graph
+  reseeded from Postgres. A platform admin uses **Reseed from Postgres** on the restored
+  provider's card under **Admin → Infrastructure**, which first says how many graphs it will
+  reseed. Or calls `POST /api/v1/admin/versioning/watermarks/reset` with
+  `{"provider": "<provider id>"}` — the restored instance's provider id, or `default` for the
+  graph store the platform's environment configures (it has no card); `"dryRun": true` only
+  counts them (`graphsToReset`). The answer says how many graphs it reset (`graphsReset`); the
+  versioning worker reseeds them in place, writing only what differs, and their reads come from
+  Postgres until each one catches up. Until then **Data health** shows each one as reseeding. The snapshot is older than the watermarks the platform kept, and a graph
   projected before this release cannot tell on its own. Then, for a source you want to check,
   open a view of it and run **Check sync** on the **Data health** tab of its versioning panel.
   If it finds differences, Postgres wins: use **Rebuild fast read layer**.

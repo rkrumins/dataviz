@@ -129,15 +129,15 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
   if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
 }
 
-/** How often to re-read the watermark (false = stop): while forced; while catching up or
- *  rebuilding; and, for a short window after main advanced, while merely behind — until the
+/** How often to re-read the watermark (false = stop): while forced; while catching up,
+ *  rebuilding or waiting for an operator's reseed; and, for a short window after main advanced, while merely behind — until the
  *  projection has had its chance to start. A recorded failure ends that window early. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
 ): number | false {
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
-  const active = d.status === 'projecting' || d.status === 'rebuilding'
+  const active = d.status === 'projecting' || d.status === 'rebuilding' || d.status === 'reseeding'
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
   return active || (justAdvanced && !d.lastError) ? 3_000 : false
 }

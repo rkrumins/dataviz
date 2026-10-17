@@ -97,6 +97,15 @@ describe('DataHealthTab', () => {
     expect(screen.getByText(/target #12/)).toBeInTheDocument()
   })
 
+  it('reads a graph an administrator reset as reseeding, not failed', () => {
+    watermark = { committed: 12, projected: 0, fresh: false, status: 'reseeding', target: 12 }
+    renderTab()
+    expect(screen.getByText('Reseeding from the system of record…')).toBeInTheDocument()
+    expect(screen.getByText('Reseeding…')).toBeInTheDocument()
+    expect(screen.queryByText('Attention needed')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Out of sync/)).not.toBeInTheDocument()
+  })
+
   it('renders the in-sync success copy with item and connection counts', () => {
     reconcileResolve = { ok: true, report: baseReport({ inSync: true, pgNodes: 40, pgEdges: 12 }) }
     renderTab()

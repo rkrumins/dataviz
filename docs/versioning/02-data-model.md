@@ -212,7 +212,7 @@ re-validation), and full lifecycle attribution (`actor` raised, `merged_at`/`mer
 
 ### `projection_state` — the FalkorDB cache watermark (one row / graph)
 `models.py:223-250`. Drives read freshness and bounded staleness: `projected_commit_seq` vs
-`target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted` (`ck_proj_status`), the pinned
+`target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted|reseeding` (`ck_proj_status`), the pinned
 `falkor_graph_name` + `falkor_provider` (per-provider cache placement/eviction), and the in-flight
 full-reseed progress bar (`progress_done`/`progress_total`, `models.py:238-242`). Fully explained in
 [04 · Projection & Cache](04-projection-and-cache.md).

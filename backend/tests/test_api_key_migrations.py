@@ -43,6 +43,8 @@ _ON_LIVE_TABLES = {
     "20261017_1900_gv_commits_idem.py": ("upgrade", "downgrade"),
     # graphver.jobs, which every job's heartbeat writes.
     "20261017_1950_gv_ingest_active.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: the reseeding status.
+    "20261017_2000_gv_ps_reseeding.py": ("upgrade", "downgrade"),
 }
 
 

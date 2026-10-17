@@ -268,4 +268,13 @@ export const systemStatusService = {
         if (cursor) params.set('cursor', cursor)
         return authFetch<VersionedGraphsPage>(`/api/v1/admin/versioning/graphs?${params}`)
     },
+    /** Reseed every versioned graph on a FalkorDB provider from Postgres
+     *  (after its instance was restored). ``dryRun`` only counts them. */
+    resetWatermarks: (provider: string, opts?: { dryRun?: boolean }): Promise<{
+        provider: string; graphsReset?: number; graphsToReset?: number
+    }> =>
+        authFetch('/api/v1/admin/versioning/watermarks/reset', {
+            method: 'POST',
+            body: JSON.stringify({ provider, dryRun: !!opts?.dryRun }),
+        }),
 }

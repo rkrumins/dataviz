@@ -170,7 +170,7 @@ Key guards:
 ## 5. Watermark & bounded staleness
 
 `ProjectionStateORM` (`models.py:223-250`) is the per-graph control row:
-`projected_commit_seq`, `target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted`,
+`projected_commit_seq`, `target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted|reseeding`,
 `falkor_graph_name`, `falkor_provider`, `last_error`, `last_projected_at`, and
 `progress_done`/`progress_total` (live full-seed progress).
 
@@ -182,6 +182,8 @@ stateDiagram-v2
     rebuilding --> idle: full seed applied + verified
     idle --> evicted: cache_manager.evict (drop key, projected = 0)
     evicted --> rebuilding: ensure_rebuilt / poll loop reseeds
+    idle --> reseeding: operator watermark reset (DR, projected = 0)
+    reseeding --> rebuilding: poll loop reseeds
     projecting --> idle: failure/cancel → status reset (not stranded)
 ```
 
