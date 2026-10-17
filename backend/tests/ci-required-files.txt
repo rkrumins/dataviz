@@ -221,6 +221,7 @@ tests/test_timeout_ladder.py
 tests/test_timeout_middleware.py
 tests/test_top_level_provider_kwargs.py
 tests/test_transfer_jobs.py
+tests/test_trash_purge_state.py
 tests/test_type_change_roundtrip.py
 tests/test_typed_compiler.py
 tests/test_typed_patch_merge.py

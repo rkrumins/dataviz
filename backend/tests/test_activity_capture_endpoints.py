@@ -69,8 +69,8 @@ def no_side_stores(monkeypatch):
     async def _none(*a, **k):
         return None
 
-    async def _true(*a, **k):
-        return True
+    async def _restored(*a, **k):
+        return purge_worker.PurgeState()
 
     async def _queued(*a, **k):
         return "msg-1"
@@ -89,7 +89,7 @@ def no_side_stores(monkeypatch):
 
     monkeypatch.setattr(workspaces, "enqueue_stats_job_safe", _none)
     monkeypatch.setattr(purge_worker, "tombstone_graphs_for_data_source", _none)
-    monkeypatch.setattr(purge_worker, "restore_graphs_for_data_source", _true)
+    monkeypatch.setattr(purge_worker, "restore_graphs_for_data_source", _restored)
     monkeypatch.setattr(bootstrap_worker, "create_bootstrap_job", _bootstrap)
     monkeypatch.setattr(bootstrap_worker, "retry_bootstrap", _retry)
     monkeypatch.setattr(bootstrap_worker, "abandon_bootstrap", _abandon)

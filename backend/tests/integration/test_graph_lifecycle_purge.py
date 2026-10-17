@@ -2,6 +2,7 @@
 
 * a trashed graph is gone to every reader; a restore brings it back until a purge is queued;
 * a purge that fails half way still blocks the restore, and the reaper queues the same job again;
+* the trash is told where the purge stands, and why it stopped: its failure, or the live forks;
 * the purge cancels the graph's other jobs as it starts, and leaves no row of the graph behind;
 * a purge that "Delete permanently" queued is revived although its data source row is gone;
 * a graph that forks still read is never purged, whoever asks;
@@ -27,7 +28,8 @@ from backend.app.services.versioning.purge_worker import (
     PurgeRunner,
     Reaper,
     create_purge_job,
-    purge_pending_for_data_source,
+    PurgeState,
+    purge_state_for_data_source,
     restore_graphs_for_data_source,
     tombstone_graphs_for_data_source,
 )
@@ -168,7 +170,7 @@ async def test_tombstone_restore_expire_purge_retry(monkeypatch):
     # 1. Trash, then undo.
     assert await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS,
                                                   actor="alice") == 1
-    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is True
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) == PurgeState()
     assert await svc.get_graph(gid) is not None
 
     # 2. Trash again: the graph is gone to every reader.
@@ -188,7 +190,9 @@ async def test_tombstone_restore_expire_purge_retry(monkeypatch):
     out = await Reaper(app_session_factory=app).run_once()
     assert out["queued"] == 1 and gone == []
     (purge,) = await _purges(gid)
-    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is False
+    queued = PurgeState("queued", final=True)
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) == queued
+    assert await purge_state_for_data_source(data_source_id=ds) == queued
 
     # 5. The purge fails half way. By then its count phase has cancelled the export.
     states = []
@@ -203,9 +207,10 @@ async def test_tombstone_restore_expire_purge_retry(monkeypatch):
     assert (failed.status, failed.current_phase) == ("failed", "nodes")
     assert failed.summary["failure"]["code"] == "infrastructure"
 
-    # 6. Half a graph is past the point of no return.
-    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is False
-    assert await purge_pending_for_data_source(data_source_id=ds) is True
+    # 6. Half a graph is past the point of no return, and the trash says why it stopped.
+    stopped = PurgeState("failed", "boom", final=True)
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) == stopped
+    assert await purge_state_for_data_source(data_source_id=ds) == stopped
 
     # 7. The reaper queues the SAME job again, from where it stopped (a regression guard).
     await Reaper(app_session_factory=app).run_once()
@@ -244,6 +249,8 @@ async def test_a_graph_that_forks_read_is_never_purged():
     ds, gid = await _graph(svc)
     await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob")
     await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+    blocked = PurgeState("blocked", "1 fork(s) still read this graph's history", forks=1)
+    assert await purge_state_for_data_source(data_source_id=ds) == blocked
 
     with pytest.raises(PurgeRefused) as exc:
         await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
@@ -265,6 +272,9 @@ async def test_a_graph_that_forks_read_is_never_purged():
     refused = await _job(job_id)
     assert refused.summary["failure"]["code"] == "live_forks"
     assert await _rows_of(gid, "node_versions") == nodes > 0
+    # Still blocked by the forks, not "failed"; and, a purge job now standing, not restorable.
+    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState(
+        "blocked", "1 fork(s) still read this graph's history", forks=1, final=True)
 
     # The reaper does not re-run a refusal.
     app, _ = _app([])
@@ -299,7 +309,8 @@ async def test_the_reaper_skips_a_graph_restored_mid_pass(monkeypatch):
     original = purge_worker.purge_graph_for_data_source
 
     async def restored_first(**kw):
-        assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS)
+        assert not (await restore_graphs_for_data_source(data_source_id=ds,
+                                                         workspace_id=WS)).final
         return await original(**kw)
 
     monkeypatch.setattr(purge_worker, "purge_graph_for_data_source", restored_first)
@@ -320,8 +331,8 @@ async def test_an_abandoned_enablement_does_not_block_a_later_restore():
                                     data_source_id=ds)
     assert (await _runner().run_job(await _take(job_id)))["status"] == "completed"
 
-    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is True
-    assert await purge_pending_for_data_source(data_source_id=ds) is False
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) == PurgeState()
+    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState()
     async with db.graphver_session() as s:
         assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.data_source_id == ds))) == 0

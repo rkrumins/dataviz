@@ -48,6 +48,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, func, select, text, update
@@ -553,8 +554,46 @@ async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id:
     return len(graphs)
 
 
-async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: str) -> bool:
-    """Bring a data source's graphs back. Returns False if it is too late.
+@dataclass(frozen=True)
+class PurgeState:
+    """Where a data source's purge stands, and why it is stuck — what the trash shows.
+
+    ``state``: ``none`` (nothing queued), ``queued`` (pending or running), ``failed`` (it stopped;
+    ``reason`` is the job's own) or ``blocked`` (``forks`` forks still read a graph's history, so
+    no purge of it goes through, whoever asks). ``final``: a purge job exists, in any status, so
+    there is no undo (:func:`restore_graphs_for_data_source`)."""
+
+    state: str = "none"
+    reason: Optional[str] = None
+    forks: int = 0
+    final: bool = False
+
+
+async def _purge_state(s, data_source_id: str) -> PurgeState:
+    jobs = (await s.execute(select(JobORM.status, JobORM.error_message, JobORM.summary)
+                            .where(_purge_jobs_of(data_source_id))
+                            .order_by(JobORM.created_at.desc()))).all()
+    forks = 0
+    for g in (await s.execute(select(GraphORM).where(
+            GraphORM.data_source_id == data_source_id))).scalars().all():
+        forks += await _forks_reading(s, g)
+    final = bool(jobs)
+    if forks:
+        return PurgeState("blocked", f"{forks} fork(s) still read this graph's history",
+                          forks, final)
+    if any(status in ("pending", "running") for status, _e, _s in jobs):
+        return PurgeState("queued", final=True)
+    for status, error, summary in jobs:
+        if status == "failed":
+            reason = ((summary or {}).get("failure") or {}).get("reason") or error
+            return PurgeState("failed", reason, final=True)
+    return PurgeState(final=final)
+
+
+async def restore_graphs_for_data_source(*, data_source_id: str,
+                                         workspace_id: str) -> PurgeState:
+    """Bring a data source's graphs back, unless it is too late: then nothing changes, and the
+    purge state that refused it is returned (``final``, with its reason).
 
     TOO LATE MEANS: a purge job exists, in any status — a failed one has already deleted part
     of the graph. That is the whole concurrency design — rather than trying to cancel a purge
@@ -570,22 +609,22 @@ async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: s
                 GraphORM.workspace_id == workspace_id,
             ).with_for_update())).scalars().all()
 
-        if await s.scalar(select(func.count()).select_from(JobORM).where(
-                _purge_jobs_of(data_source_id))):
-            return False                           # being (or already) destroyed — cannot undo
+        state = await _purge_state(s, data_source_id)
+        if state.final:
+            return state                           # being (or already) destroyed — cannot undo
 
         for g in graphs:
             g.deleted_at = None
             g.deleted_by = None
-    return True
+    return state
 
 
-async def purge_pending_for_data_source(*, data_source_id: str) -> bool:
-    """Is this data source past the point of no return? (Drives the trash UI's "Deleting…" state.)
-    A failed purge is too: it will be queued again, and restore refuses it."""
+async def purge_state_for_data_source(*, data_source_id: str) -> PurgeState:
+    """Where this data source's purge stands (:class:`PurgeState`). Drives the trash UI: "Being
+    deleted", the reason a purge failed, or the forks blocking it. A failed purge is past the
+    point of no return too: restore refuses it."""
     async with db.graphver_session() as s:
-        return bool(await s.scalar(
-            select(func.count()).select_from(JobORM).where(_purge_jobs_of(data_source_id))))
+        return await _purge_state(s, data_source_id)
 
 
 #: How long a data source made from a view package may stand without its versioned graph before the

@@ -188,10 +188,14 @@ export interface DeletedDataSource {
     deletedBy: string
     daysLeft: number
     restoreWindowDays: number
-    /** The purge has started. There is nothing left to bring back. */
+    /** The purge is queued or running. There is nothing left to bring back. */
     purging: boolean
     /** The ONLY field the UI may act on. Never offer Restore when this is false. */
     restorable: boolean
+    /** `failed`: the purge stopped (`purgeReason` says why). `blocked`: live forks hold it back. */
+    purgeState: 'none' | 'queued' | 'failed' | 'blocked'
+    purgeReason: string | null
+    liveForks: number
 }
 
 export interface ImpactedEntity {
