@@ -463,7 +463,8 @@ class GraphVersioningService:
         atomic bootstrap), so a seed failure also rolls back the graph creation."""
         async with self._session_scope(session) as s:
             if falkor_graph_name:
-                await self._claim_projection_key(s, falkor_graph_name, falkor_provider)
+                await self._claim_projection_key(s, falkor_graph_name, falkor_provider,
+                                                 data_source_id=data_source_id)
             graph = GraphORM(
                 data_source_id=data_source_id,
                 workspace_id=workspace_id,
@@ -600,13 +601,17 @@ class GraphVersioningService:
                 "try again once it finishes")
 
     async def _claim_projection_key(self, s, name: str, provider: Optional[str], *,
-                                    exclude_graph_id: Optional[str] = None) -> None:
+                                    exclude_graph_id: Optional[str] = None,
+                                    data_source_id: Optional[str] = None) -> None:
         """Take FalkorDB graph ``name`` on ``provider`` as one versioned graph's projection target.
 
         Two versioned graphs projecting into one key would each reconcile the other's entities
         away. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
         the ``20261017_1500_gv_ps_keys`` migration does); any other holder refuses the claim
-        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check."""
+        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check.
+
+        A holder that is ``data_source_id``'s own graph is not a rival: the caller lost a
+        concurrent create for that data source, and ``uq_graphs_data_source`` refuses it."""
         default = config.DEFAULT_FALKOR_PROVIDER
         key = [func.coalesce(ProjectionStateORM.falkor_provider, default) == (provider or default),
                ProjectionStateORM.falkor_graph_name == name]
@@ -617,6 +622,9 @@ class GraphVersioningService:
             ProjectionStateORM.graph_id.in_(
                 select(GraphORM.id).where(GraphORM.deleted_at.isnot(None))),
         ).values(falkor_graph_name=None).execution_options(synchronize_session=False))
+        if data_source_id is not None:
+            key.append(ProjectionStateORM.graph_id.not_in(
+                select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))
         if await s.scalar(select(ProjectionStateORM.graph_id).where(*key).limit(1)):
             raise ConcurrencyError(
                 "another versioned data source already projects into this FalkorDB graph")

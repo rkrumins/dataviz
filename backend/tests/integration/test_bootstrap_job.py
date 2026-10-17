@@ -1006,6 +1006,34 @@ def test_bootstrap_job_e2e():
     asyncio.run(_run())
 
 
+async def _run_enable_race(monkeypatch) -> None:
+    """A loser whose first look missed the winner's graph, but whose key claim sees the winner's
+    committed projection state, still gets the winner's job back — not ``graph_key_in_use``."""
+    await models.create_schema_and_partitions()
+    d = "ds_" + os.urandom(4).hex()
+    claim = GraphVersioningService._claim_projection_key
+    winner = {}
+
+    async def _claim_after_winner(self, s, name, provider, **kw):
+        if not winner:
+            winner["out"] = None
+            winner["out"] = await _enable(d)            # the other click commits first
+        return await claim(self, s, name, provider, **kw)
+
+    monkeypatch.setattr(GraphVersioningService, "_claim_projection_key", _claim_after_winner)
+    try:
+        out = await _enable(d)
+        assert (out["graph_id"], out["job_id"]) == \
+            (winner["out"]["graph_id"], winner["out"]["job_id"]), (out, winner)
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_concurrent_enable_returns_the_winners_job(monkeypatch):
+    asyncio.run(_run_enable_race(monkeypatch))
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("bootstrap job e2e: OK")
