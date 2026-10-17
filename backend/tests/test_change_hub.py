@@ -100,6 +100,7 @@ class _FakeRedis:
         if self._batches:
             return self._batches.pop(0)
         await asyncio.sleep(3600)
+        return None
 
 
 async def _settle(times: int = 20) -> None:

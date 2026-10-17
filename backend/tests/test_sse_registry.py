@@ -14,8 +14,6 @@ response is not swallowed by the compression middleware.
 """
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from backend.app.common import sse_registry

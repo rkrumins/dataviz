@@ -133,7 +133,7 @@ class ChangeHub:
             try:
                 await self._task
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # We just cancelled it; _run logs and retries every other error itself.
             self._task = None
         # Wake everyone so their streams can close cleanly rather than
         # sitting on a heartbeat timeout while the process goes down.

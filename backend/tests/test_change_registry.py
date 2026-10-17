@@ -8,8 +8,6 @@ stale with nothing in any log to show for it.
 """
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from backend.app.changes import topics as change_topics

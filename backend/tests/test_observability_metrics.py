@@ -255,8 +255,8 @@ async def test_db_queries_are_counted():
 
 
 class _FakeLog:
-    def info(self, *a, **k): ...
-    def warning(self, *a, **k): ...
+    def info(self, *a, **k): pass
+    def warning(self, *a, **k): pass
 
 
 class _FakeServer:

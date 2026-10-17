@@ -165,6 +165,7 @@ async def test_unavailable_claims_are_503_not_an_empty_answer(
     from backend.app.services.permission_service import PermissionClaims
 
     app = test_client._transport.app  # type: ignore[attr-defined]
+    fixture_override = app.dependency_overrides[get_permission_claims]
     app.dependency_overrides[get_permission_claims] = lambda: PermissionClaims(
         sid="sess_test", global_perms=("system:admin",), ws_perms={},
         ws_available=False,
@@ -172,9 +173,7 @@ async def test_unavailable_claims_are_503_not_an_empty_answer(
     try:
         resp = await test_client.get("/api/v1/changes")
     finally:
-        app.dependency_overrides[get_permission_claims] = lambda: PermissionClaims(
-            sid="sess_test", global_perms=("system:admin",), ws_perms={},
-        )
+        app.dependency_overrides[get_permission_claims] = fixture_override
 
     assert resp.status_code == 503
 

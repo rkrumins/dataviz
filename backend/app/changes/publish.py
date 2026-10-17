@@ -29,15 +29,12 @@ never be able to fail a write that already succeeded.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Iterable
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .registry import get_registry
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["publish_change_after_commit", "publish_change"]
 

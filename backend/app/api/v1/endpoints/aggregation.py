@@ -1020,9 +1020,11 @@ async def stream_job_events(
     try:
         await asyncio.wait_for(_job_stream_slots.acquire(), timeout=0.05)
     except (asyncio.TimeoutError, TimeoutError):
+        # No job id: it is the caller's path parameter, unchecked so far,
+        # and the request's own log line already records the path.
         logger.info(
-            "SSE stream %s: refused, %d/%d job-stream slots busy on this process",
-            job_id, _MAX_CONCURRENT_JOB_STREAMS, _MAX_CONCURRENT_JOB_STREAMS,
+            "SSE stream refused: all %d job-stream slots busy on this process",
+            _MAX_CONCURRENT_JOB_STREAMS,
         )
         return Response(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
