@@ -179,6 +179,7 @@ tests/test_property_patch.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
+tests/test_provider_versioned_graphs.py
 tests/test_publish_async_api.py
 tests/test_publish_job_resume.py
 tests/test_publish_view_library_script.py

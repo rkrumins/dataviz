@@ -102,6 +102,23 @@ export interface ProviderImpactResponse {
     catalogItems: ImpactedEntity[]
     workspaces: ImpactedEntity[]
     views: ImpactedEntity[]
+    /** Versioned graphs projected into the provider, named by FalkorDB key (provider impact only). */
+    versionedGraphs?: ImpactedEntity[]
+}
+
+/**
+ * 409 `versioned_graphs_pinned`: the edit moves the provider to another server while these
+ * versioned graphs are projected into it. Saving again with `confirmReseed` reseeds each of them
+ * there from Postgres.
+ */
+export class VersionedGraphsPinnedError extends Error {
+    graphs: ImpactedEntity[]
+
+    constructor(message: string, graphs: ImpactedEntity[]) {
+        super(message)
+        this.name = 'VersionedGraphsPinnedError'
+        this.graphs = graphs
+    }
 }
 
 export interface PhysicalGraphStatsResponse {
@@ -314,6 +331,13 @@ async function request<T>(
     })
     if (!res.ok) {
         const text = await res.text()
+        if (res.status === 409) {
+            let detail: { type?: string; message?: string; graphs?: ImpactedEntity[] } | undefined
+            try { detail = JSON.parse(text).detail } catch { /* not JSON */ }
+            if (detail?.type === 'versioned_graphs_pinned') {
+                throw new VersionedGraphsPinnedError(detail.message ?? '', detail.graphs ?? [])
+            }
+        }
         throw new Error(friendlyError(text || res.statusText))
     }
     if (res.status === 204) return undefined as T
@@ -364,8 +388,11 @@ export const providerService = {
         return result
     },
 
-    update(id: string, req: ProviderUpdateRequest): Promise<ProviderResponse> {
-        return request<ProviderResponse>(`${ADMIN_API}/${id}`, {
+    update(
+        id: string, req: ProviderUpdateRequest, opts?: { confirmReseed?: boolean },
+    ): Promise<ProviderResponse> {
+        const qs = opts?.confirmReseed ? '?confirmReseed=true' : ''
+        return request<ProviderResponse>(`${ADMIN_API}/${id}${qs}`, {
             method: 'PUT',
             body: JSON.stringify(req),
         })

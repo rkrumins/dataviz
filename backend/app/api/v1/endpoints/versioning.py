@@ -1237,9 +1237,11 @@ async def create_graph(
     # The pin decides which FalkorDB graph the projector writes, so it is the data source's own
     # graph and provider, never the caller's choice. The data source must be this workspace's,
     # and an API key must cover it (an id in the body is invisible to requires()'s key scope).
-    from backend.app.api.v1.endpoints.graph import _data_source_in_workspace
+    # The projector writes only FalkorDB, so a source on any other provider is refused (422).
+    from backend.app.api.v1.endpoints.graph import _assert_copyable, _data_source_in_workspace
     ds = await _data_source_in_workspace(session, body.data_source_id, ws_id)
     await api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)
+    await _assert_copyable(session, ds.provider_id)
     with _domain_errors():                  # a key another versioned graph projects into → 409
         return await svc.create_graph(
             data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,

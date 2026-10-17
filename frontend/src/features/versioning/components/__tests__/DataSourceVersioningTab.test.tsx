@@ -2,6 +2,8 @@
  * DataSourceVersioningTab — the data source's versioning hub shows where its versioned graph lives
  * (ProjectionHealthCard) once version control is on, with Rebuild and Check sync for managers only.
  * It counts only drafts still in play, and a failed lookup is an error, not "version control is off".
+ * With version control off, Enable is offered only for a data source whose graph can be copied into
+ * version history (FalkorDB): the server refuses the rest with 422 `provider_unsupported`.
  * The data hooks are stubbed; the card itself has its own spec.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
@@ -12,9 +14,15 @@ let canManage = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
+let providerType: string | undefined
 const refetch = vi.fn()
 
 vi.mock('@/store/auth', () => ({ usePermission: () => canManage }))
+vi.mock('@/hooks/useDataSourceProviderMap', () => ({
+  useDataSourceProviderMap: () => ({
+    resolve: () => (providerType ? { providerType } : undefined),
+  }),
+}))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({
     data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
@@ -49,6 +57,7 @@ beforeEach(() => {
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
   branches = []
+  providerType = undefined
   refetch.mockReset()
 })
 
@@ -109,5 +118,27 @@ describe('DataSourceVersioningTab — resolve errors', () => {
     renderTab()
     expect(screen.getByText('Version control is off')).toBeInTheDocument()
     expect(screen.getByText('Enable version control')).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — Enable', () => {
+  beforeEach(() => { resolved = undefined })
+
+  it('is offered for a FalkorDB data source', () => {
+    providerType = 'falkordb'
+    renderTab()
+    expect(screen.getByRole('button', { name: /enable version control/i })).toBeTruthy()
+  })
+
+  it('is offered when the provider is unknown to this viewer', () => {
+    renderTab()
+    expect(screen.getByRole('button', { name: /enable version control/i })).toBeTruthy()
+  })
+
+  it('is not offered for a provider whose graph cannot be copied', () => {
+    providerType = 'neo4j'
+    renderTab()
+    expect(screen.queryByRole('button', { name: /enable version control/i })).toBeNull()
+    expect(screen.getByText(/only FalkorDB data sources can be versioned/i)).toBeTruthy()
   })
 })

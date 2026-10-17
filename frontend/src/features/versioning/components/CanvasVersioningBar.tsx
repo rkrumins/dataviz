@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
@@ -69,6 +70,10 @@ export function CanvasVersioningBar({
   const resolve = useResolveGraph(workspaceId, dataSourceId, activeView?.id ?? null)
   const graphId = resolve.data?.graphId ?? null
   const [showEnable, setShowEnable] = useState(false)
+  // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
+  // provider this viewer cannot see reads 'unknown' and is left to the server to judge.
+  const providerType = useDataSourceProviderMap().resolve(dataSourceId)?.providerType
+  const copyable = !providerType || providerType === 'unknown' || providerType === 'falkordb'
   // The enablement job: live progress while it runs (seeded from /resolve, so a reload
   // lands straight back on it), then the integrity report until it's dismissed. Managers
   // only: the copy is theirs to watch (no one else is shown its progress), so every other
@@ -198,7 +203,7 @@ export function CanvasVersioningBar({
   const isBlankModel = resolve.data?.kind === 'blank'
   const needsSeed = !graphId || (!isBlankModel && (resolve.data?.mainHeadCommitSeq ?? 0) <= 1)
   if (needsSeed) {
-    if (!canManage) return null
+    if (!canManage || !copyable) return null
     // A copy in flight (or one that stopped) OWNS this strip: the user watches it, and
     // a reload comes straight back to it (the job is seeded from /resolve).
     if (boot.showProgress && boot.job) {

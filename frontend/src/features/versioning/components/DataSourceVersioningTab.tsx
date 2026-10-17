@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom'
 import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import type { Branch } from '@/services/versioningApiService'
@@ -53,6 +54,10 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const mrsQ = useMergeRequests(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
+  // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
+  // provider this viewer cannot see reads 'unknown' and is left to the server to judge.
+  const providerType = useDataSourceProviderMap().resolve(dataSourceId)?.providerType
+  const copyable = !providerType || providerType === 'unknown' || providerType === 'falkordb'
   // Same hook as the canvas strip → the two surfaces can never disagree.
   const boot = useBootstrapWatch(wsId, dataSourceId, {
     headSeq: resolve.data?.mainHeadCommitSeq ?? 0,
@@ -125,7 +130,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
             Enable it to edit this data source safely in drafts, review every change against the published
             graph, and publish with a full, auditable history.
           </p>
-          {canManage ? (
+          {!copyable ? (
+            <p className="mt-4 text-xs text-ink-muted/70">Only FalkorDB data sources can be versioned for now.</p>
+          ) : canManage ? (
             <button
               onClick={() => setShowEnable(true)}
               className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"

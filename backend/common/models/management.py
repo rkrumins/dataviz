@@ -1536,6 +1536,8 @@ class ProviderImpactResponse(BaseModel):
     catalogItems: List[ImpactedEntity] = []
     workspaces: List[ImpactedEntity] = []
     views: List[ImpactedEntity] = []
+    # Versioned graphs projected into the provider (type "versioned_graph", named by key).
+    versionedGraphs: List[ImpactedEntity] = []
 
 
 class DraftImpact(BaseModel):

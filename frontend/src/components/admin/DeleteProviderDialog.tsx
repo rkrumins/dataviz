@@ -37,8 +37,10 @@ export function DeleteProviderDialog({
     const canDelete = confirmText === providerName
     const typingProgress = providerName.length > 0 ? confirmText.length / providerName.length : 0
 
+    const versionedGraphs = impact?.versionedGraphs ?? []
     const totalImpact = impact
         ? impact.catalogItems.length + impact.workspaces.length + impact.views.length
+            + versionedGraphs.length
         : 0
 
     const handleDelete = useCallback(async () => {
@@ -183,6 +185,26 @@ export function DeleteProviderDialog({
                                             <ul className="mt-1 ml-5 space-y-0.5">
                                                 {impact.views.map(v => (
                                                     <li key={v.id} className="text-xs text-red-500 dark:text-red-400">{v.name}</li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Versioned graphs projected into it (forks and blank models included) */}
+                                {versionedGraphs.length > 0 && (
+                                    <div className="mb-2">
+                                        <button
+                                            onClick={() => toggleSection('versionedGraphs')}
+                                            className="flex items-center gap-1.5 text-xs font-semibold text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
+                                        >
+                                            <ChevronDown className={cn("w-3 h-3 transition-transform", expandedSections.versionedGraphs && "rotate-180")} />
+                                            {versionedGraphs.length} Versioned Graph{versionedGraphs.length !== 1 ? 's' : ''}
+                                        </button>
+                                        {expandedSections.versionedGraphs && (
+                                            <ul className="mt-1 ml-5 space-y-0.5">
+                                                {versionedGraphs.map(g => (
+                                                    <li key={g.id} className="text-xs text-red-500 dark:text-red-400 font-mono">{g.name}</li>
                                                 ))}
                                             </ul>
                                         )}

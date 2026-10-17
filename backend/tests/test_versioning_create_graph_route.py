@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 import backend.app.api.v1.endpoints.versioning as V
 from backend.app.auth import api_key_auth
+from backend.app.db.repositories import provider_repo
 from backend.app.services.versioning.service import ConcurrencyError
 
 _DS = {"ds1": SimpleNamespace(id="ds1", workspace_id="ws1", graph_name="ds1_graph", provider_id="prov_A"),
@@ -33,8 +34,13 @@ def _no_key(monkeypatch):
     async def no_key(request):
         return None
 
+    async def falkordb(session, provider_id):
+        return SimpleNamespace(id=provider_id, provider_type="falkordb")
+
     monkeypatch.setattr(V.data_source_repo, "get_data_source_orm", get_ds)
     monkeypatch.setattr(api_key_auth, "acting", no_key)
+    # The route refuses a provider it cannot project into; prov_A is FalkorDB.
+    monkeypatch.setattr(provider_repo, "get_provider_orm", falkordb)
 
 
 def _create(body: dict, create=None):

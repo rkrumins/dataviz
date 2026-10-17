@@ -211,6 +211,20 @@ def _view_source_kinds_unknown():
 
 
 @pytest.fixture(autouse=True)
+def _no_graphs_pinned_to_providers(monkeypatch):
+    """No versioned graph is projected into any provider, so a provider delete, edit or impact
+    report does not reach for the ``graphver`` store (see above). A test about pinned graphs
+    patches ``versioned_sources.graphs_pinned_to`` itself (see
+    test_provider_versioned_graphs.py)."""
+    from backend.app.services import versioned_sources
+
+    async def _none(provider_id):
+        return []
+
+    monkeypatch.setattr(versioned_sources, "graphs_pinned_to", _none)
+
+
+@pytest.fixture(autouse=True)
 def _reset_replica_penalty_box():
     """Clear the process-global replica penalty box between tests.
 

@@ -47,6 +47,7 @@ tests/integration/test_projection_merkle_diff.py
 tests/integration/test_projection_pending_retries_wedge.py
 tests/integration/test_projection_reconcile_live.py
 tests/integration/test_property_delete_every_path.py
+tests/integration/test_provider_versioned_graphs_live.py
 tests/integration/test_publish_narrow_squash.py
 tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py

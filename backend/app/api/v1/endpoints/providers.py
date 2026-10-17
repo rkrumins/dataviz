@@ -18,6 +18,7 @@ from backend.app.db.engine import (
 )
 from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.repositories import provider_repo
+from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.providers.reachability import resolve_provider_status
 from backend.app.services.activity import recorder
@@ -409,14 +410,37 @@ def _effective_provider_identity(prov) -> tuple:
     )
 
 
+def _graph_server(host, port, extra_config: dict | None) -> tuple:
+    """The server a provider's graphs live on: its address and FalkorDB topology. Credentials,
+    TLS and timeouts reach the same server, so they are not part of it."""
+    conn = (extra_config or {}).get("falkordbConnection") or {}
+    sentinel, cluster = conn.get("sentinel") or {}, conn.get("cluster") or {}
+    return (host, port, conn.get("mode") or "standalone", sentinel.get("masterName"),
+            sentinel.get("nodes"), cluster.get("startupNodes"))
+
+
 @router.put("/{provider_id}", response_model=ProviderResponse)
 async def update_provider(
     provider_id: str = Path(...),
     req: ProviderUpdateRequest = Body(...),
+    confirm_reseed: bool = Query(
+        False, alias="confirmReseed",
+        description=(
+            "Move the provider to another server although versioned graphs are projected "
+            "into it; each is then reseeded there from Postgres."),
+    ),
     session: AsyncSession = Depends(get_db_session),
-    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
+    user=Depends(_REQUIRES_SYSTEM_ADMIN),
+    versioning=Depends(get_versioning_service),
 ):
-    """Update a provider. Evicts any cached provider instances."""
+    """Update a provider. Evicts any cached provider instances.
+
+    An edit that points the provider at another server (address or FalkorDB topology) while
+    live versioned graphs are projected into it answers 409 ``versioned_graphs_pinned``, listing
+    them: their watermarks describe keys the new server does not hold, so reads would trust a
+    projection that is not there. With ``confirmReseed=true`` it is applied and their
+    watermarks are reset, so the projector reseeds each graph on the new server."""
+    from backend.app.services import versioned_sources
     from backend.app.services.node_identity import (
         invalidate_node_identity, provider_identity_from_extra_config,
         scopes_resolving_through,
@@ -429,15 +453,39 @@ async def update_provider(
     # this provider just as surely as editing the column does.
     old_identity = _effective_provider_identity(old_prov)
 
+    moved_graphs = []
+    if old_prov is not None:
+        old_extra = json.loads(old_prov.extra_config) if old_prov.extra_config else None
+        old_server = _graph_server(old_prov.host, old_prov.port, old_extra)
+        new_server = _graph_server(
+            req.host if req.host is not None else old_prov.host,
+            req.port if req.port is not None else old_prov.port,
+            req.extra_config if req.extra_config is not None else old_extra)
+        if new_server != old_server:
+            moved_graphs = [g for g in await versioned_sources.graphs_pinned_to(provider_id)
+                            if not g.trashed]
+    if moved_graphs and not confirm_reseed:
+        raise HTTPException(status_code=409, detail={
+            "type": "versioned_graphs_pinned",
+            "message": (f"{len(moved_graphs)} versioned graph(s) are projected into this "
+                        "provider. Moving it to another server reseeds each of them there "
+                        "from Postgres; confirm to go ahead."),
+            "graphs": [provider_repo.pinned_graph_entity(g).model_dump() for g in moved_graphs],
+        })
+
     prov = await provider_repo.update_provider(session, provider_id, req)
     if not prov:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     await provider_registry.evict_provider(provider_id)
     # Which fields were sent, never their values: one of them may be a secret.
+    details = {"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))}
+    if moved_graphs:
+        details["graphsReseeded"] = len(await versioning.reset_projection_watermarks(
+            provider=provider_id, actor=user.id))
     await recorder.record_for_request(
         session, "provider.connection.updated",
         target_type="provider", target_id=provider_id, target_label=prov.name,
-        details={"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))},
+        details=details,
     )
 
     new_prov = await session.get(ProviderORM, provider_id)
@@ -458,11 +506,12 @@ async def delete_provider(
     session: AsyncSession = Depends(get_db_session),
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
-    """Delete a provider. Rejects if workspaces still reference it."""
+    """Delete a provider. Rejects if workspaces or versioned graphs still reference it."""
     if await provider_repo.has_workspaces(session, provider_id):
         raise HTTPException(
             status_code=409,
-            detail="Cannot delete provider: one or more workspaces still reference it.",
+            detail=("Cannot delete provider: workspaces or versioned graphs still "
+                    "reference it."),
         )
     row = await provider_repo.get_provider_orm(session, provider_id)
     deleted = await provider_repo.delete_provider(session, provider_id)
