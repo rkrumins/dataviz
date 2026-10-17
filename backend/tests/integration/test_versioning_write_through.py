@@ -1,7 +1,8 @@
 """Provider write-through versioning (unification Phase 5) — needs Postgres.
 
 The VersionedWriteProvider wraps any provider so every write also lands as an audited
-commit on the data source's versioned graph (auto-resolved/created), attributed to the
+commit on the data source's versioned graph (which must already exist: enablement is an
+explicit job, and a write to an un-versioned source is refused), attributed to the
 acting user, while still delegating to the underlying provider. Edge endpoints are
 backfilled so the versioned graph stays referentially whole; updates/deletes are versioned
 too. Reads delegate unchanged.
@@ -12,7 +13,7 @@ import os
 import pytest
 
 from backend.common.models.graph import GraphEdge, GraphNode
-from backend.app.providers.versioned_write_provider import VersionedWriteProvider
+from backend.app.providers.versioned_write_provider import VersionedWriteProvider, VersioningNotEnabled
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -69,10 +70,15 @@ async def _run() -> None:
     assert (await prov.get_node("u:A")).display_name == "A"
     assert prov.name == "fake"
 
-    # ── create node: delegated AND recorded; the versioned graph is auto-created ──
+    # ── a write to an un-versioned source is refused before it reaches the provider ──
+    with pytest.raises(VersioningNotEnabled):
+        await prov.create_node(A)
+    assert inner.calls == []
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u_alice"))["graph_id"]
+
+    # ── create node: delegated AND recorded on the now-enabled graph ──
     assert await prov.create_node(A) is True
     assert ("create_node", "u:A") in inner.calls
-    gid = (await svc.get_graph_by_data_source(ds))["graph_id"]
     main = await svc.main_branch_id(gid)
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
     assert st["nodes"]["u:A"]["properties"]["owner"] == "t1"
