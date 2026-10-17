@@ -421,7 +421,8 @@ async def list_deleted_data_sources(
     out: List[DeletedDataSource] = []
     for r in rows:
         try:
-            purge = await purge_worker.purge_state_for_data_source(data_source_id=r.id)
+            purge = await purge_worker.purge_state_for_data_source(data_source_id=r.id,
+                                                                   deleted_at=r.deleted_at)
         except Exception:                                    # pragma: no cover - best effort
             logger.exception("could not read purge state for %s", r.id)
             purge = purge_worker.PurgeState()
@@ -793,8 +794,10 @@ async def restore_data_source(
     # The graph goes first, because it is the one that can REFUSE: once a purge has been queued
     # there is nothing left to restore, and we must not hand back a data source pointing at a
     # graph that is being dismantled.
+    row = await data_source_repo.get_data_source_orm(session, ds_id, include_deleted=True)
     purge = await purge_worker.restore_graphs_for_data_source(
-        data_source_id=ds_id, workspace_id=workspace_id)
+        data_source_id=ds_id, workspace_id=workspace_id,
+        deleted_at=row.deleted_at if row is not None else None)
     if purge.final:
         detail = "This data source is being permanently deleted and can no longer be restored."
         if purge.reason:

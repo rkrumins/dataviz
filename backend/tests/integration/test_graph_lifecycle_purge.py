@@ -11,9 +11,11 @@
 * a trashed fork past its grace is purged by the reaper, which drops the fork's own key and
   never its parent's — a customer's;
 * a restore that wins the race with the reaper keeps its graph, and so does a fork's restore
-  that wins the race with its parent's purge; a fork made during a parent's purge loses.
+  that wins the race with its parent's purge; a fork made during a parent's purge loses;
+* a trashed data source whose purge completed is not restorable, in the trash or by the route.
 
-The data-source rows the reaper reads live in the management database; they are faked here.
+The data-source rows the reaper reads live in the management database; they are faked here,
+except in the trash test, which keeps them in the SQLite harness behind the real routes.
 Unit level: ``test_purge_reaper_unit.py``.
 """
 from __future__ import annotations
@@ -24,7 +26,9 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services.versioning import config, db, models, purge_worker
 from backend.app.services.versioning.errors import ForkNotRestorable
 from backend.app.services.versioning.job_lease import Lease
@@ -338,8 +342,11 @@ async def test_an_abandoned_enablement_does_not_block_a_later_restore():
                                     data_source_id=ds)
     assert (await _runner().run_job(await _take(job_id)))["status"] == "completed"
 
-    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) == PurgeState()
-    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState()
+    trashed = models._now()                       # its purge was queued before this delete
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS,
+                                                deleted_at=trashed) == PurgeState()
+    assert await purge_state_for_data_source(data_source_id=ds,
+                                             deleted_at=trashed) == PurgeState()
     async with db.graphver_session() as s:
         assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.data_source_id == ds))) == 0
@@ -511,3 +518,33 @@ async def test_a_fork_waits_for_and_loses_to_a_parent_purge_being_queued():
     async with db.graphver_session() as s:
         assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.fork_parent_graph_id == gid))) == 0
+
+
+async def test_a_trashed_source_whose_purge_completed_cannot_be_restored(test_client, db_session):
+    """The purge takes the graph row with it, and the reaper removes the data-source row only on
+    a later pass. In between, the trash must not offer Restore, nor the route bring back a data
+    source whose history is gone."""
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    db_session.add_all([WorkspaceORM(id=WS, name="Purge"),
+                        ProviderORM(id="prov_purge", name="Prod", provider_type="falkordb")])
+    db_session.add(WorkspaceDataSourceORM(id=ds, workspace_id=WS, provider_id="prov_purge",
+                                          graph_name="g_purge", label="Purged", deleted_by="alice",
+                                          deleted_at="2020-01-01T00:00:00+00:00"))   # past grace
+    await db_session.commit()
+    await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+
+    app = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    assert (await Reaper(app_session_factory=app).run_once())["queued"] == 1
+    (purge,) = await _purges(gid)
+    assert (await _runner().run_job(await _take(purge.id)))["status"] == "completed"
+    async with db.graphver_session() as s:
+        assert await s.get(GraphORM, gid) is None
+
+    url = f"/api/v1/admin/workspaces/{WS}/data-sources"
+    rows = {r["id"]: r for r in (await test_client.get(f"{url}/deleted")).json()}
+    assert rows[ds]["restorable"] is False
+    resp = await test_client.post(f"{url}/{ds}/restore")
+    assert resp.status_code == 409, resp.text
+    async with app() as s:
+        assert (await s.get(WorkspaceDataSourceORM, ds)).deleted_at is not None

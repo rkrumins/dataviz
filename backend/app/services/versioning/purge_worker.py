@@ -566,12 +566,18 @@ async def purge_graph_for_data_source(*, data_source_id: str, workspace_id: str,
 
 
 # ---------------------------------------------------------------- the undo window --
-def _purge_jobs_of(data_source_id: str):
+def _purge_jobs_of(data_source_id: str, deleted_at: Optional[str] = None):
     """Every purge job, in any status, of a graph the data source still has. A purge that
     completed took its graph row with it, so it no longer counts: the purge of a graph whose
-    enablement was abandoned must not hold its data source back later."""
-    return and_(JobORM.job_type == PURGE_JOB_TYPE, JobORM.graph_id.in_(
-        select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))
+    enablement was abandoned must not hold its data source back later. Unless it was queued
+    since the data source went to the trash (``deleted_at``): that purge destroyed what a
+    restore would bring back, and the reaper removes the row only on a later pass."""
+    of_graph = JobORM.graph_id.in_(
+        select(GraphORM.id).where(GraphORM.data_source_id == data_source_id))
+    if deleted_at is not None:
+        of_graph = or_(of_graph, and_(JobORM.data_source_id == data_source_id,
+                                      JobORM.created_at >= deleted_at))
+    return and_(JobORM.job_type == PURGE_JOB_TYPE, of_graph)
 
 
 async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id: str,
@@ -609,9 +615,9 @@ class PurgeState:
     final: bool = False
 
 
-async def _purge_state(s, data_source_id: str) -> PurgeState:
+async def _purge_state(s, data_source_id: str, deleted_at: Optional[str] = None) -> PurgeState:
     jobs = (await s.execute(select(JobORM.status, JobORM.error_message, JobORM.summary)
-                            .where(_purge_jobs_of(data_source_id))
+                            .where(_purge_jobs_of(data_source_id, deleted_at))
                             .order_by(JobORM.created_at.desc()))).all()
     forks = 0
     for g in (await s.execute(select(GraphORM).where(
@@ -630,13 +636,14 @@ async def _purge_state(s, data_source_id: str) -> PurgeState:
     return PurgeState(final=final)
 
 
-async def restore_graphs_for_data_source(*, data_source_id: str,
-                                         workspace_id: str) -> PurgeState:
+async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: str,
+                                         deleted_at: Optional[str] = None) -> PurgeState:
     """Bring a data source's graphs back, unless it is too late: then nothing changes, and the
     purge state that refused it is returned (``final``, with its reason).
 
     TOO LATE MEANS: a purge job exists, in any status — a failed one has already deleted part
-    of the graph. That is the whole concurrency design — rather than trying to cancel a purge
+    of the graph, and a completed one queued since ``deleted_at`` (the data source's trash time)
+    all of it. That is the whole concurrency design — rather than trying to cancel a purge
     mid-flight and stitch a half-deleted graph back together, restore simply REFUSES once a purge
     has been queued. A purge and a restore can therefore never overlap, and there is no
     partial-restore state to reason about. The row lock below serialises us against the reaper
@@ -649,7 +656,7 @@ async def restore_graphs_for_data_source(*, data_source_id: str,
                 GraphORM.workspace_id == workspace_id,
             ).with_for_update())).scalars().all()
 
-        state = await _purge_state(s, data_source_id)
+        state = await _purge_state(s, data_source_id, deleted_at)
         if state.final:
             return state                           # being (or already) destroyed — cannot undo
 
@@ -659,12 +666,13 @@ async def restore_graphs_for_data_source(*, data_source_id: str,
     return state
 
 
-async def purge_state_for_data_source(*, data_source_id: str) -> PurgeState:
+async def purge_state_for_data_source(*, data_source_id: str,
+                                      deleted_at: Optional[str] = None) -> PurgeState:
     """Where this data source's purge stands (:class:`PurgeState`). Drives the trash UI: "Being
     deleted", the reason a purge failed, or the forks blocking it. A failed purge is past the
     point of no return too: restore refuses it."""
     async with db.graphver_session() as s:
-        return await _purge_state(s, data_source_id)
+        return await _purge_state(s, data_source_id, deleted_at)
 
 
 #: How long a data source made from a view package may stand without its versioned graph before the

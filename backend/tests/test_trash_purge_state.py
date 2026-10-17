@@ -34,7 +34,8 @@ async def trash(db_session, monkeypatch):
                                               graph_name=f"g_{ds}", label=ds, deleted_at=GONE))
     await db_session.commit()
 
-    async def _state(*, data_source_id):
+    async def _state(*, data_source_id, deleted_at):
+        assert deleted_at == GONE              # a purge queued since then counts, done or not
         return STATES[data_source_id]
 
     monkeypatch.setattr(purge_worker, "purge_state_for_data_source", _state)
@@ -59,7 +60,8 @@ async def test_the_trash_shows_each_purge_state_and_its_reason(test_client, tras
 
 @pytest.mark.asyncio
 async def test_a_refused_restore_says_why_the_purge_stopped(test_client, trash, monkeypatch):
-    async def _refuse(**_k):
+    async def _refuse(*, data_source_id, workspace_id, deleted_at):
+        assert deleted_at == GONE
         return STATES["ds_failed"]
 
     monkeypatch.setattr(purge_worker, "restore_graphs_for_data_source", _refuse)
