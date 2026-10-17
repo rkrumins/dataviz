@@ -241,7 +241,8 @@ class ProviderRef(_Base):
     is_active: bool = Field(True, alias="isActive")
     #: Versioned graphs projecting into this provider, and the size of their
     #: keys (measured, else estimated; None when no key's size is known).
-    versioned_graphs: int = Field(0, alias="versionedGraphs")
+    #: Both None when the versioning store could not be read.
+    versioned_graphs: Optional[int] = Field(None, alias="versionedGraphs")
     versioned_bytes: Optional[int] = Field(None, alias="versionedBytes")
 
 
@@ -323,6 +324,10 @@ class GraphStoreTopologyResponse(_Base):
     #: first reading of a store the page has never seen; with instances, it
     #: is a refresh behind figures that are already on screen.
     refreshing: bool = False
+    #: The versioning store could not be read: no key is attributed to a
+    #: versioned graph, so a fork's key reads as unregistered and no provider
+    #: has a versioned-graph count.
+    versioned_unread: bool = Field(False, alias="versionedUnread")
 
 
 class ReadRouting(_Base):

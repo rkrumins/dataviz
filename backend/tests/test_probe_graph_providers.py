@@ -54,3 +54,15 @@ async def test_before_the_store_is_read_the_counts_are_absent_not_zero(monkeypat
 
     cards = await probes.probe_graph_providers(SimpleNamespace())
     assert all("versionedGraphs" not in c for c in cards)
+
+
+async def test_a_reading_that_could_not_count_them_leaves_the_counts_absent(monkeypatch):
+    """A reading whose versioned-graph overlay failed has no count for a provider: its card says
+    nothing rather than "No versioned graphs"."""
+    _providers(monkeypatch)
+    snapshot = GraphStoreTopologyResponse(versioned_unread=True, instances=[GraphStoreInstance(
+        id="i1", providers=[ProviderRef(id="p1")])])
+    monkeypatch.setattr(topology, "_cache", (time.monotonic(), snapshot))
+
+    cards = {c["id"]: c for c in await probes.probe_graph_providers(SimpleNamespace())}
+    assert "versionedGraphs" not in cards["p1"] and "versionedBytes" not in cards["p1"]

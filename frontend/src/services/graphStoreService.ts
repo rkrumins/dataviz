@@ -298,6 +298,9 @@ export interface GraphStoreTopologyResponse {
      *  first reading of a store the page has never seen; with instances it
      *  is a refresh behind figures already on screen. */
     refreshing?: boolean
+    /** The versioning store could not be read: a fork's key reads as
+     *  unregistered and no provider has a versioned-graph count. */
+    versionedUnread?: boolean
 }
 
 export interface ReadRouting {

@@ -195,3 +195,24 @@ async def test_a_resumed_parse_counts_every_skipped_record_of_the_file(tmp_path)
     worker._flush, worker._skip = flush, 2
     assert await worker._parse("vjob_1", "source", "ndjson") == (3, 2)
     assert [(r["row_index"], r["kind"]) for r in staged] == [(2, "edge")]
+
+
+async def test_a_blank_csv_row_is_not_a_skipped_record(tmp_path):
+    """A sheet saved as CSV can end in rows of bare delimiters where cells were cleared. They name
+    nothing, so they are dropped like an empty line and never refuse a replace; a row with some
+    cells but no kind is still counted."""
+    store = LocalFsObjectStore(tmp_path)
+
+    async def body():
+        yield b"kind,urn,displayName\r\nnode,urn:a,A\r\n,,\r\n,urn:b,\r\n,,\r\n, ,\r\n"
+
+    await store.put_stream("source", body())
+    worker = ImportWorker(None, store)
+    staged = []
+
+    async def flush(batch):
+        staged.extend(batch)
+
+    worker._flush = flush
+    assert await worker._parse("vjob_1", "source", "csv") == (1, 1)
+    assert [r["kind"] for r in staged] == ["node"]

@@ -1230,7 +1230,8 @@ async def probe_graph_providers(app_state) -> Optional[list]:
     per-type code and zero request-path I/O — it reads only the in-memory
     circuit-breaker state and the background warmup cache. A FalkorDB
     provider's versioned graphs and their size come from the graph store
-    reading already in hand, never a sweep, and are absent before one.
+    reading already in hand, never a sweep, and are absent before one or
+    when that reading could not read the versioning store.
     """
     from backend.app.db.engine import PoolRole, get_session_factory
     from backend.app.db.repositories import provider_repo
@@ -1272,7 +1273,7 @@ async def probe_graph_providers(app_state) -> Optional[list]:
             "error": error,
             "isActive": p.is_active,
         })
-        if p.id in hosted:
+        if p.id in hosted and hosted[p.id].versioned_graphs is not None:
             out[-1]["versionedGraphs"] = hosted[p.id].versioned_graphs
             out[-1]["versionedBytes"] = hosted[p.id].versioned_bytes
     out.sort(key=lambda d: (d["status"] != "down", d["type"], d["name"] or ""))

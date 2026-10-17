@@ -201,6 +201,16 @@ export function AdminGraphStore() {
                 </p>
             )}
 
+            {data?.versionedUnread && (
+                <p
+                    data-testid="graph-store-versioned-unread"
+                    className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-700 dark:text-amber-400"
+                >
+                    Versioned graphs could not be read for this reading, so a fork’s graph shows as unregistered
+                    and providers have no versioned-graph count. The next refresh tries again.
+                </p>
+            )}
+
             {/* The first sweep does not run inside the request — it would
                 outlast any gateway — so an empty answer saying a reading is
                 on its way is the normal cold start, not a failure. */}

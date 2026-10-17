@@ -324,13 +324,14 @@ async def _expected_graphs(
 
 async def _versioned_graphs(
     provider_ids: Sequence[str],
-) -> Dict[Tuple[str, str], VersionedOnShard]:
+) -> Optional[Dict[Tuple[str, str], VersionedOnShard]]:
     """``(provider_id, graph_key)`` → the live versioned graph projecting there.
 
     Every ``projection_state`` key, not only the ones a data source names: a
     fork's key belongs to no data source, and without this it reads as
     unregistered on a store that is serving it. Read from the versioning
-    store, so a store that cannot be read costs the overlay, never the page.
+    store, so a store that cannot be read costs the overlay, never the page:
+    None then, which the snapshot reports, never an empty overlay.
     """
     from backend.app.services.system_status.probes import _projection_rows
     from backend.app.services.versioning.db import graphver_session
@@ -348,7 +349,7 @@ async def _versioned_graphs(
             ))).all()
     except Exception as exc:                          # noqa: BLE001 — the overlay is optional
         logger.info("graph store: versioned graphs not read: %s", _err(exc))
-        return {}
+        return None
     return {
         (r.falkor_provider, r.falkor_graph_name): VersionedOnShard(
             graph_id=r.id, kind="fork" if r.fork_parent_graph_id else "main",
@@ -889,7 +890,8 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         provider_ids = [p.id for slot in pending for p in slot.providers]
         expected = await _expected_graphs(session, provider_ids)
         limits = effective_limits(await _stored_tuning(session))
-    versioned = await _versioned_graphs(provider_ids)
+    overlay = await _versioned_graphs(provider_ids)
+    versioned = overlay if overlay is not None else {}
 
     # Seeds, best first: what THIS process saw last, then what ANY process
     # last saw (the memory outside the process, which is the only thing a
@@ -948,7 +950,8 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
             instance, idxs, reads, _expected_here(expected, instance), bytes_per_edge,
             _expected_here(versioned, instance),
         )
-        _count_versioned(instance, versioned)
+        if overlay is not None:
+            _count_versioned(instance, versioned)
         for shard in instance.shards:
             shard.capacity = shard_row(reading_of(shard.master), limits)
         instance.totals = _totals(instance)
@@ -999,7 +1002,10 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         summary=_summarize(instances),
         limits=limits,
         measured_at=_now_iso(),
-        ttl_s=_ttl_s(),
+        # Without the overlay the reading is incomplete: kept only until the
+        # next try, like a failed sweep, not for the whole TTL.
+        ttl_s=_ttl_s() if overlay is not None else _FAILURE_BACKOFF_S,
+        versioned_unread=overlay is None,
     )
 
 
@@ -1461,13 +1467,13 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
     global _cache, _last_error, _retry_not_before
 
     now = time.monotonic()
-    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
+    if not fresh and _cache is not None and now - _cache[0] < _cache[1].ttl_s:
         return _with_age(_cache[1], _cache[0])
     if _cache is not None and now < _retry_not_before:
         return _with_age(_cache[1], _cache[0], stale=True)
     entered = time.monotonic()
     async with _build_lock():
-        if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
+        if not fresh and _cache is not None and time.monotonic() - _cache[0] < _cache[1].ttl_s:
             return _with_age(_cache[1], _cache[0])
         if _cache is not None and _cache[0] >= entered:
             # Someone swept while we waited; theirs is as fresh as ours.
@@ -1492,7 +1498,8 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
         _last_error = None
         _retry_not_before = 0.0
         _cache = (time.monotonic(), snapshot)
-        await _shared_remember(snapshot)
+        if not snapshot.versioned_unread:     # an incomplete reading stays in this process
+            await _shared_remember(snapshot)
         return _with_age(snapshot, _cache[0])
 
 
@@ -1526,7 +1533,7 @@ def cached_summary() -> Optional[Dict[str, Any]]:
     out: Dict[str, Any] = {
         "measured_at": snapshot.measured_at,
         "age_s": round(time.monotonic() - cached_at, 1),
-        "stale": time.monotonic() - cached_at >= _ttl_s(),
+        "stale": time.monotonic() - cached_at >= snapshot.ttl_s,
         "instances": {},
     }
     for inst in snapshot.instances:
@@ -1578,7 +1585,7 @@ async def snapshot_for_request(
     Returns ``(snapshot or None, refreshing)``.
     """
     now = time.monotonic()
-    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
+    if not fresh and _cache is not None and now - _cache[0] < _cache[1].ttl_s:
         return _with_age(_cache[1], _cache[0]), False
 
     task = request_refresh(fresh=fresh)
@@ -1594,7 +1601,7 @@ async def snapshot_for_request(
     refreshing = not task.done()
     if _cache is None:
         return None, refreshing
-    stale = time.monotonic() - _cache[0] >= _ttl_s()
+    stale = time.monotonic() - _cache[0] >= _cache[1].ttl_s
     return _with_age(_cache[1], _cache[0], stale=stale and _last_error is not None), refreshing
 
 

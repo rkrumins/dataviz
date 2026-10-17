@@ -159,6 +159,8 @@ class DelimitedAdapter:
         header: List[str] | None = None
         async for record in _csv_records(_lines(chunks), self._delim):
             row = next(csv.reader([record], delimiter=self._delim))
+            if not any(c.strip() for c in row):
+                continue                      # a blank row (",,,,"), as the xlsx adapter skips
             if header is None:
                 header = row
                 continue

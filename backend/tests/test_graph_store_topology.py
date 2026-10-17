@@ -854,6 +854,47 @@ def test_each_provider_counts_its_versioned_graphs_and_their_size(monkeypatch):
     assert (providers["p2"].versioned_graphs, providers["p2"].versioned_bytes) == (0, None)
 
 
+def test_a_versioning_store_that_cannot_be_read_is_said_not_read_as_none(monkeypatch):
+    """The overlay read failing is not the same as no versioned graphs: the snapshot says it
+    could not be read, the providers' counts are left unknown rather than 0, and the reading is
+    kept only until the next try, not the full TTL, nor handed to other processes."""
+    import contextlib
+
+    from backend.app.services.versioning import db as ver_db
+
+    real = topology._versioned_graphs
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    monkeypatch.setattr(topology, "_versioned_graphs", real)
+
+    @contextlib.asynccontextmanager
+    async def unreachable():
+        raise OSError("connection refused")
+        yield
+
+    monkeypatch.setattr(ver_db, "graphver_session", unreachable)
+    shared = []
+
+    async def remember(snapshot):
+        shared.append(snapshot)
+
+    monkeypatch.setattr(topology, "_shared_remember", remember)
+
+    snap = _run(topology.get_topology_snapshot())
+    assert snap.versioned_unread
+    assert snap.instances[0].providers[0].versioned_graphs is None
+    assert snap.ttl_s == topology._FAILURE_BACKOFF_S and shared == []
+
+    async def readable(provider_ids):
+        return {}
+
+    monkeypatch.setattr(topology, "_versioned_graphs", readable)
+    cached_at, degraded = topology._cache
+    topology._cache = (cached_at - topology._FAILURE_BACKOFF_S, degraded)
+    snap = _run(topology.get_topology_snapshot())
+    assert not snap.versioned_unread, "swept again once the short life ran out"
+    assert snap.instances[0].providers[0].versioned_graphs == 0 and len(shared) == 1
+
+
 def test_graph_sizes_are_measured_when_the_server_has_the_command(monkeypatch):
     nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
     slot_owner = MASTERS[topology.key_slot("g1") // 5461]
