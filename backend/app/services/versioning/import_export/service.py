@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
+from ..errors import MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import ImportRowORM, JobORM
 from ..service import AccessDenied, GraphVersioningService, Viewer
@@ -415,16 +416,26 @@ class ImportExportService:
         merge_request_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """A publish of a draft too large to publish inside a request — or the merge of its review
-        (``merge_request_id``), queued like an export. The request rides in ``field_scope``."""
+        (``merge_request_id``), queued like an export. The request rides in ``field_scope``.
+
+        The draft is taken in the same transaction: under its row lock it must be open (main is
+        :class:`MainWriteForbidden`, a closed draft :class:`BranchNotOpen`), and it becomes
+        ``publishing``, closed to every write but the job's publish until the job ends. The job is
+        stored already queued: it has no input to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
         if merge_request_id:
             fields["mergeRequestId"] = merge_request_id
         async with db.graphver_session() as s:
+            branch = await self._svc._lock_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._svc._require_open(branch)
+            branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,
-                         field_scope=fields, status="pending")
+                         field_scope=fields, status="pending", current_phase=QUEUED, updated_at=_now())
             s.add(job)
             await s.flush()
             return {"job_id": job.id}
@@ -438,6 +449,7 @@ class ImportExportService:
         the transfer lane's, which keeps a large squash alive while it says nothing until it lands;
         called without one, the job is taken here (:func:`.import_worker.lease_job`). The hook's
         answer is the job's summary, and a refusal fails the job; both through the fenced finish.
+        A refusal hands the draft back (``publishing`` → ``open``) once the job has failed.
 
         Safe to run again. An earlier attempt may have merged the draft and died (or been taken
         over) before it finished the job: a merged draft is not published twice — the hook is told
@@ -463,6 +475,8 @@ class ImportExportService:
         if not await lease.finish(**values):
             raise Superseded(f"publish job {job_id} (epoch {lease.epoch}) was taken over before it "
                              "could finish")
+        if "error" in result:
+            await self._svc.release_publishing(graph_id=job["graphId"], branch_id=job["branchId"])
         return result
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:

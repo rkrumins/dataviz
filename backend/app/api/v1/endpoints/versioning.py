@@ -1612,8 +1612,9 @@ async def publish(
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
     published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
-        return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
-                                    branch_id=branch_id, actor=user.id, body=body)
+        with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
+            return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
+                                        branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
@@ -1678,11 +1679,13 @@ async def _publish_from_job(job: dict) -> dict:
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
-                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
+                        queued=True)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
-                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
+                        queued=True)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
@@ -3528,9 +3531,10 @@ async def merge_merge_request(
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
-        return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
-                                    graph_id=target, branch_id=str(source), actor=user.id,
-                                    body=body, merge_request_id=pr_id)
+        with _domain_errors():
+            return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
+                                        graph_id=target, branch_id=str(source), actor=user.id,
+                                        body=body, merge_request_id=pr_id)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     with _domain_errors():

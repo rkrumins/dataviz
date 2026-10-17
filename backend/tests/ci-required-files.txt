@@ -178,6 +178,7 @@ tests/test_provider_refresh_batch.py
 tests/test_publish_async_api.py
 tests/test_publish_job_resume.py
 tests/test_publish_view_library_script.py
+tests/test_publishing_release.py
 tests/test_purge_ownership_guard.py
 tests/test_purge_reaper_unit.py
 tests/test_purge_then_rebuild.py

@@ -45,6 +45,10 @@ async def _run() -> None:
 
     pr = await svc.open_pr(source_graph_id=F["graph_id"], actor="bob", reviewers=["carol"])
     assert (await svc.get_pr(pr))["approval_status"] == "pending"
+    # The merge route queues a merge job by the source's change count in the TARGET graph, which a
+    # fork's main never has there: a fork PR always merges in the request, never through
+    # create_publish_job (which would lock and hold a draft of the target graph).
+    assert await svc.branch_change_count(graph_id=pg, branch_id=(await svc.get_pr(pr))["source_branch_id"]) == 0
     with pytest.raises(ApprovalRequired) as ei:                  # unapproved → blocked
         await svc.merge_pr(pr_id=pr, actor="dave", message="merge")
     assert ei.value.pending == ["carol"]

@@ -7,6 +7,8 @@ behind main is refused with the route's own answer, for the client to raise the 
 merge of a draft's review goes the same way, waiting on its reviewer's approval. And a job run again
 after its draft merged — its worker died after the squash, or a superseded attempt's squash landed
 under it — completes with that merge, publishing nothing twice, and what a publish sets off runs.
+The draft is ``publishing`` while its job is queued, ``open`` again when the job is refused, and
+``merged`` when it lands.
 """
 import asyncio
 import os
@@ -23,6 +25,9 @@ async def _run(monkeypatch) -> None:
 
     await models.create_schema_and_partitions()
     svc, ie = get_versioning_service(), get_import_export_service()
+
+    async def status(branch_id):
+        return (await svc.branch_statuses([branch_id]))[branch_id]
     ds = "ds_" + os.urandom(4).hex()
     gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="alice"))["graph_id"]
     await svc.bulk_ingest(graph_id=gid, actor="alice", rows=[
@@ -36,7 +41,9 @@ async def _run(monkeypatch) -> None:
     await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", ops=[upd("A", properties={"reviewed": True})])
     job = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
                                       branch_id=draft, actor="alice", message="publish by job")
+    assert await status(draft) == "publishing"
     result = await ie.run_publish(job["job_id"])
+    assert await status(draft) == "merged"
     got = await ie.get_job(job["job_id"])
     assert got["status"] == "completed" and got["summary"] == result and result.get("commitId"), got
     main = await svc.main_branch_id(gid)
@@ -57,6 +64,7 @@ async def _run(monkeypatch) -> None:
     assert result2["error"]["status"] == 409, result2
     assert result2["error"]["detail"]["type"] == "not_up_to_date", result2
     assert (await ie.get_job(job2["job_id"]))["status"] == "failed"
+    assert await status(behind) == "open", "a refused job hands the draft back"
 
     # The merge of a draft's review, as a job: refused until the reviewer approves, then merged.
     reviewed = await svc.open_draft(graph_id=gid, owner="alice")
@@ -70,6 +78,7 @@ async def _run(monkeypatch) -> None:
 
     unapproved = await merge_by_job()
     assert unapproved["error"] == {"status": 409, "detail": {"type": "approval_required", "pending": ["carol"]}}
+    assert await status(reviewed) == "open", "refused: open again, so it can be queued again"
     await svc.approve_pr(pr_id=mr, actor="carol")
     merged = await merge_by_job()
     pr = await svc.get_pr(mr)
@@ -100,7 +109,8 @@ async def _run(monkeypatch) -> None:
     job = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
                                       branch_id=crashed, actor="alice", message="crashed")
     await lease_job(job["job_id"])                      # the first attempt's worker...
-    landed = await svc.publish(graph_id=gid, branch_id=crashed, actor="alice", message="crashed")
+    landed = await svc.publish(graph_id=gid, branch_id=crashed, actor="alice", message="crashed",
+                               queued=True)
     result = await ie.run_publish(job["job_id"])       # ...died here; the next attempt runs it
     got = await ie.get_job(job["job_id"])
     assert (got["status"], got["attempt"], result) == ("completed", 2, {"commitId": landed}), got
@@ -119,7 +129,8 @@ async def _run(monkeypatch) -> None:
     async def looks_then_the_zombie_lands(**kwargs):
         merged = await looked(**kwargs)
         if not zombie:
-            zombie.append(await svc.publish(graph_id=gid, branch_id=raced, actor="alice", message="zombie"))
+            zombie.append(await svc.publish(graph_id=gid, branch_id=raced, actor="alice", message="zombie",
+                                            queued=True))
         return merged
     monkeypatch.setattr(svc, "merged_commit_id", looks_then_the_zombie_lands)
     set_off.clear()

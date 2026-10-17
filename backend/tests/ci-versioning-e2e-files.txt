@@ -96,6 +96,7 @@ tests/integration/test_versioning_projection_provider_routing.py
 tests/integration/test_versioning_projection_rebuild.py
 tests/integration/test_versioning_property_conflict.py
 tests/integration/test_versioning_property_union.py
+tests/integration/test_versioning_publish_fence.py
 tests/integration/test_versioning_publish_job.py
 tests/integration/test_versioning_publish_large.py
 tests/integration/test_versioning_reads.py

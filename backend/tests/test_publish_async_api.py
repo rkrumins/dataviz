@@ -38,6 +38,7 @@ class _Versioning:
 class _Jobs:
     def __init__(self):
         self.created, self.started = [], []
+        self.refusal = None
         self.jobs = {
             "vjob_done": {"jobId": "vjob_done", "jobType": "publish", "graphId": "g1",
                           "status": "completed", "summary": {"commitId": "cmt_9"}},
@@ -49,6 +50,8 @@ class _Jobs:
         }
 
     async def create_publish_job(self, **kw):
+        if self.refusal is not None:
+            raise self.refusal
         self.created.append(kw)
         return {"job_id": "vjob_new"}
 
@@ -99,6 +102,23 @@ async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services
     assert r.status_code == 202, r.text
     (created,) = jobs.created
     assert (created["graph_id"], created["branch_id"], created["merge_request_id"]) == ("g1", "br_big", "mr_1")
+
+
+@pytest.mark.parametrize("path", ["/graphs/g1/branches/br_big/publish", "/merge-requests/mr_1/merge"])
+async def test_a_publish_that_cannot_be_queued_answers_like_one_in_the_request(test_client, services, path):
+    """Queuing takes the draft (``publishing``), so it is refused as a publish is: a draft that is
+    not open is 409 branch_closed, an unknown one 404 — not a 500."""
+    from backend.app.services.versioning.errors import BranchNotOpen
+
+    _svc, jobs = services
+    jobs.refusal = BranchNotOpen("br_big", "publishing")
+    r = await test_client.post(f"{BASE}{path}", json={"message": "m"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["type"] == "branch_closed"
+    jobs.refusal = ValueError("unknown branch")
+    r = await test_client.post(f"{BASE}{path}", json={"message": "m"})
+    assert r.status_code == 404, r.text
+    assert jobs.started == []
 
 
 async def test_a_publish_job_says_what_the_request_would_have(test_client, services):

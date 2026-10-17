@@ -36,6 +36,7 @@ from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, sele
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
@@ -829,6 +830,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold uncommitted working changes into a draft commit, retrying on a
         ``commit_seq`` collision so two collaborators checkpointing the SAME shared
@@ -839,7 +841,7 @@ class GraphVersioningService:
                 graph_id=graph_id, branch_id=branch_id, actor=actor, message=message,
                 resolutions=resolutions, actor_groups=actor_groups,
                 containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, publishing_ok=publishing_ok),
         )
 
     async def _checkpoint_once(
@@ -853,6 +855,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -862,7 +865,7 @@ class GraphVersioningService:
         ``resolutions`` payload (``{entity_id: payload|None}``) settles it."""
         async with self._session() as s:
             branch = await self._lock_branch(s, graph_id, branch_id)
-            self._require_open(branch)
+            self._require_open(branch, publishing_ok=publishing_ok)
             await self._require_edit(s, branch, actor, actor_groups)
 
             changes = (
@@ -992,6 +995,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold any staged-but-uncommitted ``working_changes`` on a draft into a
         checkpoint commit. Publish/merge read the draft side from committed heads
@@ -1000,21 +1004,26 @@ class GraphVersioningService:
         silently drop those edits. Returns the new commit id, or ``None`` if there
         was nothing pending."""
         async with self._session() as s:
-            pending = (await s.execute(
-                select(func.count()).select_from(WorkingChangeORM).where(
-                    WorkingChangeORM.graph_id == graph_id,
-                    WorkingChangeORM.branch_id == branch_id,
-                    WorkingChangeORM.committed_into_commit_id.is_(None),
-                )
-            )).scalar_one()
+            pending = await self._pending_count(s, graph_id, branch_id)
         if not pending:
             return None
         return await self.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=actor,
             message="auto-checkpoint pending changes before merge",
             actor_groups=actor_groups, containment_edge_types=containment_edge_types,
-            ontology_rules=ontology_rules,
+            ontology_rules=ontology_rules, publishing_ok=publishing_ok,
         )
+
+    @staticmethod
+    async def _pending_count(s, graph_id: str, branch_id: str) -> int:
+        """How many of the draft's staged ``working_changes`` no checkpoint has folded yet."""
+        return (await s.execute(
+            select(func.count()).select_from(WorkingChangeORM).where(
+                WorkingChangeORM.graph_id == graph_id,
+                WorkingChangeORM.branch_id == branch_id,
+                WorkingChangeORM.committed_into_commit_id.is_(None),
+            )
+        )).scalar_one()
 
     # ------------------------------------------------------------------ #
     # Publish (squash draft → main)                                       #
@@ -1030,6 +1039,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        queued: bool = False,
     ) -> str:
         """Squash an UP-TO-DATE draft into a single ``main`` commit (plan §8) — the
         ungated path (admin / no review). The reviewed path is :meth:`open_draft_mr`
@@ -1041,22 +1051,27 @@ class GraphVersioningService:
         exactly what the user reviewed. Once up-to-date (base == current head) the squash
         reduces to the draft's own delta; a residual clash still raises
         :class:`MergeConflict`.
-        """
-        # Fold any staged-but-uncommitted edits first, so a publish never silently
-        # drops working changes that were staged but not checkpointed.
-        await self._flush_pending_changes(
-            graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
-            ontology_rules=ontology_rules,
-        )
 
+        ``queued``: the draft's publish job runs this, and the job set the draft ``publishing``.
+        """
         async def _once():
+            # Fold any staged-but-uncommitted edits first, so a publish never silently
+            # drops working changes that were staged but not checkpointed.
+            await self._flush_pending_changes(
+                graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
+                ontology_rules=ontology_rules, publishing_ok=queued,
+            )
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)       # serialize same-graph merges (see _lock_graph)
                 graph = await s.get(GraphORM, graph_id)
-                draft = await s.get(BranchORM, branch_id)
-                if graph is None or draft is None or draft.graph_id != graph_id:
+                if graph is None:
                     raise ValueError("unknown graph/branch")
-                self._require_open(draft)
+                # The draft's lock: a save in flight is published with the draft, a later one finds
+                # it merged. An edit staged after the fold above is folded by the retry.
+                draft = await self._lock_branch(s, graph_id, branch_id)
+                self._require_open(draft, publishing_ok=queued)
+                if await self._pending_count(s, graph_id, branch_id):
+                    raise _StaleHead()
                 if draft.is_shared:                       # publishing a shared draft → maintainer
                     await self._require_manage(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
@@ -1646,6 +1661,33 @@ class GraphVersioningService:
                 .returning(BranchORM.id)
             )).scalars().all()
             return list(swept)
+
+    async def release_publishing(
+        self, *, graph_id: Optional[str] = None, branch_id: Optional[str] = None,
+    ) -> List[str]:
+        """Reopen the ``publishing`` drafts whose publish job ended without landing — refused,
+        failed, poisoned or timed out — and return their ids. Its lease makes a pending or running
+        job the whole definition of a live one, so no clock is read here. A draft whose row is
+        locked is skipped, not waited on: after the wait this statement would not see the job a
+        concurrent ``create_publish_job`` just queued, and would reopen its draft. Never waiting on a
+        branch, it cannot invert the branch-before-job lock order, whatever its caller holds."""
+        b = aliased(BranchORM)
+        live_job = select(JobORM.id).where(
+            JobORM.job_type == "publish", JobORM.branch_id == b.id,
+            JobORM.status.in_(("pending", "running")))
+        stuck = select(b.id).where(b.status == "publishing", ~live_job.exists())
+        if graph_id is not None:
+            stuck = stuck.where(b.graph_id == graph_id)
+        if branch_id is not None:
+            stuck = stuck.where(b.id == branch_id)
+        async with self._session() as s:
+            return list((await s.execute(
+                update(BranchORM)
+                .where(BranchORM.id.in_(stuck.with_for_update(key_share=True, skip_locked=True)))
+                .values(status="open", updated_at=_now())
+                .returning(BranchORM.id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all())
 
     async def preview_merge(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """Dry-run the publish merge: report conflicts + change counts without
@@ -2391,11 +2433,13 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        queued: bool = False,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
         (main may have advanced under continued editing), enforces the
-        reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`."""
+        reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`.
+        ``queued`` as for :meth:`publish`."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, mr_id)
             if pr is None:
@@ -2409,24 +2453,25 @@ class GraphVersioningService:
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions
             )
-        # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
-        # so the merge never silently drops working changes that were never checkpointed.
-        await self._flush_pending_changes(
-            graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
-            ontology_rules=ontology_rules,
-        )
-
         async def _once():
+            # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
+            # so the merge never silently drops working changes that were never checkpointed.
+            await self._flush_pending_changes(
+                graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
+                ontology_rules=ontology_rules, publishing_ok=queued,
+            )
             async with self._session() as s:
                 await self._lock_graph(s, flush_gid)      # serialize merges into this graph's main
                 pr = await s.get(MergeRequestORM, mr_id)
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"merge request {mr_id} is {pr.status}")
                 graph = await s.get(GraphORM, pr.target_graph_id)
-                draft = await s.get(BranchORM, pr.source_branch_id)
-                if graph is None or draft is None:
+                if graph is None:
                     raise ValueError("merge request endpoints missing")
-                self._require_open(draft)
+                draft = await self._lock_branch(s, graph.id, pr.source_branch_id)   # as in publish
+                self._require_open(draft, publishing_ok=queued)
+                if await self._pending_count(s, graph.id, pr.source_branch_id):
+                    raise _StaleHead()
                 main_id = await self._main_branch_id(s, graph.id)
                 # Require-up-to-date gate (see publish / docs 03 §3.13): a PR whose source draft is
                 # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
@@ -4808,10 +4853,11 @@ class GraphVersioningService:
         return best
 
     @staticmethod
-    def _require_open(branch: BranchORM) -> None:
+    def _require_open(branch: BranchORM, *, publishing_ok: bool = False) -> None:
         """Edits/checkpoints/publish need an ``open`` draft. Merged or abandoned
-        drafts are inert (plan §17 #8); ``main`` stays open for its lifetime."""
-        if branch.status != "open":
+        drafts are inert (plan §17 #8); ``main`` stays open for its lifetime. A draft
+        being published by a job is closed to everyone but that job (``publishing_ok``)."""
+        if branch.status != "open" and not (publishing_ok and branch.status == "publishing"):
             raise BranchNotOpen(branch.id, branch.status)
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:

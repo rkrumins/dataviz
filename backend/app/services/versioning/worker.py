@@ -287,12 +287,20 @@ class ProjectionWorker:
                 keeper.unregister(lease)
 
     async def _job_reap_loop(self) -> None:
-        """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``)."""
+        """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``), then hand back
+        the drafts held ``publishing`` by a publish job that ended without landing."""
         while not self._stop.is_set():
             try:
                 await self._job_reaper.run_once()
             except Exception:
                 logger.exception("job reaper error")
+            try:
+                from .service import GraphVersioningService
+                released = await GraphVersioningService().release_publishing()
+                if released:
+                    logger.info("reopened %d draft(s) whose publish job ended", len(released))
+            except Exception:
+                logger.exception("publishing release error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=_JOB_REAP_SECS)
             except asyncio.TimeoutError:
