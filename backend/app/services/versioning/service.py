@@ -1980,6 +1980,24 @@ class GraphVersioningService:
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
     # ------------------------------------------------------------------ #
+    async def _fork_slot(self, s, parent_graph_id: str) -> Optional[GraphORM]:
+        """The live parent a new fork may read, or None when it is missing or trashed. Its row
+        is read FOR KEY SHARE, so a purge being queued (FOR UPDATE) finishes first and is seen,
+        or waits and counts the fork. At most ``config.MAX_FORKS_PER_GRAPH`` live forks
+        (:class:`ForkLimit`); the caller holds the parent's graph lock, so the count and the
+        insert are one step."""
+        parent = (await self._bounded_lock(s, select(GraphORM).where(
+            GraphORM.id == parent_graph_id).with_for_update(read=True, key_share=True)
+            .execution_options(populate_existing=True), f"graph {parent_graph_id}")
+        ).scalar_one_or_none()
+        if parent is None or parent.deleted_at is not None:
+            return None
+        live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
+            GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
+        if live_forks >= config.MAX_FORKS_PER_GRAPH:
+            raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+        return parent
+
     async def fork_graph(
         self,
         *,
@@ -1993,17 +2011,13 @@ class GraphVersioningService:
         only as the fork's own commits; reads compose parent@fork_base + own (plan
         §8 cross-team flow).
 
-        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`);
-        the parent's graph lock makes the count and the insert one step."""
+        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`), and
+        none of a trashed parent (:meth:`_fork_slot`)."""
         async with self._session() as s:
             await self._lock_graph(s, parent_graph_id)
-            parent = await s.get(GraphORM, parent_graph_id)
+            parent = await self._fork_slot(s, parent_graph_id)
             if parent is None:
                 raise ValueError(f"unknown parent graph {parent_graph_id}")
-            live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
-                GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
-            if live_forks >= config.MAX_FORKS_PER_GRAPH:
-                raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
             base_seq = parent.main_head_commit_seq
             parent_main = await self._main_branch_id(s, parent_graph_id)
             fork = GraphORM(

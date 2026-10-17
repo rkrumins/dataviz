@@ -51,7 +51,8 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.orm import aliased
 
 from . import config, db, job_lease
 from .job_lease import Draining, Lease, Superseded
@@ -131,11 +132,16 @@ async def delete_window(s, table: str, pk: str, graph_id: str, *, where: str = "
 
 async def _forks_reading(s, graph: GraphORM) -> int:
     """How many forks still read ``graph``'s history. A graph with nothing past its genesis
-    commit (an abandoned enablement) gives its forks nothing, so none hold it back."""
+    commit (an abandoned enablement) gives its forks nothing, so none hold it back. A trashed
+    fork stops holding its parent back unless forks of its own read through it (a fork's state
+    composes its parent's, recursively)."""
     if graph.main_head_commit_seq <= 1:
         return 0
+    child = aliased(GraphORM)
     return int(await s.scalar(select(func.count()).select_from(GraphORM).where(
-        GraphORM.fork_parent_graph_id == graph.id)) or 0)
+        GraphORM.fork_parent_graph_id == graph.id,
+        or_(GraphORM.deleted_at.is_(None),
+            select(child.id).where(child.fork_parent_graph_id == GraphORM.id).exists()))) or 0)
 
 
 async def graph_key_readers(provider_id: Optional[str], graph_name: str,
@@ -429,8 +435,10 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
 
     ``require_tombstoned`` is the reaper's: it acts on a graph only while it is still in the
     trash — a restore that took the graph row first wins — and re-queues only a purge that failed
-    on infrastructure, never one that was refused. A graph that forks still read is not purged:
-    the reaper leaves it (None); anyone else is refused (:class:`PurgeRefused` ``live_forks``).
+    on infrastructure, or was refused for forks that no longer read the graph, never one refused
+    for anything else. A graph that forks still read is not purged: the reaper leaves it (None);
+    anyone else is refused (:class:`PurgeRefused` ``live_forks``). A trashed fork with no forks of
+    its own is no reader: it is purged with its parent (:func:`_queue_trashed_forks`).
     """
     sf = session_factory or db.graphver_session
     async with (contextlib.nullcontext(session) if session is not None else sf()) as s:
@@ -450,6 +458,10 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
             logger.info("purge skipped: graph %s was restored", graph_id)
             return None
 
+        # Then its forks (parent before child), FOR KEY SHARE: a fork's restore or purge (FOR
+        # UPDATE) waits for this decision or is seen by the count; a fork's commits do not wait.
+        await s.execute(select(GraphORM.id).where(GraphORM.fork_parent_graph_id == graph_id)
+                        .order_by(GraphORM.id).with_for_update(read=True, key_share=True))
         forks = await _forks_reading(s, graph)
         if forks:
             reason = f"{forks} fork(s) still read this graph's history"
@@ -461,11 +473,13 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
         if existing is not None and existing.status != "failed":
             return existing.id
         if existing is not None and require_tombstoned and \
-                ((existing.summary or {}).get("failure") or {}).get("code") != "infrastructure":
+                ((existing.summary or {}).get("failure") or {}).get("code") \
+                not in ("infrastructure", "live_forks"):
             logger.warning("purge %s of graph %s was refused; not re-queueing it", existing.id,
                            graph_id)
             return None
 
+        await _queue_trashed_forks(s, graph_id, actor)
         graph.deleted_at = graph.deleted_at or _now()
         graph.deleted_by = graph.deleted_by or actor
 
@@ -480,20 +494,46 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
             logger.info("purge re-queued for graph %s (job=%s, by %s)", graph_id, existing.id, actor)
             return existing.id
 
-        job = JobORM(
-            job_type=PURGE_JOB_TYPE,
-            graph_id=graph_id,
-            workspace_id=workspace_id or graph.workspace_id,
-            data_source_id=data_source_id or graph.data_source_id,
-            status="pending",
-            current_phase="count",
-            idempotency_key=f"purge:{graph_id}",
-            summary={"actor": actor},
-        )
+        job = _new_purge_job(graph, actor=actor, workspace_id=workspace_id,
+                             data_source_id=data_source_id)
         s.add(job)
         await s.flush()
         logger.info("purge queued for graph %s (job=%s, by %s)", graph_id, job.id, actor)
         return job.id
+
+
+def _new_purge_job(graph, *, actor: str, workspace_id: Optional[str] = None,
+                   data_source_id: Optional[str] = None,
+                   summary: Optional[dict] = None) -> JobORM:
+    return JobORM(
+        job_type=PURGE_JOB_TYPE,
+        graph_id=graph.id,
+        workspace_id=workspace_id or graph.workspace_id,
+        data_source_id=data_source_id or graph.data_source_id,
+        status="pending",
+        current_phase="count",
+        idempotency_key=f"purge:{graph.id}",
+        summary=summary or {"actor": actor},
+    )
+
+
+async def _queue_trashed_forks(s, graph_id: str, actor: str) -> None:
+    """Queue a purge, in the caller's transaction, for each trashed fork of ``graph_id`` that has
+    no forks of its own and no purge job: a fork cannot outlive the history it reads, and once
+    queued it is past its undo. The caller holds the fork rows (FOR KEY SHARE)."""
+    child = aliased(GraphORM)
+    forks = (await s.execute(select(GraphORM).where(
+        GraphORM.fork_parent_graph_id == graph_id, GraphORM.deleted_at.isnot(None),
+        ~select(child.id).where(child.fork_parent_graph_id == GraphORM.id).exists(),
+        ~select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                 JobORM.graph_id == GraphORM.id).exists(),
+    ))).scalars().all()
+    for f in forks:
+        s.add(_new_purge_job(f, actor=actor, summary={"actor": actor, "parentGraphId": graph_id}))
+    if forks:
+        await s.flush()
+        logger.info("purge queued for the trashed forks %s of graph %s (by %s)",
+                    [f.id for f in forks], graph_id, actor)
 
 
 async def purge_graph_for_data_source(*, data_source_id: str, workspace_id: str,
@@ -724,13 +764,14 @@ class Reaper:
             except Exception:
                 logger.exception("reaper: %s failed; carrying on with the rest", ds_id)
 
-        # A purge that failed on infrastructure is queued again — including one whose data
-        # source row is already gone ("Delete permanently"), which the loop above never sees.
+        # A purge that failed on infrastructure, or was refused for forks (queued again only once
+        # none reads the graph), is queued again — including one whose data source row is
+        # already gone ("Delete permanently"), which the loop above never sees.
         async with self._gv() as gs:
             failed = (await gs.execute(
                 select(JobORM.graph_id).join(GraphORM, GraphORM.id == JobORM.graph_id).where(
                     JobORM.job_type == PURGE_JOB_TYPE, JobORM.status == "failed",
-                    JobORM.summary["failure"]["code"].astext == "infrastructure",
+                    JobORM.summary["failure"]["code"].astext.in_(("infrastructure", "live_forks")),
                     GraphORM.deleted_at.isnot(None)))).scalars().all()
         revived = 0
         for gid in failed:

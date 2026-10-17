@@ -4,8 +4,11 @@
 * a graph restored while the reaper looked is left standing, and so is its data source;
 * a graph that forks still read is never purged: a person's "delete permanently" is refused, the
   reaper skips it, and the purge itself refuses at its count;
+* a trashed fork reads its parent only while forks of its own read through it; the parent's purge
+  locks its forks before counting them, and takes its trashed leaf forks along;
 * once a purge starts, the graph's other queued and running jobs are cancelled with it;
-* the reaper re-queues a purge that failed on infrastructure, never one that was refused;
+* the reaper re-queues a purge that failed on infrastructure, or was refused for forks since
+  gone, never one refused for anything else;
 * a pull request cannot be opened into a trashed parent.
 
 The same paths against a real Postgres: ``integration/test_graph_lifecycle_purge.py``.
@@ -140,7 +143,8 @@ async def test_a_restored_graph_keeps_its_data_source(monkeypatch, caplog):
     assert len(warned) == 1, "the reaper should say so once per data source, not every pass"
 
 
-async def test_the_reaper_revives_only_purges_that_failed_on_infrastructure(monkeypatch):
+async def test_the_reaper_revives_only_purges_that_failed_on_infrastructure_or_forks_since_gone(
+        monkeypatch):
     app, _ = _app([], {})
     gv, seen = _gv({}, failed=["g_failed"])
     revived = []
@@ -159,6 +163,7 @@ async def test_the_reaper_revives_only_purges_that_failed_on_infrastructure(monk
     (sql,) = [_sql(s) for s in seen if "JOIN" in str(s)]
     assert "'purge'" in sql and "'failed'" in sql
     assert "'infrastructure'" in sql, "a refused purge must not be re-run every pass"
+    assert "'live_forks'" in sql, "a purge refused for forks is retried once they are gone"
     assert "deleted_at IS NOT NULL" in sql
 
 
@@ -166,16 +171,20 @@ async def test_the_reaper_revives_only_purges_that_failed_on_infrastructure(monk
 
 
 class _PurgeSession:
-    """``create_purge_job``'s transaction: the graph, its latest purge job, and its fork count."""
+    """``create_purge_job``'s transaction: the graph, its latest purge job, its fork count, and
+    the fork rows a select of the graph's forks answers."""
 
-    def __init__(self, graph, existing=None, forks=0):
+    def __init__(self, graph, existing=None, forks=0, fork_rows=()):
         self.graph, self.existing, self.forks = graph, existing, forks
+        self.fork_rows = list(fork_rows)
         self.statements, self.added = [], []
 
     async def execute(self, stmt):
         self.statements.append(stmt)
         if stmt.column_descriptions[0]["entity"] is JobORM:
             return _Rows([self.existing] if self.existing is not None else [])
+        if "graphs.fork_parent_graph_id = " in str(stmt):
+            return _Rows(self.fork_rows)
         return _Rows([self.graph])
 
     async def get(self, _model, _ident):
@@ -214,6 +223,69 @@ async def test_the_purge_job_is_locked_before_the_graph():
         "jobs then graphs, both FOR UPDATE (15 §8)"
 
 
+async def test_a_trashed_fork_holds_its_parent_only_while_forks_of_its_own_read_through_it():
+    seen = []
+
+    class _S:
+        async def scalar(self, stmt):
+            seen.append(_sql(stmt))
+            return 0
+
+    assert await purge_worker._forks_reading(_S(), _graph(head=5)) == 0
+    (sql,) = seen
+    assert "graphs.fork_parent_graph_id = 'g1'" in sql
+    assert "graphs.deleted_at IS NULL OR (EXISTS" in sql, sql
+    assert "graphs_1.fork_parent_graph_id = graphver.graphs.id" in sql, \
+        "a fork of a trashed fork still reads the parent through it"
+
+
+async def test_a_purge_locks_the_graphs_forks_before_counting_them():
+    s = _PurgeSession(_graph(head=5, deleted_at="t"))
+    await purge_worker.create_purge_job(graph_id="g1", workspace_id=None, actor="u", session=s)
+
+    lock = s.statements[2]
+    assert getattr(lock, "column_descriptions", None), f"no fork-row select: {s.statements}"
+    assert lock.column_descriptions[0]["entity"] is GraphORM
+    assert "graphs.fork_parent_graph_id = " in str(lock)
+    assert lock._for_update_arg is not None
+    assert (lock._for_update_arg.read, lock._for_update_arg.key_share) == (True, True), \
+        "FOR KEY SHARE: a restore's FOR UPDATE waits for it, a fork's commit does not"
+    assert "count" in str(s.statements[3]), "the lock comes before the count"
+
+
+async def test_a_parent_purge_queues_its_trashed_leaf_forks():
+    def fork():
+        return SimpleNamespace(id="f1", deleted_at="t", workspace_id="ws1",
+                               data_source_id="dsfork_1")
+
+    s = _PurgeSession(_graph(head=5, deleted_at="t"), fork_rows=[fork()])
+    await purge_worker.create_purge_job(graph_id="g1", workspace_id=None, actor="u", session=s)
+    jobs = {j.idempotency_key: j for j in s.added}
+    assert set(jobs) == {"purge:g1", "purge:f1"}
+    assert (jobs["purge:f1"].graph_id, jobs["purge:f1"].workspace_id,
+            jobs["purge:f1"].data_source_id) == ("f1", "ws1", "dsfork_1")
+    assert jobs["purge:f1"].summary == {"actor": "u", "parentGraphId": "g1"}
+    cascade = _sql(s.statements[-1])
+    assert "graphs.deleted_at IS NOT NULL" in cascade and "'purge'" in cascade
+    assert "NOT (EXISTS" in cascade, cascade
+
+    # The re-queue of a purge that failed on infrastructure goes ahead too, and so cascades.
+    s = _PurgeSession(_graph(head=5, deleted_at="t"), existing=_failed("infrastructure"),
+                      fork_rows=[fork()])
+    assert await purge_worker.create_purge_job(
+        graph_id="g1", workspace_id=None, actor="reaper", require_tombstoned=True,
+        session=s) == "vjob_p"
+    assert [j.idempotency_key for j in s.added] == ["purge:f1"]
+
+    # A reaper call that skips adds nothing: the graph was restored, or forks still read it.
+    for graph, forks in ((_graph(head=5), 0), (_graph(head=5, deleted_at="t"), 1)):
+        s = _PurgeSession(graph, forks=forks, fork_rows=[fork()])
+        assert await purge_worker.create_purge_job(
+            graph_id="g1", workspace_id=None, actor="reaper", require_tombstoned=True,
+            session=s) is None
+        assert s.added == []
+
+
 @pytest.mark.parametrize("head", [5, 1])
 async def test_a_permanent_purge_refuses_a_graph_that_forks_read(head):
     graph = _graph(head=head)
@@ -250,7 +322,8 @@ async def test_the_reaper_skips_a_graph_restored_under_it():
 
 
 @pytest.mark.parametrize("require_tombstoned, code, out, status", [
-    (True, "live_forks", None, "failed"),          # the reaper never re-runs a refusal
+    (True, "live_forks", "vjob_p", "pending"),     # its forks are gone: nothing refuses now
+    (True, "graph_not_deleted", None, "failed"),   # the reaper never re-runs another refusal
     (True, "infrastructure", "vjob_p", "pending"),
     (False, "live_forks", "vjob_p", "pending"),    # a person asking again does
 ])

@@ -6,7 +6,10 @@
 * the purge cancels the graph's other jobs as it starts, and leaves no row of the graph behind;
 * a purge that "Delete permanently" queued is revived although its data source row is gone;
 * a graph that forks still read is never purged, whoever asks;
-* a restore that wins the race with the reaper keeps its graph.
+* a trashed fork is no reader, unless a fork of its own reads through it; the parent's purge
+  takes it along, and a purge refused for forks is retried once they are gone;
+* a restore that wins the race with the reaper keeps its graph, and so does a fork's restore
+  that wins the race with its parent's purge; a fork made during a parent's purge loses.
 
 The data-source rows the reaper reads live in the management database; they are faked here.
 Unit level: ``test_purge_reaper_unit.py``.
@@ -276,7 +279,7 @@ async def test_a_graph_that_forks_read_is_never_purged():
     assert await purge_state_for_data_source(data_source_id=ds) == PurgeState(
         "blocked", "1 fork(s) still read this graph's history", forks=1, final=True)
 
-    # The reaper does not re-run a refusal.
+    # The reaper does not re-run a refusal while the fork still reads the graph.
     app, _ = _app([])
     await Reaper(app_session_factory=app).run_once()
     assert (await _job(job_id)).status == "failed"
@@ -336,3 +339,132 @@ async def test_an_abandoned_enablement_does_not_block_a_later_restore():
     async with db.graphver_session() as s:
         assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.data_source_id == ds))) == 0
+
+
+async def _fork(svc, gid, actor="bob"):
+    """A fork of ``gid``, and its minted data-source id: the handle a fork is trashed by."""
+    fid = (await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor=actor))["graph_id"]
+    return fid, (await svc.get_graph(fid))["data_source_id"]
+
+
+async def _trash(ds):
+    assert await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS,
+                                                  actor="alice") == 1
+
+
+async def _row(gid):
+    async with db.graphver_session() as s:
+        return await s.get(GraphORM, gid)
+
+
+async def test_a_parent_purge_ignores_a_trashed_fork_and_takes_it_along():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    fid, fds = await _fork(svc, gid)
+    await _trash(fds)
+    await _trash(ds)
+
+    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState()
+    job_id = await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    assert job_id
+    (fork_job,) = await _purges(fid)
+    assert fork_job.summary["parentGraphId"] == gid
+    # The fork's purge is queued: past the point of no return, so its restore is refused.
+    assert (await restore_graphs_for_data_source(data_source_id=fds, workspace_id=WS)).final
+    assert (await _row(fid)).deleted_at is not None
+
+    for jid in (job_id, fork_job.id):
+        assert (await _runner().run_job(await _take(jid)))["status"] == "completed"
+    assert await _row(gid) is None and await _row(fid) is None
+
+
+async def test_a_trashed_fork_that_another_fork_reads_still_holds_its_parent():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    f1, f1ds = await _fork(svc, gid)
+    f2, f2ds = await _fork(svc, f1)
+    await _trash(f1ds)                       # trashed under its live fork: the legacy path
+    await _trash(ds)
+
+    with pytest.raises(PurgeRefused) as exc:
+        await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    assert exc.value.code == "live_forks"
+    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState(
+        "blocked", "1 fork(s) still read this graph's history", forks=1)
+
+    await _trash(f2ds)
+    f2_job = await create_purge_job(graph_id=f2, workspace_id=WS, actor="alice")
+    assert (await _runner().run_job(await _take(f2_job)))["status"] == "completed"
+
+    assert await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    (f1_job,) = await _purges(f1)
+    assert f1_job.summary["parentGraphId"] == gid
+
+
+async def test_a_fork_row_held_by_a_restore_wins_against_the_parent_purge():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    fid, fds = await _fork(svc, gid)
+    await _trash(fds)
+    await _trash(ds)
+
+    async with db.graphver_session() as s1:          # commits on exit
+        f = (await s1.execute(select(GraphORM).where(GraphORM.id == fid)
+                              .with_for_update())).scalars().one()
+        f.deleted_at = f.deleted_by = None
+        await s1.flush()
+        purge = asyncio.create_task(create_purge_job(graph_id=gid, workspace_id=WS,
+                                                     actor="alice"))
+        await asyncio.sleep(0.3)
+        assert not purge.done(), "the parent's purge must wait for the fork row a restore holds"
+
+    with pytest.raises(PurgeRefused) as exc:
+        await purge
+    assert exc.value.code == "live_forks"
+    assert await _purges(fid) == [] and await _purges(gid) == []
+
+
+async def test_a_live_forks_refusal_is_retried_once_the_fork_is_deleted():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    fid, fds = await _fork(svc, gid)
+    await _trash(ds)
+    async with db.graphver_session() as s:
+        job = JobORM(job_type="purge", graph_id=gid, workspace_id=WS, data_source_id=ds,
+                     status="pending", current_phase="count", idempotency_key=f"purge:{gid}",
+                     summary={"actor": "test"})
+        s.add(job)
+        await s.flush()
+        job_id = job.id
+    assert (await _runner().run_job(await _take(job_id)))["status"] == "failed"
+    assert (await _job(job_id)).summary["failure"]["code"] == "live_forks"
+
+    await _trash(fds)
+    app, _ = _app([])
+    await Reaper(app_session_factory=app).run_once()
+    assert (await _job(job_id)).status == "pending"
+    (fork_job,) = await _purges(fid)
+    assert fork_job.summary["parentGraphId"] == gid
+    assert (await _runner().run_job(await _take(job_id)))["status"] == "completed"
+    assert await _row(gid) is None
+
+
+async def test_a_fork_waits_for_and_loses_to_a_parent_purge_being_queued():
+    svc = GraphVersioningService()
+    _ds, gid = await _graph(svc)
+
+    async with db.graphver_session() as s1:          # commits on exit
+        g = (await s1.execute(select(GraphORM).where(GraphORM.id == gid)
+                              .with_for_update())).scalars().one()
+        g.deleted_at, g.deleted_by = models._now(), "alice"
+        await s1.flush()
+        fork = asyncio.create_task(svc.fork_graph(parent_graph_id=gid, workspace_id=WS,
+                                                  actor="bob"))
+        await asyncio.sleep(0.3)
+        assert not fork.done(), "a fork must wait for the parent row a purge holds"
+
+    with pytest.raises(ValueError):
+        await fork
+    async with db.graphver_session() as s:
+        assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
+            GraphORM.fork_parent_graph_id == gid))) == 0
