@@ -104,6 +104,18 @@ describe('portal auto sign-in', () => {
         expect(loginWithBrowserProfile).not.toHaveBeenCalled()
     })
 
+    it('offers the portal as a button, never as the primary connection', async () => {
+        // Its credential is read from this browser's storage when the
+        // button is pressed; an address typed on the page says nothing
+        // about whether it is there, so Enter is never sent its way.
+        renderLogin()
+
+        const button = (await screen.findByText(/Continue with Corporate Portal/))
+            .closest('button')
+        expect(button).not.toBeNull()
+        expect(button!.className).not.toMatch(/(^|\s)bg-accent-lineage(\s|$)/)
+    })
+
     it('attempts exactly once and does not loop after a rejection', async () => {
         window.localStorage.setItem('corp.user', 'a-rejected-payload')
         loginWithBrowserProfile.mockResolvedValue(false)

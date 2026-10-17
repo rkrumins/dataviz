@@ -4,6 +4,7 @@ An imported file is untrusted input. These bound the work one request can ask th
 do, and each is well above what a real view reaches (the wizard itself refuses to draw views
 anywhere near them).
 """
+from backend.app.services.versioning.import_export.stream import MAX_BYTES as _EXPORT_MAX_BYTES
 
 #: Views in one bundle. A whole workspace fits; a whole estate does not have to.
 MAX_VIEWS_PER_BUNDLE = 200
@@ -24,12 +25,14 @@ MAX_JSON_DEPTH = 64
 #: Longest string accepted for a name.
 MAX_NAME_LENGTH = 500
 
-#: Bytes in one uploaded view package (a view with its data), compressed.
+#: Bytes in a view package (a view with its data), compressed, sent whole in one request (the
+#: single-request ``/packages/inspect``). Sent in parts, a package may be as large as an import.
 MAX_PACKAGE_BYTES = 100 * 1024 * 1024
 
-#: Bytes the data part of a package may decompress to. Graph data compresses about ten to one;
-#: this is the ceiling that stops a small archive from unpacking into something enormous.
-MAX_PACKAGE_DATA_BYTES = 2 * 1024 * 1024 * 1024
+#: Bytes the data part of a package may decompress to: as much as an export may write, so every
+#: package this platform makes can be imported again. Graph data compresses about ten to one; this
+#: is the ceiling that stops a small archive from claiming to unpack into something enormous.
+MAX_PACKAGE_DATA_BYTES = _EXPORT_MAX_BYTES
 
 #: Bytes a package's manifest may be.
 MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024

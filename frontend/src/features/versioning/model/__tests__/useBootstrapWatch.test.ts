@@ -17,11 +17,13 @@ vi.mock('@tanstack/react-query', () => ({
 }))
 
 let statusByDs: Record<string, BootstrapJob | undefined> = {}
+const polled: boolean[] = []
 vi.mock('../../hooks/useVersioning', () => ({
   VERSIONING_KEYS: { all: ['versioning'] },
-  useBootstrapStatus: (_ws: string, ds: string | null, opts: { enabled: boolean }) => ({
-    data: opts.enabled && ds ? statusByDs[ds] : undefined,
-  }),
+  useBootstrapStatus: (_ws: string, ds: string | null, opts: { enabled: boolean }) => {
+    polled.push(opts.enabled)
+    return { data: opts.enabled && ds ? statusByDs[ds] : undefined }
+  },
 }))
 
 const { useBootstrapWatch } = await import('../useBootstrapWatch')
@@ -35,6 +37,7 @@ const REPORT = { checks: [], stored: { nodes: 1, edges: 1 } } as unknown as Boot
 
 beforeEach(() => {
   statusByDs = {}
+  polled.length = 0
   invalidateQueries.mockClear()
 })
 
@@ -103,5 +106,23 @@ describe('nothing it remembers may leak to another data source', () => {
     statusByDs.dsB = job({ status: 'completed', report: REPORT })
     rerender({ ds: 'dsB' })
     expect(result.current.showReport).toBe(true)
+  })
+})
+
+describe('a copy paused for a decision', () => {
+  it('stays on screen, so the duplicates can be decided rather than the source offered for enabling again', () => {
+    statusByDs.dsA = job({ status: 'needs_decision', phase: 'awaiting_decision' })
+    const { result } = renderHook(() => useBootstrapWatch('ws1', 'dsA', { headSeq: 1 }))
+    expect(result.current.showProgress).toBe(true)
+    expect(result.current.showReport).toBe(false)
+  })
+})
+
+describe('only those shown the copy watch it', () => {
+  it('polls nothing for someone it is not shown to (the canvas strip, for a non-manager)', () => {
+    statusByDs.dsA = job({ status: 'running' })
+    const { result } = renderHook(() => useBootstrapWatch('ws1', 'dsA', { headSeq: 1, enabled: false }))
+    expect(polled.every((enabled) => !enabled)).toBe(true)
+    expect(result.current.showProgress).toBe(false)
   })
 })

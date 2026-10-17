@@ -10,11 +10,12 @@ millisecond so two ids minted back-to-back still sort in mint order.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
 
-__all__ = ["ulid", "prefixed_id"]
+__all__ = ["ulid", "prefixed_id", "stable_prefixed_id"]
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"   # excludes I, L, O, U
 _MASK80 = (1 << 80) - 1
@@ -55,6 +56,16 @@ def ulid(ts_ms: int | None = None) -> str:
 def prefixed_id(prefix: str) -> str:
     """``<prefix>_<ulid>`` — e.g. ``cmt_01J9Z...`` (mirrors the repo's id style)."""
     return f"{prefix}_{ulid()}"
+
+
+def stable_prefixed_id(prefix: str, key: str) -> str:
+    """``<prefix>_<26 chars>`` derived from ``key`` alone — the same key always mints the same id.
+
+    For an id a job must mint again identically when it replays a window after a crash (a package
+    line with no entity id is keyed by its position in the file), where :func:`prefixed_id` would
+    mint a second entity. Not time-sortable: the 128 bits are a hash of ``key``."""
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=16).digest()
+    return f"{prefix}_{_encode(int.from_bytes(digest, 'big'), 26)}"
 
 
 def _selftest() -> None:

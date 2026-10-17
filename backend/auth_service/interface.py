@@ -50,7 +50,8 @@ class User(BaseModel):
     # Chosen avatar illustration, or None to fall back to initials.
     avatar_id: Optional[str] = Field(None, alias="avatarId")
     # True while the account is holding a password it must rotate before
-    # it can do anything else. See ``get_current_user``.
+    # it can do anything else. See ``_hold_for_password_change`` in
+    # ``backend/app/auth/dependencies.py``.
     must_change_password: bool = Field(False, alias="mustChangePassword")
     # IdP-mapped attributes. Empty dict for local-only users.
     attributes: dict = Field(default_factory=dict)
@@ -77,6 +78,74 @@ class SessionTokens:
     refresh_token: str
     refresh_max_age_seconds: int
     csrf_token: str
+
+
+@dataclass(frozen=True)
+class ApiKeyPolicy:
+    """The deployment's rules for API keys, read by the caller per request.
+
+    ``sso_signin_window_days``: an owner with an SSO identity must have signed
+    in through their identity provider within this many days, or their keys
+    pause. ``None`` turns the rule off.
+
+    ``max_lifetime_days``: no key outlives this many days from its creation,
+    whatever expiry it was minted with — applied to existing keys too. ``None``
+    means no maximum.
+    """
+    sso_signin_window_days: Optional[int] = 30
+    max_lifetime_days: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ApiKeyIdentity:
+    """A request authenticated by an API key: who it acts as, and through
+    which key.
+
+    ``claims`` is whatever the injected claims resolver produced — opaque
+    here, the application's permission claims for this key.
+
+    ``status`` is ``active`` for a key that may act. A caller that asked for
+    inactive keys too (a key inspecting or revoking itself) also receives the
+    reason it would otherwise have been refused, and ``claims`` is then
+    ``None``: such a key may describe or end itself and nothing more.
+    """
+    key_id: str
+    kind: str
+    user: "User"
+    claims: object
+    expires_at: Optional[str]
+    status: str = "active"
+
+
+#: How a step-up can confirm that an SSO session is still its person, by the
+#: provider the session signed in through (``StepUpTarget.confirms``):
+#:
+#: * ``proven`` — OIDC or SAML: the provider reports when the person
+#:   authenticated, and can be made to ask again.
+#: * ``gateway_live`` — an Enterprise gateway this server can ask, now,
+#:   whether the company session on the request is still live.
+#: * ``gateway_sign_in`` — a gateway only the browser talks to: a sign-in
+#:   through it is the gateway's answer.
+#: * ``none`` — a portal, which can say neither.
+STEP_UP_CONFIRMS = ("proven", "gateway_live", "gateway_sign_in", "none")
+
+#: What a gateway says when asked about the company session behind a
+#: session (``confirm_live_session``).
+LIVE_SESSION_ANSWERS = ("confirmed", "absent", "rejected", "unreachable")
+
+
+@dataclass(frozen=True)
+class StepUpTarget:
+    """Where to send someone to prove it is them again, and how the provider
+    their session signed in through can confirm it (``STEP_UP_CONFIRMS``).
+    ``unreachable``: that provider is confirmed down (``sso_outage_slugs``),
+    so neither sending anyone to it nor asking it can confirm anything until
+    it is back. ``slug``: that provider's, for a sign-in the page runs in
+    place — a gateway's."""
+    login_url: str
+    confirms: str
+    unreachable: bool = False
+    slug: Optional[str] = None
 
 
 # ── Service protocol ─────────────────────────────────────────────────
@@ -161,6 +230,49 @@ class IdentityService(Protocol):
         """
         ...
 
+    async def validate_api_key(
+        self,
+        token: str,
+        *,
+        client_ip: Optional[str],
+        user_agent: Optional[str],
+        policy: ApiKeyPolicy,
+        allow_inactive: bool = False,
+    ) -> ApiKeyIdentity:
+        """Authenticate a request by API key, checked afresh every time.
+
+        Raises ``ApiKeyRejected`` when the key is not honoured — unknown,
+        revoked, expired, its owner suspended or due to sign in again, or
+        presented from an address the key does not allow — and
+        ``ApiKeyLookupUnavailable`` when the answer could not be read, which
+        must never be mistaken for a bad key.
+
+        ``allow_inactive`` lets a key that is merely paused or expired through
+        with its ``status`` set, for the routes where a key describes or
+        revokes itself. A revoked or unknown key is refused regardless.
+        """
+        ...
+
+    async def step_up_target(
+        self, user_id: str, *, next_path: str, provider_id: Optional[str] = None,
+    ) -> StepUpTarget:
+        """Where this person signs in again to confirm it is them, returning
+        to ``next_path``, and how that provider can confirm it.
+
+        ``provider_id`` is the provider the session signed in through; without
+        one, the provider they signed in with most recently."""
+        ...
+
+    async def confirm_live_session(
+        self, provider_id: str, *, ambient_cookies: dict, ambient_headers: dict,
+    ) -> str:
+        """Ask the gateway ``provider_id`` names whether the company session
+        on this request is still live — one of ``LIVE_SESSION_ANSWERS``:
+        ``absent`` when the request carries none, ``rejected`` when the
+        gateway says it has ended, ``unreachable`` when it did not answer in
+        time. Never raises for the gateway's sake."""
+        ...
+
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -223,25 +335,34 @@ class SsoReauthRequired(AuthError):
         self.provider = provider
 
 
-class LocalLoginDisabled(AuthError):
-    """Phase 4: the platform is in SSO-only mode
-    (``app_auth_config.allow_local_login = false``). The router
-    surfaces this as a 403 with a structured body so the FE can
-    redirect to the dynamic providers picker instead of showing the
-    generic "invalid credentials" message."""
+class ApiKeyRejected(AuthError):
+    """An API key was presented and is not honoured. ``reason`` is a stable
+    code: ``malformed``, ``unknown``, ``revoked``, ``expired``,
+    ``owner_inactive``, ``owner_reauth_required`` or ``ip_not_allowed``."""
 
-    def __init__(self) -> None:
-        super().__init__("local_login_disabled")
+    def __init__(self, reason: str, *, key_id: Optional[str] = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.key_id = key_id
+
+
+class ApiKeyLookupUnavailable(AuthError):
+    """Whether the key is valid could not be determined — the store did not
+    answer. The caller answers 503, never 401: a database blip must not read
+    to a client as "your credential is bad"."""
 
 
 __all__ = [
     "User",
     "SessionTokens",
+    "ApiKeyPolicy",
+    "ApiKeyIdentity",
+    "ApiKeyRejected",
+    "ApiKeyLookupUnavailable",
     "IdentityService",
     "AuthError",
     "InvalidCredentials",
     "InvalidRefreshToken",
     "SSOAuthError",
     "SsoReauthRequired",
-    "LocalLoginDisabled",
 ]

@@ -446,18 +446,15 @@ async def test_system_account_not_found(test_client: AsyncClient):
     assert resp.status_code == 404
 
 
-async def test_unmark_refused_when_it_would_lock_out_the_admin(
-    test_client: AsyncClient, db_session,
-):
-    """Passwords off + active super-admin with no SSO identity: the
-    flag is the only thing keeping that admin able to sign in, so
-    stripping it is refused with the same 409 the config PATCH uses."""
+async def _seed_break_glass_admin(db_session, email: str):
+    """An active super-admin with a password, marked as a system account:
+    a ready break-glass account."""
     from backend.app.db import models as m
-    from backend.app.db.repositories import app_auth_config_repo, user_repo
+    from backend.app.db.repositories import user_repo
 
     user = await user_repo.create_user(
         db_session,
-        email="lastdoor@example.com",
+        email=email,
         password_hash="hash123",
         first_name="Last",
         last_name="Door",
@@ -469,6 +466,41 @@ async def test_unmark_refused_when_it_would_lock_out_the_admin(
         role_name="super_admin", scope_type="global", scope_id=None,
         granted_at="2024-01-01T00:00:00Z", source="local",
     ))
+    return user
+
+
+async def test_unmark_refused_for_the_last_ready_break_glass_account(
+    test_client: AsyncClient, db_session,
+):
+    """Passwords could only be switched off because a ready break-glass
+    account existed; the last one is the door an IdP outage needs."""
+    from backend.app.db.repositories import app_auth_config_repo
+
+    user = await _seed_break_glass_admin(db_session, "onlydoor@example.com")
+    await app_auth_config_repo.update_config(
+        db_session, allow_local_login=False, updated_by="test",
+    )
+    await db_session.flush()
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": False},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "no_break_glass_account"
+
+
+async def test_unmark_refused_when_it_would_lock_out_the_admin(
+    test_client: AsyncClient, db_session,
+):
+    """Passwords off + active super-admin with no SSO identity: the
+    flag is the only thing keeping that admin able to sign in, so
+    stripping it is refused with the same 409 the config PATCH uses —
+    even when another break-glass account remains."""
+    from backend.app.db.repositories import app_auth_config_repo
+
+    await _seed_break_glass_admin(db_session, "spare@example.com")
+    user = await _seed_break_glass_admin(db_session, "lastdoor@example.com")
     await app_auth_config_repo.update_config(
         db_session, allow_local_login=False, updated_by="test",
     )
@@ -567,6 +599,39 @@ async def test_reset_password(test_client: AsyncClient, db_session):
     )
     assert resp.status_code == 200
     assert resp.json()["detail"] == "Password has been reset"
+
+
+async def test_a_password_an_admin_sets_is_replaced_at_next_sign_in(
+    test_client: AsyncClient, db_session,
+):
+    """A password the admin chose, the admin knows."""
+    from backend.app.db.repositories import user_repo
+
+    user = await user_repo.create_user(
+        db_session, email="held@example.com", password_hash="hash123",
+        first_name="Held", last_name="Over",
+    )
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/reset-password",
+        json={"newPassword": "V3ryStr0ngP@ssw0rd!"},
+    )
+    assert resp.status_code == 200
+    stored = await user_repo.get_user_by_id(db_session, user.id)
+    assert stored.must_change_password is True
+
+
+async def test_an_admin_setting_their_own_password_is_choosing_it(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import user_repo
+
+    resp = await test_client.post(
+        "/api/v1/admin/users/usr_test000000/reset-password",
+        json={"newPassword": "V3ryStr0ngP@ssw0rd!"},
+    )
+    assert resp.status_code == 200
+    stored = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert stored.must_change_password is False
 
 
 # ── POST /admin/users/{user_id}/generate-reset-token ──────────────────
@@ -821,6 +886,30 @@ async def test_change_password_clears_forced_rotation(
     )
     user = await user_repo.get_user_by_id(db_session, "usr_test000000")
     assert user.must_change_password is False
+
+
+async def test_a_system_account_can_change_its_own_password(
+    test_client: AsyncClient, db_session,
+):
+    """The built-in administrator is a local account with no SSO. The
+    self-service change is how it replaces its starting password, and it
+    stays the break-glass account afterwards."""
+    from backend.app.db.repositories import user_repo
+    from backend.auth_service.core.password import verify_password
+
+    await _set_my_password(db_session, "Old!Passw0rd#2026")
+    await user_repo.set_system_account(db_session, "usr_test000000", True)
+    await user_repo.set_must_change_password(db_session, "usr_test000000", True)
+
+    resp = await test_client.post(
+        "/api/v1/users/me/password",
+        json={"currentPassword": "Old!Passw0rd#2026", "newPassword": _STRONG},
+    )
+    assert resp.status_code == 200, resp.text
+    user = await user_repo.get_user_by_id(db_session, "usr_test000000")
+    assert verify_password(_STRONG, user.password_hash)
+    assert user.must_change_password is False
+    assert user.is_system_account is True
 
 
 # ── Self-service: sessions and activity ───────────────────────────────

@@ -8,6 +8,8 @@ bytes, and every download says its size, ``Accept-Ranges`` and its validators. O
 is a 409, one no longer kept a 404, and its job says it isn't kept. An export job is readable only
 by those who may read what it exported: someone else's private draft's export, or one of a view
 the caller can't read, is a 404 as for none, and missing from the list; an import isn't an export.
+A cancel reaches only an export the caller may read, answers with the job wherever it ended, and
+is a 403 when the export isn't the caller's to cancel.
 """
 from __future__ import annotations
 
@@ -61,6 +63,7 @@ class _ImportExport:
     def __init__(self, store):
         self.store = store
         self.jobs: dict = {}
+        self.cancels: list = []
 
     def add(self, job_id, **extra):
         self.jobs[job_id] = {"jobId": job_id, "jobType": "export", "status": "completed", "graphId": "g1",
@@ -73,6 +76,15 @@ class _ImportExport:
 
     async def list_jobs(self, *, graph_id, job_type):
         return [j for j in self.jobs.values() if j["graphId"] == graph_id and j["jobType"] == job_type]
+
+    async def cancel_export(self, job_id, *, viewer):
+        """Whose it is to cancel is the service's to say (test_export_cancel)."""
+        self.cancels.append((job_id, viewer.actor))
+        job = self.jobs[job_id]
+        if job.get("startedBy", viewer.actor) != viewer.actor:
+            raise AccessDenied("Only the person who started this export, or a manager, can cancel it.")
+        if job["status"] in ("pending", "running"):
+            job.update(status="cancelled", completedAt=DONE_AT)
 
 
 @pytest.fixture
@@ -156,3 +168,35 @@ async def test_an_export_is_only_for_those_who_may_read_what_it_exported(test_cl
         for path in (f"{BASE}/{job_id}", f"{BASE}/{job_id}/download"):
             refused = await test_client.get(path)
             assert refused.status_code == 404 and refused.json()["detail"] == "export not found", (path, refused.text)
+
+
+async def test_an_export_is_cancelled_by_those_who_may_read_it_and_answers_with_the_job(
+        test_client, api, monkeypatch):
+    from backend.app.api.v1.endpoints import view_guards
+
+    async def readable_view(session, view_id, user, claims):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    monkeypatch.setattr(view_guards, "readable_view", readable_view)
+    api.add("j_running", status="running", completedAt=None)
+    cancelled = await test_client.post(f"{BASE}/j_running/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    assert (cancelled.json()["jobId"], cancelled.json()["status"]) == ("j_running", "cancelled")
+    again = await test_client.post(f"{BASE}/j_running/cancel")
+    assert again.status_code == 200 and again.json()["status"] == "cancelled", "a second cancel changes nothing"
+    assert (await test_client.post(f"{BASE}/j1/cancel")).json()["status"] == "completed", "one that ended stays so"
+
+    api.add("j_theirs", status="running", completedAt=None, startedBy="usr_someone_else")
+    refused = await test_client.post(f"{BASE}/j_theirs/cancel")
+    assert refused.status_code == 403 and "Only the person who started" in refused.json()["detail"]["message"]
+    assert api.jobs["j_theirs"]["status"] == "running"
+
+    api.add("j_private", status="running", branchId="br_private")
+    api.add("j_view", status="running", scopeViewId="v_hidden")
+    api.add("j_import", status="running", jobType="ingest")
+    asked = len(api.cancels)
+    for job_id in ("j_private", "j_view", "j_import", "j_missing"):
+        hidden = await test_client.post(f"{BASE}/{job_id}/cancel")
+        assert hidden.status_code == 404 and hidden.json()["detail"] == "export not found", (job_id, hidden.text)
+    assert len(api.cancels) == asked, "an export the caller may not read is never cancelled"
+    assert api.jobs["j_private"]["status"] == "running"

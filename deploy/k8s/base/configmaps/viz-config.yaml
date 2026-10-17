@@ -15,10 +15,6 @@ data:
   # build would wedge the event loop and freeze every request). Explicit here
   # so the topology never depends on a code default flipping.
   GRAPHVER_PROJECTION_INPROCESS: "0"
-  # Import and export jobs are only queued here: the versioning-worker
-  # Deployment claims them from the jobs table and runs them, so a large
-  # import or export never shares a web pod's CPU and memory with requests.
-  GRAPHVER_TRANSFER_INPROCESS: "0"
   # R-C3: keep the isolated GRAPH_READ pool modest so the per-pod Postgres
   # ceiling (~85 conns/process × GUNICORN_WORKERS × replicas) stays bounded.
   # A single Postgres max_connections cannot cover an HPA'd fleet — front it
@@ -39,3 +35,9 @@ data:
   # PRODUCT_EVENT_RETENTION_DAYS is deliberately absent: the sweep does not
   # run on this role, and setting it here would only imply it did.
   ANALYTICS_WARM_INTERVAL_SECONDS: "300"
+  # The activity sweep runs on the control plane, but this tier tells readers
+  # how far back the log goes, so it MUST match controlplane-config's value.
+  ACTIVITY_RETENTION_DAYS: "730"
+  # Aggregation runs are pruned on the control plane, and this tier says how
+  # far back they reach, so it MUST match controlplane-config's value too.
+  AGGREGATION_JOB_RETENTION_DAYS: "90"

@@ -8,13 +8,14 @@ memory stays flat at any size. The helpers both share live here.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import re
 from typing import AsyncIterator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import require_feature
@@ -134,11 +135,18 @@ async def _first_bytes(chunks: AsyncIterator[bytes], n: int) -> AsyncIterator[by
             n -= len(chunk)
 
 
-def stored_download(store, key: str, *, size: int, etag: str, modified: Optional[str], filename: str,
-                    media_type: str, range_header: Optional[str], if_range: Optional[str]) -> Response:
+async def stored_download(store, key: str, *, size: int, etag: str, modified: Optional[str], filename: str,
+                          media_type: str, range_header: Optional[str], if_range: Optional[str]) -> Response:
     """A stored file as a download that resumes: its size, validators and ``Accept-Ranges`` up
     front, then the part a ``Range`` asks for (206), or the whole file (200) when ``If-Range``
-    names a version other than this one."""
+    names a version other than this one. A store that serves the file itself (``download_url``:
+    a presigned GET) gets the browser redirected there (307), ranges and resumes included, and no
+    API worker streams it."""
+    offer = getattr(store, "download_url", None)
+    # Signing may first refresh the store's credentials (STS, instance metadata): off the loop.
+    url = await asyncio.to_thread(offer, key, filename=filename) if offer else None
+    if url:
+        return RedirectResponse(url, status_code=307)
     if if_range and if_range.strip() not in (etag, modified):
         range_header = None
     try:

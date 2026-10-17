@@ -1,36 +1,22 @@
-/** A drawer's JSON tab: what it shows, read-only, for inspection — serialised only while open. */
-import { useMemo, useState } from 'react'
-import { Check, Code, Copy } from 'lucide-react'
-import { IconButton } from '@/components/ui/Button'
+/** A drawer's JSON tab: what it shows, read-only, for inspection — the
+ *  shared `JsonTree`: highlighted, foldable, and one click from the
+ *  clipboard. Built only while the tab is open. */
+import { Code } from 'lucide-react'
+
+import { JsonTree } from '@/components/ui/JsonTree'
 
 export function JsonView({ data, label }: {
   data: unknown
-  /** Names the block for assistive tech, e.g. "Entity data as JSON". */
+  /** What the data is, e.g. "Entity data" — read as "Entity data as JSON". */
   label: string
 }) {
-  const json = useMemo(() => JSON.stringify(data, null, 2), [data])
-  const [copied, setCopied] = useState(false)
-  const copy = async () => {
-    await navigator.clipboard?.writeText(json)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
   return (
     <div className="p-5">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-ink-muted flex items-center gap-2">
-          <Code className="w-3.5 h-3.5" aria-hidden />
-          Raw JSON
-        </span>
-        <IconButton icon={copied ? Check : Copy} label={copied ? 'Copied' : 'Copy JSON'} size="sm" onClick={() => { void copy() }} />
-      </div>
-      <pre
-        className="w-full max-h-[520px] overflow-auto px-4 py-3 rounded-xl bg-black/[0.04] dark:bg-white/[0.04] border border-glass-border text-xs font-mono text-ink whitespace-pre-wrap break-words custom-scrollbar"
-        aria-label={label}
-        tabIndex={0}
-      >
-        {json}
-      </pre>
+      <p className="mb-2 flex items-center gap-2 text-xs font-semibold text-ink-muted">
+        <Code className="h-3.5 w-3.5" aria-hidden />
+        Raw JSON
+      </p>
+      <JsonTree value={data} label={label} openDepth={3} />
     </div>
   )
 }

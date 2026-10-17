@@ -271,7 +271,7 @@ Instance `max_connections=800` = 150 + 100 server pools + ~50 system/replication
 
 ### 5.5 Ingest & maintenance
 
-- Batch knobs at this scale: `GRAPHVER_INGEST_BATCH_SIZE=5000`, `GRAPHVER_PROJECTION_BATCH_SIZE=5000` (defaults are fine; raise only if p99 lock time stays low), `IMPORT_COMMIT_WINDOW=50000`.
+- Batch knobs at this scale: `GRAPHVER_INGEST_BATCH_SIZE=5000`, `GRAPHVER_PROJECTION_BATCH_SIZE=5000` (defaults are fine; raise only if p99 lock time stays low), `IMPORT_COMMIT_WINDOW=10000` (the default: short windows keep each transaction and each resume step small).
 - Partition pruning by `graph_id` + BRIN on `commit_seq` is the read path — verify plans keep pruning after PG major upgrades (`EXPLAIN` in a CI smoke test).
 - Schedule bulk reseeds / large imports **off-peak** — a full reseed of a multi-million-element graph is a minutes-long, IOPS-heavy scan; the 1 TB IOPS headroom (§2.3) exists for exactly this.
 
@@ -397,7 +397,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 | Memorystore | memory, evictions (cache) / rejected-writes (coord) | coord evictions **any**; cache OOM |
 | GKE | pod restarts (falkordb pool), PDB violations, HPA at ceiling | any / sustained-at-max |
 
-> **The single most important gap to close first** (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)): the app currently *collects* these counters but has **no `/metrics` scrape endpoint**. Wire Prometheus/GCP Managed Prometheus export before this topology goes live — resilience you can't observe fails silently.
+> **The single most important gap to close first** (see `docs/TECHNICAL_DEBT.md` §1.4): the app now *exports* these counters on a `/metrics` endpoint, but it is **off by default and nothing scrapes it or alerts on it**. Turn it on and wire Prometheus/GCP Managed Prometheus scraping and alerts before this topology goes live — resilience you can't observe fails silently.
 
 ---
 
@@ -438,7 +438,7 @@ Phased; each gate verifiable before the next.
 **Before this is truly production-ready, close these (they are outside the overlay):**
 1. **Enable Managed Connection Pooling on the Cloud SQL instance** (transaction mode) — the app-side `DB_POOLER_MODE=transaction` is necessary but not sufficient; the pooler itself is instance config (§5.4).
 2. **FalkorDB is the single base StatefulSet, not the 3-shard Redis Cluster** of §7 — stand that up on the tainted node pool for real read-layer HA/throughput.
-3. **Egress hardening (SSRF):** add a `default-deny-egress` NetworkPolicy + explicit allows to the Cloud SQL / Memorystore / FalkorDB CIDRs and the connection-tester allowlist (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)). Left open here so first deploy connects; tighten once endpoints are known.
+3. **Egress hardening:** add a `default-deny-egress` NetworkPolicy + explicit allows to the Cloud SQL / Memorystore / FalkorDB CIDRs and to the hosts your graph providers live on. Left open here so first deploy connects; tighten once endpoints are known.
 4. **TLS in transit (Cloud SQL):** enable SSL on the Cloud SQL instance, then switch the DSN to enforce it (asyncpg `ssl`). *(Redis TLS is no longer open — per-role `REDIS_{STREAMS,CACHE}_TLS_*` + cert-Secret mounts on `/certs/streams`/`/certs/cache` already ship in the base manifests (ADR-022); flip `REDIS_STREAMS_TLS_ENABLED`/`REDIS_CACHE_TLS_ENABLED=true` and mount the CA to enable it.)*
 
 ---
@@ -462,4 +462,4 @@ Phased; each gate verifiable before the next.
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
-| `IMPORT_COMMIT_WINDOW` | import worker | `50000` |
+| `IMPORT_COMMIT_WINDOW` | import worker | `10000` (default) |

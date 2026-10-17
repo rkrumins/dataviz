@@ -121,6 +121,31 @@ async def test_update_view(test_client: AsyncClient):
     assert resp.json()["description"] == "Updated desc"
 
 
+async def test_update_view_tags_keep_replace_and_clear(test_client: AsyncClient):
+    """Every editor of a view's tags (the Explorer's details, the wizard, the canvas) sends
+    the whole list: leaving it out keeps the tags, a list replaces them and an empty list
+    clears them. The view and the list it appears in then read back the same set."""
+    ws_id = await _create_workspace(test_client)
+    view_id = (await _create_view(test_client, ws_id, "Tagged", tags=["finance"]))["id"]
+
+    async def tags_read_back() -> tuple:
+        one = (await test_client.get(f"/api/v1/views/{view_id}")).json()["tags"]
+        listed = (await test_client.get("/api/v1/views/", params={"workspaceId": ws_id})).json()
+        return one, next(v["tags"] for v in listed["items"] if v["id"] == view_id)
+
+    resp = await test_client.put(f"/api/v1/views/{view_id}", json={"name": "Renamed"})
+    assert resp.json()["tags"] == ["finance"]
+    assert await tags_read_back() == (["finance"], ["finance"])
+
+    resp = await test_client.put(f"/api/v1/views/{view_id}", json={"tags": ["finance", "pii"]})
+    assert resp.json()["tags"] == ["finance", "pii"]
+    assert await tags_read_back() == (["finance", "pii"], ["finance", "pii"])
+
+    resp = await test_client.put(f"/api/v1/views/{view_id}", json={"tags": []})
+    assert resp.status_code == 200
+    assert await tags_read_back() == ([], [])
+
+
 async def test_update_view_not_found(test_client: AsyncClient):
     """Updating a non-existent view returns 404."""
     resp = await test_client.put(

@@ -33,6 +33,7 @@ import { useAuthStore } from '../store/auth'
 import { ANALYTICS_FIXTURES, type AnalyticsFixtureName } from './analyticsFixtures'
 import { OverviewTab } from '../components/analytics/OverviewTab'
 import { GrowthTab } from '../components/analytics/GrowthTab'
+import { DataTab } from '../components/analytics/DataTab'
 import { EngagementTab } from '../components/analytics/EngagementTab'
 import { ContentTab } from '../components/analytics/ContentTab'
 import { HealthTab } from '../components/analytics/HealthTab'
@@ -76,8 +77,10 @@ function Harness() {
         } as never)
     }, [])
 
-    const { summary, rows } = ANALYTICS_FIXTURES[fixtureName]
+    const { summary, rows, data, usage: usageDoc } = ANALYTICS_FIXTURES[fixtureName]
     const common = { data: summary, range: RANGE, isStale: false }
+    // As the page hands it over once the usage document has arrived.
+    const usage = { data: usageDoc, isLoading: false, isFetching: false, error: null }
 
     return (
         <MemoryRouter>
@@ -93,13 +96,15 @@ function Harness() {
                         <OverviewTab {...common} onWorkspaceClick={() => {}} />
                     )}
                     {tab === 'growth' && <GrowthTab {...common} />}
-                    {tab === 'engagement' && <EngagementTab {...common} />}
-                    {tab === 'content' && <ContentTab {...common} />}
-                    {tab === 'health' && <HealthTab {...common} />}
+                    {tab === 'data' && <DataTab data={data} range={RANGE} isStale={false} />}
+                    {tab === 'engagement' && <EngagementTab {...common} usage={usage} />}
+                    {tab === 'content' && <ContentTab {...common} usage={usage} />}
+                    {tab === 'health' && <HealthTab {...common} usage={usage} />}
                     {tab === 'workspaces' && (
                         <WorkspacesTab
                             rows={rows} range={RANGE} isStale={false}
                             selectedId={null} onSelect={() => {}}
+                            usage={usage}
                         />
                     )}
                 </div>

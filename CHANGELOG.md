@@ -9,6 +9,1057 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — API keys: scripts and services that act as you, limited to what you choose
+
+### Added
+
+**API keys.** Anyone can create a key under **Account → API keys** (or **API keys** in the menu
+under their avatar) that lets a script or a service call the API as them — people who sign in
+through an identity provider and have no password included. A key reaches everything its owner
+can, or only chosen workspaces, views and data sources, and may read, or read and change, views
+(with or without publishing to everyone) and data. On anything it reaches it may do what its owner
+may do there at that moment, never more: access taken from a person is taken from their keys
+within 30 seconds.
+
+**Made in five guided steps.** **Purpose** starts from the job — *Read data for reporting*, *Load
+data and signal refreshes*, *Publish views from CI* or *Custom* — and names the key; **Reach**
+recommends the narrowest choice; **Permissions** says what each level lets a script do;
+**Safety** sets the expiry (shown as a date; never only where the deployment allows it) and
+networks, offering the address you are calling from; **Review** shows how exposed the key would be
+and what it could do right now, checked by the server exactly as creating it is
+(`POST /me/api-keys/preview`, which creates nothing). Creating, rotating or renewing a key asks for
+the password, or for a sign-in the identity provider dated within the last 15 minutes — or, through
+an Enterprise gateway, the gateway's word that the company sign-in is still live. The key is
+shown once, with snippets for cURL, Python, JavaScript and `.env`, and the page waits for its first
+call.
+
+**Every key, at a glance.** Each key is a card: its status, what it reaches, when it expires,
+when and from where it was last used, and its requests per day over two weeks. Open one for what it
+can do right now per workspace, view and data source, 30 days of use with refusals and errors, and
+the key it replaced or was replaced by. **Edit** renames a key or says what it is for; **Rotate**
+makes a new token with the same access and keeps the old one working for up to a week (a key is
+replaced once); **Renew** gives an expired key a fresh token; **Revoke** ends it at once. Ended keys
+stay listed for 90 days.
+
+**Scripts send one header.** `Authorization: Bearer nxpat_…` replaces the cookie jar, the CSRF
+header and renewal. `GET /api/v1/api-keys/self` says what a key is and when it stops working;
+`DELETE /api/v1/api-keys/self` revokes it, for whoever holds it, even when it is paused or expired;
+and every answer carries `X-API-Key-Expires-At`. Keys are for the data plane — views, graphs,
+version control, data-source signals and jobs. The API reference marks each operation a key may
+call, and every other route answers `403 api_key_not_allowed`.
+
+**Paused, not forgotten.** The keys of someone who signs in through an identity provider pause when
+they haven't signed in there for 30 days, and resume at their next sign-in, so the keys of someone
+who has left stop without anyone remembering them. A suspended account's keys stop at once.
+
+**Administration → API keys** opens on counts that filter the list — active, expiring within 7
+days, never expiring, unused for 90 days, paused — with tabs for every status, search by key or
+owner, and sorting by name, last use, expiry or creation. Open a key for its owner, access, usage,
+lineage and everything it did (**Its activity**); revoke it with a note its owner sees, or all of a
+person's; **Export CSV** downloads the list as filtered, up to 10,000 keys. The access drawer on
+**Administration → Users** links to a person's keys. Seeing keys needs `system:audit:read`;
+revoking needs `system:users:manage`. Four switches under **Administration → Features →
+Authentication** govern keys: **API keys**, **Longest an API key may live**, **Pause keys of
+people who stop signing in** and **Accept a fresh sign-in round trip for API keys** — off by
+default, it lets people on portal connections, which can't date a sign-in, make keys.
+
+**Enterprise gateway users make keys with nothing to switch on.** When this server can reach the
+gateway (server exchange with an ambient token), creating or rotating a key asks it, then and
+there, whether the company session behind the request is still live: confirmed makes the key, ended
+signs in through the gateway again without leaving the page, and no answer makes nothing (`503
+gateway_unreachable`; try again). No database connection is held while the gateway answers. Where
+only the browser reaches the gateway, a sign-in through it in
+the last 15 minutes counts, and an older one signs in through it again the same way. The request is
+sent again only if the same person is still signed in. Every key's record says how it was
+confirmed.
+
+**Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
+administrator revokes it (with their note), and when a revoked key is presented again or a key is
+used from a network it isn't limited to — even when it only asks about itself.
+
+**Key traffic on your dashboards.** `api_key_requests_total{outcome}` on the API's `/metrics` counts
+every request made with a key: accepted, or the code it was refused with. A wave of paused keys, a
+stranger guessing tokens or key checks failing can now raise an alert, and Observability suggests
+three. The count is never per key, so the series stay bounded; each key's own use is under
+**Administration → API keys**.
+
+### Changed
+
+- **The API Guide leads with keys.** It, and the search and versioning references, show the key
+  first and say which routes still need a password session. Scripts that sign in with a password
+  keep working unchanged.
+- **Sign out everywhere** and **End sessions** say that API keys keep working, and where to revoke
+  them.
+- **`publish_view_library.py` takes an API key.** With `SYNODIC_API_KEY` set, the view library
+  publisher checks the key and sends it instead of signing in, so it works where password sign-in
+  is off. The key is read only from the environment, never from the command line. Without one, it
+  signs in with an email and password as before.
+
+### Security
+
+- **A graph import no longer rewrites a view its caller can't edit.** An import's `?viewId=` made
+  the import rewrite that view's layout, while the route checked only that the caller could manage
+  the data source — so it reached any view on the platform. The view must now be live, in the
+  import's workspace, and editable by the caller (`create_import`, `complete_import_upload`).
+- **Everything a key does is attributed.** Every change made with a key is on **Administration →
+  Activity** with its owner as the actor and the key named — filter by the key, or open **Its
+  activity** on it — including what the control plane does for the request; an aggregation run a
+  key starts is recorded as started through the API. The access log records `authMethod=api_key`
+  with the key's id. Creating, renaming, rotating and revoking keys, and keys refused or misused,
+  are in Activity under Identity and on the owner's **Recent activity**.
+- **A search can't read a view its caller can't open.** A view named in a search's body
+  (`/graph/search/advanced`, `/graph/search/explain`) was used without checking the caller could
+  open it, and `explain` returned its roots, types and layers. It now needs the same access as
+  opening the view.
+- **A job's event stream belongs to its data source.** `GET /admin/data-sources/{ds}/aggregation-jobs/{job}/events`
+  streamed any job named in the path, whatever data source the caller was checked against. A job
+  of another data source is now `404`.
+- **A draft is reached through its own graph.** A merge preview and a draft's view changes
+  (`/versioning/graphs/{graph}/branches/{branch}/merge-preview`, `/view-changes`) did not check that
+  the draft belonged to the graph in the path, or that the caller could read it. Both now do.
+- **Signing in through an identity provider proves when.** The session records whether the
+  provider itself dated the sign-in (`auth_time_proven`), and keeps that through every renewal. A
+  sign-in it re-issued silently, or dated too long ago to use, does not count as a fresh one, and
+  only OIDC and SAML can prove one: a portal's `auth_time`, which it maps from its own payload,
+  never does. The session also names the provider it came from (`idp`), so a confirmation is asked
+  of that provider.
+- **A password confirms a key only while password sign-in is on.** With **Passwords** switched off,
+  a password session — including one opened through the emergency window or the Super Admin
+  outage door — can't create, rotate or renew a key: refused before the password is checked
+  (`step_up_unavailable`, reason `passwords_off`), so a key never outlives the emergency it was
+  made in. The create form says so up front.
+- **A break-glass account holds no keys.** Like a cloud account's root user, the account kept for
+  when nobody else can sign in shouldn't have anything running as it: a system account can't
+  create, rotate or renew a key, however it signed in (`step_up_unavailable`, reason
+  `system_account`), and keys it made before it was marked stop while it is one
+  (`api_key_owner_inactive`) and work again if the mark is removed. Nothing is revoked. The
+  inventory's **Owner suspended** tab is now **Owner inactive**. The seeded administrator is
+  marked on a fresh install, so make keys from a personal account.
+- **Nothing waits on an identity provider that is down.** While the reachability prober has the
+  session's provider confirmed down, creating, rotating or renewing a key through it is answered at
+  once — `503 idp_unreachable` with `Retry-After`, and no sign-in link — rather than asking a gateway
+  that can't answer (holding the request for up to 10 seconds) or
+  sending the person to an error page or the sign-in page's password doors. The create form says so
+  up front, and **Sign in to resume** is hidden until the provider is back. A sign-in the provider
+  proved in the last 15 minutes still counts.
+- **With Passwords off, a password is no way back in.** A key pauses when its owner has no way to
+  sign in; an owner with no single sign-on identity now has none while **Passwords** is switched
+  off — the emergency window closes, so it doesn't count — and their keys pause
+  (`owner_reauth_required`) until passwords come back on or they sign in through single sign-on.
+  Nothing is revoked. Requests read the switch from the cached sign-in posture, within 30 seconds;
+  a server that can't read the posture and has none cached takes passwords as on. The owner's page
+  and the inventory show the keys as paused.
+- **Secret scanners can stop a key being committed.** The API Keys guide gives the pattern every
+  key matches, `nxpat_[0-9A-Za-z]{38}`, to add to GitHub secret scanning with push protection,
+  gitleaks or GitGuardian. A test keeps it matching what the server issues. The guide also says a
+  key is read only from `Authorization`, so a proxy that sets or strips that header stops keys.
+
+### Upgrading
+
+- **Run the upgrade job.** Migrations `20261012_1000_api_keys` and `20261013_1000_api_key_usage`
+  add the `api_keys` and `api_key_usage` tables; `20261013_1100_merge_api_keys`,
+  `20261014_0600_merge_key_filters` and `20261014_1100_merge_sso_keys` join them to `main`'s chain;
+  `20261013_1300_api_key_scale` indexes `user_identities (user_id, last_login_at)` and a key's
+  successor; and, last, `20261014_1200_aal_api_key` adds `auth_audit_log.api_key_id` and a partial
+  index on it (`20261013_1200_activity_api_key` now builds nothing).
+- **The upgrade is one transaction, and waits at most 5 seconds for any lock.** If it fails or gives
+  up — a long-running reader, such as an activity export, holding a table it needs — nothing has
+  changed, servers still on the previous version keep working, and you run it again. Every lock is
+  held until it commits. Measured on Postgres 16 with 10 million activity events, 100,000 people
+  and a million SSO identities, the whole upgrade took 6.7 seconds: sign-ins (which write `users`
+  and `user_identities`) waited up to 4 seconds, and the activity log, changed last, was unreadable
+  for 1.5 seconds at the end.
+- **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
+  Features → Authentication**; people can still see and revoke their keys while it is off.
+- **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` (120 lookups of unknown keys a minute per address).
+- **Name your proxies.** Behind a proxy, `FORWARDED_ALLOW_IPS` must name exactly it: too narrow and
+  a key limited to networks sees the proxy's address; as wide as the shipped Compose and
+  Kubernetes settings (every private range) and a client inside them can claim any address.
+- The control plane runs one more hourly sweep, for expiry reminders and to drop usage counts
+  older than 90 days. Every API process writes its keys' usage counts every 30 seconds.
+
+### Known limitations
+
+- **No service accounts.** A key acts as the person who made it and stops when they leave. An
+  integration that must outlive a person waits for service accounts, which this is built to take
+  ([ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource)).
+- **Data sources have no grants of their own.** A key's data access follows its owner's workspace
+  roles, or reads a data source through a view its owner can open.
+- **Keys can't call** administration, sharing, settings, the inbox, inspecting or importing a view
+  file, data-source administration beyond signals and jobs, or creating a version-controlled graph.
+  Use a password session for those.
+- **Signing out everywhere, changing a password and End sessions leave keys working**, by design:
+  revoke a key you no longer trust.
+- The refresh audit (`refresh_events`) and graph commits record a key's owner, not the key.
+- **Usage counts are best-effort.** A process that stops abruptly loses up to its last 30 seconds
+  of counts, and a streamed response is counted when it starts.
+- **Portal sign-ins can't make keys** unless an administrator turns on **Accept a fresh sign-in
+  round trip for API keys**, and an Enterprise gateway that doesn't answer stops its users making
+  keys until it does.
+- **The inventory's counts take a moment on a large deployment.** A key's status depends on its
+  owner's latest identity-provider sign-in, read for every owner: measured on Postgres 16, the
+  counts take about 0.4 seconds at 100,000 keys from 30,000 owners with a million identities.
+
+---
+
+## [Unreleased] — Single sign-on first, with a way in when the identity provider is down
+
+### Changed
+
+**The sign-in page leads with single sign-on.** With a connection live, the first thing on the
+page is **Continue with** the primary connection — the first in login-page order (**Priority**,
+lowest first), marked **Primary** in Administration → SSO → Providers. Typing an email and pressing
+Enter routes it: to the connection whose **Email domains** list its domain, otherwise to the
+primary. Enter no longer trips the browser's "please fill in this field" on a password nobody
+needed, and **Ask for an email first** no longer answers an unmapped domain with "We don't
+recognise that email's domain". Passwords are the deliberate fallback: while **Passwords** is on,
+**Can't use single sign-on? Sign in with email and password** opens a password step that carries
+the email and works with password managers, and it is offered prominently whenever a single
+sign-on attempt fails. Deployments with no connection keep the single email-and-password form.
+
+**Turning Passwords off needs a ready break-glass account.** The switch is refused until an
+active Super Admin with a password is marked as a system account — the door that survives an
+identity-provider outage. Administrators without an SSO identity — Super Admins and org admins —
+are no longer a hard refusal: the confirm lists them by name and role, each with **Make
+break-glass**, and **Turn off anyway** proceeds. Both
+checks run on the switch-off only, so saving another switch while passwords are off is never
+blocked by them. The last ready break-glass account cannot be unmarked while passwords are off.
+
+**A refused password sign-in looks like a wrong password.** While passwords are off, an account
+that may not use one now gets `401 "Invalid email or password"`, after a password check that costs
+the same, instead of `403 local_login_disabled` — so the form cannot be used to find out which
+accounts are break-glass accounts or Super Admins. The activity log still records
+`local_login_disabled`. Password sign-up keeps its 403.
+
+### Added
+
+**Automatic fallback when an identity provider goes down.** The control plane checks every OIDC,
+SAML and Enterprise gateway connection each minute — the discovery document and signing keys, the
+single sign-on URL, or the gateway URL through the back-channel allowlist — and confirms an outage
+only for a connection it has seen working, after three minutes of failure on fresh evidence; it
+ends after five minutes of health. While one lasts:
+
+- the sign-in page says *We can't reach {connection} right now*;
+- Super Admins with a password can sign in with it, through **Administrator sign-in**, so somebody
+  can always get in to support everyone else — break-glass accounts always could;
+- people already signed in through that connection keep working past their daily
+  re-authentication, for up to a day more, instead of being sent to an IdP that cannot answer;
+- through an Enterprise gateway, sessions keep their outage grace as before, and the ones that
+  end land on the sign-in page with the notice instead of the gateway's own sign-in. The page's
+  automatic gateway sign-in, and the app's in-place re-sign-in, skip a gateway that is down
+  instead of waiting on it.
+
+Browser reports never count, and when detection is not running nothing opens by itself.
+
+**Emergency password access.** Administration → SSO → Settings opens password sign-in to everyone
+for 1 to 24 hours, with a reason; it closes itself, and **Close now** ends it early. While it is
+open, **Extend** keeps it open for up to 24 hours from now — as often as an outage needs, never
+more than a day ahead, so somebody decides again at least daily; extended before it lapses,
+nobody who signed in through it is sent back to a dead identity provider. Sessions opened
+through it, or by a Super Admin during an outage, end at their first renewal once single sign-on
+is back — usually a brief redirect that lands people where they were — and never last more than a
+day. The same page shows **Single sign-on status** (what detection last saw, and when it is not
+running), **Break-glass accounts** and their readiness, and the admins a switch-off would affect.
+
+**One command when nobody can sign in.** `python -m backend.scripts.reset_admin_password --email …
+--break-glass` sets a password, marks the account as break-glass, clears its failed sign-in count
+and signs its old sessions out — then sign in at `/login?password=1`.
+
+**Outages and fallback sign-ins in the activity log, said as what happened.** An outage
+confirmed and over (`idp.outage.detected` / `resolved`); the emergency window opened, extended,
+closed early or closed by itself at its deadline (`auth.config.password_fallback_opened` /
+`_extended` / `_closed` / `_expired`), with who did it and the reason in the log's *why*; each
+password sign-in made while passwords are off, by its door — *Signed in with a password through
+emergency access*, *…while single sign-on was down (Super Admin)*, *…with a break-glass account's
+password* (`via` on `user.logged_in`; the SSO activity tab shows it as the row's reason); each
+session kept past its daily re-authentication because its IdP was down, once per session
+(`user.sso_reauth_deferred`); each emergency session that ended, and why; and accounts made or
+no longer break-glass, including from the command line.
+
+**Settings changes say what changed.** `auth.config.updated` records which switch moved, before →
+after (*Passwords turned off — break-glass accounts only*), not only the values after the save. A
+connection edit (`idp.provider.updated`) names the settings that changed — names only, never
+values — and, before → after, whether it was turned on or off, its linking policy, its rating, and
+**Link Super Admin and break-glass accounts too**.
+
+**How to get a connection to Verified, and how to trust your corporate CA.** Running Single
+Sign-On → *Getting a connection to Verified* says what decides each connection's rating and walks
+an unsigned Enterprise gateway to Verified step by step — including keeping the same subject so
+people already linked are still recognised. Deployment → *Corporate TLS trust for SSO* covers
+building and checking the PEM bundle, setting it on both services that need it for Compose,
+Kubernetes and Helm, rotating it, and what the logs say when it cannot be loaded.
+
+### Security
+
+**An unverified connection can no longer claim a Super Admin's or break-glass account.** Its
+claims — `email_verified` included — are whatever the sender wrote, yet under an auto-linking
+policy (**Strict**, the default) a hand-written payload naming an existing account's email
+linked to that account — the break-glass Super Admin among them — for anyone able to reach the
+sign-in endpoint. A connection below verified now never links itself to a system (break-glass)
+account or one holding `super_admin` (`unsafe_auto_link`, reason `unverified_connection`);
+Super Admins link it from their own account page. Every other account still links — an org
+admin's included, since `org_admin` has neither `system:admin` nor user management — new
+accounts are still created, and people already linked still sign in, so an unsigned gateway
+keeps working as before for everyone it was trusted for: the risk its card states (and can now
+fold away once read). An operator who accepts the risk for Super Admins and break-glass accounts
+as well turns on **Link Super Admin and break-glass accounts too** on the connection — offered
+on any connection below Verified, Unverified or Asserted — and every existing account links as
+before.
+
+**Only a Super Admin changes who is in a group that grants Super Admin.** Org admins manage
+groups, and a member inherits every binding its group holds, so an org admin could add themselves
+— or anyone — to a group bound to `super_admin` and so make a Super Admin. Adding or removing
+members of such a group, or deleting it, now needs `system:admin` (403
+`group_grants_super_admin`); every other group is managed as before. It matters more now that an
+org admin's account links through a connection below Verified.
+
+### Fixed
+
+- **Two first sign-ins for the same person at once** — tabs restored together, each running the
+  automatic gateway sign-in, or a double submit — no longer fail with "Database is temporarily
+  unavailable" (`duplicate key value violates unique constraint "uq_users_email"` in the log). The
+  second reads again and signs in to the account the first created; a conflict that survives the
+  re-read is refused as `account_conflict`, with a reference, like any sign-in that cannot complete.
+- **`SSO_OUTBOUND_TLS_CA_CERTS` adds your corporate CAs to the public roots** instead of
+  replacing them. A bundle holding only the corporate chain — the documented way to use it — used
+  to make every public identity provider (Entra, Okta) fail TLS the moment it was set.
+- **An Enterprise gateway whose exchange runs in the browser** no longer shows *No gateway_url
+  configured; this provider cannot sign anyone in* on its card. That shape has no gateway URL by
+  design: the health check now looks at the browser exchange URL and, when the connection verifies
+  against one, whether its JWKS URL is an allowed destination.
+- **An unverified connection's warning says why, and how to fix it.** Instead of the same sentence
+  for every case, the card names the setting to blame — *Trust unsigned*, TLS verification off, an
+  unsigned portal payload — and what to change, with **Open its settings** beside it.
+- Starting a sign-in against an identity provider whose discovery or metadata cannot be fetched
+  lands on the sign-in page with a reference (`idp_unreachable` in the activity log), instead of a
+  bare `503` JSON body.
+- Turning **Passwords** off showed only a toast when Super Admins had no SSO identity; the list
+  of who now reaches the page.
+- `POST /auth/resolve` answers whenever single sign-on is on, not only under **Ask for an email
+  first**; misses still all look the same.
+- The IdP health card no longer claims the signing keys were checked when only the discovery
+  document was fetched.
+
+### Upgrading
+
+- **The sign-in page changes for every deployment with a live connection.** It leads with single
+  sign-on; people who sign in with a password use the password link. Set **Priority** so the
+  connection most people use is first.
+- **Super Admins with a password can sign in during a confirmed outage even while passwords are
+  off.** If that is not acceptable, remove their passwords and keep break-glass accounts only.
+- **Clients that read `403 local_login_disabled` from `POST /auth/login`** now get the `401` a
+  wrong password gets.
+- **Passwords off without a break-glass account** stays off; the new check applies to the next
+  switch-off. Check **Break-glass accounts** on the Settings page.
+- **A Super Admin or break-glass account first signing in through an unverified connection**
+  (an unsigned portal, a gateway trusting unsigned replies) is now asked to link it from their
+  account page instead of being linked automatically. Everyone else, org admins included, links
+  as before; a Verified connection links Super Admins automatically too. To keep the old
+  behaviour on an unverified connection, turn on **Link Super Admin and break-glass accounts
+  too** under its **Identity**. The same holds for an Asserted connection (a portal reading a
+  proxy's header).
+- **Set `SSO_OUTBOUND_TLS_CA_CERTS` on `aggregation-controlplane` as well as `viz-service`.**
+  The outage prober runs there; without the bundle it can never reach a connection behind your
+  corporate CA, so it never confirms that connection's outage. A bundle is read once per
+  process: after replacing it at the same path, restart both. Deployment → *Corporate TLS trust
+  for SSO* has Compose, Kubernetes and Helm steps.
+- The migration `20261014_1000_sso_fallback` adds three nullable columns to `app_auth_config`
+  and the `idp_provider_reachability` table.
+
+### Known limitations
+
+- Portal and dev connections, and gateways whose exchange runs in the browser, are not probed:
+  cover their outages with the emergency window.
+- Each Enterprise gateway in server mode receives one request a minute with no session handle;
+  a 401 or 405 reads as healthy. The integration contract tells gateway teams.
+- Anyone able to make the IdP unreachable from the server can open the password door for Super
+  Admins, which is why only Super Admins get in automatically.
+- A closed emergency window keeps working on other servers for up to 30 seconds.
+- Deactivating or deleting the last break-glass account is not blocked; the Settings page flags
+  it.
+
+---
+
+## [Unreleased] — Find views by how their data is kept, when they changed, and who changed them
+
+### Added
+
+**Versioned or External.** The **Versioning** menu in the Explorer's filter row narrows the list to
+views whose data is versioned in {brand} (changed through drafts, review and publishing) or kept by
+another system. Every card and list row says which it is, and so does the preview's *What this
+view is built on*. A view with no data source of its own is judged by its workspace's default
+source. The menu and labels follow the **Version control** switch: off, they are hidden.
+
+**Date.** One menu filters on when a view was **Created** or last **Updated** — any change, to its
+settings, its layout or its data. Pick a period (Today, Past 7 days, This month, Last quarter…),
+type any number of past days, or choose a custom range on a two-month calendar. Days are the
+reader's own calendar days, both ends included. The address keeps the period rather than the
+dates, so a bookmarked *Past 7 days* means the past seven days whenever it is opened.
+
+**People.** Replaces **Creator**: pick one or more people and say what they did — **Any**
+(created it or edited it last), **Created**, **Edited** or **Published** (published the data
+behind it last). You are always first in the list, and a bookmark of *views I edited* means the
+same to whoever opens it. Old links filtered by creator still work.
+
+**The workspace Views tab filters like the Explorer.** Search, Versioned/External, Date, People
+and Source sit in its toolbar, with the same chips underneath. Its People list comes from the
+server, so it names everyone, not just the people behind the first 50 views. **Browse in
+Explorer** now opens the Explorer with the tab's filters.
+
+**Every filter shows what it would leave.** Each option in the Versioning, Workspace, Source, Type,
+Tag, Visibility and People menus shows how many views it would leave given your other filters; a
+choice that would leave none is greyed out. The Source menu also marks each source Versioned or
+External and names its workspace.
+
+**No dead ends.** When nothing matches, the Explorer and the workspace Views tab list each active
+filter with how many views removing just that one would bring back — click one to drop it — instead
+of only offering to clear everything. **Clear all filters** now has an **Undo**.
+
+**Counts in the Date menu.** Each period shows how many views it would show, and the calendar
+marks the busy days with a dot.
+
+**Who shaped a view.** Cards and list rows show the faces of whoever created a view, edited it last
+and published its latest data, each person once; hover one for what they did and when, click it to
+show only views by that person. The preview lists them as **Contributors**.
+
+**Type filters into the search box.** `by:ada`, `is:versioned`, `updated:<7d`, `tag:pii`,
+`created:2026-09` and the like turn into the same chips their menus make as soon as they are
+finished, with suggestions and counts while you type; the rest of what you type stays a search. A
+value that matches nothing, or more than one thing, is never guessed. **Backspace** in an empty box
+removes the last chip, with an **Undo**. The workspace Views tab takes them too.
+
+**Filter by anything (Shift+F).** One searchable list of every filter value in the Explorer — each
+person, tag, source, workspace, type, date period and visibility — with live counts and a check by
+those already on. **Ctrl/⌘+Enter** picks several in a row.
+
+**Saved filters.** Save any set of filters (and the sort, if you chose one) under a name filled in
+from what it does — *Versioned · Updated past 7 days · By Ada Lovelace* — and it becomes a pill beside
+the Explorer's quick filters: one click puts it back, and the pill lights up whenever its filters
+are on screen. Rename it, point it at the current filters, copy its link, reorder it or delete it
+(with an **Undo**) from its **⋯** menu. Saved filters belong to your account, up to 30 each.
+
+**Since your last visit.** Back after half an hour or more, the Explorer (beside the **All Views**
+heading) and each workspace's Views tab say how many views are new or updated since you were last
+there, counted with your filters; click a number to see exactly those. Their cards are marked **New since your visit** or **Updated
+since your visit** until **Mark as seen**.
+
+API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
+`updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
+`/views/facets` takes every list filter plus `fields`, counts each dimension with the OTHER filters
+applied, and adds `contributors`, `workspaces`, `dataSources`, `visibilities` and `sourceKinds`;
+`GET /views/count` returns how many views a filter set leaves; `GET /views/histogram` counts views
+created or updated per hour (or ten minutes) over a window, with the same filters. Views carry
+`createdByAvatarId`, `updatedByAvatarId` and `dataUpdatedByAvatarId`. `/views/saved-filters` lists,
+creates, renames, reorders (`PUT /order`) and deletes the caller's own saved filters.
+
+### Changed
+
+- **A failed load says so.** The Explorer used to answer a server error with "No views match your
+  search". It now shows the error, with **Try again** — and, when the Versioned/External filter
+  can't be answered, a button that removes just that filter.
+- **The preview's data-source line names version control.** It said *Managed graph* or *External
+  graph* from how the source was first connected, which called many versioned sources external.
+- **Clearing every filter keeps your sort and layout.**
+- **Sort, Grid/List and density sit on the right of the All Views heading,** beside what they
+  change, so the filter row above holds only filters.
+- **The workspace Views tab counts the whole workspace.** Its summary counted only the first 50
+  views the page loaded, so in a large workspace every number was short.
+- An invalid `createdAfter` is now refused with a 422 instead of being compared as text.
+- **A version store that goes down is asked again every 30 seconds, not on every request.** The
+  versioned-sources lookup kept serving its last answer after a failed refresh but retried on the
+  very next call, so with view lists now asking, each request would have waited on a connection.
+
+### Removed
+
+- **Featured Views.** The Explorer's banner of pinned views is gone. Nothing in the app pins a
+  view, it looked only at the first page of results, and the same views were in **All Views**
+  below it, where a pinned view still says **Pinned**.
+
+### Fixed
+
+- **`f` favourites the focused card with Caps Lock on**, now that **Shift+F** opens the filter list.
+- **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
+  a narrower created date instead of combining with it.
+- **The bar for selected views sits in the middle of the list.** It started at the middle of the
+  window instead, so it hung to the right, further still beside the sidebar.
+- **A person's hover card opens above them in the lower half of the screen,** instead of running
+  off its foot.
+- **A view's tags are the same wherever you look.** The view wizard opened every view with no tags,
+  so tags added in the Explorer were missing there, and a tag added in the wizard replaced all of
+  them; tags couldn't be cleared from the wizard, and a description changed there was never saved.
+  The Explorer's and the workspace tab's preview, the view page, the canvas and the wizard each kept
+  their own copy of a view, so a change made in one reached the others only after a reload. A save
+  now refreshes them all, and the preview shows what it saved straight away. Emptying the
+  description in the preview's **Edit details** now clears it.
+
+### Upgrading
+
+- One migration, `20261013_0116_saved_filters`, adds the `saved_view_filters` table. It only adds;
+  run it with the usual `alembic upgrade head`.
+
+### Known limitations
+
+- **Edited** and **Published** match each view's latest change only: a view records who changed it
+  last, not everyone who has.
+- One role applies to everyone picked in **People**.
+- A view with no data source of its own (it reads its workspace's default) is never stamped by a
+  publish, so for it **Updated** sees only settings and layout edits, and **Published** never
+  matches.
+- While the version store can't be reached, views carry no Versioned/External label and that filter
+  can't be applied; the rest of the Explorer works.
+- Your last visit is remembered by each browser, not your account, so another computer counts from
+  its own last visit.
+
+---
+
+## [Unreleased] — Who did what, where and why: one activity log, and analytics that see the data
+
+### Added
+
+**Administration → Activity: one log of what people do across the platform.** The RBAC-only Audit
+Log page at `/admin/audit` is replaced by an explorer of every recorded change: sign-ins and access, aggregation
+and freshness operations, data sources and providers, version control, group membership and
+platform settings. Lenses (Operations, Access, Identity, Data, Content, Platform, Security), a date
+range, and filters for a person — as the one who acted or the one it happened to — action, outcome,
+whether a reason was given, and free text. An insight band compares the range with the period
+before it: events, people active, operations started by hand, the share of changes that said why,
+volume by kind, a weekday × hour punchcard (UTC), the most active people, the most hands-on data
+sources and how often each is touched, the most frequent actions, and the reasons people give. The
+timeline groups by day, folds repeats and offers newer events without moving the page; each event
+opens a drawer with who, when, where and why, links to the run, source, group, view or workspace,
+and the other events from the same request and on the same target. Every filtered view is a link,
+and **Export** downloads it as CSV. Workspaces gain an **Activity** tab with the same explorer,
+scoped to that workspace's operations, access and data changes, for its admins.
+
+**Every manual operation names its person.** Aggregation runs record who started them and why
+(`aggregation_jobs.triggered_by` and `stated_reason`), through the web tier and across the
+control-plane proxy. Job History shows *Manual · by {name} — "why"* on each run and filters by who
+started it. Recorded once each, as the person, with the request it came in: re-trigger, resume,
+cancel, delete, purge, skip, limits, schedules and fleet settings; Freshness rebuilds, retries, bulk
+and provider/fleet refreshes, reconcile runs and automation holds; data sources added (by hand
+or from a view package), changed, removed, restored, made primary or switched projection mode;
+providers registered, changed or deleted; version control enabled, retried, abandoned or
+re-synced, and duplicate copies collapsed; discovery runs and asset statistics refreshes;
+dead-lettered messages redriven or deleted, admission limits, graph-store query limits and graph
+cache rebuilds; feature flags, the profiling policy and the node-identity default; and group
+membership — by hand, or by the identity provider's sync, which now records the memberships it
+actually changed.
+
+**Asked, never required: why.** Wherever work is started, stopped or destroyed, the dialog asks
+for an optional reason, with one-click suggestions for that kind of change and the person's own
+recent reasons, and says who will be able to read it. One-click actions get a prompt that is also
+their confirmation, so nothing asks twice. Safe resets, previews, limit tweaks and settings edits
+do not ask.
+
+**Activity is kept for two years.** `ACTIVITY_RETENTION_DAYS` (730 unless set; `0` keeps
+everything; less than a year counts as a year, so the longest range stays whole) bounds both the
+activity log and the outbox it is copied from. A daily sweep on the control plane deletes what
+happened before that horizon, oldest first, a batch per short transaction, pacing itself so a first
+run that clears years of history shares the database. It never deletes an outbox row the relay has
+not copied, nor the password events sign-in reads back. The end of the timeline says how long the
+log keeps activity, and a range whose previous period reaches past the horizon shows no change
+rather than a comparison with what is left of it, and says why.
+
+**The explorer from the keyboard, and what needs a look.** `j`/`k` (or the arrows) walk the
+timeline and Enter opens an event; in an open event `j`/`k` or `←`/`→` step to the next and
+previous, and Esc returns to the row you reached; `/` searches and `?` lists the keys. Above the
+figures, *Needs attention* says what they suggest, each one click from the events it is about: a
+source run by hand at least daily (a schedule could take it over), a source only one person ever
+operates, manual operations up by half or more, and changes that mostly gave no reason. Each
+hands-on source shows the faces of the people who keep operating it, and picking a person puts
+them in focus: who they are, when they are busiest and what they do most.
+
+**Zoom in from the chart, and search that helps.** Drag across *What happened, by kind* — or click
+one day or week — and the whole explorer narrows to exactly those days, as a log console's
+histogram does; *Back* retraces each zoom. Search is the widest field on the bar: focused, it
+offers the searches made here before (kept in this browser) and words the range can answer — the
+reasons people gave, the sources and targets acted on most — picked with ↑/↓ and Enter, and what
+it matched is marked in each row. A range longer than search reads offers *Search the last 90
+days* instead of a disabled box. Under it, a person is picked by face from the people active in
+the range and then reads as their name; their part, the actions (several at once), the outcome and
+whether a reason was given are pills, each saying what it is set to.
+
+**Analytics → Data: what the platform holds, and how it got there.** Entities and relationships as
+they stood at the end of each period — so a pruned graph shows as a fall — overall, by workspace
+and by kind of source, with the sources that moved most; sources onboarded, under version control
+or external, by provider type, and the wait for a first build; and version-control adoption by how
+graphs are kept. When version control cannot be read, that section says so and the rest still
+loads.
+
+**Richer Analytics tabs.**
+- *Engagement:* who is around (active this week, seen, gone quiet, never signed in) and when
+  people use the platform, by weekday and hour.
+- *Content:* distinct viewers over time, how far each view reaches, how many new views are read by
+  someone other than their author and how soon, and views built against opened, by kind or by who
+  can see them.
+- *Health:* how ingestion is driven — runs started by hand against automatic and onboarding runs,
+  the share started by hand, the run failure rate, and the most hands-on sources.
+- *Workspaces:* a pulse of each workspace, period by period, so one that went quiet mid-range shows
+  as a gap; and *By hand* and *Access* columns in the table.
+- *Workspace drill-in:* what the workspace holds over time, and how its ingestion ran.
+
+**API.** `/api/v1/admin/activity/*` (`system:audit:read`) and
+`/api/v1/admin/workspaces/{ws_id}/activity/*` (that workspace's admins), each with `events`,
+`events/newer`, `events/{event_id}`, `summary`, `catalogue` and `export.csv`;
+`GET /api/v1/admin/analytics/data` and `/usage`; and `GET /api/v1/directory/people?ids=`, which
+names up to 100 people for any signed-in reader. Mutating requests may carry an optional
+`X-Activity-Reason` header. See `docs/RBAC.md` §Activity log.
+
+### Changed
+
+**`auth_audit_log` is the activity ledger.** Each record stays immutable; beside it sits a
+rebuildable projection in indexed columns (category, audience, severity, outcome, actor, subject,
+target, workspace, data source, stated reason, correlation id), so every filter runs in SQL.
+
+**Administration's "Audit Log" is now "Activity"**, second in the System group, and holders of
+`system:audit:read` (Org Auditors) can open Administration, landing on it.
+
+**The public trigger endpoint accepts only `manual`, `onboarding` and `api`**, so a rebuild started
+by a person cannot be recorded as automation.
+
+The analytics document cache moves to schema version 3; documents rebuild on first read.
+
+**A busy replica answers "try again shortly" instead of timing out.** Free-text activity searches,
+exports and the first build of a summary each get a fixed share of a replica's read connections.
+Past it, a request waits briefly, then gets `429` with `Retry-After` (`"code": "busy"`) rather
+than taking the connections the readiness probe needs. Of several replicas missing the same
+summary, one builds it and the others wait for its result. The warmer prepares every lens of the
+activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
+
+**A zoom adds up days already counted.** The activity insight band is the sum of whole days. Each day
+that is over is counted once and kept, in Redis, until it has gone three days unread. Any range — a
+preset, a zoom, or the period it is compared with — adds up the days it covers, so a zoom into days
+already counted reads none of the log's rows. The warmer counts each lens's last 180 days before
+anyone opens them, and the counts survive a restart. Days not yet counted are read a fortnight at a
+time and kept as each fortnight lands, so a long range that cannot be counted within one request
+is ready after a few, instead of timing out every time. How often each source is run by hand is
+read from a new index that holds the operations (`idx_aal_cadence`), without touching the table.
+Measured with 300 people reading the explorer on a ten-million-event log, about one action in
+eight a zoom: a zoom's band answered in 96 ms (p95 204 ms). Before, it took 15 s (p95 24 s), and
+one zoom in five was refused or timed out. The readiness probe stays at p95 63 ms (was 4.7 s), and
+none of the 6,929 requests failed.
+
+**People, times and values, drawn as what they are.** Wherever a record names a person — who
+started a run, who changed a running job's limits, who acted in the activity log, who added a group
+member or rebuilt a source — they appear with their face (profile picture, the illustration they
+picked, or initials) and name, linking to them in User Management, with their email and id on
+hover; an id that names nobody stays the id, and a deleted account is still named, and marked.
+Times read by age ("12 min ago", "Today 09:41", "Mon 18:02", "12 Oct") and move together on one
+shared clock; hovering gives the local time with its zone, UTC and ISO. Job History shows each
+run's timeline — created, started, finished — with how long it waited for a worker and how long it
+ran, counting up while it runs. In an activity event, a change reads as before → after (several at
+once as one per field), every value is drawn by kind — durations and sizes in their units, yes/no,
+statuses, links, ids named where the event names them — and the raw payload is a highlighted,
+foldable tree that copies as JSON — as is an entity's or a relationship's raw data in its drawer.
+`GET /api/v1/directory/people` and the activity API also say
+which illustration a person picked (`avatarId`) and whether they have a profile picture
+(`hasImage`), so a page of people without pictures asks for none.
+
+**Theme colours take their opacity — an app-wide visual change.** About 1,700 classes asked for a
+theme colour at an opacity (`bg-canvas-elevated/95`, `border-glass-border/50`, `text-ink-muted/60`)
+and emitted no CSS, because the theme's variables hold whole colours: translucent panels and sticky
+headers were see-through, and those borders fell back to the default grey, a bright line in the dark
+theme. They now render. A surface takes its alpha; a glass border at an opacity is a divider in the
+theme's own ink (subtle in the dark theme, as it always was in the light one); text never fades
+below its token, so muted labels stay legible, and `/0` still hides. About 170 tints at in-between
+amounts (`/8`, `/12`, `/98`) emitted nothing for a second reason — they are not on Tailwind's scale
+— and render too. A source test now fails any such class.
+
+**Redis waits a moment for a free connection.** With all of a role's pooled connections busy, a
+command now waits up to `REDIS_<ROLE>_POOL_TIMEOUT` seconds (2) for one instead of failing at once,
+which sent every caller of a burst to its fallback together: sign-in checks to the database, cached
+graph reads to a rebuild. The cap on connections is unchanged; `0` fails at once, as before.
+
+### Fixed
+
+- The audit page filtered people and targets after the page limit, so a filtered page could come
+  back short or empty. Administration → Activity filters in the query. `GET /api/v1/admin/audit`,
+  kept as it was for API clients, still filters that way.
+- Data sources added through the API recorded no creator; `created_by` is now set.
+- In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
+- A request that ran out of time could answer `500` instead of `504`, when the deadline fell inside
+  a middleware that turns a cancelled handler into "No response returned".
+- **Zooming the activity chart crashed the page.** It fell over with "The page hit an unexpected
+  error and stopped rendering" (`Cannot read properties of undefined (reading 'slice')`). The
+  chart remembered the hovered day by its position, and the zoomed chart has fewer days, so the
+  position named none. A chart now lets go of its hover and drag whenever its days change.
+- **The activity event lists had no request deadline.** The timeout middleware took any path ending
+  in `/events` for a live stream. Streams are now named one by one, so the lists answer `504` like
+  any other read.
+- **A slow activity export could be cut off mid-file and still look complete.** The 30-second
+  deadline closed the download cleanly, so nothing showed it was short. The export now runs to the
+  end, like the other streamed downloads: it is capped at 50,000 rows, and each process runs at
+  most two at a time.
+- **Analytics → Data said aggregation runs are kept for 90 days, whatever the setting.** It now
+  reads `AGGREGATION_JOB_RETENTION_DAYS`, the setting the prune deletes by. Time to first build
+  says how far back runs reach, or says nothing when every run is kept.
+
+### Security
+
+- A client `X-Request-ID` is honoured only when it matches `^[A-Za-z0-9._:-]{1,128}$`; otherwise the
+  server makes one. It is now the correlation id that groups a request's events.
+- The control plane trusts the forwarded `X-Activity-*` identity only behind its internal token,
+  and re-validates each value. The web tier builds them from the session, never from the client.
+- Recorded values are stripped of control, format and lone-surrogate characters, so a hostile
+  payload cannot stop the relay.
+- The workspace activity routes force the workspace scope on the server, and never return raw
+  payloads.
+- The CSV export neutralises spreadsheet formulas.
+
+### Upgrading
+
+- **Four migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
+  no data updates), `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
+  `stated_reason`), `20261011_1000_activity_pulse` (a partial index on `auth_audit_log` for the
+  workspace pulse) and `20261013_1000_activity_cadence` (a partial index over its manual
+  operations: 3.4 s and 171 MB for 1.5 million operations among ten million events; the ledger
+  takes no writes while it builds, and the relay waits). Run the upgrade job before rolling out.
+- **The activity band's kept counts change shape.** The first band after the upgrade counts its
+  days again; the warmer does this for the leading views.
+- **`AGGREGATION_JOB_RETENTION_DAYS` is read by both roles now.** The control plane prunes
+  finished runs to it, and the web tier says how far back runs reach. Compose, the Kustomize config
+  maps and the Helm chart set it on both (90 unless set). If you set it, set it alike on both.
+- **Copying the audit backlog** (see the entry below) also classifies each event for the activity
+  log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
+  events. Administration → Activity says *Importing earlier activity* until it finishes.
+- **Event storage roughly doubles:** events are kept both in `outbox_events` and in the ledger, each
+  for `ACTIVITY_RETENTION_DAYS`.
+- **The first activity retention sweep** deletes ledger events and relayed outbox rows from before
+  the horizon — two years unless set. Set `ACTIVITY_RETENTION_DAYS` alike on the control plane,
+  which deletes, and the web tier, which tells readers how far back the log goes. The Helm chart
+  and the Compose file take one value for both; the Kustomize base sets it in both config maps.
+  Set `0` before upgrading to keep everything.
+- Browser clients may send `X-Activity-Reason`; it is in the CORS allow-list.
+
+### Known limitations
+
+- The ledger is not partitioned, so retention deletes in batches rather than dropping a partition.
+- Who started a run, and why, starts at this release; earlier manual runs show their trigger only.
+- Entity history starts when daily profiling began, and aggregation runs are kept for
+  `AGGREGATION_JOB_RETENTION_DAYS` (90 unless set), so the Data tab and runs by origin reach no
+  further back than that.
+- Client telemetry carries no workspace, so the workspace pulse counts view opens, view changes and
+  recorded operations only. Punchcards are in UTC.
+- A moved data source is attributed to its destination workspace only.
+- Version publishes and merges stay in graph history (Reviews); the ledger covers version control's
+  onboarding side.
+- A stated reason is free text and may contain personal data. Auditors can read it, and so can the
+  workspace's admins for a workspace change; the field says so.
+
+---
+
+## [Unreleased] — Exports you can follow from anywhere, and cancel
+
+### Added
+
+**Exports follow you around the app.** An export the server prepares, whether a data source's file
+or a view with its data, no longer lives only in the dialog that started it. Close the dialog,
+go back to the canvas, change page or reload, and an **Exports** panel at the bottom right keeps
+showing it: the step it is on, what it has written, how long it has taken and, when it can tell, how
+long is left. The file downloads by itself the moment it is ready, wherever you are, and the panel
+says so before it does. With several tabs open, it downloads once. The panel minimises to a pill
+showing the overall progress, and a finished export can be downloaded again until it is dismissed.
+
+**Cancel an export.** An export started by mistake can be stopped from its dialog or the Exports
+panel, which asks once more first. The person who started it can cancel it, and so can a
+data-source manager (`POST …/versioning/graphs/{graphId}/exports/{jobId}/cancel`). A queued export
+never starts. A running one stops within seconds, and the part of its file already written is
+removed. One that finished just before the cancel reached the server is not downloaded by itself;
+the panel offers it instead.
+
+### Changed
+
+**The export dialogs show progress the way the panel does.** Both use one component: a progress
+ring with the percent done when the export's size is known, the steps (a spreadsheet's column pass
+included), live counts of entities and relationships, the bytes written and the time taken, and
+the note that the download starts automatically.
+
+### Fixed
+
+- **Closing an export dialog no longer leaves the file undownloaded.** The dialog stopped following
+  the export when it closed, so the file downloaded only if the dialog was opened again.
+- **A spreadsheet export reports progress while it reads its columns.** CSV, TSV and Excel read
+  every record once for their columns before writing any. That first pass reported nothing, so the
+  dialog sat at "Starting…" for half the export.
+
+### Upgrading
+
+- Nothing to run. Exports started before the upgrade don't record who started them, so only a
+  data-source manager can cancel those.
+
+### Known limitations
+
+- A view package's export shows live counts and its steps, but no percentage: its total isn't
+  counted up front.
+- A hidden browser tab doesn't check on its exports. The download starts when the tab is shown
+  again, or from another open tab of the app.
+
+---
+
+## [Unreleased] — View packages at 100k+ entities, new data sources from a package, and duplicate-safe version control
+
+### Added
+
+**Import a view package into a new data source.** The view wizard's import can now target *a new
+data source* instead of an existing one. You pick the FalkorDB provider, a label and a graph name,
+and the name is checked as you type. The semantic layer is matched for you: the package's own one
+when it exists in this environment (a changed one is shown as drift), otherwise the best match by
+entity and relationship types, the same scoring the Add data source wizard uses. You can also pick
+another, *Create from this package* or *No semantic layer*. The package's data is written as the new
+source's first version, keeping its entity ids, with no draft and nothing to publish. The
+platform's rollup connections, when the package carries them, are rebuilt rather than copied, and
+the check report says how many. Every view in the package is imported afterwards. Opening the same
+package again follows the copy it made; *Make another copy* makes a further, independent one.
+Needs `viewImportEnabled`, `versioningEnabled` and permission to manage data sources
+(`POST /views/transfer/packages/{uploadId}/new-source`).
+
+**Duplicate identifiers no longer fail "Enable version control".** Before copying anything, the job
+now lists every urn that more than one node in the graph carries, and it pauses until a manager
+decides. The page shows the counts (same type and across types), a sample and a full CSV, and warns
+when other data sources read the same graph. *Collapse N duplicates and continue* keeps one copy
+per urn (the latest `lastSyncedAt`, then the lowest internal id), moves the other copies' edges to
+it and deletes those copies from the FalkorDB graph, then rebuilds the rollups. Nothing is deleted
+until the decision, and *Give up* after it does not bring the copies back
+(`GET /graph/bootstrap/duplicates[?format=csv]`, `POST /graph/bootstrap/decision`).
+
+**An optional S3-compatible store for import and export files.** `OBJECT_STORE_BACKEND=s3` keeps
+them in a bucket on Amazon S3, MinIO or Google Cloud Storage (through its HMAC interoperability
+keys), with optional presigned URLs so browsers upload and download straight from the bucket.
+It is off by default, and boto3 is only installed from `backend/requirements-s3.txt`.
+
+**`python -m backend.scripts.bench_versioning`** generates a package or a FalkorDB graph of any
+size and times export, inspect, import, publish, seeding a new source and enabling version control.
+
+### Changed
+
+**Large view packages import, and fast.** Importing 100k nodes and 100k edges took 7–12 minutes on
+a worker, and inside a web server it was killed at 120 s. Two integrity checks grew with the square
+of the graph; they are now linear and give the same answers. Measured at 100k + 100k: import into an
+empty source 85 s, publish of the 200k changes about 28 s (it was 23 minutes at a tenth of that),
+package export 15 s, a new source from the package 49 s, and enable version control with 1,000
+duplicates pauses within 3 s and finishes 42 s after the decision.
+
+**Exporting millions of entities takes minutes, not hours.** An export read the version store a
+page at a time, and Postgres planned each page on its own. Without statistics for the partitioned
+table it expected a few hundred entities, so for every page of 2,000 it sorted every version row
+left: about 500 entities a second on a 2M-node graph, around seven hours for 7M items. Each part of
+the graph is now read by one query, streamed, and the next page is read while the last is written.
+On 2M nodes and 2M edges the whole package takes about three minutes, at full speed from the start.
+An export's plan counts and a replace import's read of the graph stream the same way.
+
+**Imports look entities up with one array, not thousands of parameters.** Each import window looked
+up the entities its rows name with IN lists of up to 20,000 bind parameters, compiled one at a time
+on the worker's event loop and planned again by Postgres for every length. They now go as one array:
+a 100k + 100k import takes 62 s instead of 80 s, and 1M + 1M takes 592 s instead of 772 s.
+
+**Version-control jobs run only on the versioning worker, and resume.** Imports, exports, publishes,
+package checks, enabling version control and purges never run in a web server any more. The worker
+runs them on three lanes, `projection`, `transfer` and `bootstrap` (`GRAPHVER_WORKER_LANES`), which
+Helm, the Kubernetes base and compose now deploy. A job holds a lease: if its worker dies it is
+taken over within about two minutes and resumes from its last committed window, and a worker that
+was taken over cannot write any more. A job's status request no longer changes it. A failed job
+says whether to resume it or start again.
+
+**View package files move without copies.** A package is uploaded in resumable 16 MiB parts and
+checked by a job (`POST /views/transfer/packages/uploads`, `PUT …/parts/{n}`, `POST …/complete`).
+Its data is imported straight from the upload, which is kept while a job still needs it. Export is a
+job that writes the zip once (`POST /views/transfer/packages` now returns 202 with the job).
+`POST /views/transfer/packages/inspect` also returns 202. `/packages/{id}/data` answers 409
+`not_inspected` before the check finishes and 410 `upload_expired` once the upload is gone.
+
+**Drafts with 100k+ new entities open without loading them all.** The first read of a large draft
+loaded every created entity's payload. It now reads them page by page.
+
+### Upgrading
+
+- Three graphver migrations (`20261008_1000` to `20261008_1200`). They also run from
+  `create_schema_and_partitions` for a separate `GRAPHVER_DB_URL`.
+- **Cut over in one release.** Apply the migrations, scale the old `versioning-worker` to 0 (on Helm,
+  roll the web tier first, so nothing still runs jobs in-process), then start the three lanes. Jobs
+  the old worker left running are taken over once they go silent; an import that had already staged
+  rows fails with "Start it again". A deployment without the transfer lane queues imports, exports
+  and publishes that never start; system status shows the backlog per lane.
+- `GRAPHVER_TRANSFER_INPROCESS` is no longer read (a WARNING says so) and `JOB_STALE_AFTER_SECS` is
+  gone. `IMPORT_COMMIT_WINDOW` now defaults to 10000. New, all optional: `GRAPHVER_BOOTSTRAP_SLOTS`,
+  `GRAPHVER_BOOTSTRAP_PER_PROVIDER`, `GRAPHVER_JOBS_PER_WORKSPACE`, `GRAPHVER_DRAIN_SECS`,
+  `GRAPHVER_JOB_WEDGE_SECS`, `GRAPHVER_PACKAGE_SEED_WINDOW`, `GRAPHVER_PACKAGE_PROJECT_WINDOW`,
+  `GRAPHVER_BOOTSTRAP_BACKFILL_MAX_WRITES`, `GRAPHVER_BOOTSTRAP_BACKFILL_PAUSE_MS` and the
+  temporary `GRAPHVER_NARROW_SQUASH` kill switch. See `docs/versioning/08-import-export.md`.
+- With `OBJECT_STORE_S3_PRESIGN=1`, add the bucket's origin to the site's `connect-src`
+  (`CSP_CONNECT_SRC` or `frontend.cspConnectSrc`) and a CORS rule to the bucket.
+
+### Known limitations
+
+- Publishing holds the whole draft in worker memory: about 420 MB for 200k changes and 3.2 GB for
+  2M, which took 3.6 minutes under the graph's lock, with one 8.5 s stall of the worker's event
+  loop. A draft of several million changes needs a worker sized for it.
+- A worker's event loop can stall for 120–170 ms (p99) during the heaviest windows. Leases are kept
+  alive by a separate thread, so jobs are not lost, and the web servers run no jobs.
+- Exports still write package format 1. This release reads both 1 and 2; the next one writes 2.
+- Giving up a new data source while its data is being written into FalkorDB can leave the new graph
+  behind.
+
+---
+
+## [Unreleased] — A guide and docs for every reader, checked against the product
+
+### Added
+
+**Six new User Guide pages.** *Requesting Access* explains each "you can't do that" message and
+which way of asking works; *Editing in a Draft* and *The Review Center* cover changing data and
+publishing it; *Feature Switches* describes all 28 switches by the names Administration → Features
+shows; *Data Freshness & Ingestion* covers keeping lineage current; *Analytics* explains who sees
+what. Administration → Features' **Learn more** opens the new page — it used to open one that
+didn't exist.
+
+**Help shows the guide pages for the screen you're on.** The Help panel opens with **For this
+page** on every signed-in screen, above the quick start.
+
+**Three new ways into the docs.** The docs hub has cards for Integrators (a new *API Guide*),
+Security Reviewers (a new *Security Overview*) and Data Engineers (a new *Onboarding a Data
+Source*), alongside New Engineers, Architects and Operators. New pages: *Contributing*, *Testing &
+CI*, *Kubernetes*, *Observability*, *Runbooks* and a *Configuration Reference* generated from every
+environment variable the backend reads. Pages that existed but weren't in the reader now are:
+*Property Storage*, *Database Domain Ownership*, *Feature Switch Lifecycle*, *Top-Level Nodes
+Performance*, the *Back-channel SSO Contract*, the *Production Cluster Overlay* and the
+2026-09-10 upgrade note.
+
+**Reading paths that keep your place.** Each persona's pages — in the docs and in the guide — are
+a path you can follow: the page shows the step you're on, its end offers the next page, the sidebar
+ticks off what you've read, and the hub picks up where you left off. Progress stays in your
+browser.
+
+**The docs and the guide work on a phone.** The table of contents opens as a drawer, search fills
+the screen, and "On this page" folds into the top of the article.
+
+### Changed
+
+**Search finds the part of a page that answers.** *Search everything* (⌘K / Ctrl+K, or "/")
+searches every section of every page and every FAQ answer, matches a word in any form, forgives a
+typo and ignores filler words. Results are grouped by page with the sections that matched, the best
+page first whichever reader it is in, and choosing one opens the page at that section. *Filter
+pages* in the sidebar uses the same index, and both hubs' search boxes open *Search everything*.
+
+**The User Guide teaches the product as it ships.** The pages people start with described an
+Explorer that was an open canvas, a "Save as View" button, renamed visibility tiers, a five-step
+wizard and favourites in the sidebar. Every page was checked against the code and rewritten where
+it had drifted; each task page now says what to have ready, what you should see after each step,
+what to do if you don't, and where to go next. The guide's "Before you start", "If …" and
+"Admins" notes render as callouts.
+
+**The engineering entry points match the code.** *Developer Setup* follows the real `dev.sh`, a
+seed command that works and the first sign-in's password change; *Backend* is a router map;
+*Architecture*, *Frontend* and *Data Architecture* drop the mock provider, the Web-Worker layout
+and the session in local storage; *RBAC* and *Feature Flags API* list every permission and switch;
+the ADRs record what superseded what.
+
+### Fixed
+
+- A link to a section of a page opened the top of the page, and a new page opened as far down as
+  the previous one had been scrolled.
+- *Filter pages* matched only titles and descriptions — and only the exact phrase — so most
+  searches found nothing; on the hubs, "share a view" found nothing at all.
+- "On this page" links for headings that contain the product name went nowhere.
+- Code blocks' **Copy** buttons were invisible on touch screens.
+- Wizard help links opened the guide in the same tab, unmounting the wizard and throwing away what
+  you had entered. They open a new tab.
+- Four deep links into the docs pointed at headings that don't exist.
+- Guide reading times were typed by hand and had drifted; they are computed from each page.
+- Identity-provider health — reachability and certificate expiry — on the SSO admin pages was
+  empty in every container deployment. Every API process checks it now.
+
+Guards keep this from drifting again: every link the app shows into the guide or docs must open a
+page, every guide page must end by pointing the reader on, every seeded switch, permission and role
+must be documented, every signed-in page must offer help, and the configuration reference must
+match the code.
+
+### Security
+
+- **A password someone else chose has to be replaced.** The first administrator chooses its own
+  password at its first sign-in, whatever `ADMIN_PASSWORD` it was created with; before, only three
+  published values asked for that. The same holds for a password an administrator sets for someone
+  else, when creating the account or with **Reset password**. While the change is pending, the
+  server refuses every request except the change itself, on every route, from a session signed in
+  with that password. Signing in through SSO is unaffected: someone who signs in through the
+  identity provider and also has a local password keeps working, and can replace the password on
+  **Account settings**.
+- **Sign-in events reach the audit table in every deployment.** The relay that copies them into
+  the append-only `auth_audit_log` — with the refresh-token and product-event retention sweeps and
+  the analytics warmer — never ran in Docker Compose, Kubernetes or Helm. The control plane runs
+  them now, one copy at a time. The activity log also shows changes to the SSO back-channel host
+  list, and **Recent activity** on Account settings shows password resets, reset links, role
+  changes and suspensions done to your account.
+
+### Upgrading
+
+- **The first administrator may be asked for a new password.** At the first start after upgrading,
+  a system account still signing in with its starting password (`ADMIN_PASSWORD`), or with one
+  published in this repository, must choose a new one at its next sign-in. Scripts that sign in
+  as it need the new password afterwards. An administrator who already chose its own password —
+  on **Account settings**, with a reset link, **Reset password** on its own row, or the host's
+  reset script — isn't asked again, even if `ADMIN_PASSWORD` has since been set to it, unless it
+  is one of the published ones.
+- **The product-event retention sweep runs for the first time.** It deletes product events —
+  views opened, traces and searches, which Analytics counts — older than
+  `PRODUCT_EVENT_RETENTION_DAYS`, 400 days unless you set it. Raise it before upgrading if you
+  want to keep more.
+- **The control plane copies the audit backlog.** On an install where the relay never ran, its
+  first pass copies every event since installation into `auth_audit_log`, continuously until it
+  has caught up.
+
+### Known limitations
+
+- **Request access** on the Access denied card can't load its list of roles for most accounts, so
+  the request isn't sent; and **Add member** on a workspace's Members tab works fully only for
+  Super Admins. *Requesting Access* and *Workspace Admin* describe the routes that work today.
+- Two screens still have a placeholder rather than a screenshot: a semantic layer's **Health** tab, and
+  Administration → **Infrastructure** on the Observability page.
+
+---
+
+## [Unreleased] — Docs that stay inside the deployment, and a debt register that matches the code
+
+### Changed
+
+**The in-app docs no longer send readers to GitHub.** Wherever a doc linked to one the reader did
+not carry, the link was an absolute URL into the public repository, which on a deployment that cannot
+reach it led nowhere. Those links are relative now, and the pages they pointed at — versioning
+chapters 02–05 and 07–11, the versioning suite guide and glossary, and the draft-lineage notes — are
+in the reader under **Versioning**. A relative link with an `#anchor`, or one that climbs out of its
+folder (`../DATA_ARCHITECTURE.md`), now opens in the reader too; both used to open a new tab on a page
+that did not exist. The docs tests check links with the reader's own resolver, and fail if a doc, a
+guide or an FAQ answer links anywhere on GitHub again.
+
+**Nothing else points at public GitHub either.** The landing site's GitHub buttons — in the
+navigation, the open-source call to action and the footer — open the docs at `/docs`, the way its
+other links already route into the app. `SECURITY.md` describes private vulnerability reporting
+without a URL and links the known-issues list in the repository. The Helm chart no longer names a
+home page, the FAQ no longer sends readers to GitHub, and the ingress-nginx chart repository and the
+FalkorDB module download in the deploy notes are variables you point at a source your cluster can
+reach.
+
+**The technical-debt register, the roadmap and the status pages were re-verified against the code.**
+`docs/TECHNICAL_DEBT.md` was last checked on 2026-08-25 and had drifted: four of its items had
+closed, four had changed shape, and eleven risks were missing. `PLAN.md`, the overview's roadmap and
+maturity sections, the canvas book of work, the scaling plan (the three-tier split it called
+deferred is deployed), and the versioning chapters' status and roadmap sections now say what the
+code does. `SPEC.md` is marked as the historical design it is.
+
+### Known limitations
+
+- **No shipped deployment config sets `ENV=production`**, so the production-only safeguards — the
+  15-minute token cap, shared replay caches, credential encryption, the control-plane token, and
+  readiness on shared revocation — only log a warning. Set it yourself until the configs do
+  (`docs/TECHNICAL_DEBT.md` §1.1).
+- **The zero-config quickstart does not boot.** The README and `QUICKSTART.md` now say so (§2.1).
+- **The kustomize manifests apply no schema migrations**; run the upgrade by hand before rolling out
+  a release that carries one (§1.5).
+- Repository files outside the in-app reader, such as `QUICKSTART.md` and `loadtest/README.md`, are
+  named rather than linked from the docs it carries.
+
+---
+
 ## [Unreleased] — One placement rule for every view surface (preview)
 
 ### Added
@@ -3212,7 +4263,7 @@ graph_too_large_to_sync`, quoting the item count and the memory it would need. R
 OOM on every axis — an OOM kills unrelated requests and explains nothing.
 
 The design that removes the guard entirely is written out in
-[`docs/versioning/11-resync-at-any-scale.md`](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/11-resync-at-any-scale.md).
+[`docs/versioning/11-resync-at-any-scale.md`](docs/versioning/11-resync-at-any-scale.md).
 
 **Enabling version control is FalkorDB-only.** Other providers are refused with a clear `422`.
 

@@ -70,7 +70,30 @@ _REDISPATCH_TTL_SECS: int = 7 * 86400
 #: otherwise lose its whole history to a 90-day cutoff, and the history is
 #: what Job History's "read this run against the last one" is for. Set the
 #: window to 0 to keep everything.
-_RETENTION_DAYS: int = int(os.getenv("AGGREGATION_JOB_RETENTION_DAYS", "90"))
+DEFAULT_RETENTION_DAYS = 90
+
+
+def retention_days() -> int | None:
+    """Days a finished run stays readable; ``None`` when every run is kept.
+
+    The prune below deletes to it, and Analytics says how far back runs reach
+    by it: one reading of one setting, so the two can never disagree.
+    """
+    raw = os.getenv("AGGREGATION_JOB_RETENTION_DAYS")
+    if not raw:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        logger.warning(
+            "AGGREGATION_JOB_RETENTION_DAYS=%r is not a whole number of days; keeping %d",
+            raw, DEFAULT_RETENTION_DAYS,
+        )
+        return DEFAULT_RETENTION_DAYS
+    return days if days > 0 else None
+
+
+_RETENTION_DAYS: int = retention_days() or 0
 _RETENTION_MIN_PER_SOURCE: int = int(
     os.getenv("AGGREGATION_JOB_RETENTION_MIN_PER_SOURCE", "20")
 )

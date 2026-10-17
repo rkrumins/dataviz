@@ -23,6 +23,7 @@ import { ProviderEditorDrawer } from '../ProviderEditorDrawer'
 import { SsoCard, SsoEmpty } from '../ui/SsoCard'
 import { SsoListSkeleton, SsoLoading } from '../ui/SsoSkeleton'
 import { ErrorBanner } from './ErrorBanner'
+import { primaryConnection } from './settings/posture'
 import { useAppNotifications } from '@/components/ui/notifications'
 
 /** The server's own words when it gave any, and a sentence naming the
@@ -349,6 +350,7 @@ export function ProvidersTab({
     const visible = filter === 'drafts'
         ? rows.filter(p => p.lifecycle === 'draft')
         : rows
+    const primaryId = primaryConnection(rows)?.id
 
     return (
         <div className="space-y-4">
@@ -529,6 +531,7 @@ export function ProvidersTab({
                     <IdpProviderCard
                         key={p.id}
                         provider={p}
+                        primary={p.id === primaryId}
                         health={health[p.id]}
                         healthUnavailable={healthUnavailable}
                         busy={busy}

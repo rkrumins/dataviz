@@ -88,17 +88,19 @@ const MAX_LISTED = 20_000
 const VERDICT_LABEL: Record<ReconcileVerdict, string> = { ready: 'Ready', attention: 'Worth a look', blocked: 'Can’t import' }
 const VERDICT_TONE: Record<ReconcileVerdict, string> = { ready: TONE_CHIP.emerald, attention: TONE_CHIP.amber, blocked: TONE_CHIP.rose }
 
-function initialEntries(inspect: InspectResult): Entry[] {
+/** Each view updates the view here it already is, if editable; else it's new. `createAll`: every
+ *  view is new (they go into a data source just made for them). */
+function initialEntries(inspect: InspectResult, createAll = false): Entry[] {
   return inspect.views.map(view => {
     const match = (inspect.identityMatches[view.portableId] ?? []).find(m => m.canEdit)
     return {
       view,
-      action: match ? 'update' : 'create',
+      action: match && !createAll ? 'update' : 'create',
       skipped: false,
       here: match ? { viewId: match.viewId, name: match.name, workspaceId: match.workspaceId, dataSourceId: match.dataSourceId ?? null } : null,
       overwrite: null,
       strategy: 'replace',
-      name: match ? match.name : view.metadata.name,
+      name: match && !createAll ? match.name : view.metadata.name,
       visibility: 'private',
       resolutions: {},
       draft: {},
@@ -141,10 +143,13 @@ function targetFor(e: Entry, targets: Record<string, SourceTarget>): TransferTar
   return t ? { ...t } : null
 }
 
-export function BatchImport({ steps, onBackToFile, onClose }: {
+export function BatchImport({ steps, onBackToFile, onClose, preset }: {
   steps: WizardStepDef[]
   onBackToFile: () => void
   onClose: () => void
+  /** Decided already: every source's views go to `target` as new views (a data source just copied
+   *  from the package), and `stage` says whether they wait in drafts. */
+  preset?: { target: { workspaceId: string; dataSourceId: string }; stage: boolean } | null
 }) {
   const session = useImportSession()!
   const inspect = session.inspect!
@@ -153,14 +158,16 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const workspaces = useWorkspacesStore(s => s.workspaces)
   const [step, setStep] = useState<Step>('target')
   const [phase, setPhase] = useState<'steps' | 'importing' | 'done'>('steps')
-  const [targets, setTargets] = useState<Record<string, SourceTarget>>(() => initialTargets(inspect))
-  const [entries, setEntries] = useState<Entry[]>(() => initialEntries(inspect))
+  const [targets, setTargets] = useState<Record<string, SourceTarget>>(() => (preset
+    ? Object.fromEntries(Object.keys(inspect.bundle.sources).map(key => [key, { ...preset.target }]))
+    : initialTargets(inspect)))
+  const [entries, setEntries] = useState<Entry[]>(() => initialEntries(inspect, !!preset))
   const [checksInFlight, setChecksInFlight] = useState(0)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
   /** The view whose overwrite target is being picked. */
   const [picking, setPicking] = useState<number | null>(null)
-  const [stageChoice, setStageChoice] = useState<boolean | null>(null)
+  const [stageChoice, setStageChoice] = useState<boolean | null>(preset ? preset.stage : null)
   const [batchId] = useState(newRequestId)
   const environment = inspect.bundle.generator.environment
   const reconciling = checksInFlight > 0

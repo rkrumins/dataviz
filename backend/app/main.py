@@ -587,8 +587,11 @@ async def lifespan(_app: FastAPI):
         logger.warning("System default ontology seed warning: %s", exc)
 
     # 2c. Bootstrap system admin (idempotent — skips if any user exists)
-    # Always ensures at least one admin account is present.
-    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    # Always ensures at least one admin account is present, from
+    # ADMIN_EMAIL / ADMIN_PASSWORD. Whatever its starting password is,
+    # somebody else chose it, so the account must replace it at its first
+    # sign-in; an existing system account still on its starting password,
+    # or on one this repository publishes, is held the same way.
     #
     # N-worker safety: the (count==0 → create) check is not atomic. With
     # multiple workers/replicas booting against a fresh DB, several can pass
@@ -596,69 +599,31 @@ async def lifespan(_app: FastAPI):
     # users.email funnels them to a single winner; the rest hit
     # IntegrityError, which we treat as "another worker won the race".
     try:
-        import os
         from sqlalchemy.exc import IntegrityError
-        from .db.repositories import user_repo
-        from .auth.password import hash_password
-        admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
-        admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
-        # Passwords that ship in this repo — in .env.example, the
-        # quickstart compose file, the README, and every setup doc. An
-        # account holding one of these is holding a credential that is
-        # public knowledge, so it is made to rotate on first sign-in.
-        # An operator who supplied their own is not nagged.
-        must_rotate = admin_password in {"changeme", "admin123", "REPLACE_ME"}
+        from .auth.bootstrap import (
+            hold_unchanged_system_accounts,
+            seed_system_admin,
+        )
         async with get_async_session() as session:
-            user_count = await user_repo.count_users(session)
-            if user_count == 0:
-                try:
-                    user = await user_repo.create_user(
-                        session,
-                        email=admin_email,
-                        password_hash=hash_password(admin_password),
-                        first_name="System",
-                        last_name="Admin",
-                        status="active",
-                    )
-                    if must_rotate:
-                        await user_repo.set_must_change_password(
-                            session, user.id, True,
-                        )
-                    # The seeded admin is the deployment's break-glass
-                    # account: it keeps password sign-in even when the
-                    # platform enforces SSO, and forced sign-out sweeps
-                    # skip it. Marked here because this is the one
-                    # account that exists before any operator can mark
-                    # anything.
-                    await user_repo.set_system_account(
-                        session, user.id, True,
-                    )
-                    # Phase 6: ``set_global_role`` writes both
-                    # ``user_roles`` (legacy display) and
-                    # ``role_bindings`` (canonical claims) so the
-                    # bootstrap admin actually has system:admin in
-                    # their JWT, not just on the User DTO.
-                    await user_repo.set_global_role(
-                        session, user.id, "super_admin",
-                        granted_by="system",
-                    )
-                    await user_repo.create_approval(
-                        session, user.id, status="approved", approved_by="system",
-                    )
+            try:
+                created = await seed_system_admin(session)
+                if created:
                     logger.info(
-                        "System admin created: %s%s",
-                        admin_email,
-                        (
-                            " (default password — a change is required at "
-                            "first sign-in)"
-                            if must_rotate else ""
-                        ),
+                        "System admin created: %s (it must choose a new "
+                        "password at first sign-in)", created,
                     )
-                except IntegrityError:
-                    await session.rollback()
-                    logger.info(
-                        "Admin bootstrap: another worker won the race (expected at N>1)"
-                    )
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Admin bootstrap: another worker won the race (expected at N>1)"
+                )
+        async with get_async_session() as session:
+            for user_id in await hold_unchanged_system_accounts(session):
+                logger.warning(
+                    "System account %s still signs in with its starting "
+                    "password or a published one; it must choose a new "
+                    "password at its next sign-in.", user_id,
+                )
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
@@ -1063,6 +1028,7 @@ async def lifespan(_app: FastAPI):
     async def _load_auth_config() -> AuthConfigSnapshot:
         async with get_async_session() as session:
             snap = await _app_auth_config_repo.get_snapshot(session)
+        outage = await _read_sso_outage(snap.sso_enabled)
         return AuthConfigSnapshot(
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
@@ -1072,11 +1038,33 @@ async def lifespan(_app: FastAPI):
             # (False) silently won at runtime — the admin page showed
             # email-first ON while the login page never led with email.
             email_first_login=snap.email_first_login,
+            password_fallback_until=snap.password_fallback_until,
+            sso_outage_slugs=outage[0],
+            sso_outage_since=outage[1],
             version=snap.version,
             updated_at=snap.updated_at,
         )
 
+    async def _read_sso_outage(sso_enabled: bool):
+        """Confirmed-down connections, read after the posture in a session
+        of its own; a failed read means "no outage" and never fails the
+        posture read, whose failsafe opens passwords."""
+        if not sso_enabled:
+            return (), None
+        from backend.app.services.idp_reachability import read_confirmed_outage
+        return await read_confirmed_outage(get_async_session)
+
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
+    # Asked while passwords are off and an SSO outage is confirmed — Super
+    # Admins may then sign in with a password to support everyone else —
+    # and when a connection below verified would link itself to an existing
+    # account, which is never a Super Admin's. Read-only, on the caller's
+    # session — it runs before anyone has proved who they are, so it must
+    # have no side effects.
+    async def _is_super_admin(session, user_id: str) -> bool:
+        from backend.app.db.repositories import binding_repo
+        return user_id in await binding_repo.super_admin_user_ids(session)
 
     async def _fetch_avatar_image(
         url: str, *, provider_id: str | None = None,
@@ -1137,6 +1125,12 @@ async def lifespan(_app: FastAPI):
             verify=verify,
         )
 
+    # API keys: the per-request lookup, what a key may do (the owner's
+    # authority narrowed to the key, cached briefly and dropped whenever the
+    # owner's sessions are ended), and the record of keys refused.
+    from backend.app.db.repositories import api_key_repo as _api_key_repo
+    from backend.app.services import api_key_service as _api_key_service
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -1151,8 +1145,12 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
         revocation_checker=_is_session_revoked,
+        super_admin_checker=_is_super_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
+        api_key_repo=_api_key_repo,
+        api_key_claims_resolver=_api_key_service.claims_for_key,
+        api_key_rejection_hook=_api_key_service.record_rejection,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a
@@ -1520,20 +1518,29 @@ async def lifespan(_app: FastAPI):
         _app.state._event_loop_shutdown.is_set,
     )
 
-    # Versioning projection worker (in-process; dev / single-node). In
-    # production the standalone `python -m backend.app.services.versioning`
-    # runs instead. Gated by GRAPHVER_PROJECTION_INPROCESS; never blocks boot.
+    # Versioning worker lanes (in-process; dev only). Everywhere else the
+    # standalone `python -m backend.app.services.versioning` runs them: a web
+    # process never runs jobs. Gated by GRAPHVER_PROJECTION_INPROCESS AND
+    # SYNODIC_ROLE=dev; never blocks boot.
     _app.state._versioning_worker = None
     _app.state._versioning_worker_task = None
     try:
         from .services.versioning import config as _vcfg
-        if _vcfg.PROJECTION_INPROCESS:
-            from .services.versioning.bootstrap_worker import BootstrapRunner
-            from .services.versioning.purge_worker import PurgeRunner, Reaper
+        from .runtime.role import SynodicRole, current_role
+        if _vcfg.PROJECTION_INPROCESS and current_role() != SynodicRole.DEV:
+            # A web pod running jobs shares its CPU, memory and event loop with every
+            # interactive request, and loses the job to its next restart.
+            logger.error(
+                "GRAPHVER_PROJECTION_INPROCESS=1 is ignored: versioning worker lanes run "
+                "in the web process only when SYNODIC_ROLE=dev (this is %s). Deploy the "
+                "versioning worker, or nothing projects and no job runs.",
+                current_role().value,
+            )
+        elif _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.job_lease import LeaseKeeper, running_keeper
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
-            from .services.versioning.worker import ProjectionWorker
-            from .services.versioning.service import GraphVersioningService
+            from .services.versioning.worker import build_worker
             from .services.projection_target import (
                 make_rollup_rebuild_hook,
                 after_projection,
@@ -1541,7 +1548,8 @@ async def lifespan(_app: FastAPI):
                 resolve_aggregation_edge_types,
             )
             from .providers.eviction_budget import make_registry_budget_resolver
-            _vw = ProjectionWorker(
+            from .api.v1.endpoints.versioning import get_import_export_service
+            _vw = build_worker(
                 # Self-heal the projection target on every worker-driven projection, the same way the
                 # interactive project_now path does — else a worker-only graph projects into an orphan
                 # gv_<id> the canvas never reads and merged main never surfaces.
@@ -1559,22 +1567,24 @@ async def lifespan(_app: FastAPI):
                         lambda: getattr(_app.state, "aggregation_service", None)),
                     on_projected=after_projection,
                 ),
-                versioning=GraphVersioningService(),
+                make_registry_graph_factory(),
+                lanes=_vcfg.worker_lanes(),
+                # Import, export and publish jobs the API queues run here too, in dev.
+                import_export=get_import_export_service,
                 # Per-provider eviction budgets come from the provider registry
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
                 # provider's falkorMaxResident is set.
                 evict_budget=make_registry_budget_resolver(),
-                # "Enable version control" jobs (dev / single-node: the standalone
-                # versioning-worker hosts them when INPROCESS=0).
-                bootstrap=BootstrapRunner(make_registry_graph_factory()),
-                purge=PurgeRunner(make_registry_graph_factory()),
-                reaper=Reaper(),
             )
+            # Job leases renewed off the event loop. A dev server is never exited on a
+            # wedged loop (exit_on_wedge=False): its leases just stop being renewed.
+            if running_keeper() is None:
+                LeaseKeeper(exit_on_wedge=False).start()
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
                 _vw.run(), name="versioning-projection-worker",
             )
-            logger.info("In-process versioning projection worker started")
+            logger.info("In-process versioning worker lanes started")
         else:
             # R-M4: make the delegated-projection topology observable — with
             # INPROCESS=0 the reconciling poll-loop backstop runs ONLY in the
@@ -1588,9 +1598,12 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 
-    # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
-    # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
-    # so multiple WEB replicas don't all drain the same outbox.
+    # Phase 0 — outbox relay → append-only auth_audit_log. In a split
+    # deployment the aggregation control plane runs it, with the retention
+    # sweeps and the analytics warmer below (see
+    # ``services/aggregation/controlplane.py``); this process starts them
+    # only as a dev monolith, so web replicas don't each run them. Every
+    # pass claims an advisory lock either way.
     _app.state._outbox_relay_shutdown = asyncio.Event()
     _app.state._outbox_relay_task = None
     if runs_scheduler():
@@ -1603,9 +1616,9 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
-    # Refresh-token revocation sweep. Same owner role as the relay: the
-    # table is shared, so three web replicas sweeping it would only
-    # contend for the same rows.
+    # Refresh-token revocation sweep. Same owner as the relay: the table
+    # is shared, so three web replicas sweeping it would only contend for
+    # the same rows.
     _app.state._refresh_gc_shutdown = asyncio.Event()
     _app.state._refresh_gc_task = None
     if runs_scheduler():
@@ -1616,6 +1629,20 @@ async def lifespan(_app: FastAPI):
                 _app.state._refresh_gc_shutdown,
             ),
             name="refresh-token-gc",
+        )
+
+    # API key expiry reminders: a week ahead, once per key. Same owner role,
+    # and a lock per pass, so replicas never send the same reminder twice.
+    _app.state._api_key_housekeeping_shutdown = asyncio.Event()
+    _app.state._api_key_housekeeping_task = None
+    if runs_scheduler():
+        from .services.api_key_housekeeping import run_sweeper as _run_api_key_housekeeping
+        _app.state._api_key_housekeeping_task = asyncio.create_task(
+            _run_api_key_housekeeping(
+                get_jobs_session,
+                _app.state._api_key_housekeeping_shutdown,
+            ),
+            name="api-key-housekeeping",
         )
 
     # Product-event retention sweep. ``product_events`` now takes a row per
@@ -1631,6 +1658,20 @@ async def lifespan(_app: FastAPI):
                 _app.state._product_event_gc_shutdown,
             ),
             name="product-event-gc",
+        )
+
+    # Activity retention sweep: the ledger and the relayed outbox kept to
+    # ACTIVITY_RETENTION_DAYS. Same owner role, same reason.
+    _app.state._activity_retention_shutdown = asyncio.Event()
+    _app.state._activity_retention_task = None
+    if runs_scheduler():
+        from .services.activity_retention import run_sweeper as _run_activity_retention
+        _app.state._activity_retention_task = asyncio.create_task(
+            _run_activity_retention(
+                get_jobs_session,
+                _app.state._activity_retention_shutdown,
+            ),
+            name="activity-retention",
         )
 
     # Analytics warmer — precomputes the standard windows so no reader ever
@@ -1649,24 +1690,51 @@ async def lifespan(_app: FastAPI):
             name="analytics-warmer",
         )
 
+    # IdP reachability → idp_provider_reachability, the evidence the
+    # automatic password fallback and the SSO session ride-through act on
+    # (see ``services/idp_reachability.py``). Same owner role as the relay:
+    # one prober for the deployment, an advisory lock per pass, so each
+    # outage is detected — and audited — once.
+    _app.state._idp_reachability_shutdown = asyncio.Event()
+    _app.state._idp_reachability_task = None
+    if runs_scheduler():
+        from .services.idp_reachability import run_idp_reachability_loop
+        _app.state._idp_reachability_task = asyncio.create_task(
+            run_idp_reachability_loop(
+                get_jobs_session,
+                _app.state._idp_reachability_shutdown,
+            ),
+            name="idp-reachability",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
-    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
-    # relay so replicas don't each probe every IdP. The cache is initialised
-    # unconditionally: a WEB replica serves an empty status rather than
-    # AttributeError-ing on a missing attribute.
+    # GET /admin/idp-providers/status. Runs in every process that serves the
+    # API, because the cache lives in this process: gated on the scheduler
+    # role, as it was, web replicas — every container deployment — always
+    # answered with an empty status. One discovery or metadata fetch per
+    # provider every fifteen minutes; back-channel providers are not
+    # contacted at all (see ``services/idp_health.py``).
     _app.state.idp_health_cache = {}
     _app.state._idp_health_shutdown = asyncio.Event()
-    _app.state._idp_health_task = None
-    if runs_scheduler():
-        from .services.idp_health import run_idp_health_loop
-        _app.state._idp_health_task = asyncio.create_task(
-            run_idp_health_loop(
-                get_jobs_session,
-                _app.state._idp_health_shutdown,
-                _app.state.idp_health_cache,
-            ),
-            name="idp-health",
-        )
+    from .services.idp_health import run_idp_health_loop
+    _app.state._idp_health_task = asyncio.create_task(
+        run_idp_health_loop(
+            get_jobs_session,
+            _app.state._idp_health_shutdown,
+            _app.state.idp_health_cache,
+        ),
+        name="idp-health",
+    )
+
+    # API key usage: counted in this process's memory on every key request
+    # and added to ``api_key_usage`` every half minute. Every process that
+    # serves the API counts, so every one flushes — not gated on a role.
+    from .services import api_key_usage as _api_key_usage
+    _app.state._api_key_usage_shutdown = asyncio.Event()
+    _app.state._api_key_usage_task = asyncio.create_task(
+        _api_key_usage.run_flusher(_app.state._api_key_usage_shutdown),
+        name="api-key-usage",
+    )
 
     # Everything startup built lives as long as the process: take it out of
     # the garbage collector's reach. A full collection otherwise walks this
@@ -1756,6 +1824,21 @@ async def lifespan(_app: FastAPI):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # Stop the API key reminders before DB pool teardown, same shape.
+    _key_hk_shutdown = getattr(_app.state, "_api_key_housekeeping_shutdown", None)
+    _key_hk_task = getattr(_app.state, "_api_key_housekeeping_task", None)
+    if _key_hk_shutdown is not None:
+        _key_hk_shutdown.set()
+    if _key_hk_task is not None and not _key_hk_task.done():
+        try:
+            await asyncio.wait_for(_key_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _key_hk_task.cancel()
+            try:
+                await _key_hk_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: shutting down regardless
+
     # Stop the product-event sweeper before DB pool teardown, same shape.
     _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
     _pe_gc_task = getattr(_app.state, "_product_event_gc_task", None)
@@ -1768,6 +1851,21 @@ async def lifespan(_app: FastAPI):
             _pe_gc_task.cancel()
             try:
                 await _pe_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the activity retention sweep before DB pool teardown, same shape.
+    _ar_shutdown = getattr(_app.state, "_activity_retention_shutdown", None)
+    _ar_task = getattr(_app.state, "_activity_retention_task", None)
+    if _ar_shutdown is not None:
+        _ar_shutdown.set()
+    if _ar_task is not None and not _ar_task.done():
+        try:
+            await asyncio.wait_for(_ar_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _ar_task.cancel()
+            try:
+                await _ar_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1786,6 +1884,21 @@ async def lifespan(_app: FastAPI):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # Stop the IdP reachability prober before DB pool teardown, same shape.
+    _reach_shutdown = getattr(_app.state, "_idp_reachability_shutdown", None)
+    _reach_task = getattr(_app.state, "_idp_reachability_task", None)
+    if _reach_shutdown is not None:
+        _reach_shutdown.set()
+    if _reach_task is not None and not _reach_task.done():
+        try:
+            await asyncio.wait_for(_reach_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _reach_task.cancel()
+            try:
+                await _reach_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose; shutdown carries on
+
     # Stop the IdP health sweep before DB pool teardown, same shape as the
     # relay above. The loop waits on the shutdown event rather than
     # sleeping, so this returns immediately instead of after its interval.
@@ -1802,6 +1915,27 @@ async def lifespan(_app: FastAPI):
                 await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Stop the API key usage flusher, then write what is still counted:
+    # before the pool goes, or the last half minute of usage is lost.
+    _usage_shutdown = getattr(_app.state, "_api_key_usage_shutdown", None)
+    _usage_task = getattr(_app.state, "_api_key_usage_task", None)
+    if _usage_shutdown is not None:
+        _usage_shutdown.set()
+    if _usage_task is not None and not _usage_task.done():
+        try:
+            await asyncio.wait_for(_usage_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _usage_task.cancel()
+            try:
+                await _usage_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: the final flush follows
+    try:
+        from .services.api_key_usage import recorder as _usage_recorder
+        await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — shutting down either way
+        logger.warning("Final API key usage flush failed: %s", exc)
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the
@@ -2118,6 +2252,29 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
                 "code": "PROVIDER_BUSY",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# Every slot of a bulkhead stayed taken while the request waited for one (see
+# common/bulkhead.py): too many slow reads of one kind on this replica at once.
+# 429 + Retry-After, for the same reason as a busy provider — the client backs
+# off and asks again, instead of every request timing out on an empty pool.
+from backend.app.common.bulkhead import Busy as _Busy
+
+
+@app.exception_handler(_Busy)
+async def _busy_handler(request, exc: _Busy):
+    logger.info("Busy on %s: %s", request.url.path, exc.kind)
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "busy",
+                "message": str(exc),
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
@@ -2490,6 +2647,7 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
         "/api/v1/views/transfer/reconcile",
         "/api/v1/views/transfer/import",
         "/api/v1/views/transfer/packages/inspect",
+        "/api/v1/views/transfer/packages/uploads",
     )
 
     def __init__(self, app, *, default_bytes: int, large_bytes: int):
@@ -2583,11 +2741,14 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # P1.8 — explicit SSE path registry. Routers may extend this at
-    # startup via ``register_sse_path("/api/v1/.../my-stream")``. The
-    # default suffix ``/events`` matches today's only SSE convention but
-    # the contract is explicit registration, not endswith heuristics.
-    _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
+    # P1.8 — explicit SSE path registry: each live feed by its exact shape,
+    # never by how its path ends. Matching any path ending in ``/events``
+    # also exempted the activity log's event lists — ordinary paged reads —
+    # from every deadline.
+    _SSE_PATHS: tuple[re.Pattern, ...] = (
+        # An aggregation job's progress (``aggregation.stream_job_events``).
+        re.compile(r"^/api/v1/admin/data-sources/[^/]+/aggregation-jobs/[^/]+/events$"),
+    )
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
     # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
     # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
@@ -2600,6 +2761,12 @@ class _TimeoutMiddleware:
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+        # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
+        # short keyset read per chunk, two at a time per process (activity._EXPORTS).
+        re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
+        # The API key inventory as CSV: at most 10,000 keys, a short read per page of 500, two
+        # at a time per process (api_keys._EXPORTS).
+        re.compile(r"^/api/v1/admin/api-keys/export\.csv$"),
     )
 
     def __init__(self, app):
@@ -2652,10 +2819,7 @@ class _TimeoutMiddleware:
     def _is_sse_path(self, path: str) -> bool:
         if path in self._SSE_EXACT_PATHS:
             return True
-        for suffix in self._SSE_PATH_SUFFIXES:
-            if path.endswith(suffix):
-                return True
-        return any(p.match(path) for p in self._STREAM_PATHS)
+        return any(p.match(path) for p in (*self._SSE_PATHS, *self._STREAM_PATHS))
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
@@ -2731,13 +2895,21 @@ class _TimeoutMiddleware:
                 state["terminal"] = True
             await original_send(message)
 
+        deadline = asyncio.timeout(timeout)
         try:
-            async with asyncio.timeout(timeout):
+            async with deadline:
                 await self.app(scope, receive, tracked_send)
-        except TimeoutError:
+        except Exception as exc:
             # ``asyncio.timeout()`` converts the inner CancelledError to a
-            # TimeoutError. The inner task is already torn down — no more
+            # TimeoutError — unless something inside caught the cancellation
+            # and raised an error of its own. ``BaseHTTPMiddleware`` does
+            # exactly that ("No response returned"), which used to escape as
+            # a 500 for a request whose only fault was being slow. An error
+            # raised once the deadline has passed is the deadline's. Either
+            # way the inner task is already torn down — no more
             # ``tracked_send`` calls will arrive.
+            if not isinstance(exc, TimeoutError) and not deadline.expired():
+                raise
             if state["terminal"]:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
@@ -2829,7 +3001,12 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
+    # ``X-Activity-Reason`` carries the optional "why" a person gives for a
+    # manual operation into the activity ledger (``common/activity_context``).
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+        "X-Activity-Reason",
+    ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
     #
@@ -2898,6 +3075,18 @@ app.add_middleware(_TimeoutMiddleware)
 # ------------------------------------------------------------------ #
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+def _openapi_with_api_keys() -> dict:
+    """The generated schema, marking the operations an API key may call."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from backend.app.auth import api_key_surface
+
+    return api_key_surface.document(FastAPI.openapi(app), app)
+
+
+app.openapi = _openapi_with_api_keys
 
 # Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.

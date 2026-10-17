@@ -28,6 +28,7 @@ import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
 import { NotificationStack } from '@/components/ui/notifications'
+import { ExportTray } from '@/features/import-export/ExportTray'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
@@ -40,6 +41,7 @@ export { useViewEditorModal }
 export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const passwordChangeRequired = useAuthStore((s) => s.user?.passwordChangeRequired ?? false)
   const location = useLocation()
   // Selector subscriptions (not whole-store) so this always-mounted shell
   // only re-renders when these specific fields change, not on every
@@ -79,7 +81,10 @@ export function AppLayout() {
   // links in the sidebar and deep-linked URLs resolve without a page refresh.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   useEffect(() => {
-    if (!isAuthenticated) return
+    // Not while a password change is pending: the API refuses the read,
+    // and the refusal would reload the page on its way to the change
+    // screen this layout is already redirecting to.
+    if (!isAuthenticated || passwordChangeRequired) return
 
     const loadViews = async () => {
       try {
@@ -92,7 +97,7 @@ export function AppLayout() {
       }
     }
     loadViews()
-  }, [isAuthenticated])
+  }, [isAuthenticated, passwordChangeRequired])
 
   // Applies the theme preference to <html class="dark">. See
   // useAppliedTheme for the anti-jank details — routes outside this layout
@@ -147,6 +152,14 @@ export function AppLayout() {
     return <Navigate to={here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`} replace />
   }
 
+  // A password somebody else chose — at install, or an administrator —
+  // has to be replaced before anything else. The API holds every other
+  // request regardless; going straight to the change screen spares the
+  // person a page that loads only to be refused.
+  if (passwordChangeRequired) {
+    return <Navigate to="/password-change-required" replace />
+  }
+
   return (
     <ViewEditorContext.Provider value={{ openViewEditor, closeViewEditor }}>
       <div className="h-full w-full flex flex-col overflow-hidden bg-canvas">
@@ -186,9 +199,12 @@ export function AppLayout() {
           journey={initialScope.journey}
           importFile={initialScope.importFile}
           importIntoViewId={initialScope.importIntoViewId}
+          importUploadId={initialScope.importUploadId}
         />
 
         <HelpPanel />
+        {/* The exports the server prepares, followed and downloaded wherever the person goes. */}
+        <ExportTray />
         <NotificationStack />
         <AccessDeniedModal />
 

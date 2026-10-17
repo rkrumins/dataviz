@@ -297,17 +297,29 @@ download is named for the package.
 
 **Import:**
 
-1. `POST /api/v1/views/transfer/packages/inspect` takes the raw zip. Every part is checked against
-   its checksum and size, and never decompresses past the limits, whatever the archive claims.
-   The data is kept under `transfer-uploads/{uploadId}/` for 24 hours for the caller only, and the
-   views are described as for a view file. Each suggested target says whether it is under version
-   control (`versioned`).
+1. The zip is uploaded in parts: `POST /api/v1/views/transfer/packages/uploads` (201, how to
+   split it), `PUT …/uploads/{uploadId}/parts/{n}` for each part, then `POST …/complete`, which
+   answers 202 and checks the package on a job of its own (`package_inspect`). Every part is
+   checked against its checksum and size, and never decompresses past the limits, whatever the
+   archive claims. `POST /api/v1/views/transfer/packages/inspect` takes a zip of at most 100 MB
+   whole, for scripts, and checks it the same way (202). The upload is kept for the caller only,
+   for 24 hours and while any job still reads it. `GET /api/v1/views/transfer/packages/{uploadId}`
+   then describes the views as for a view file, plus the package and, per source, the semantic
+   layer here that is its own (`ontologyMatch`), and the data sources it already made where the
+   caller may read them (`newSources`); 409 until the check is done. Each suggested target says
+   whether it is under version control (`versioned`).
 2. `POST /api/v1/views/transfer/packages/{uploadId}/data` brings the data into a **new draft** of
    the target data source, through the data source's own import job, adding and updating only
    (a package never deletes). For an update, name the view (`viewId`): the draft is opened for it.
-   Asking again for the same target returns the same job, or, when that job failed, runs the data
-   again into the same draft from the job's own copy of it. The data goes with that job, so
-   another target is refused with 409 and needs the file again.
+   The job reads the data from the upload where it is. Each target gets its own draft and job;
+   asking again for the same target returns its job, or, when that job failed, queues it again to
+   resume into the same draft. 409 until the package is checked; 410 `upload_expired` once the
+   upload is gone. Instead, `POST …/packages/{uploadId}/new-source` makes a new data source of
+   the data, as its first version with no draft, and the views are then imported into it. Asking
+   again answers with what that request made. Once a package made one in a workspace, another
+   target there is 409 `upload_consumed` (the newest as `source`, to follow instead), unless the
+   request asks for `another` copy on purpose. The copy skips the platform's rollup connections
+   (`AGGREGATED`), which are rebuilt from the others, and its report counts them.
 3. The view is reconciled against **that draft** (`target.branchId`), so the entities the data
    brought count as found, then imported into it with `stage` set. A new view claims the draft as
    its own. The view and its data are reviewed and published together.
@@ -350,8 +362,11 @@ description, icon and tags, never visibility, and says the graph data isn't affe
 | `POST /api/v1/views/transfer/reconcile` | views + targets + resolutions → effective definition, report, update preview | `viewImportEnabled`; create permission in the target workspace, or edit access to the target view |
 | `POST /api/v1/views/transfer/import` | one view → view, version, report, integrity (and `staged` when it went into a draft) | `viewImportEnabled`; the view-create gates, or edit access; staging needs sign-in and `workspace:datasource:manage` |
 | `POST /api/v1/views/transfer/packages` | views + scope + data version → export job | `viewExportEnabled` and `graphExportEnabled`; read access; `workspace:datasource:read` |
-| `POST /api/v1/views/transfer/packages/inspect` | raw zip → as inspect, plus `uploadId` and the package | `viewImportEnabled`; version control on; sign-in |
+| `POST /api/v1/views/transfer/packages/uploads` · `PUT …/{uploadId}/parts/{n}` · `POST …/complete` | a zip in parts → **202**, checked by a `package_inspect` job | `viewImportEnabled`; version control on; sign-in |
+| `POST /api/v1/views/transfer/packages/inspect` | a raw zip of at most 100 MB → **202** `{uploadId, jobId}`, checked the same way | `viewImportEnabled`; version control on; sign-in |
+| `GET /api/v1/views/transfer/packages/{uploadId}` | the checked package: as inspect, plus the package, `ontologyMatch` and `newSources` | `viewImportEnabled`; the uploader |
 | `POST /api/v1/views/transfer/packages/{uploadId}/data` | target → the data's draft and import job | `viewImportEnabled`; version control on; the uploader; `workspace:datasource:manage` |
+| `POST /api/v1/views/transfer/packages/{uploadId}/new-source` | provider, label, graph name, semantic layer → **202**, a new data source and the job that copies the data into it | `viewImportEnabled`; version control on; the uploader; `workspace:datasource:manage` |
 | `GET /api/v1/views/{viewId}/versions` | a page of versions + the working copy | read access |
 | `GET …/versions/status` | head version, dirty, identity, origin | read access |
 | `POST …/versions` | save a version | edit access |

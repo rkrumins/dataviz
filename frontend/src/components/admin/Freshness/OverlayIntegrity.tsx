@@ -10,6 +10,7 @@ import { Clock, PauseCircle, RefreshCw, RotateCcw, StopCircle, Zap } from 'lucid
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import type { FreshnessSummary, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import { IntegrityPulse } from './IntegrityPulse'
@@ -52,6 +53,7 @@ export function OverlayIntegrity({
     const activity = useReconcileActivity(ACTIVITY_HORIZON)
     const reconcileNow = useReconcileNow()
     const setPolicy = useSetReconciliationPolicy()
+    const [reasonPrompt, askReason] = useReasonPrompt()
     const [previewOpen, setPreviewOpen] = useState(false)
     const [historyOpen, setHistoryOpen] = useState(false)
     const [lastCheck, setLastCheck] = useState<ReconcileRun | null>(null)
@@ -74,15 +76,34 @@ export function OverlayIntegrity({
     const policy = recon.data?.policy
     const hold = fleetHold(policy)
     const fleetPausedLeft = hold?.kind === 'paused' ? timeUntil(hold.until) : null
-    const resumeFleet = () => {
-        setPolicy.mutate({ pausedUntil: null, stopped: false }, {
+    const resumeFleet = async () => {
+        const answer = await askReason({
+            title: 'Resume fleet-wide rebuilds?',
+            message: 'Automatic rebuilds start again for every source, from a fresh check.',
+            confirmLabel: 'Resume fleet-wide',
+            confirmIcon: RotateCcw,
+            context: 'hold',
+            audience: 'platform',
+        })
+        if (!answer) return
+        setPolicy.mutate({ pausedUntil: null, stopped: false, reason: answer.reason }, {
             onSuccess: () => notify('success', 'Fleet-wide rebuilds resumed.'),
             onError: (e) => notify('error', e.message || 'Could not resume fleet-wide rebuilds.'),
         })
     }
 
-    const runNow = () => {
-        reconcileNow.mutate({}, {
+    // A real sweep, not the preview: it can queue rebuilds, so it asks why.
+    const runNow = async () => {
+        const answer = await askReason({
+            title: 'Check every source now?',
+            message: 'Sources found drifting can be queued for a rebuild, just as on a scheduled check.',
+            confirmLabel: 'Check now',
+            confirmIcon: RefreshCw,
+            context: 'reconcile',
+            audience: 'platform',
+        })
+        if (!answer) return
+        reconcileNow.mutate({ reason: answer.reason }, {
             onSuccess: (res) => {
                 if (res.run) setLastCheck(res.run)
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
@@ -262,6 +283,8 @@ export function OverlayIntegrity({
                 onClose={() => setPreviewOpen(false)}
                 fleetTotal={summary?.total}
             />
+
+            {reasonPrompt}
         </section>
     )
 }

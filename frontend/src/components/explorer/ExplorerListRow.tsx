@@ -23,8 +23,9 @@ import { VISIBILITY_ICON } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
-import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
+import { ContributorTrail } from '@/features/view-filters/components/ContributorTrail'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 
 /* ------------------------------------------------------------------ */
@@ -67,6 +68,10 @@ export interface ExplorerListRowProps {
   providerInfo?: DataSourceProviderInfo
   /** Hide the (redundant) workspace pill when the whole list is one workspace. */
   hideWorkspaceInScope?: boolean
+  /** A person in the contributor trail was clicked: filter to them. */
+  onPickPerson?: (userId: string) => void
+  /** New or changed since the reader's last visit. */
+  visitMark?: 'new' | 'updated' | null
 }
 
 /* ------------------------------------------------------------------ */
@@ -89,6 +94,8 @@ export function ExplorerListRow({
   density = 'comfortable',
   providerInfo,
   hideWorkspaceInScope,
+  onPickPerson,
+  visitMark,
 }: ExplorerListRowProps) {
   const typeMeta = viewTypeMeta(view.viewType)
   // One source for the sentence, so the tip and the screen-reader text cannot
@@ -162,8 +169,16 @@ export function ExplorerListRow({
             <DynamicIcon name={iconName} className="h-3.5 w-3.5" />
           </div>
           <div className="min-w-0">
-            <span className="truncate text-sm font-medium text-ink block">
-              {view.name}
+            <span className="flex items-center gap-1.5 text-sm font-medium text-ink">
+              {visitMark && !isDeleted && (
+                <span
+                  title={visitMark === 'new' ? 'New since your visit' : 'Updated since your visit'}
+                  className={cn('h-1.5 w-1.5 shrink-0 rounded-full', visitMark === 'new' ? 'bg-emerald-500' : 'bg-sky-500')}
+                >
+                  <span className="sr-only">{visitMark === 'new' ? 'New since your visit: ' : 'Updated since your visit: '}</span>
+                </span>
+              )}
+              <span className="truncate">{view.name}</span>
             </span>
             {view.contextModelName && (
               <span className="flex items-center gap-1 text-[10px] text-ink-muted truncate">
@@ -190,6 +205,8 @@ export function ExplorerListRow({
               >
                 {view.dataSourceName ?? view.dataSourceId}
               </span>
+              {/* The glyph only: the column is narrow, and the tip names it. */}
+              <SourceKindBadge kind={view.sourceKind} compact className="shrink-0" />
             </div>
           ) : (
             <span className="text-xs text-ink-muted">—</span>
@@ -229,20 +246,16 @@ export function ExplorerListRow({
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
 
         {/* ── Owner ──
-             Prefer the server-resolved display name; fall back to "Unknown"
-             when unresolvable — never the raw user id. The CreatorHoverCard
-             shows full name + email on hover so power users can disambiguate
-             without taking a round-trip to the view detail drawer. */}
+             The contributor trail (creator first), then the creator's name —
+             the server-resolved display name, "Unknown" when unresolvable,
+             never the raw user id. Each avatar's hover card says who did what. */}
         {(view.createdByName || view.createdBy) ? (
-          <CreatorHoverCard
-            userId={view.createdBy ?? null}
-            displayName={view.createdByName ?? null}
-            email={view.createdByEmail ?? null}
-          >
-            <span className="truncate text-xs text-ink-muted cursor-default" tabIndex={0}>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <ContributorTrail view={view} onPick={onPickPerson} className="shrink-0" avatarClassName="h-5 w-5 text-[8px]" />
+            <span className="truncate text-xs text-ink-muted">
               {view.createdByName ?? 'Unknown'}
             </span>
-          </CreatorHoverCard>
+          </div>
         ) : (
           <span className="truncate text-xs text-ink-muted">—</span>
         )}

@@ -183,9 +183,27 @@ config:
 
 ### Docker Compose / local
 
+With Docker Compose, a container sees only the variables its service lists under
+`environment:` in `docker-compose.yml`, and the shipped file doesn't list this one — a line in
+`.env` alone does nothing. Add it to `viz-service`, together with `JWT_SECRET_KEY_PREVIOUS`
+for key rotation (§4), keep the values in `.env`, and recreate the container:
+
+```yaml
+services:
+  viz-service:
+    environment:
+      AUTH_ENVIRONMENT_ID: ${AUTH_ENVIRONMENT_ID:-}
+      JWT_SECRET_KEY_PREVIOUS: ${JWT_SECRET_KEY_PREVIOUS:-}
+```
+
 ```bash
+# .env
 AUTH_ENVIRONMENT_ID=dev
 ```
+
+When you run the API on your own machine with `.env.dev` loaded
+([Developer Setup](/docs/setup#run-the-apps-on-your-machine-instead)), the line in `.env.dev`
+is enough.
 
 Leave it unset for a single-environment deployment: every cookie name and the issuer stay
 exactly as they were, so this is a no-op upgrade.
@@ -348,7 +366,7 @@ easy to hit on `.local` hostnames that have no certificate.
 | `AUTH_COOKIE_DOMAIN` | *(unset — host-only)* | Set only to deliberately share a session across subdomains. |
 | `AUTH_COOKIE_SAMESITE` | `lax` | `strict` breaks the SSO redirect handshake. |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | Re-auth ceiling for SSO sessions; local password sessions are exempt. |
-| `SSO_OUTBOUND_TLS_CA_CERTS` | (none) | PEM CA bundle every outbound SSO call verifies against — set it when gateways/IdPs sit behind a corporate CA. |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none) | PEM CA bundle every outbound SSO call trusts in addition to the public roots — set it when gateways/IdPs sit behind a corporate CA. |
 
 ---
 

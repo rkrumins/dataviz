@@ -160,6 +160,7 @@ class ViewServiceImpl {
             // only when it actually differs.
             let result = await viewApi.updateView(id, {
                 name: request.name,
+                description: request.description,
                 contextModelId: request.contextModelId,
                 ...(request.layoutType && { viewType: request.layoutType }),
                 config: buildViewConfig(request, base),

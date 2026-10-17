@@ -19,9 +19,15 @@ model here, and the reason there is no HTTP equivalent.
 The password is prompted for, never taken as an argument: arguments end
 up in shell history, in ``ps`` output, and in CI logs.
 
-Also clears any forced-rotation flag and signs every existing session
-out, because the reason to reach for this script is usually that you are
-not certain who else is holding one.
+Also clears any forced-rotation flag and the account's failed sign-in
+count, and signs every existing session out, because the reason to reach
+for this script is usually that you are not certain who else is holding
+one.
+
+``--break-glass`` also marks the account as a system account, which keeps
+password sign-in while single sign-on is enforced. That is the way back in
+when the identity provider is down and no administrator can sign in: one
+command, then ``/login?password=1``.
 """
 from __future__ import annotations
 
@@ -31,10 +37,12 @@ import getpass
 import sys
 
 
-async def _reset(email: str, password: str) -> int:
+async def _reset(email: str, password: str, *, break_glass: bool = False) -> int:
     from backend.app.db.engine import get_async_session, init_db, close_db
-    from backend.app.db.repositories import user_repo
+    from backend.app.db.repositories import binding_repo, user_repo
+    from backend.auth_service.core.config import RATELIMIT_LOGIN_PER_ACCOUNT
     from backend.auth_service.core.password import hash_password
+    from backend.auth_service.ratelimit import get_account_limiter
 
     await init_db()
     try:
@@ -65,7 +73,38 @@ async def _reset(email: str, password: str) -> int:
                 aggregate_type="user",
                 aggregate_id=user.id,
             )
+            marked = False
+            if break_glass and not user.is_system_account:
+                await user_repo.set_system_account(session, user.id, True)
+                await user_repo.create_outbox_event(
+                    session,
+                    event_type="user.system_account_changed",
+                    payload={
+                        "user_id": user.id,
+                        "is_system_account": True,
+                        "changed_by": "break_glass_cli",
+                        "via": "cli",
+                    },
+                    aggregate_type="user",
+                    aggregate_id=user.id,
+                )
+                marked = True
+            is_admin = user.id in await binding_repo.super_admin_user_ids(session)
 
+        # A failed-attempt count — easily someone else's, aimed at a known
+        # address — must not keep the new password from working.
+        # Best-effort: the limiter fails open when its store is away.
+        await get_account_limiter().reset(
+            "login", email, RATELIMIT_LOGIN_PER_ACCOUNT,
+        )
+
+        if marked:
+            print(f"{email} is now a system (break-glass) account.")
+        if break_glass and not is_admin:
+            print(
+                "Note: the account is not a Super Admin, so it can sign in "
+                "but cannot change settings.",
+            )
         if user.status != "active":
             print(
                 f"Note: the account is {user.status!r}, so the new password "
@@ -88,6 +127,11 @@ def main() -> int:
     parser.add_argument(
         "--email", required=True, help="Email address of the account to reset.",
     )
+    parser.add_argument(
+        "--break-glass", action="store_true",
+        help="Also mark it as a system account, which keeps password "
+             "sign-in while single sign-on is enforced.",
+    )
     args = parser.parse_args()
 
     password = getpass.getpass("New password: ")
@@ -105,7 +149,7 @@ def main() -> int:
         print("Aborted: use at least 8 characters.", file=sys.stderr)
         return 1
 
-    return asyncio.run(_reset(args.email, password))
+    return asyncio.run(_reset(args.email, password, break_glass=args.break_glass))
 
 
 if __name__ == "__main__":

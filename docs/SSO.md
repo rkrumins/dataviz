@@ -1,9 +1,11 @@
 # SSO — operator reference
 
+*For administrators and operators who set up and run single sign-on.*
+
 > **At a glance.** The operator reference for {brand}'s single sign-on: **what exists**
 > and **how to run it**. Covers the OIDC + SAML2 transport, DB-backed per-row IdP
 > providers, multi-identity users, claim mapping, group→role/group mapping, 24h SSO
-> re-auth, and the platform posture switches — plus step-by-step operator playbooks
+> re-auth, the platform posture switches and the IdP-outage fallback — plus step-by-step operator playbooks
 > (§2) and verification procedures (§3). For *how to integrate, extend, and debug*, read
 > the [SSO Integration Guide](/docs/sso-integration).
 
@@ -137,7 +139,7 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 | `oidc` | Authorization Code + PKCE + JWKS verify | Entra ID, Auth0, Ping, Keycloak, Okta-OIDC |
 | `saml2` | python3-saml strict mode + replay cache | ADFS, OneLogin, Okta-SAML, PingFederate |
 | `custom_profile` | profile handed over via cookie / browser storage / proxy header | internal deployments where a corporate portal or auth proxy already authenticated the user |
-| `backchannel` | an opaque handle redeemed against the provider's own endpoints — server-to-server when the cookie is on a shared domain, or exchanged by the browser (with mandatory JWT verification) when it is not; the answer may be JSON or a JWT | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand `docs/SSO_BACKCHANNEL_CONTRACT.md` to the team that owns the gateway |
+| `backchannel` | an opaque handle redeemed against the provider's own endpoints — server-to-server when the cookie is on a shared domain, or exchanged by the browser (with mandatory JWT verification) when it is not; the answer may be JSON or a JWT | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand the [back-channel integration contract](/docs/sso-backchannel-contract) to the team that owns the gateway |
 | `custom` | HS256-signed cookie envelope (dev/demo only) | local development, CI smoke, demo videos |
 
 Every provider is one row in `idp_providers`. The runtime
@@ -228,12 +230,15 @@ Validation at write time:
   true.
 * `group_membership`: the target group must exist and have
   `is_protected=false`.
-* Universal: `role_name='system:admin'` is refused (forbidden auto-role).
+* Universal: `super_admin` is refused (a forbidden auto-grant role), and so is
+  `system:admin` if it is sent as a role name. A platform admin role
+  (`org_admin`) can be mapped only for one specific provider whose assurance
+  is `verified` (§1.13).
 
 Reconciliation (`permission_service.reconcile_sso_targets`) runs on
 **every SSO login AND on every `/refresh`** for SSO sessions. Admin
-mapping changes propagate to active sessions within ~5 min (one
-refresh cycle).
+mapping changes propagate to active sessions within one access-token
+lifetime (one refresh cycle).
 
 ### 1.6 24-hour SSO re-authentication
 
@@ -273,6 +278,10 @@ An SSO session past the idle or absolute ceiling
 envelope WITHOUT `force=1`, so the IdP's own session decides whether a
 credential is needed — rather than a bare 401 that stranded the user on
 the sign-in page. Password sessions still get the bare 401.
+
+While the session's own connection is confirmed down (§1.17) the ceiling
+is deferred — the session renews for at most one more ceiling period — and
+any envelope that would name that IdP names the sign-in page instead.
 
 ### 1.7 Linking + manual linking
 
@@ -316,17 +325,28 @@ Singleton row in `app_auth_config`:
 | Toggle | Default | When OFF |
 |---|---|---|
 | `sso_enabled` | true | `/auth/providers` returns `[]`; `/auth/{slug}/*` 404s |
-| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` (and `POST /auth/signup` the same — a password account minted under enforcement would be a dead end). One carve-out: an account marked `is_system_account` (break-glass) still signs in with its password, and unknown emails get the identical 403 so the carve-out is not an account oracle |
+| `allow_local_login` | true | Passwords are for break-glass only. `POST /auth/login` gives every account that may not use one the same 401 a wrong password gets (`Invalid email or password`, after a password check that costs the same; the audit reason is `local_login_disabled`), so the form reveals nothing about which accounts may. Who may: an account marked `is_system_account` (break-glass), always; Super Admins while an SSO outage is confirmed; everyone while the emergency window is open (§1.17). `POST /auth/signup` returns 403 `{"detail":{"error":"local_login_disabled"}}` — a password account minted under enforcement would be a dead end |
 | `allow_jit_provisioning` | true | New IdP subjects with no email match raise `jit_disabled` |
-| `email_first_login` | **false** | `POST /auth/resolve` always answers `{"provider": null}`; the login page is byte-for-byte what it was |
+| `email_first_login` | **false** | The sign-in page hides the connection buttons and leads with the email field (§1.14) |
+
+Not a switch: `password_fallback_until` (+ `_by`, `_reason`) is the deadline of
+the emergency window (§1.17). Opening it does not bump `version`.
 
 The PATCH endpoint refuses lockout scenarios:
 
-* `allow_local_login=false` is rejected (HTTP 409) when any active
-  admin lacks an SSO identity **and is not a system account** — a
-  system account keeps password sign-in under enforcement, so it
-  cannot be locked out by the switch and does not block it. Response
-  carries the offending admin list so the operator can fix it.
+* Turning `allow_local_login` off is refused (HTTP 409
+  `no_break_glass_account`) unless a **ready break-glass account**
+  exists: active, holding `super_admin`, marked as a system account, and
+  with a password set. It is the door that survives an IdP outage; the
+  config `GET` reports `breakGlass {ready, accounts}`.
+* Turning it off also warns (HTTP 409 `would_lock_out_admin`, with
+  `adminsWithoutSso` — each entry's `role` is `super_admin` or
+  `org_admin`) when active administrators have no SSO identity on an
+  enabled, published connection and are not system accounts: they lose
+  their password until they link one. Resending the patch with
+  `acknowledgeAdminsWithoutSso: true` proceeds; the audit event records
+  who was acknowledged. Both checks run on the switch-off itself, never on
+  a later save of another switch.
 * `sso_enabled=false` AND `allow_local_login=false` together is
   rejected — there'd be no way to log in.
 * The companion sweep `POST /admin/sso/config/end-all-sessions`
@@ -334,7 +354,9 @@ The PATCH endpoint refuses lockout scenarios:
   system accounts', so enforcement can take effect now instead of when
   the old sessions expire. Unmarking a system account is refused with
   the same 409 when passwords are off and that admin has no SSO
-  identity: the flag was the last door in.
+  identity: the flag was the last door in — and with
+  `no_break_glass_account` when it is the last ready break-glass
+  account.
 
 ### 1.10 Admin lookup + search
 
@@ -359,8 +381,8 @@ Shared response shape (`UserSummary`): id, email, name, status,
 * Admin `GET /admin/idp-providers` redacts secret fields to
   `"********"`. Rotation happens by PATCH-ing the field with a new
   value (the merge logic preserves the rest of the settings dict).
-* JWT_SECRET_KEY fails fast at import if < 32 chars (Phase 0
-  hardening).
+* `JWT_SECRET_KEY` fails fast at startup if it is missing, shorter than
+  32 characters, or a placeholder published in the repository.
 
 ### 1.12 Audit
 
@@ -379,10 +401,20 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `user.sso_session_expired` | SSO session ended at /refresh: `reason` is `reauth_ceiling` (24h), `idle` or `absolute` |
 | `user.identity.linked` / `user.identity.unlinked` | self-service link/unlink |
 | `user.identity.admin_linked` / `user.identity.admin_unlinked` | admin link/unlink |
-| `idp.provider.{created,updated,deleted}` | IdP provider CRUD |
+| `idp.provider.{created,updated,deleted}` | IdP provider CRUD. `updated` names the settings that changed (`changed_settings` — names only, never values) and carries, before → after, `enabled`, `linking_policy`, `assurance` and `link_admin_accounts` when they changed |
 | `rbac.sso_mapping.{created,deleted}` | Group→target mapping CRUD |
-| `auth.config.updated` | platform posture switch changed |
-| `user.sso_login_failed` | any SSO sign-in failure, keyed by the `ref` the user was shown |
+| `auth.config.updated` | platform posture saved: the switches as they now are, and `changes` — each switch that moved, before → after |
+| `user.sso_login_failed` | any SSO sign-in failure, keyed by the `ref` the user was shown (`idp_unreachable` when the sign-in could not even start) |
+| `idp.outage.detected` / `idp.outage.resolved` | a connection confirmed down / back up (§1.17) |
+| `auth.config.password_fallback_opened` / `_extended` | the emergency window opened, or an open one extended (`until`, `hours`, `previous_until` when extended; the reason given as `stated_reason`, the activity log's *why*) |
+| `auth.config.password_fallback_closed` / `_expired` | closed early by an admin (`was_until`), or closed by itself at its deadline — recorded once, by the prober's pass |
+| `user.password_fallback_session_ended` | a password session opened during an outage ended at renewal (`fallback_closed` or `expired`) |
+| `user.sso_reauth_deferred` | an SSO session renewed past its daily re-authentication because its IdP is confirmed down — once per session, on the first renewal past the ceiling |
+| `user.system_account_changed` | an account made, or no longer, a break-glass account (`via: "cli"` from `reset_admin_password --break-glass`) |
+
+`user.logged_in` for a password sign-in made while passwords are off carries
+`via`: `break_glass`, `admin_fallback` or `emergency_window`. The activity log
+says which in words, and the SSO activity tab shows it as the row's reason.
 
 ### 1.13 Assurance level
 
@@ -396,7 +428,7 @@ escalation.
 |---|---|---|
 | `verified` | the identity was proved against the provider itself — a signature checked against a key we hold, or an answer it gave us directly when we asked | `oidc`, `saml2`, `custom_profile` with `payload_format=jwt`, `backchannel` |
 | `asserted` | a trusted network position vouched for it — sound when the proxy strips inbound copies, a full bypass when it does not, and we cannot tell which from here | `custom_profile` with `source=header` |
-| `unverified` | we cannot distinguish a genuine claim from a forged one | `custom_profile` with `trust_unsigned`, and the dev-only `custom` kind |
+| `unverified` | we cannot distinguish a genuine claim from a forged one | `custom_profile` with `trust_unsigned`, a browser-mode `backchannel` with `trust_unsigned` or one verified only over a TLS check that is off, and the dev-only `custom` kind |
 
 **Derived on every read, never stored** (`auth_service/providers/assurance.py`).
 A column would be a second source of truth that drifts the moment an
@@ -410,30 +442,71 @@ existed — or inserted out of band — is still refused when it would take
 effect. `super_admin` is refused from *every* provider regardless of
 assurance; admin grants stay manual.
 
-### 1.14 Email-first login (Home Realm Discovery)
+Nor may a provider below `verified` **link itself to a Super Admin's or a
+break-glass account** — one holding `super_admin`, or a system account
+(`_link_deny_reasons`, reason `unverified_connection`; who holds
+`super_admin` is answered by the injected `super_admin_checker`, and with
+none every account counts): its claims, the email and `email_verified`
+included, are whatever the sender wrote, so linking by email would hand the
+platform to anyone able to reach the sign-in endpoint. Every other account
+still links, an org admin's included — `org_admin` runs workspaces but has
+neither `system:admin` nor user management, and cannot change who is in a
+group that grants `super_admin` — so an unsigned connection keeps
+working for the people its operator trusted it for; Super Admins link it
+from their own page. An operator who accepts the risk for them too turns on
+**Link Super Admin and break-glass accounts too** on the connection
+(`link_admin_accounts`, read strictly — only an explicit `true` — and never
+published to the browser; offered in the editor for any connection below
+`verified`, `unverified` or `asserted`): every existing account then links
+by the linking policy. Once linked — by email, by the person, or through
+the opt-in — an account on such a connection can be signed into by anyone
+able to forge a reply naming its subject; that is what the rating says, and
+`verified` is the lasting fix. The admin card states
+each weak row's cause and fix (`assurance_explained`), and an admin who has
+read the warning can fold it on their own screen. Raising a connection to
+`verified`, step by step, and what changes when it is:
+[Running Single Sign-On → Getting a connection to Verified](/guide/sso-operations#getting-a-connection-to-verified).
 
-Off by default (§1.9). When on, the login page asks for an address first
-and routes it to the matching provider, instead of showing every configured
-IdP as a button — which is a coin flip once an org has three of them, and
-publishes the org's IdP topology to anyone who loads `/login`.
+### 1.14 The sign-in page: SSO first, routed by email
 
-The page's shape follows the posture; it is not a fixed layout with
-email-first bolted underneath. `GET /auth/login-context` returns the
-catalog and the two posture booleans in one call, and the page renders one
-of:
+The page leads with single sign-on whenever an enabled, published
+connection exists, and passwords are the deliberate fallback.
+`GET /auth/login-context` returns the catalog and the posture in one call,
+and the page renders one of:
 
 | Posture | Page |
 |---|---|
-| local + SSO, email-first off | password form, divider, full button row (the default — unchanged) |
-| local + SSO, email-first on | email field → routed provider as the primary action; password behind "use a password instead"; button row behind "other ways to sign in" |
-| SSO-only, email-first off | the button row alone — no password form, no divider, no "forgot password" |
-| SSO-only, email-first on | email field → routed provider; no password escape, because there is nothing to escape to |
-| local only | password form; no divider, no empty SSO section |
+| no connections (SSO off, or none live) | email and password on one step — unchanged |
+| connections, email-first off | the **primary** connection's button first, the others under it; then "or continue with email" — an address is routed on Enter (below); "Can't use single sign-on? Sign in with email and password" when passwords are on |
+| connections, email-first on | the email field first, the buttons behind "Other ways to sign in"; the same routing |
+| passwords off | no password affordance; break-glass at `/login?password=1`; during a confirmed outage an **Administrator sign-in** link (§1.17) |
+
+The identify step has no password field, so Enter never trips a browser's
+"please fill in this field" on a password nobody needs. The password step
+carries the email as a chip, a hidden `username` field and
+`autocomplete="current-password"`, so password managers fill it.
+
+**Routing an address**, account-agnostic by design:
+
+1. the connection whose **Email domains** list the address's domain, else
+2. the **primary** connection: the first one in login-page order
+   (`priority ASC, slug ASC`) that the page can route to — not the dev
+   `custom` kind, and not a portal that reads browser storage, else
+3. the password step when passwords are offered to everyone, or the
+   connection buttons with neutral "Choose how you sign in" copy. Never an
+   error.
+
+People who only have a password use the explicit password link. Nothing
+about the account decides where Enter goes, so routing is not an
+enumeration oracle.
 
 `login-context` **fails open**: a posture read that raises yields local
 login on and email-first off. That is the shape that always has a usable
 control on it — failing closed here would render a page nobody can sign in
-from.
+from. Besides `allowLocalLogin` (the password step is offered to everyone:
+the switch is on, or the emergency window is open) and `emailFirstLogin` it
+reports `passwordAccess` (`everyone` | `administrators` | `break_glass`),
+`ssoOutage {since, providers}` and `passwordFallbackUntil`.
 
 * Domains live on `idp_providers.email_domains` — plaintext JSON, no
   secrets, normalised on write (`@Corp.Example` and `corp.example` are one
@@ -441,15 +514,11 @@ from.
 * Matching is **exact**. `corp.example.com` does not resolve to a provider
   claiming `example.com`; routing someone to the wrong IdP is worse than
   not routing them at all.
-* `POST /auth/resolve` is deliberately **not an enumeration oracle**: a
-  miss from the feature being off, an unknown domain, a disabled provider,
-  or malformed input all return the same empty body. Rate limited like
-  `/login`, and CSRF-exempt because it is called before any session exists.
-* Additive: submitting an address that matches nothing says so on the
-  page ("We don't recognise that email's domain") and reveals the
-  password form and the full button row, so a wrong or missing domain
-  mapping cannot strand anyone. While typing, a miss stays silent — only
-  the submit speaks.
+* `POST /auth/resolve` answers whenever SSO is on, and is deliberately
+  **not an enumeration oracle**: a miss from SSO being off, an unknown
+  domain, a disabled provider, or malformed input all return the same
+  empty body. Rate limited like `/login`, and CSRF-exempt because it is
+  called before any session exists.
 
 ### 1.15 IdP health
 
@@ -462,11 +531,16 @@ The payload that matters is **certificate expiry**: an expired SAML signing
 cert takes every sign-in down at once, and the date was readable months
 ahead. Warned at 30 days. It must be computed server-side —
 `idp_x509_cert` is a secret field and is redacted on read, so the UI can
-never parse it itself. OIDC has no cert dates; there "health" means
-discovery/JWKS reachability.
+never parse it itself. OIDC has no cert dates; there "health" means the
+discovery document is reachable (the outage prober, §1.17, also fetches the
+signing keys). An Enterprise gateway is never called: its health is that
+the server's destinations are configured and allowlisted — the gateway
+(and exchange) URL in server mode; in browser mode, where the browser runs
+the exchange, only the JWKS URL if the row verifies against one.
 
-The loop is gated on `runs_scheduler()` so replicas do not duplicate it,
-and shuts down instantly via `wait_for(shutdown.wait(), timeout=...)`
+The loop runs in every process that serves the API, because the endpoint
+reads that process's own cache, and shuts down instantly via
+`wait_for(shutdown.wait(), timeout=...)`
 rather than sleeping through a deploy. Note this is deliberately **not** a
 frontend sweep: the mount-time fan-out pattern was removed from
 `useProviderHealthSweep` as a P0.4 regression, and repeating it for IdPs
@@ -488,6 +562,108 @@ typed from memory.
   `lastAssertionAt` so the UI can offer the button; the claims come from
   `GET /admin/idp-providers/{id}/last-assertion`. That is deliberate — it
   cannot leak by someone adding a field to the list response.
+
+### 1.17 IdP outage: automatic fallback and the emergency window
+
+Enforcing SSO must not turn an IdP outage into a platform outage. Three
+layers, from automatic to manual:
+
+**Detection** (`app/services/idp_reachability.py`). A prober in the
+scheduler role — the control plane, or a dev monolith — probes every
+enabled, published OIDC, SAML and Enterprise gateway connection each
+minute, one process at a time (an advisory lock per pass). OIDC: the
+discovery document **and** the signing keys, through the provider's own
+code. SAML: whether the IdP's single sign-on URL answers at all (any status
+below 500). Enterprise gateway in server mode: whether the gateway URL
+answers at all, by the same rule — asked with no session handle, a healthy
+gateway says 401 or 405 — through the back-channel allowlist and the row's
+TLS setting, exactly as sign-in and renewal reach it. Results land in
+`idp_provider_reachability`. A connection is **confirmed down** only when
+all of these hold:
+
+* the prober has **seen it working** before — a probe that can never
+  succeed from where it runs is not an outage;
+* it has failed continuously for **3 minutes**;
+* the evidence is **fresh** (a probe in the last 3 minutes). A stopped
+  prober confirms nothing, and a gap that long starts any run of failures
+  afresh.
+
+It is over after **5 minutes** of continuous health, so a flapping IdP does
+not bounce the sessions opened during it. Browser reports and failed SSO
+callbacks never count — anyone can produce those. A gateway whose exchange
+runs in the browser is called by browsers, not by the server, which cannot
+speak for their network path; portal and dev connections are handed a
+payload rather than fetching one. None of those is ever confirmed down; an
+admin covers their outages with the emergency window. A gateway destination
+outside the allowlist is "not probed", never "down". The confirmed set
+rides the posture snapshot (30 s cache), so sign-in and renewal pay no
+query for it, and a failed read of it means "no outage" rather than failing
+the posture read.
+
+**Who may use a password, by posture** (one rule, `password_access`, which
+the page renders and the server enforces):
+
+| | Passwords on | Passwords off | …and an outage confirmed | …and the emergency window open |
+|---|---|---|---|---|
+| Break-glass (system) account | yes | yes | yes | yes |
+| Super Admin with a password | yes | no | **yes** | yes |
+| Everyone else with a password | yes | no | no | **yes** |
+
+**The emergency window** opens password sign-in to everyone for 1–24
+hours: `POST /admin/sso/config/password-fallback {"hours", "reason"}`,
+`DELETE` to close it early. It closes itself, does not bump the config
+`version`, is refused while passwords are already on, and other servers
+pick it up within 30 seconds. The same `POST` while it is open **extends**
+it to `hours` from now — so an outage longer than a day is covered without
+it lapsing, and a person decides again at least daily — and is refused
+(409 `would_not_extend`) when that would end it sooner: `DELETE` does that.
+Who opened it stays on the record; the extension is audited with the
+deadline it replaced.
+
+**Sessions.** Signed-in SSO users keep working through an outage: past the
+24-hour re-authentication, a session whose own connection is confirmed down
+is renewed instead of being sent to an IdP that cannot answer — for at most
+one more ceiling period, measured from the server's record of when they
+authenticated, and every extension is logged. Idle (12 h) and absolute
+(7 d) limits still apply. Any re-authentication that would land on a down
+IdP goes to the sign-in page instead, which says so. A password session
+opened only because SSO was down (window or outage) carries a signed
+refresh claim, `pwfb`: it ends at its first renewal after its door closes,
+and within 24 hours regardless, back through single sign-on without forcing
+a fresh credential — a warm IdP session signs the person straight back in on
+the page they were on. Break-glass sessions are never marked.
+
+**Enterprise gateway sessions** keep their own outage rule, which this
+does not change: every renewal re-asks the gateway ([contract
+§3](/docs/sso-backchannel-contract#3-status-codes--the-part-that-matters-most)), and an
+unanswered re-check is tolerated for the connection's **outage grace**
+(`liveness_grace_seconds`, 15 minutes by default) from the last real
+answer; past it the session ends, as the integration contract promises
+gateway teams. To keep gateway users signed in through longer outages,
+raise the grace. What changes is where an ended session lands while the
+gateway is confirmed down: the sign-in page, with the notice and whatever
+password door is open — never the gateway's own login, which can only fail
+again. The page's automatic gateway sign-in and the app's in-place
+re-sign-in skip a connection confirmed down instead of waiting on it, and
+once the gateway is back the next renewal of an emergency password session
+signs the person back in through it in place.
+
+**Visibility.** The sign-in page announces the outage ("We can't reach …
+right now") and the window ("Password sign-in is open until …").
+Administration → SSO → Settings shows detection's last run (and says when
+it is not running), any outage, break-glass readiness and the window. Every
+transition and every password sign-in through one of these doors is
+audited (§1.12).
+
+**Residual risks, accepted and bounded.** Anyone able to make the IdP
+unreachable from the server can open the password door for Super Admins
+(hence administrators only, automatically; everyone needs a person to open
+it). A closed window keeps working on other servers for up to 30 seconds.
+Anyone who knows a break-glass address can run its per-account throttle
+down, as before; the host recovery script clears it. Deactivating or
+deleting the last break-glass account is not blocked — the Settings page
+flags it in red. During an outage the ride-through gives a user disabled at
+the IdP up to one more day of an existing session.
 
 ---
 
@@ -560,17 +736,23 @@ to restart uvicorn.
 K8s deployments via Helm do not need this step — the hook Job runs
 ahead of every `helm install/upgrade`.
 
+> **Note:** In the app, **Connect a provider** opens a wizard — **Provider**, **Connect**,
+> **Fields**, **Rehearse**, **Publish** — that asks which product you use (for example
+> **Microsoft Entra ID**) and sets the protocol from it. The JSON in these playbooks is what
+> it saves; a connection's **Advanced (JSON)** editor shows the same settings object. For a
+> click-by-click walkthrough, see [Single Sign-On](/guide/sso-setup).
+
 ### 2.1 Configure a new OIDC provider
 
-1. Admin → SSO → Providers → **Connect a provider**.
+1. Administration → SSO → Providers → **Connect a provider**.
 2. Fill in:
    * **Slug** — URL-safe identifier (e.g. `entra-staff`). Becomes
      `/api/v1/auth/entra-staff/login`.
    * **Display name** — shown on the login button (e.g. `Corporate
      Entra ID`).
-   * **Kind** — `oidc`.
-   * **Linking policy** — `strict` for most cases.
-   * **Settings (JSON)**:
+   * **Protocol** — `oidc`.
+   * **Account linking** — **Strict** (`strict`) for most cases.
+   * **Settings**, as JSON:
      ```json
      {
        "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
@@ -580,8 +762,8 @@ ahead of every `helm install/upgrade`.
        "scopes": "openid email profile"
      }
      ```
-   * **Claim mapping (JSON)** — empty `{}` to use defaults, or
-     override fields. Operators commonly add `extras`:
+   * **Claim mapping** — leave the defaults (`{}`), or override
+     fields. Operators commonly add `extras`:
      ```json
      {
        "groups": ["wids"],
@@ -591,19 +773,19 @@ ahead of every `helm install/upgrade`.
        }
      }
      ```
-3. Register the redirect URI at the IdP. Use the claim-mapping
-   editor's **Preview** button (POST `/admin/idp-providers/{id}/test`)
-   to paste a sample id_token claims blob and confirm the mapping
-   resolves to the expected `ProviderIdentity` (incl. `attributes`).
-   Preview needs a saved row, so create the provider first, then reopen
-   it with the row's edit (pencil) action.
+3. Register the redirect URI at the IdP. In **Claim mapping**, paste a
+   sample id_token claims blob: the live preview shows the
+   `ProviderIdentity` the mapping resolves to (incl. `attributes`). It
+   runs as you type, before the connection is saved; for a saved one it
+   uses `POST /admin/idp-providers/{id}/test`.
 4. Rehearse a sign-in, then **Publish**. A new connection is created as a
    draft and is invisible to every login surface until published; after
    that the login page picks it up within 60 s (registry TTL).
 
 ### 2.2 Configure a new SAML provider
 
-1. Same flow as OIDC, with kind `saml2`.
+1. Same flow as OIDC, with protocol `saml2` (the **AD FS** and **Other SAML 2.0
+   provider** products set it).
 2. Settings JSON:
    ```json
    {
@@ -620,8 +802,8 @@ ahead of every `helm install/upgrade`.
    ```
 3. Hand the SP metadata XML to the IdP team:
    `GET /api/v1/auth/okta-prod/metadata` returns it.
-4. Smoke test with `/admin/idp-providers/{id}/test` (paste a SAML
-   attribute statement as the `claims` blob).
+4. Check the mapping by pasting a SAML attribute statement as the sample
+   in **Claim mapping**; the live preview resolves it.
 
 ### 2.2.1 Configure a custom profile provider (cookie / storage / header)
 
@@ -639,9 +821,9 @@ mapping is configured in the admin UI rather than in code.
 > `trusted_proxy_acknowledged`) each require an explicit toggle in the
 > admin UI and emit their own audit event on every login.
 
-1. Admin → SSO → Providers → **Connect a provider**, kind
-   `Custom profile (cookie / browser storage / header)`.
-2. Pick the **source**:
+1. Administration → SSO → Providers → **Connect a provider**, and pick
+   **Corporate portal** (protocol `custom_profile`).
+2. Pick the **Source**:
 
    | Source | Read by | Login flow |
    |---|---|---|
@@ -652,7 +834,8 @@ mapping is configured in the admin UI rather than in code.
 
    One source per row. Multiple rows of this kind are fine — run a
    cookie provider and a storage provider side by side if you need to.
-3. Set **source key** — the cookie name, storage key, or header name.
+3. Set the key it is read from — **Cookie name**, **Storage key** or
+   **Header name**, depending on the source.
 4. Settings, for the signed (recommended) case:
    ```json
    {
@@ -674,17 +857,17 @@ mapping is configured in the admin UI rather than in code.
      JSON, since a raw JSON blob isn't a legal cookie value.
    * `signing_alg: "RS256"` swaps `shared_secret` for `public_key` (PEM).
    * `issuer` / `audience` are enforced only when set.
-5. Map the fields. The **Profile field mapping** editor lists our fields
+5. Map the fields. **Claim mapping** lists our fields
    against ordered candidate keys — first non-empty wins. Defaults
    already cover the common casings (`firstName` / `first_name` /
    `givenName`, `emailAddress` / `mail` / `upn`, `fullName` split into
    first + last), so most portals need no override. For a storage
    source, **Read from my browser** pulls the real object out of your own
-   browser so you can map against it; **Preview** resolves it through
-   the mapping server-side and shows the resulting profile.
+   browser so you can map against it, and the live preview resolves it
+   through the mapping server-side and shows the resulting profile.
 6. Anything else worth keeping (department, employee ID) goes under
    **Extra attributes** — those land in `users.metadata_.attributes` and
-   the indexed `user_external_attributes` table, so Admin → SSO →
+   the indexed `user_external_attributes` table, so Administration → SSO →
    Diagnostics can search on them.
 7. Rehearse a sign-in, then **Publish**. Until it is published the
    connection is a draft and no login page shows it; after publishing,
@@ -702,20 +885,23 @@ including an administrator, network isolation notwithstanding. Every such
 login is audited as `user.sso_unsigned_accepted`.
 
 **Proxy headers.** `source: "header"` requires
-`trusted_proxy_acknowledged: true`. Only tick it once you have confirmed
+`trusted_proxy_acknowledged: true` (**Trust proxy headers**). Only tick it once you have confirmed
 your proxy strips the header from inbound requests before setting its
 own — otherwise a request can name any user it likes. Audited as
 `user.sso_header_accepted`.
 
 ### 2.3 Set up IdP group → role mapping
 
-Admin → SSO → Access mapping → **Create mapping**.
+Administration → SSO → **Access mapping**: build the rule under **New rule**,
+then choose **Create rule**. The fields, as the API names them:
 
 * **Role-binding target** — "Everyone in the IdP group
-  `DataViz-Admins` gets `super_admin` globally":
+  `DataViz-Admins` who signs in through the `entra-staff` connection
+  gets `org_admin` globally":
+  * `providerId`: the `entra-staff` connection's id
   * `idpGroup`: `DataViz-Admins`
   * `targetType`: `role_binding`
-  * `roleName`: `super_admin`
+  * `roleName`: `org_admin`
   * `scopeType`: `global`
 * **Group-membership target** — "Everyone in the IdP group
   `engineering` joins the internal `Engineers` group":
@@ -724,43 +910,56 @@ Admin → SSO → Access mapping → **Create mapping**.
   * `targetGroupId`: `grp_xxxxxxxxxx`
 
 Mapping takes effect on the next SSO login OR the next `/refresh`
-(within ~5 min) for sessions already in flight.
+(within one access-token lifetime) for sessions already in flight.
 
-> **Warning:** An IdP-group mapping that grants a **global admin** role (`super_admin`
-> or `org_admin`) hands platform-wide power to whoever your IdP puts in that group.
-> Validation refuses `roleName: system:admin` outright (a forbidden auto-role — that is
-> a *permission*, not a bindable role), and `role_is_bindable_in_scope` must pass, but a
-> valid `super_admin` binding is exactly as powerful as it sounds. Prefer mapping to
-> `group_membership` and managing privileged membership internally. Role names come from
-> the [RBAC taxonomy](/docs/rbac).
+> **Warning:** An IdP-group mapping that grants a **global admin** role hands
+> platform-wide power to whoever your IdP puts in that group. `super_admin` can never be
+> granted this way: validation refuses it, as it refuses `system:admin` sent as a role
+> name. `org_admin` can be mapped only for one specific provider whose assurance is
+> `verified` (§1.13). Every mapping must also pass `role_is_bindable_in_scope`. A valid `org_admin`
+> mapping is exactly as powerful as it sounds: prefer mapping to `group_membership` and
+> managing privileged membership internally. Role names come from the
+> [RBAC taxonomy](/docs/rbac).
 
 ### 2.4 Disable local login (SSO-only mode)
 
-> **Caution:** This is a lockout-class change. The API refuses it (HTTP 409) if any
-> active admin lacks an SSO identity, and refuses `sso_enabled=false` +
-> `allow_local_login=false` together (no way left to log in) — but you still want an
-> SSO login verified end-to-end **before** you flip it.
+> **Caution:** This is a lockout-class change. The API refuses it (HTTP 409) until a
+> break-glass account is ready, warns before it strands a Super Admin who has no SSO
+> identity, and refuses `sso_enabled=false` + `allow_local_login=false` together (no
+> way left to log in) — but you still want an SSO login verified end-to-end **before**
+> you flip it.
 
-Pre-flight: every admin must have at least one linked SSO identity.
-Check via `Admin → SSO → Diagnostics` and confirm each admin has a
-`Linked identities` row, OR have them go to `/me/identities` and
-click **Link** for an IdP.
+Pre-flight:
 
-Admin → SSO → Settings → toggle **Allow local login** OFF →
-confirm. If any admin lacks an SSO identity the API returns 409
-with the offending list and the toggle reverts; fix them first
-and retry.
+1. **A ready break-glass account.** An operational Super Admin with a
+   password, marked as a system account (Administration → Users → **Mark as
+   system account**, or on the host
+   `python -m backend.scripts.reset_admin_password --email … --break-glass`).
+   Administration → SSO → Settings → **Break-glass accounts** shows whether
+   one is ready. Without one the switch is refused: it is the way in when
+   the identity provider is down.
+2. **Every other Super Admin linked.** Look each one up in Administration →
+   SSO → **Diagnostics** and confirm their **Ways in** lists an SSO
+   identity, OR have them go to `/me/identities` and click **Link** for an
+   IdP.
+
+Administration → SSO → Settings → turn **Passwords** off → confirm. If any
+administrator (Super Admin or org admin) still has no SSO identity, the
+confirm lists them, with their role, each with
+**Make break-glass**, and **Turn off anyway** proceeds — they keep their
+accounts and sign in through a connection, linking by email on the first
+sign-in where the connection's linking policy allows it.
 
 ### 2.5 Master kill-switch
 
-Admin → SSO → Settings → toggle **SSO enabled** OFF. The login page
+Administration → SSO → Settings → turn **Single sign-on** off. The login page
 will only show the password form; SSO routes 404. Per-provider
 `enabled` rows are unchanged; flipping the master toggle back on
 restores everything.
 
 ### 2.6 Block JIT provisioning
 
-Admin → SSO → Settings → toggle **Allow JIT provisioning** OFF. New
+Administration → SSO → Settings → turn **Create accounts automatically** off. New
 IdP subjects whose email doesn't match an existing user get
 `jit_disabled` (audited as `user.sso_jit_blocked`). Existing users
 keep working — admins must pre-create / invite new users before
@@ -768,13 +967,13 @@ they can SSO in.
 
 ### 2.7 Find a user
 
-Admin → SSO → Diagnostics. Three modes:
+Administration → SSO → Diagnostics → **Find a person**. Three searches:
 
-* **Free-text** — type any of email, name, external_id, or attribute
+* **Anything** — type any of email, name, external_id, or attribute
   value. Fan-out across all four; results show which dimension
   matched.
-* **Find by email** — exact match on `users.email`.
-* **Find by claim attribute** — type `staff_id` + the value;
+* **Email** — exact match on `users.email`.
+* **Claim attribute** — type `staff_id` + the value;
   uses the `(key, value)` composite index. Returns 409 if the value
   matches more than one user (operator narrows with a provider
   filter or uses fan-out instead).
@@ -806,7 +1005,7 @@ row in the admin UI, set the env vars, restart.
 
 ### 2.10 Onboard a provider by discovery (instead of typing 15 fields)
 
-Admin → SSO → Providers → **Connect a provider** → paste one of:
+Administration → SSO → Providers → **Connect a provider** → paste one of:
 
 * an **OIDC issuer URL** — the `.well-known/openid-configuration` is
   fetched and `authorization_endpoint` / `token_endpoint` / `jwks_uri` /
@@ -829,7 +1028,7 @@ actually breaks in production — redirect URI registered at the IdP,
 signature verifies, clock skew, certificate still valid — is what this
 covers.
 
-1. Admin → SSO → Providers → the flask icon on the provider row.
+1. Administration → SSO → Providers → the flask icon (**Rehearse sign-in**) on the provider row.
 2. A new tab opens the real IdP login. **Sign in with your own account.**
 3. The callback reports what *would* have happened: which branch fires
    (`provision_new` / `sign_in_existing` / `link_existing` / `rejected`),
@@ -859,7 +1058,7 @@ Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
 reason is deliberately withheld from that page — it is admin-only by
 construction and lives in the audit log instead.
 
-Admin → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
+Administration → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
 the **Activity** tab with the ref searched (`GET /api/v1/admin/sso/activity`). The
 `user.sso_login_failed` event carries the provider, the precise reason
 (`state_mismatch`, `token_or_idtoken`, `saml_validate`,
@@ -869,32 +1068,77 @@ to know (`email`, `user_id`, `external_id`) and where it came from
 (`client_ip`, `user_agent`, `path`). Open the row to read them.
 
 The same tab's **Sign-in problems** list groups these per person
-(`GET /api/v1/admin/sso/failures`); see *When a sign-in fails* in
-`docs/guide/SSO_OPERATIONS.md`.
+(`GET /api/v1/admin/sso/failures`); see [Running Single Sign-On](/guide/sso-operations).
 
-The tab needs `system:audit:read` in addition to `system:admin` — the two
-do not imply each other.
+The tab's data needs `system:audit:read`, and opening the SSO page at all
+needs `system:admin`; `super_admin` holds both, since `system:admin` passes
+every check.
 
 ### 2.13 Map claims against what the IdP actually sent
 
-In the claim-mapping editor, **Load last assertion** pulls the most recent
+In **Claim mapping**, **Use last real assertion** pulls the most recent
 claims blob this provider sent (§1.16) into the sample box, then the live
 preview shows exactly what the current mapping would produce from it. This
 beats pasting a sample from the IdP's documentation, which is where most
 mapping bugs come from.
 
-The button 404s with an explanation until one has been captured — it is
-recorded on the next successful sign-in through that provider.
+Until one has been captured, the button explains that there is nothing to
+load yet — one is recorded on the next successful sign-in through that provider.
 
 ### 2.14 Turn on email-first login
 
 1. Set each provider's **Email domains** (comma or space separated) in the
-   provider form. Do this **first**.
-2. Admin → SSO → Settings → **Email-first sign-in**.
+   connection's **Login page** section. With one connection this is
+   optional: an address that matches no domain goes to the primary
+   connection anyway.
+2. Administration → SSO → Settings → turn on **Ask for an email first**.
 
-An address that matches nothing falls back to the password form and the
-button row, so nobody is stranded by a domain you missed. To reverse it,
-flip the switch off; the login page returns to exactly what it was.
+An address that matches nothing goes to the primary connection — the first
+in login-page order (**Priority**, lowest first), marked **Primary** in the
+providers list — so nobody is stranded by a domain you missed. To reverse
+it, flip the switch off; the connection buttons come back.
+
+### 2.15 When the identity provider is down
+
+What happens by itself, once the prober has seen the connection fail for
+three minutes (§1.17):
+
+* the sign-in page says the connection cannot be reached;
+* Super Admins with a password can sign in with it, through
+  **Administrator sign-in**, and break-glass accounts always could;
+* people already signed in through that connection keep working past
+  their daily re-authentication, for up to a day more — through an
+  Enterprise gateway, for the connection's outage grace (15 minutes by
+  default; raise it to ride out longer outages), after which they land
+  on the sign-in page with the notice rather than on the gateway.
+
+What an administrator does:
+
+1. Sign in — as a Super Admin with a password during the outage, or as
+   the break-glass account at `/login?password=1`.
+2. Administration → SSO → Settings → **Single sign-on status** confirms
+   which connection is down and since when.
+3. If people need to work, **Emergency password access** → choose how long
+   (1–24 hours) → **Open for everyone**. Anyone with a password can now use
+   it; the sign-in page says until when. Still down when it is due to
+   close? **Extend** it, before it lapses, for up to 24 hours from now.
+   Close it early with **Close now** once the IdP is back — sessions opened
+   through it then go back through single sign-on at their next renewal.
+
+If the outage cannot be detected — a portal connection, a gateway whose
+exchange runs in the browser, or an IdP that answers the server but not
+your users — step 3 works the same without it.
+
+**Nobody can sign in at all** (no break-glass account ready, every admin
+SSO-only): on the host, set a password on an administrator and make it a
+break-glass account in one command, then sign in at `/login?password=1`:
+
+```bash
+python -m backend.scripts.reset_admin_password --email you@example.com --break-glass
+```
+
+It also clears that account's failed sign-in count and signs its existing
+sessions out.
 
 ---
 
@@ -903,7 +1147,7 @@ flip the switch off; the login page returns to exactly what it was.
 ### 3.1 Test suites (cheap, deterministic)
 
 ```bash
-# Auth/SSO suite — 96 tests
+# Auth/SSO suite
 JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_sso_phase2.py \
   backend/tests/test_sso_phase3.py \
@@ -921,7 +1165,7 @@ JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_sso_dry_run.py
 ```
 
-Expected: 233 passing.
+Expected: every test passes.
 
 ```bash
 # Frontend: session cache, the claim mapper UI, and the silent
@@ -964,15 +1208,15 @@ export JWT_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(4
 3. Visit `/me/identities` → see the linked identity from
    `default-custom`.
 4. Visit `/admin/sso` → Providers tab shows `default-custom`;
-   Settings tab shows all three toggles ON; Find user finds the
-   mock user.
-5. Toggle **Allow local login** OFF in Settings → confirm.
+   Settings tab shows **Single sign-on**, **Passwords** and **Create
+   accounts automatically** on; Diagnostics finds the mock user.
+5. Turn **Passwords** off in Settings → confirm.
 6. Log out → try password login → 403 `local_login_disabled`. Try
    Dev Login again → succeeds.
-7. Toggle **Allow JIT provisioning** OFF → log out → Dev Login with
+7. Turn **Create accounts automatically** off → log out → Dev Login with
    a brand-new external_id + email → `/login?sso_error=1`. Logs
    show `user.sso_jit_blocked`.
-8. Toggle everything back ON.
+8. Turn everything back on.
 
 ### 3.4 Review checklist
 
@@ -1015,8 +1259,8 @@ we go beyond the typical pattern:
   every IdP rename. Group-membership mapping decouples IdP-side
   and internal group management.
 * **Continuous reconciliation on /refresh** — many platforms only
-  reconcile on login. Admin mapping changes propagate within ~5 min
-  here.
+  reconcile on login. Admin mapping changes propagate within one
+  access-token lifetime here.
 * **Multi-identity per user with last-authenticator invariant** —
   most platforms lock you to one IdP per account. Ours stacks
   arbitrarily, with a server-side guarantee the unlink path can't
@@ -1091,9 +1335,11 @@ backend/app/db/
     idp_provider_repo.py     # Fernet-encrypted CRUD + redaction
     idp_group_mapping_repo.py# role_binding + group_membership targets + validation
     app_auth_config_repo.py  # singleton CRUD with optimistic version bump
-  services/
-    permission_service.py    # reconcile_sso_targets (both target types)
-    idp_health.py            # background probe loop -> app.state.idp_health_cache
+
+backend/app/services/
+  permission_service.py      # reconcile_sso_targets (both target types)
+  idp_health.py              # background probe loop -> app.state.idp_health_cache
+  idp_reachability.py        # outage prober -> idp_provider_reachability (§1.17)
 
 backend/app/api/v1/endpoints/
   admin_idp_providers.py   # CRUD + /test mapping preview + /discover + /status
@@ -1117,6 +1363,8 @@ backend/alembic/versions/
   20260725_1200_custom_profile.py                 # custom_profile kind
   20260725_1400_sso_hrd_assertion.py              # email_domains + last_assertion
                                                   #  + email_first_login
+  20261014_1000_sso_fallback.py                   # emergency window +
+                                                  #  idp_provider_reachability
 
 frontend/src/
   store/auth.ts                  # auth store (Zustand)
@@ -1127,9 +1375,23 @@ frontend/src/
   pages/MyIdentitiesPage.tsx     # /me/identities
   pages/DevLogin.tsx             # /dev-login (custom IdP)
   pages/PortalLogin.tsx          # /portal-login (custom_profile web storage)
-  components/admin/AdminSso.tsx  # Providers / Mappings / Settings / Find user tabs
-  components/admin/ProviderForm.tsx      # create + edit, kind-aware settings
-  components/admin/ClaimMappingEditor.tsx # visual field mapper + live preview
-  components/auth/LoginPage.tsx  # dynamic SSO buttons + collision modal
-                                 # + one-shot silent custom_profile sign-in
+  components/admin/AdminSso.tsx  # Providers / Access mapping / Diagnostics / Activity / Settings tabs
+  components/admin/sso/IdpConnectionWizard/  # connect a provider (Provider -> Publish)
+  components/admin/sso/ProviderEditorDrawer/ # edit a connection, section by section
+  components/admin/sso/settings/             # kind-aware settings forms + Advanced (JSON)
+  components/admin/sso/ClaimMappingStudio/   # visual field mapper + live preview
+  components/auth/LoginPage.tsx  # SSO-first sign-in, password step, outage notice
+                                 # + collision modal + silent sign-in
+  components/auth/loginShape.ts  # primary connection, routing, password audience
 ```
+
+## Where to next
+
+* [Single Sign-On](/guide/sso-setup) — when you want the click-by-click setup of a
+  connection in the app.
+* [SSO Integration Guide](/docs/sso-integration) — when you need to extend, test or debug
+  the sign-in surface.
+* [Security Overview](/docs/security-overview) — when you want SSO in the context of
+  every other security control.
+* [Multi-Environment Sessions](/docs/multi-environment-sessions) — when more than one
+  environment can be open in the same browser.

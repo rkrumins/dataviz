@@ -40,8 +40,11 @@ async function checkedFetch(
         // so authService / ssoAdminService / future services can't
         // silently drift.
         const detail = extractErrorMessageFromText(text, res.statusText)
-        if (res.status === 401) throw new Error('Session expired')
-        throw new Error(detail)
+        // The status rides on the error (``httpStatusOf``), so a caller can
+        // tell a refusal from a server that failed: a job poll gives up at
+        // once on a 4xx, and asks again through a 502.
+        if (res.status === 401) throw Object.assign(new Error('Session expired'), { status: 401 })
+        throw Object.assign(new Error(detail), { status: res.status })
     }
     return res
 }

@@ -14,9 +14,10 @@ Nothing reads past the analytics windows (365 days is the hard ceiling on both
 the ``days`` query param and a custom range), so rows older than the retention
 horizon cost storage and vacuum pressure and buy nothing back.
 
-Runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler`` gate the
-outbox relay and the refresh-token sweeper use. Three web replicas each
-sweeping the same table would only contend for the same rows.
+Runs on the aggregation control plane, and on a dev-role monolith through the
+``runs_scheduler`` gate the outbox relay and the refresh-token sweeper share.
+Each batch takes an advisory lock first (``db/advisory.py``), so control-plane
+replicas take turns rather than contending for the same rows.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories.product_event_repo import purge_older_than
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,8 @@ async def run_sweeper(
         try:
             while not shutdown.is_set():
                 async with session_factory() as session:
+                    if not await claim_this_pass(session, "analytics:product-event-gc"):
+                        break  # another process is sweeping
                     deleted = await sweep_once(session, days=days)
                 if deleted:
                     logger.info(

@@ -47,10 +47,10 @@ services:
   #     pytest backend/tests/integration/test_versioning_falkor_live.py -v -m integration
   #
   # Where image pulls are blocked, run FalkorDB by loading the released module
-  # into a redis-server 8.0+ (the module requires redis 8):
+  # into a redis-server 8.0+ (the module requires redis 8). FALKORDB_MODULE_URL
+  # is FalkorDB's v4.18.8 `falkordb-x64.so` release asset, or your mirror of it:
   #
-  #     curl -sSL -o /tmp/falkordb.so \
-  #       https://github.com/FalkorDB/FalkorDB/releases/download/v4.18.8/falkordb-x64.so
+  #     curl -sSL -o /tmp/falkordb.so "$FALKORDB_MODULE_URL"
   #     chmod +x /tmp/falkordb.so
   #     redis-server --port 6379 --loadmodule /tmp/falkordb.so
   falkordb:

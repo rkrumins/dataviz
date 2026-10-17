@@ -15,8 +15,10 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
+import { withReason, type ActivityOpts } from './activityReason'
 
 // ============================================
 // Wire types (match the backend `_ApiModel` aliases — camelCase)
@@ -548,6 +550,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
       d.suggestion ?? null,
     )
   }
+  if (status === 409 && (d?.type === 'stale_decision' || d?.type === 'not_awaiting_decision')) {
+    return new BootstrapDecisionError(d.type, d.message)
+  }
   if (status === 401) return new Error('Session expired')
   const msg =
     typeof detail === 'string'
@@ -647,9 +652,12 @@ export interface BootstrapResult {
   alreadyEnabled?: boolean
 }
 
-export type BootstrapJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+/** `needs_decision`: paused before copying anything, because the source uses some identifiers
+ *  more than once (see {@link BootstrapDuplicates}); it waits for a manager to decide. */
+export type BootstrapJobStatus = 'pending' | 'running' | 'needs_decision' | 'completed' | 'failed' | 'cancelled'
 export type BootstrapPhase =
-  | 'counting' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
+  | 'reset' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle'
+  | 'finalize' | 'backfill'
 
 /** One integrity check from the job's report — rendered verbatim in the report card. */
 export interface BootstrapCheck {
@@ -686,6 +694,95 @@ export interface BootstrapJob {
   updatedAt?: string | null
   error?: string | null
   report?: BootstrapReport | null
+  /** What it copies from: the data source's graph, or (a seed) a view package. */
+  origin?: 'graph' | 'package'
+  /** Waiting its turn: how many enablement jobs are ahead of it; else null. */
+  queuedAhead?: number | null
+  /** Each time a server takes the job up is one attempt: past the first, it resumed where an
+   *  earlier one stopped. */
+  attempt?: number
+  /** Running, but its server stopped answering: another one is about to take it over. */
+  stale?: boolean
+  /** A failed job: why, and what can be done about it. */
+  failure?: JobFailure | null
+  /** Identifiers the source uses more than once, found before anything is copied; null if none. */
+  duplicates?: BootstrapDuplicates | null
+  /** What the copy turned away: duplicates that appeared after the check, and connections whose
+   *  ends are missing. */
+  rejected?: { duplicateUrns: number; danglingEdges: number; samples: Array<Record<string, unknown>> } | null
+  /** What collapsing the duplicates removed: the extra copies (by type), and the connections that
+   *  only joined two copies of one item. */
+  collapsed?: { nodes: number; byLabel: Record<string, number>; selfLoops: number } | null
+  /** Connections whose id was already an item's, so they were given a new one. */
+  rekeyedEdges?: number
+  /** Set once duplicate copies may have been removed from the source graph — kept through a
+   *  restart, since nothing puts them back. */
+  sourceCollapse?: { moved: number; deleted: number } | null
+}
+
+/** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)
+ *  only fails the same way again unless it is restarted; an `infrastructure` one resumes where it
+ *  stopped; an `internal` one is a bug, which no action fixes. */
+export interface JobFailure {
+  code: 'integrity' | 'infrastructure' | 'internal'
+  action: 'restart' | 'resume' | null
+  phase?: string | null
+  reason?: string | null
+}
+
+/** One copy of a duplicated identifier. `internalId` is the source graph's own id for the item
+ *  (the tie-break); `kept` marks the copy that collapsing keeps. */
+export interface BootstrapDuplicateCopy {
+  urn: string
+  label: string | null
+  internalId: number
+  lastSyncedAt: string | null
+  kept: boolean
+}
+
+/** The duplicate identifiers the pre-flight found. Collapsing keeps one copy of each (`rule`: the
+ *  latest `lastSyncedAt`, then the lowest internal id). `fingerprint` names exactly this list: a
+ *  decision carries it, so it can only ever apply to the list the manager was shown. */
+export interface BootstrapDuplicates {
+  identifiers: number
+  extraCopies: number
+  /** Of `identifiers`: those whose copies all share one type, and those whose copies differ. */
+  sameType: number
+  crossType: number
+  rule: string
+  fingerprint: string
+  detectedAt: string
+  /** At most 20 copies; the whole list is {@link getBootstrapDuplicates}, or the CSV. */
+  sample: BootstrapDuplicateCopy[]
+  decision: { policy: 'collapse'; fingerprint: string; decidedBy: string; decidedAt: string } | null
+  /** Other data sources reading the same physical graph: collapsing changes it for them too.
+   *  Named only within this workspace; those in other workspaces are only counted. */
+  sharedWith: Array<{ dataSourceId: string; name: string }>
+  sharedWithOtherWorkspaces: number
+}
+
+/** A row of the whole duplicate list: `copy` is its rank among its identifier's copies (1 = kept). */
+export interface BootstrapDuplicateRow {
+  urn: string
+  copy: number
+  kept: boolean
+  label: string | null
+  internalId: number
+  lastSyncedAt: string | null
+}
+
+/** The server would not take a duplicates decision: the list changed since it was shown
+ *  (`stale_decision` — review it again), or the job is no longer waiting for one
+ *  (`not_awaiting_decision` — someone else decided, or it was restarted). */
+export class BootstrapDecisionError extends Error {
+  readonly type: 'stale_decision' | 'not_awaiting_decision'
+  constructor(type: 'stale_decision' | 'not_awaiting_decision', message?: string) {
+    super(message || (type === 'stale_decision'
+      ? 'The list of duplicates changed — review it again.'
+      : 'This copy is no longer waiting for a decision.'))
+    this.name = 'BootstrapDecisionError'
+    this.type = type
+  }
 }
 
 /**
@@ -694,10 +791,10 @@ export interface BootstrapJob {
  * resumable windows (a large graph can't be paged into one request), so callers poll
  * {@link getBootstrapStatus}. An already-versioned source returns `alreadyEnabled`.
  */
-export function bootstrapGraph(wsId: string, dataSourceId: string): Promise<BootstrapResult> {
+export function bootstrapGraph(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<BootstrapResult> {
   return vfetch<BootstrapResult>(
     `/api/v1/${wsId}/graph/bootstrap?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
   )
 }
 
@@ -710,21 +807,48 @@ export function getBootstrapStatus(wsId: string, dataSourceId: string): Promise<
 
 /** `resume` continues from the last completed window; `restart` re-reads the source. */
 export function retryBootstrap(
-  wsId: string, dataSourceId: string, mode: 'resume' | 'restart' = 'resume',
+  wsId: string, dataSourceId: string, mode: 'resume' | 'restart' = 'resume', opts?: ActivityOpts,
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/retry?dataSourceId=${encodeURIComponent(dataSourceId)}&mode=${mode}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
   )
 }
 
 /** Give up: everything the job imported is removed and the source reads as before. */
 export function abandonBootstrap(
-  wsId: string, dataSourceId: string,
+  wsId: string, dataSourceId: string, opts?: ActivityOpts,
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/abandon?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
+  )
+}
+
+/** A page (≤500 rows) of the whole duplicate list; pass `next` back as `after` (404 → none found). */
+export function getBootstrapDuplicates(
+  wsId: string, dataSourceId: string, opts: { after?: string | null; limit?: number } = {},
+): Promise<{ items: BootstrapDuplicateRow[]; next: string | null }> {
+  const q = new URLSearchParams({ dataSourceId })
+  if (opts.after) q.set('after', opts.after)
+  if (opts.limit) q.set('limit', String(opts.limit))
+  return vfetch(`/api/v1/${wsId}/graph/bootstrap/duplicates?${q}`)
+}
+
+/** The whole duplicate list as a CSV download (the browser sends the session cookie). */
+export function bootstrapDuplicatesCsvUrl(wsId: string, dataSourceId: string): string {
+  return `/api/v1/${wsId}/graph/bootstrap/duplicates?${new URLSearchParams({ dataSourceId, format: 'csv' })}`
+}
+
+/** Collapse the duplicates and let the copy carry on. `fingerprint` is the list's as it was shown:
+ *  if the source has changed since, the server refuses ({@link BootstrapDecisionError}) rather than
+ *  apply the decision to a list nobody reviewed. Repeating a recorded decision is harmless. */
+export function decideBootstrapDuplicates(
+  wsId: string, dataSourceId: string, { fingerprint }: { fingerprint: string }, opts?: ActivityOpts,
+): Promise<BootstrapJob> {
+  return vfetch<BootstrapJob>(
+    `/api/v1/${wsId}/graph/bootstrap/decision?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    withReason(jsonBody({ action: 'collapse', fingerprint }), opts?.reason),
   )
 }
 
@@ -1196,30 +1320,21 @@ interface PublishJob {
   error: { status: number; detail: RefusalDetail } | null
 }
 
-/** How often a queued publish is asked about, and for how long it may go unanswered (tests shorten
- *  both). */
-export const PUBLISH_JOB_POLL = { ms: 2000, patienceMs: 120_000 }
+/** How long a queued publish may go unanswered before the publish gives up (tests shorten it). */
+export const PUBLISH_JOB_POLL = { patienceMs: 120_000 }
 
 /** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
- *  refused job raises the error the request would have raised. A failed poll (a network blip, a web
- *  pod restarting) doesn't stop the job, so it is asked again until it goes unanswered too long. */
+ *  refused job raises the error the request would have raised. Followed like every job
+ *  (`pollJob`): a failed poll (a network blip, a web pod restarting) doesn't stop the job, so it is
+ *  asked again until it goes unanswered too long. */
 async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
   if (!('jobId' in answer)) return answer
-  let answeredAt = Date.now()
-  for (;;) {
-    let job: PublishJob | null = null
-    try {
-      job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
-      answeredAt = Date.now()
-    } catch (err) {
-      if (Date.now() - answeredAt >= PUBLISH_JOB_POLL.patienceMs) throw err
-    }
-    if (job?.status === 'completed' && job.commitId) return { commitId: job.commitId }
-    if (job?.status === 'failed' || job?.status === 'cancelled') {
-      throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
-    }
-    await new Promise((resolve) => setTimeout(resolve, PUBLISH_JOB_POLL.ms))
-  }
+  const job = await pollJob(
+    () => vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`),
+    { patienceMs: PUBLISH_JOB_POLL.patienceMs },
+  )
+  if (job.status === 'completed' && job.commitId) return { commitId: job.commitId }
+  throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
 }
 
 // ============================================

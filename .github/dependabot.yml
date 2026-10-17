@@ -5,7 +5,7 @@
 # (Settings -> Code security), Dependabot also opens CVE-fix PRs off this
 # same config, immediately and regardless of the schedule below.
 #
-# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Docs: Dependabot's "configuration options for the dependabot.yml file" reference.
 version: 2
 updates:
   # ── Python (pip) ──────────────────────────────────────────────────

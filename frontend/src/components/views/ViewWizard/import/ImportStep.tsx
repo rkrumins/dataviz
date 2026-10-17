@@ -19,10 +19,10 @@ import {
 import { cn } from '@/lib/utils'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { getView, listViews, type View } from '@/services/viewApiService'
-import type { IdentityMatch } from '@/services/viewTransferApiService'
+import type { IdentityMatch, PackageProgress } from '@/services/viewTransferApiService'
 import { BundleDropzone } from '@/features/view-transfer/BundleDropzone'
 import { BundleSummaryCard } from '@/features/view-transfer/BundleSummaryCard'
-import { pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
+import { fileSize, pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
 import { useImportSession, type ImportTargetView } from './importSession'
 import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 
@@ -55,6 +55,7 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
             fileName={session.fileName}
             size={session.fileSize}
             busy={session.inspecting}
+            progress={readingProgress(session.inspectProgress)}
             error={session.inspectError?.message ?? null}
             integrity={integrity}
             environment={environment}
@@ -118,6 +119,14 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
       </div>
     </div>
   )
+}
+
+/** A package being read: how much of it is up, then that it is checked. */
+function readingProgress(progress: PackageProgress | null): { label: string; percent: number | null } | null {
+  if (!progress) return null
+  if (progress.stage === 'check') return { label: 'Checking the package…', percent: progress.progress }
+  const percent = progress.total ? Math.floor((100 * progress.sent) / progress.total) : 0
+  return { label: `Uploading… ${percent}% of ${fileSize(progress.total)}`, percent }
 }
 
 function HowItWorks({ withData }: { withData: boolean }) {

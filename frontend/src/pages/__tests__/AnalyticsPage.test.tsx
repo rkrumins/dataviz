@@ -50,6 +50,8 @@ vi.mock('@/services/analyticsService', async (importOriginal) => {
             getSummary: vi.fn(),
             listWorkspaces: vi.fn(),
             getWorkspace: vi.fn(),
+            getData: vi.fn(),
+            getUsage: vi.fn(),
         },
     }
 })
@@ -177,6 +179,89 @@ const DETAIL = {
     graph: { nodes: 10, edges: 20, entityTypes: 3, sourcesWithStats: 1 },
 }
 
+/** The Data tab's document: history that starts inside the window, one
+ *  source the reader cannot see, version control readable. */
+const DATA = {
+    windowDays: 30, generatedAt: SUMMARY.generatedAt, range: SUMMARY.range, bucket: 'day' as const,
+    coverage: { entitiesSince: '2026-06-14', jobsKeptDays: 90 },
+    growth: {
+        buckets: SUMMARY.series.buckets,
+        entities: [0, 120, 150], relationships: [0, 300, 360],
+        totals: {
+            entities: { start: 0, end: 150, change: 150, changePct: null },
+            relationships: { start: 0, end: 360, change: 360, changePct: null },
+            sources: 2,
+        },
+        byWorkspace: [{ workspaceId: 'ws1', name: 'Finance', entities: [0, 120, 150] }],
+        byProviderType: [{ key: 'neo4j', entities: [0, 120, 150] }],
+        movers: [
+            {
+                dataSourceId: 'ds1', name: 'Ledger', workspaceId: 'ws1', workspaceName: 'Finance',
+                start: 0, end: 150, change: 150, changePct: null, canOpen: true,
+            },
+            {
+                dataSourceId: null, name: 'Restricted source', workspaceId: null,
+                workspaceName: 'Restricted workspace', start: 40, end: 10, change: -30,
+                changePct: -75, redacted: true, canOpen: false,
+            },
+        ],
+    },
+    onboarding: {
+        buckets: SUMMARY.series.buckets, total: [0, 1, 1], versioned: [0, 1, 0], external: [0, 0, 1],
+        totals: { sources: { total: 2, current: 2, previous: 0, changePct: null } },
+        byProviderType: [{ key: 'neo4j', count: 2 }],
+        firstBuild: { medianHours: 3, p90Hours: 5, measured: 2, awaiting: 0 },
+    },
+    versionControl: {
+        available: true as const,
+        byKind: [{ key: 'manual', count: 1 }],
+        adopted: { buckets: SUMMARY.series.buckets, series: [{ key: 'manual', values: [0, 1, 0] }] },
+        share: { versioned: 1, total: 2 },
+    },
+}
+
+/** The usage document. The pulse is empty by default so the workspace
+ *  table's names stay unique on the page; the tests that draw it say so. */
+const USAGE = {
+    windowDays: 30, generatedAt: SUMMARY.generatedAt, range: SUMMARY.range, bucket: 'day' as const,
+    content: {
+        buckets: SUMMARY.series.buckets,
+        uniqueViewers: [1, 2, 3],
+        viewers: { total: 4, current: 4, previous: 2, changePct: 100 },
+        viewsOpened: 2,
+        reach: [{ key: '1', count: 1 }, { key: '2–5', count: 1 }, { key: '6–20', count: 0 }, { key: '21+', count: 0 }],
+        byType: [{ key: 'graph', built: 2, opens: 9 }],
+        byVisibility: [{ key: 'private', built: 2, opens: 9 }],
+        firstOpen: { medianHours: 12, withinWeek: 1, opened: 1, built: 2 },
+    },
+    engagement: {
+        presence: [
+            { key: 'active', count: 3 }, { key: 'seen', count: 1 }, { key: 'recent', count: 1 },
+            { key: 'dormant', count: 2 }, { key: 'never', count: 1 },
+        ],
+        punchcard: Array.from({ length: 7 }, () => Array(24).fill(0)),
+    },
+    health: {
+        buckets: SUMMARY.series.buckets,
+        runs: [
+            { key: 'byHand', values: [1, 0, 1] }, { key: 'automatic', values: [2, 2, 2] },
+            { key: 'onboarding', values: [0, 1, 0] }, { key: 'other', values: [0, 0, 0] },
+        ],
+        totals: { byHand: 2, automatic: 6, onboarding: 1, other: 0 },
+        byHand: { total: 2, current: 2, previous: 1, changePct: 100 },
+        manualShare: 0.2222, failureRate: 0.1,
+        handsOnSources: [{
+            dataSourceId: 'ds1', workspaceId: 'ws1', count: 3,
+            lastAt: '2026-06-15T09:00:00+00:00', medianGapHours: 48, name: 'Ledger',
+        }],
+    },
+    workspaces: {
+        buckets: SUMMARY.series.buckets,
+        pulse: [] as unknown[],
+        rows: [{ workspaceId: 'ws1', activity: 5, manualOperations: 11, accessChanges: 13 }],
+    },
+}
+
 /** The range object a preset resolves to — the shape the service now takes. */
 const preset = (days: number) => ({ kind: 'preset' as const, days })
 
@@ -227,6 +312,8 @@ describe('AnalyticsPage', () => {
         vi.mocked(analyticsService.getSummary).mockResolvedValue(SUMMARY as never)
         vi.mocked(analyticsService.listWorkspaces).mockResolvedValue(WORKSPACE_ROWS as never)
         vi.mocked(analyticsService.getWorkspace).mockResolvedValue({} as never)
+        vi.mocked(analyticsService.getData).mockResolvedValue(DATA as never)
+        vi.mocked(analyticsService.getUsage).mockResolvedValue(USAGE as never)
     })
 
     it('resolves the active tab from the URL', async () => {
@@ -703,6 +790,134 @@ describe('AnalyticsPage', () => {
         renderAt('/analytics')
         await screen.findByText(/accounts in total/i)
         expect(screen.queryByText(/nothing to measure yet/i)).toBeNull()
+    })
+
+    // ── Data and usage ──────────────────────────────────────────────
+
+    it('fetches each document only on the tabs that draw from it', async () => {
+        vi.mocked(analyticsService.getData).mockClear()
+        vi.mocked(analyticsService.getUsage).mockClear()
+        renderAt('/analytics?tab=overview')
+        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalled())
+        expect(analyticsService.getData).not.toHaveBeenCalled()
+        expect(analyticsService.getUsage).not.toHaveBeenCalled()
+
+        renderAt('/analytics?tab=content')
+        await waitFor(() => expect(analyticsService.getUsage).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
+        expect(analyticsService.getData).not.toHaveBeenCalled()
+    })
+
+    it('opens the Data tab on its own document, even when the summary fails', async () => {
+        vi.mocked(analyticsService.getSummary).mockRejectedValue(new Error('summary down'))
+        renderAt('/analytics?tab=data')
+
+        expect(await screen.findByRole('heading', { name: 'What the platform holds' })).toBeInTheDocument()
+        expect(analyticsService.getData).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS))
+        expect(screen.queryByText(/summary down/)).toBeNull()
+        // History that starts inside the window is said, not drawn as zeros.
+        expect(screen.getByText(/earlier periods have no data, not zero/i)).toBeInTheDocument()
+        // A mover the reader may see is linked; one they may not keeps its
+        // numbers and loses its name.
+        expect(screen.getByRole('link', { name: 'Finance' })).toHaveAttribute('href', '/workspaces/ws1')
+        expect(screen.getByText('Restricted source')).toBeInTheDocument()
+        expect(screen.getByText('−30')).toBeInTheDocument()
+    })
+
+    it('says how far back runs reach as the platform keeps them, not as a constant', async () => {
+        // Time to first build reads aggregation runs, and runs are pruned to
+        // AGGREGATION_JOB_RETENTION_DAYS: the caveat said 90 whatever that was.
+        const user = userEvent.setup()
+        vi.mocked(analyticsService.getData).mockResolvedValue({
+            ...DATA, coverage: { ...DATA.coverage, jobsKeptDays: 30 },
+        } as never)
+        renderAt('/analytics?tab=data')
+        await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
+        expect(within(await screen.findByRole('tooltip')).getByText(/kept for 30 days/i)).toBeInTheDocument()
+    })
+
+    it('has no caveat on first builds when every run is kept', async () => {
+        const user = userEvent.setup()
+        vi.mocked(analyticsService.getData).mockResolvedValue({
+            ...DATA, coverage: { ...DATA.coverage, jobsKeptDays: null },
+        } as never)
+        renderAt('/analytics?tab=data')
+        await user.click(await screen.findByRole('button', { name: /what does "time to first build" mean/i }))
+        expect(within(await screen.findByRole('tooltip')).queryByText(/are kept for/i)).toBeNull()
+    })
+
+    it('says version control could not be read rather than reporting none', async () => {
+        vi.mocked(analyticsService.getData).mockResolvedValue({
+            ...DATA,
+            onboarding: { ...DATA.onboarding, versioned: null, external: null },
+            versionControl: { available: false },
+        } as never)
+        renderAt('/analytics?tab=data')
+
+        expect(await screen.findByText(/the rest of this page is unaffected/i)).toBeInTheDocument()
+        expect(screen.queryByText(/no graph is under version control yet/i)).toBeNull()
+    })
+
+    it('reaches the Data tab from the Overview frames it deepens', async () => {
+        const user = userEvent.setup()
+        renderAt('/analytics')
+
+        await user.click(await screen.findByRole('button', { name: /growth over time/i }))
+        await waitFor(() =>
+            expect(screen.getByRole('tab', { name: /^data$/i })).toHaveAttribute('aria-selected', 'true'))
+        await waitFor(() => expect(analyticsService.getData).toHaveBeenCalled())
+    })
+
+    it('separates the runs people started from the ones automation did', async () => {
+        renderAt('/analytics?tab=health')
+
+        expect(await screen.findByRole('heading', { name: /how ingestion is driven/i })).toBeInTheDocument()
+        expect(await screen.findByText('Runs started by hand')).toBeInTheDocument()
+        expect(screen.getByText('22%')).toBeInTheDocument()
+        expect(screen.getByText('Ledger')).toBeInTheDocument()
+        expect(screen.getByText('every ~2 days')).toBeInTheDocument()
+    })
+
+    it('withholds how ingestion is driven below the posture that shows it', async () => {
+        vi.mocked(analyticsService.getUsage).mockResolvedValue({
+            ...USAGE, health: undefined,
+            redaction: { applied: true, showsOperations: false, hidden: ['operations'] },
+        } as never)
+        renderAt('/analytics?tab=health')
+
+        expect(await screen.findByText(/who starts ingestion runs is hidden/i)).toBeInTheDocument()
+        expect(screen.queryByText('Ledger')).toBeNull()
+        // The heading stays, so the reader learns the platform tracks it.
+        expect(screen.getByRole('heading', { name: /how ingestion is driven/i })).toBeInTheDocument()
+    })
+
+    it('keeps a tab standing when only the usage document fails', async () => {
+        vi.mocked(analyticsService.getUsage).mockRejectedValue(new Error('usage down'))
+        renderAt('/analytics?tab=engagement')
+
+        expect(await screen.findByText(/value moments/i)).toBeInTheDocument()
+        expect(
+            await screen.findByText(/could not be loaded just now/i, undefined, { timeout: 5000 }),
+        ).toBeInTheDocument()
+    })
+
+    it('joins the hands-on counts to the workspace table and draws the pulse', async () => {
+        vi.mocked(analyticsService.getUsage).mockResolvedValue({
+            ...USAGE,
+            workspaces: {
+                ...USAGE.workspaces,
+                pulse: [{ workspaceId: 'ws1', name: 'Finance', values: [1, 2, 2], total: 5, canOpen: true }],
+            },
+        } as never)
+        vi.mocked(analyticsService.getWorkspace).mockResolvedValue(DETAIL as never)
+        renderAt('/analytics?tab=workspaces')
+
+        const row = await screen.findByRole('row', { name: /open analytics for finance/i })
+        await waitFor(() => expect(within(row).getByText('11')).toBeInTheDocument())
+        expect(within(row).getByText('13')).toBeInTheDocument()
+
+        // A name in the pulse opens the same drill-in a table row does.
+        await userEvent.click(screen.getByRole('button', { name: 'Finance' }))
+        await waitFor(() => expect(analyticsService.getWorkspace).toHaveBeenCalledWith('ws1', preset(DEFAULT_RANGE_DAYS)))
     })
 
     it('surfaces a load failure instead of rendering empty charts', async () => {

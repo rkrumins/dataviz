@@ -18,12 +18,16 @@ import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { extractHeadings } from '@/components/docs/reading/headings'
-import { OnThisPage } from '@/components/docs/reading/OnThisPage'
+import { OnThisPage, OnThisPageInline } from '@/components/docs/reading/OnThisPage'
 import { Pager } from '@/components/docs/reading/Pager'
 import { ContentSkeleton } from '@/components/docs/reading/ContentSkeleton'
 import { UpdatedChip } from '@/components/docs/reading/UpdatedChip'
 import { PageFeedback } from '@/components/docs/reading/PageFeedback'
 import { guideMeta } from '@/components/docs/reading/docMeta.generated'
+import { readingTime } from '@/components/docs/reading/readingTime'
+import { useScrollLanding } from '@/components/docs/reading/useScrollLanding'
+import { NextStep, PathProgress } from '@/components/docs/reading/ReadingPath'
+import { useReadTracking } from '@/components/docs/reading/useReadTracking'
 
 export function GuideContent() {
   const brand = useBrand()
@@ -37,8 +41,13 @@ export function GuideContent() {
 
   useDocumentTitle(entry?.title ? `${entry.title} · Guide` : 'User Guide')
 
-  const headings = useMemo(() => (content ? extractHeadings(content) : []), [content])
+  // From the page as rendered — brand filled in — so each id matches its heading.
+  const headings = useMemo(() => (content ? extractHeadings(interpolateBrand(content, brand)) : []), [content, brand])
+  const minutes = useMemo(() => (content ? readingTime(content) : ''), [content])
   const { prev, next } = entry ? getPagerNeighbors(entry.slug) : { prev: undefined, next: undefined }
+  const ready = !isLoading && !!content
+  useScrollLanding(ready, content)
+  const endRef = useReadTracking('guide', entry?.slug, ready)
 
   if (error || !entry) {
     return (
@@ -49,7 +58,7 @@ export function GuideContent() {
           <p className="text-sm text-ink-muted">
             The guide page <code className="text-accent-lineage">"{slug}"</code> doesn't exist.
           </p>
-          <Link to="/guide" className="btn btn-secondary inline-flex mt-2">
+          <Link to="/guide" className="btn btn-secondary btn-md inline-flex mt-2">
             <Home className="w-3.5 h-3.5" /> Back to the guide
           </Link>
         </div>
@@ -60,23 +69,25 @@ export function GuideContent() {
   if (isLoading) return <ContentSkeleton />
 
   return (
-    <div className="mx-auto max-w-6xl px-6 sm:px-8 py-10">
+    <div className="mx-auto max-w-6xl px-4 sm:px-8 py-8 sm:py-10">
       {/* Breadcrumb */}
-      <nav className="flex items-center gap-1.5 text-xs text-ink-muted mb-6">
+      <nav className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted mb-6" aria-label="Breadcrumb">
         <Link to="/guide" className="hover:text-ink transition-colors">User Guide</Link>
         {section && (
           <>
-            <ChevronRight className="w-3 h-3" />
-            <span>{section.label}</span>
+            <ChevronRight className="w-3 h-3" aria-hidden />
+            <Link to="/guide#browse-by-topic" className="hover:text-ink transition-colors">{section.label}</Link>
           </>
         )}
-        <ChevronRight className="w-3 h-3" />
-        <span className="text-ink font-medium">{interp(entry.title)}</span>
+        <ChevronRight className="w-3 h-3" aria-hidden />
+        <span className="text-ink font-medium" aria-current="page">{interp(entry.title)}</span>
       </nav>
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-10">
         {/* Article column */}
         <div className="min-w-0">
+          <PathProgress area="guide" slug={entry.slug} />
+
           {/* Meta row */}
           <div className="flex flex-wrap items-center gap-2 mb-4">
             {persona && (
@@ -92,12 +103,16 @@ export function GuideContent() {
                 {persona.label}
               </span>
             )}
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-ink-muted bg-black/[0.04] dark:bg-white/[0.06]">
-              <Clock className="w-3.5 h-3.5" />
-              {entry.readingTime} read
-            </span>
+            {minutes && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-ink-muted bg-black/[0.04] dark:bg-white/[0.06]">
+                <Clock className="w-3.5 h-3.5" />
+                {minutes} read
+              </span>
+            )}
             <UpdatedChip date={guideMeta[entry.slug]?.updated} />
           </div>
+
+          {headings.length > 1 && <OnThisPageInline headings={headings} />}
 
           <article className="prose-synodic">
             <ReactMarkdown
@@ -109,6 +124,9 @@ export function GuideContent() {
               {interp(content ?? '')}
             </ReactMarkdown>
           </article>
+          <div ref={endRef} aria-hidden />
+
+          <NextStep area="guide" slug={entry.slug} />
 
           <PageFeedback pageKey={`guide:${entry.slug}`} />
 

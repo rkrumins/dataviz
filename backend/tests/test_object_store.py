@@ -1,4 +1,8 @@
-"""The object stores for import/export artifacts: the database store (the default) and LocalFs.
+"""The object stores for import/export artifacts: the database store (the default), LocalFs, and
+the optional S3 store.
+
+The contract at the end runs the same behaviours against every store: LocalFs, the database, and an
+S3-compatible endpoint when ``OBJECT_STORE_S3_TEST_ENDPOINT`` is set (with boto3 installed).
 
 Pins the behaviours the import/export pipeline relies on: streamed put/open round-trips without
 buffering the whole file, stat/existence, single-object + prefix (job-dir) deletion for the cleanup
@@ -151,8 +155,9 @@ def test_the_database_is_the_default_store(monkeypatch, tmp_path):
     monkeypatch.setenv("OBJECT_STORE_BACKEND", "local")
     monkeypatch.setenv("IMPORT_STORE_ROOT", str(tmp_path))
     assert isinstance(get_object_store(), LocalFsObjectStore)
-    monkeypatch.setenv("OBJECT_STORE_BACKEND", "s3")
-    with pytest.raises(NotImplementedError):
+    monkeypatch.setenv("OBJECT_STORE_BACKEND", "s3")           # optional, and says what it lacks
+    monkeypatch.delenv("OBJECT_STORE_S3_BUCKET", raising=False)
+    with pytest.raises(RuntimeError, match="OBJECT_STORE_S3_BUCKET"):
         get_object_store()
 
 
@@ -165,7 +170,7 @@ async def test_the_worker_sweeps_the_store_daily(monkeypatch):
     swept = []
 
     class _Store:
-        async def sweep(self, *, older_than_hours):
+        async def sweep(self, *, older_than_hours, keep_prefixes=()):
             swept.append(older_than_hours)
             return 0
 
@@ -176,8 +181,14 @@ async def test_the_worker_sweeps_the_store_daily(monkeypatch):
     async def _settle(_versioning):
         return {}
 
+    async def _no_pins():
+        return set()
+
+    from backend.app.services.versioning.import_export import uploads
+
     monkeypatch.setattr(object_store, "get_object_store", lambda: _Store())
     monkeypatch.setattr(draft_views, "settle", _settle)
+    monkeypatch.setattr(uploads, "jobs_input_prefixes", _no_pins)   # pins: test_upload_pins.py
     await ProjectionWorker(None, versioning=_Versioning()).sweep_once()
     assert swept == [config.OBJECT_STORE_TTL_HOURS]
 
@@ -322,6 +333,25 @@ async def test_db_store_delete_and_delete_prefix_match_keys_literally(db_store, 
     assert len(await _chunk_rows(sessions)) == 2, "the chunks went with their objects"
 
 
+async def test_db_store_reads_a_few_chunks_per_session(db_store, sessions):
+    """A read takes ``_CHUNKS_PER_TXN`` chunks per session, not a session (and a round trip) per
+    MiB — from any offset, in order."""
+    data = random.Random(5).randbytes(20 * MiB + 5)
+    await db_store.put_stream("ws/g/job/big", _chunks(data))
+    opened = []
+
+    @contextlib.asynccontextmanager
+    async def counted():
+        opened.append(1)
+        async with sessions() as s:
+            yield s
+
+    reader = DatabaseObjectStore(session_factory=counted)
+    assert await _drain(reader.open_stream("ws/g/job/big")) == data
+    assert len(opened) == 1 + 3, "the object's row, then 21 chunks in 3 sessions"
+    assert await _drain(reader.open_stream("ws/g/job/big", start=9 * MiB + 7)) == data[9 * MiB + 7:]
+
+
 async def test_db_store_sweep_reclaims_old_objects_and_dead_puts(db_store, sessions):
     await db_store.put_stream("ws1/job1/export.ndjson", _chunks(b"o" * (MiB + 1)))
     await db_store.put_stream("ws1/job2/export.ndjson", _chunks(b"n"))
@@ -338,6 +368,100 @@ async def test_db_store_sweep_reclaims_old_objects_and_dead_puts(db_store, sessi
     assert {b for b, _, _ in await _chunk_rows(sessions)} == \
         {await _blob_of(sessions, "ws1/job2/export.ndjson"), "running"}, \
         "an hour-old orphan goes; a put still running keeps its chunks"
+
+
+# ── The contract every store keeps ───────────────────────────────────────────
+
+
+@pytest.fixture(params=["local", "database", "s3"])
+def any_store(request, tmp_path, monkeypatch):
+    """Each store in turn: S3 on the live endpoint the S3 tests use, under a prefix of its own
+    (skipped without one), emptied afterwards."""
+    if request.param == "local":
+        yield LocalFsObjectStore(tmp_path)
+    elif request.param == "database":
+        yield DatabaseObjectStore(session_factory=request.getfixturevalue("sessions"))
+    else:
+        from backend.tests.test_s3_object_store import live_store
+
+        store = live_store(monkeypatch)
+        yield store
+        asyncio.run(store.sweep(older_than_hours=-1))
+
+
+async def test_contract_round_trip_stat_and_reads_from_any_offset(any_store):
+    data = random.Random(8).randbytes(3 * MiB + 12_345)
+    key = storage_key("ws1", "ds1", "g1", "job1", "export.ndjson")
+
+    assert await any_store.put_stream(key, _uneven(data)) == ObjectStat(key=key, size=len(data), exists=True)
+    assert await any_store.stat(key) == ObjectStat(key=key, size=len(data), exists=True)
+    for start in (0, 1, MiB + 7, len(data) - 1, len(data), len(data) + 10):
+        assert await _drain(any_store.open_stream(key, start=start)) == data[start:], start
+    pieces = [len(c) async for c in any_store.open_stream(key, chunk_size=100_000, start=5)]
+    assert max(pieces) <= 100_000 and sum(pieces) == len(data) - 5
+
+    await any_store.put_stream(key, _chunks(b"rewritten"))
+    assert await _drain(any_store.open_stream(key)) == b"rewritten"
+    assert await any_store.put_stream("ws1/job1/empty", _chunks()) == \
+        ObjectStat(key="ws1/job1/empty", size=0, exists=True)
+    assert await _drain(any_store.open_stream("ws1/job1/empty")) == b""
+
+    assert await any_store.stat("ws1/job1/missing") == ObjectStat(key="ws1/job1/missing", size=0, exists=False)
+    with pytest.raises(FileNotFoundError):
+        await _drain(any_store.open_stream("ws1/job1/missing"))
+    assert any_store.upload_target(key).mode == "backend"
+
+
+async def test_contract_a_failed_put_leaves_nothing(any_store):
+    async def broken():
+        yield b"x" * MiB
+        raise RuntimeError("the client went away")
+
+    with pytest.raises(RuntimeError):
+        await any_store.put_stream("ws1/job1/upload.json", broken())
+    assert (await any_store.stat("ws1/job1/upload.json")).exists is False
+
+
+async def test_contract_deletes(any_store):
+    keys = ["ws/g/job_1/source.ndjson", "ws/g/job_1/rejected.ndjson", "ws/g/job_10/source.ndjson",
+            "ws/g/jobX1/source.ndjson"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(key.encode()))
+
+    async def left():
+        return [k for k in keys if (await any_store.stat(k)).exists]
+
+    await any_store.delete_prefix("ws/g/job_1")
+    assert await left() == ["ws/g/job_10/source.ndjson", "ws/g/jobX1/source.ndjson"], "only that job's folder"
+    await any_store.delete("ws/g/jobX1/source.ndjson")
+    await any_store.delete("ws/g/jobX1/source.ndjson")             # already gone: no error
+    assert await left() == ["ws/g/job_10/source.ndjson"]
+
+
+async def test_contract_the_sweep_keeps_what_jobs_still_read(any_store):
+    keys = ["ws/ds/g/j1/export.zip", "transfer-uploads/up_1/part-00000", "transfer-uploads/up_10/part-00000"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(b"x"))
+
+    assert await any_store.sweep(older_than_hours=1) == 0, "nothing is an hour old yet"
+    # A cutoff an hour ahead makes everything old (no store's clock can be set back).
+    assert await any_store.sweep(older_than_hours=-1, keep_prefixes={"transfer-uploads/up_1"}) == 2
+    assert [k for k in keys if (await any_store.stat(k)).exists] == ["transfer-uploads/up_1/part-00000"]
+
+
+async def test_contract_old_uploads_are_pruned_whole(any_store):
+    if not hasattr(any_store, "prune_older_than"):
+        pytest.skip("a store that can't tell an upload's age keeps it (prune_uploads)")
+    keys = ["transfer-uploads/up_1/part-00000", "transfer-uploads/up_2/part-00000",
+            "transfer-uploads/up_2/upload.json", "ws/ds/g/j1/export.zip"]
+    for key in keys:
+        await any_store.put_stream(key, _chunks(b"x"))
+
+    assert await any_store.prune_older_than("transfer-uploads", 3600) == 0
+    assert await any_store.prune_older_than("transfer-uploads", -3600,
+                                            keep_prefixes={"transfer-uploads/up_1"}) == 1, "up_2, whole"
+    assert [k for k in keys if (await any_store.stat(k)).exists] == \
+        ["transfer-uploads/up_1/part-00000", "ws/ds/g/j1/export.zip"]
 
 
 if __name__ == "__main__":

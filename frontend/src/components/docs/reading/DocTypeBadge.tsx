@@ -17,6 +17,8 @@ const STYLE: Record<DocType, { label: string; icon: LucideIcon; cls: string }> =
 
 /** Diátaxis classification per docs slug. Unlisted slugs simply show no badge. */
 export const DOC_TYPES: Record<string, DocType> = {
+  // Tutorial — learning-oriented
+  'onboarding-a-source': 'tutorial',
   // Explanation — understanding-oriented
   overview: 'explanation',
   architecture: 'explanation',
@@ -26,7 +28,6 @@ export const DOC_TYPES: Record<string, DocType> = {
   'aggregation-pipeline': 'explanation',
   'feature-aggregation-reconciliation': 'how-to',
   'feature-external-change-notification': 'how-to',
-  'technical-debt': 'explanation',
   'versioning-overview': 'explanation',
   'services-overview': 'explanation',
   'services-insights': 'explanation',
@@ -39,6 +40,17 @@ export const DOC_TYPES: Record<string, DocType> = {
   'infra-launch-scale': 'explanation',
   'infra-scaling-250m': 'explanation',
   'read-path-performance': 'explanation',
+  'versioning-branching-and-merge': 'explanation',
+  'versioning-projection-and-cache': 'explanation',
+  'versioning-ontology-governance': 'explanation',
+  'versioning-frontend-integration': 'explanation',
+  'versioning-scale-and-roadmap': 'explanation',
+  'versioning-authoritative-sources': 'explanation',
+  'versioning-resync-at-any-scale': 'explanation',
+  'versioning-drafts-and-merge': 'explanation',
+  'security-overview': 'explanation',
+  'property-storage': 'explanation',
+  'top-level-nodes-performance': 'explanation',
   // Reference — information-oriented
   backend: 'reference',
   frontend: 'reference',
@@ -48,6 +60,14 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-deep-dives': 'reference',
   changelog: 'reference',
   'feature-search-and-rules-reference': 'reference',
+  'versioning-data-model': 'reference',
+  'versioning-import-export': 'reference',
+  'versioning-guide': 'reference',
+  'testing-and-ci': 'reference',
+  configuration: 'reference',
+  'sso-backchannel-contract': 'reference',
+  'domain-ownership': 'reference',
+  observability: 'reference',
   // How-to — task-oriented
   setup: 'how-to',
   'integration-testing': 'how-to',
@@ -56,6 +76,17 @@ export const DOC_TYPES: Record<string, DocType> = {
   sso: 'how-to',
   'versioning-e2e': 'how-to',
   'scaling-concurrent-users': 'how-to',
+  'feature-view-portability': 'how-to',
+  'multi-environment-sessions': 'how-to',
+  migrations: 'how-to',
+  'concurrency-tuning': 'how-to',
+  contributing: 'how-to',
+  'feature-flags-lifecycle': 'how-to',
+  'api-guide': 'how-to',
+  kubernetes: 'how-to',
+  'kubernetes-cluster-overlay': 'how-to',
+  runbooks: 'how-to',
+  'upgrade-2026-09-10': 'how-to',
 }
 
 export function getDocType(slug: string): DocType | undefined {

@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from backend.app.common import activity_context
 from backend.app.db.engine import (
     Base,
     get_db_session,
@@ -187,6 +188,26 @@ def _feature_flags_at_their_defaults():
     feature_flags._cache_ts = time.monotonic()
     yield
     feature_flags.invalidate()
+
+
+@pytest.fixture(autouse=True)
+def _view_source_kinds_unknown():
+    """Every test starts with the view reads' versioned/external lookup marked as
+    having just failed, so ``sourceKind`` is unknown and nothing reaches for the
+    ``graphver`` store.
+
+    Every view list asks that store, through its own engine — which the SQLite
+    harness never creates, and which, wherever a dev Postgres IS reachable, would
+    open a real connection on this test's event loop: the hazard described in
+    ``_feature_flags_at_their_defaults`` above. A test about source kinds calls
+    ``view_source_kinds.reset()`` and stubs
+    ``versioned_sources.versioned_data_source_ids`` (see test_view_filters_api.py).
+    """
+    from backend.app.services import view_source_kinds
+
+    view_source_kinds._failed_at = time.monotonic()
+    yield
+    view_source_kinds.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -437,6 +458,8 @@ async def test_client(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Session revoked",
             )
+        # And its attribution: what the request changes is the fake user's.
+        activity_context.bind_actor(_FAKE_USER.id)
         return _FAKE_USER
 
     async def _override_get_optional_user():
@@ -445,6 +468,7 @@ async def test_client(
         # endpoints that use get_optional_user (e.g. create_view) would see
         # a None token and fall back to the anonymous sentinel, breaking
         # created_by attribution in test assertions.
+        activity_context.bind_actor(_FAKE_USER.id)
         return _FAKE_USER
 
     async def _override_require_admin():

@@ -23,10 +23,9 @@ vi.mock('@/store/auth', async () => {
     return { ...actual, usePermission: () => perms.value }
 })
 
-const { listProviders, listGroupMappings, auditList, failureDigest, activity } = vi.hoisted(() => ({
+const { listProviders, listGroupMappings, failureDigest, activity } = vi.hoisted(() => ({
     listProviders: vi.fn(),
     listGroupMappings: vi.fn(),
-    auditList: vi.fn(),
     failureDigest: vi.fn(),
     activity: vi.fn(),
 }))
@@ -41,10 +40,6 @@ vi.mock('@/services/ssoAdminService', () => ({
     },
 }))
 
-vi.mock('@/services/auditService', () => ({
-    auditService: { list: auditList },
-}))
-
 import { DiagnosticsTab } from '../tabs/DiagnosticsTab'
 import { AdminSso } from '../../AdminSso'
 
@@ -53,7 +48,6 @@ beforeEach(() => {
     perms.value = true
     listProviders.mockResolvedValue([])
     listGroupMappings.mockResolvedValue([])
-    auditList.mockResolvedValue({ events: [], nextCursor: null })
     failureDigest.mockResolvedValue(digest())
     activity.mockResolvedValue({
         rows: [], nextCursor: null,
@@ -132,11 +126,13 @@ describe('stat tiles', () => {
         ])
         render(<MemoryRouter><AdminSso /></MemoryRouter>)
 
+        // The tiles draw 0 before the list arrives, so wait for the count
+        // itself, not just its label.
         const live = await screen.findByText(/live connections/i)
-        expect(within(live.closest('div')!.parentElement!).getByText('1'))
+        expect(await within(live.closest('div')!.parentElement!).findByText('1'))
             .toBeInTheDocument()
         const drafts = screen.getByText(/drafts to rehearse/i)
-        expect(within(drafts.closest('div')!.parentElement!).getByText('1'))
+        expect(await within(drafts.closest('div')!.parentElement!).findByText('1'))
             .toBeInTheDocument()
     })
 
@@ -157,7 +153,6 @@ describe('stat tiles', () => {
         const fails = await screen.findByText(/failed sign-ins/i)
         expect(await within(fails.closest('div')!.parentElement!).findByText('7'))
             .toBeInTheDocument()
-        expect(auditList).not.toHaveBeenCalled()
     })
 })
 

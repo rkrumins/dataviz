@@ -2,9 +2,12 @@
 
 **What this is:** the platform's technical specification — data models, the rule/projection engine, and the API contract. **Who it's for:** engineers implementing or integrating against the platform who need the precise shapes and semantics.
 
+> [!WARNING]
+> **Historical — read this as the original design, not as the current system.** Checked against the code on 2026-10-09: the entity model below (`PhysicalNode`, `BusinessEntity`, `LensManifest`, `MappingRule`, `URNMatcher`) was never built; the platform's model is Provider + CatalogItem + Ontology + Workspace ([docs/OVERVIEW.md](docs/OVERVIEW.md), [docs/DATA_ARCHITECTURE.md](docs/DATA_ARCHITECTURE.md)). There is no WebSocket channel, GraphBLAS or quadtree. `POST /api/v1/trace` is retired (use `POST /api/v1/{ws_id}/graph/trace/v2`), search is `POST /api/v1/{ws_id}/graph/search`, and `/lenses` and `/physical/sync` do not exist. [docs/BACKEND.md](docs/BACKEND.md) is the current API reference.
+
 ## Overview
 
-The platform is a data-lineage system that overlays user-defined business ontologies (Context Lenses) onto physical technical metadata. It uses a multi-graph architecture over FalkorDB — a physical metadata graph plus ontology-driven lenses — with a materialized aggregation pipeline that pre-computes summary edges so large graphs (verified at millions of entities) can be traced and navigated at any level of detail without live traversal. The entity model described below is the platform's current data model.
+The platform is a data-lineage system that overlays user-defined business ontologies (Context Lenses) onto physical technical metadata. It uses a multi-graph architecture over FalkorDB — a physical metadata graph plus ontology-driven lenses — with a materialized aggregation pipeline that pre-computes summary edges so large graphs (verified at millions of entities) can be traced and navigated at any level of detail without live traversal. The entity model described below was the design; see the warning above for what was built instead.
 
 ---
 

@@ -57,7 +57,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Literal, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -312,6 +312,7 @@ class ViewScopeResolver:
         requested: SearchScope,
         data_source_id: Optional[str] = None,
         branch_id: Optional[str] = None,
+        can_read: Optional[Callable[[Any], Awaitable[bool]]] = None,
     ) -> EffectiveViewScope:
         """Produce the authoritative scope or raise.
 
@@ -331,6 +332,9 @@ class ViewScopeResolver:
         - ``requested.root_urns`` and ``requested.entity_types`` are
           treated as *narrowing* hints; the resolver intersects them
           with the view's allowed scope and never widens.
+        - ``can_read`` holds the view to the caller: a route checked the
+          workspace and data source, not the view a search names in its
+          body. A view the caller cannot read is one that does not exist.
         """
         view = await self._load_view(requested.view_id)
         if view is None:
@@ -343,6 +347,8 @@ class ViewScopeResolver:
             raise ViewNotFound(
                 f"view '{requested.view_id}' has been deleted"
             )
+        if can_read is not None and not await can_read(view):
+            raise ViewNotFound(f"view '{requested.view_id}' not found")
 
         # Branch-effective read: base config when no branch/overlay, else
         # base ⊕ the branch's layout overlay (see view_repo).

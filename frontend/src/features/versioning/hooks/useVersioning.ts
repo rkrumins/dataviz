@@ -11,6 +11,7 @@ import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
 import { recordEvent } from '@/services/telemetryService'
+import { jobPollDelayMs } from '@/config/polling'
 
 export const VERSIONING_KEYS = {
   all: ['versioning'] as const,
@@ -431,8 +432,9 @@ export function useSquashedCommits(
 export function useBootstrapGraph(wsId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (dataSourceId: string) => api.bootstrapGraph(wsId, dataSourceId),
-    onSuccess: (_res, dataSourceId) => {
+    mutationFn: ({ dataSourceId, reason }: { dataSourceId: string; reason?: string }) =>
+      api.bootstrapGraph(wsId, dataSourceId, { reason }),
+    onSuccess: (_res, { dataSourceId }) => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
@@ -442,7 +444,10 @@ export function useBootstrapGraph(wsId: string) {
 
 /** Live progress of the enablement job. Polls ONLY while a job is actually running —
  *  a completed/failed/absent job settles to no network at all (the storm-safe pattern
- *  the projection watermark uses). `seed` renders instantly from /resolve on reload. */
+ *  the projection watermark uses) — and less often the longer it runs (`jobPollDelayMs`):
+ *  a copy takes minutes to hours. A job paused for a decision (`needs_decision`) is not
+ *  polled either: it can wait for days, nothing moves until someone decides, and deciding
+ *  refetches it. `seed` renders instantly from /resolve on reload. */
 export function useBootstrapStatus(
   wsId?: string, dataSourceId?: string | null,
   opts: { enabled?: boolean; seed?: api.BootstrapJob | null } = {},
@@ -456,7 +461,7 @@ export function useBootstrapStatus(
     retry: false,                          // 404 = never started; don't hammer
     refetchInterval: (q) => {
       const s = (q.state.data as api.BootstrapJob | undefined)?.status
-      return s === 'pending' || s === 'running' ? 2500 : false
+      return s === 'pending' || s === 'running' ? jobPollDelayMs(q.state.dataUpdateCount) : false
     },
     refetchIntervalInBackground: false,    // a hidden tab doesn't poll
   })
@@ -466,9 +471,23 @@ export function useBootstrapStatus(
 export function useRetryBootstrap(wsId: string, dataSourceId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (mode: 'resume' | 'restart' = 'resume') =>
-      api.retryBootstrap(wsId, dataSourceId, mode),
+    mutationFn: ({ mode = 'resume', reason }: { mode?: 'resume' | 'restart'; reason?: string } = {}) =>
+      api.retryBootstrap(wsId, dataSourceId, mode, { reason }),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
+    },
+  })
+}
+
+/** Collapse the duplicates a paused copy found (pass the list's `fingerprint`), so it carries on.
+ *  Refetched on a refusal too: a refusal means the list changed or the job moved on, and the user
+ *  must see what it is now, not decide again on what it was. */
+export function useDecideBootstrapDuplicates(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ fingerprint, reason }: { fingerprint: string; reason?: string }) =>
+      api.decideBootstrapDuplicates(wsId, dataSourceId, { fingerprint }, { reason }),
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
     },
   })
@@ -477,7 +496,7 @@ export function useRetryBootstrap(wsId: string, dataSourceId: string) {
 export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => api.abandonBootstrap(wsId, dataSourceId),
+    mutationFn: (vars?: { reason?: string }) => api.abandonBootstrap(wsId, dataSourceId, { reason: vars?.reason }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })

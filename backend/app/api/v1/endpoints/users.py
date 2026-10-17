@@ -499,6 +499,18 @@ _ACCOUNT_ACTIVITY_TYPES = (
     "user.role_changed",
     "user.suspended",
     "user.reactivated",
+    "identity.api_key.created",
+    "identity.api_key.rotated",
+    "identity.api_key.updated",
+    "identity.api_key.revoked",
+    "identity.api_key.misuse",
+)
+
+
+#: The payload key each of those events names its actor under.
+_ACTIVITY_ACTOR_KEYS = (
+    "updated_by", "reset_by", "changed_by", "generated_by",
+    "suspended_by", "reactivated_by", "created_by", "revoked_by",
 )
 
 
@@ -538,7 +550,7 @@ async def my_account_activity(
             payload = json.loads(row.payload or "{}")
         except ValueError:
             payload = {}
-        actor = payload.get("updated_by") or payload.get("reset_by") or payload.get("changed_by")
+        actor = next((payload[k] for k in _ACTIVITY_ACTOR_KEYS if payload.get(k)), None)
         out.append(AccountActivityItem(
             id=row.id,
             eventType=row.event_type,
@@ -782,6 +794,8 @@ async def update_user_identity(
             "updated_fields": list(updates.keys()),
             "updated_by": admin.id,
         },
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s identity updated by %s: %s", user_id, admin.id, list(updates.keys()))
@@ -839,6 +853,8 @@ async def change_user_role(
             "changed_by": admin.id,
             "sessions_revoked": revoked,
         },
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info(
@@ -883,6 +899,8 @@ async def suspend_user(
         session,
         event_type="user.suspended",
         payload={"user_id": user_id, "suspended_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s suspended by %s", user_id, admin.id)
@@ -963,12 +981,30 @@ async def set_system_account(
 
     if not body.is_system_account:
         from backend.app.api.v1.endpoints.admin_sso_config import (
-            _super_admin_user_ids,
+            break_glass_accounts,
         )
-        from backend.app.db.repositories import app_auth_config_repo
+        from backend.app.db.repositories import (
+            app_auth_config_repo, binding_repo,
+        )
         snap = await app_auth_config_repo.get_snapshot(session)
+        if not snap.allow_local_login:
+            # The account that survives an IdP outage must not be the one
+            # taken away: passwords could only be switched off because a
+            # ready break-glass account existed.
+            ready = [a for a in await break_glass_accounts(session) if a["ready"]]
+            if [a["id"] for a in ready] == [user.id]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "no_break_glass_account",
+                        "message": "Passwords are off and this is the only "
+                                   "break-glass account ready to sign in — "
+                                   "unmarking it would leave no way in "
+                                   "during an identity-provider outage.",
+                    },
+                )
         if not snap.allow_local_login and user.status == "active":
-            admin_ids = await _super_admin_user_ids(session)
+            admin_ids = await binding_repo.super_admin_user_ids(session)
             if user.id in admin_ids:
                 idents = await user_identity_repo.list_for_user(
                     session, user.id,
@@ -1029,6 +1065,8 @@ async def reactivate_user(
         session,
         event_type="user.reactivated",
         payload={"user_id": user_id, "reactivated_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s reactivated by %s", user_id, admin.id)
@@ -1070,7 +1108,12 @@ async def admin_reset_password(
 
     _check_password_strength(body.new_password)
     hashed = hash_password(body.new_password)
-    await user_repo.update_password(session, user_id, hashed)
+    # A password the admin chose for someone else is theirs to replace at
+    # the next sign-in, so it stops being one the admin also knows. An
+    # admin setting their own is choosing it, like the self-service change.
+    await user_repo.update_password(
+        session, user_id, hashed, must_change=user_id != admin.id,
+    )
 
     if converting_sso_only:
         logger.warning(
@@ -1101,6 +1144,8 @@ async def admin_reset_password(
         session,
         event_type="user.password_reset_by_admin",
         payload={"user_id": user_id, "reset_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("Password reset for user %s by admin %s", user_id, admin.id)
@@ -1134,6 +1179,8 @@ async def generate_reset_token(
         session,
         event_type="user.reset_token_generated",
         payload={"user_id": user_id, "generated_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("Reset token generated for user %s by admin %s", user_id, admin.id)
@@ -2233,6 +2280,10 @@ async def _provision_user(
         status="active" if activate else "pending",
         signup_source="admin_created",
     )
+    if credential == "password":
+        # The admin typed it, so the admin knows it: the new account
+        # chooses its own at its first sign-in.
+        user.must_change_password = True
 
     if role:
         await _grant_invite_role(

@@ -27,10 +27,12 @@ and acted on in weeks, so this is invisible to a human reading a 90-day trend �
 and the document carries ``generatedAt``, which the UI shows, so the staleness
 is stated rather than hidden.
 
-Runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler`` gate the
-outbox relay, the refresh-token sweeper and the product-event GC use. Three web
-replicas each warming the same keys would be three times the work for one
-result.
+Runs on the aggregation control plane, and on a dev-role monolith through the
+``runs_scheduler`` gate the outbox relay, the refresh-token sweeper and the
+product-event GC share — never on the web tier, where every replica warming the
+same keys would be that many times the work for one result. Each pass claims
+an advisory lock first (``db/advisory.py``), so of several control planes one
+warms each slot.
 """
 from __future__ import annotations
 
@@ -40,8 +42,14 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.repositories import analytics_repo
+from backend.app.db.advisory import claim_this_pass
+from backend.app.db.repositories import (
+    analytics_data_repo,
+    analytics_repo,
+    analytics_usage_repo,
+)
 from backend.app.services import analytics_cache
+from backend.app.services.activity import summaries
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +58,22 @@ logger = logging.getLogger(__name__)
 #: list is allowed to be a plain constant rather than a shared contract.
 WARM_WINDOWS: tuple[int, ...] = (7, 14, 30, 90, 180, 365)
 
-#: The two reader-independent surfaces. The per-workspace drill-in is
-#: deliberately absent: it is one document per workspace per window, which is
-#: unbounded in the dimension that matters, and it is opened by one person at a
-#: time rather than by everyone at once.
-_SURFACES = ("summary", "workspaces")
+#: The reader-independent surfaces, each with the builder that computes it —
+#: named rather than bound, so a test that patches a builder patches what runs.
+#: The per-workspace drill-in is deliberately absent: it is one document per
+#: workspace per window, which is unbounded in the dimension that matters, and
+#: it is opened by one person at a time rather than by everyone at once.
+_SURFACES = {
+    "summary": (analytics_repo, "platform_summary"),
+    "workspaces": (analytics_repo, "workspace_rows"),
+    "data": (analytics_data_repo, "platform_data"),
+    "usage": (analytics_usage_repo, "platform_usage"),
+}
 
 #: How often to recompute. Long enough that the aggregation cost is negligible
-#: (12 documents per pass on one replica), short enough that "as of 4 minutes
-#: ago" is not a number anyone argues with.
+#: (24 documents and the activity explorer's 24 lens views per pass, on one
+#: replica), short enough that "as of 4 minutes ago" is not a number anyone
+#: argues with.
 #:
 #: Aliased rather than restated: the warm cadence and the epoch grid must be
 #: the same number, and a second literal here is how they drift apart again.
@@ -105,25 +120,25 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
     epoch = analytics_cache.epoch_start()
     for days in WARM_WINDOWS:
         args = {"days": days}
-        for surface in _SURFACES:
+        for surface, (module, builder) in _SURFACES.items():
             try:
-                if surface == "summary":
-                    doc = await analytics_repo.platform_summary(
-                        session, scope=None, now=epoch, **args)
-                else:
-                    doc = await analytics_repo.workspace_rows(
-                        session, scope=None, now=epoch, **args)
+                doc = await getattr(module, builder)(
+                    session, scope=None, now=epoch, **args)
             except Exception as exc:  # noqa: BLE001 — one window, not the pass
                 logger.warning(
                     "Analytics warm failed for %s/%dd: %s", surface, days, exc,
                     exc_info=True,
                 )
+                await summaries.rolled_back(session)
                 continue
             if await analytics_cache.put(
                 analytics_cache.document_key(surface, args, epoch=epoch),
                 doc, ttl=ttl,
             ):
                 stored += 1
+    # The Activity explorer's lenses: their cold cost is folding closed days,
+    # the same for everyone who opens them, so it is paid here.
+    stored += await summaries.warm_platform(session)
     return stored
 
 
@@ -164,9 +179,15 @@ async def run_warmer(
         started = time.monotonic()
         try:
             async with session_factory() as session:
-                stored = await warm_once(session, ttl=ttl)
+                # One warmer per slot: passes are phase-locked to the same
+                # boundary, so without this every control plane would warm
+                # the same documents at the same moment.
+                claimed = await claim_this_pass(session, "analytics:warmer")
+                stored = await warm_once(session, ttl=ttl) if claimed else 0
             elapsed = time.monotonic() - started
-            if stored:
+            if not claimed:
+                pass  # another process warmed this slot
+            elif stored:
                 logger.info(
                     "Analytics warm pass stored %d document(s) in %.1fs",
                     stored, elapsed,

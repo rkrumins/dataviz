@@ -1,5 +1,7 @@
 # Insights Service
 
+*For engineers and platform operators.*
+
 The insights service is the headless background service that keeps per–data-source
 statistics, graph-schema profiles, and pre-registration asset discovery fresh —
 so the web tier can answer "how big is this graph, what's in it, and is it
@@ -441,20 +443,19 @@ In the registry / assets UI, a `RefreshControl` pill renders
 cache-only reads let the frontend render a placeholder with an ETA chip while a
 job is `computing`. A stuck pipeline (Redis down) surfaces as a
 "background refresh paused" affordance when a read comes back `unavailable`.
-The counts history appears as a **Last 30 days** card in the data source
-profile and, behind it, a full history view at
-`/datasources/{catalogId}/history` — counts over time by label, a change ledger
-with correlated platform activity, an unusual-only filter, a CSV export, and a
-scope switch between this source, its provider and the whole platform. The
-retention policy is edited in place from the coverage line that reports it,
-read-only for non-admins — and the alert policy sits in the same dialog, because
-how much evidence to keep and how loudly to react to it are one decision in
-practice. Open anomalies appear as a band above the chart until someone
-acknowledges them, naming the provider and source they belong to; at the
-provider and platform scopes they are grouped into an inbox by provider, because
-several affected sources under one provider is a provider problem — a rotated
-cluster, a broken loader, an expired credential — and a flat severity-ordered
-list scatters that signal instead of leading with it.
+The counts history has two homes. **Ingestion → Profiling** is a board of what
+moved across every data source — unusual movement first — with an
+**Unusual only** filter and a CSV export of the whole board; clicking a row
+opens that source's profile without leaving the board. A single source's
+history is its **Profiling** view: counts over time, a change ledger, and open
+findings in a band above the chart until someone acknowledges them, each
+naming its provider. It opens from the **Profiling** tab beside **Overview** on
+the data source page (`/datasources/{catalogId}`), shown to people who can read
+profiling, and from the **Profiling** tab of the workspace data-source drawer. Old links to `/datasources/{catalogId}/history`
+open the data source page. The retention policy and the alert policy share one
+settings dialog — readable by anyone who can read profiling, changeable only by
+platform administrators — because how much evidence to keep and how loudly to
+react to it are one decision in practice.
 Providers that fail repeatedly show as degraded via the rolling success window.
 
 ## Limitations
@@ -490,3 +491,9 @@ Providers that fail repeatedly show as degraded via the rolling success window.
   cutoff on a source changing on every probe. When it does, that source keeps
   fewer than 7 days of RAW rows; its hour and day rollups still cover the full
   window, because they are built before raw becomes eligible for deletion.
+
+## See also
+
+- [Platform Services Overview](/docs/services-overview) — where the stats service sits among the other processes
+- [Architecture](/docs/architecture) — every process and store as deployed
+- [Data Freshness & Ingestion](/guide/data-freshness) — what administrators see of freshness in the product

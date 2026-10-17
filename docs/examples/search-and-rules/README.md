@@ -52,7 +52,7 @@ Search), choose the file, review the preview, and **Import**.
 **Into one View, or every View of a data source, from a script:**
 
 ```bash
-export SYNODIC_BASE_URL=http://localhost:8000 SYNODIC_EMAIL=you@example.com
+export SYNODIC_BASE_URL=http://localhost:8000 SYNODIC_API_KEY=nxpat_…   # or SYNODIC_EMAIL, and it asks for the password
 python -m backend.scripts.publish_view_library docs/examples/search-and-rules/packs/governance.library.json --view <view id>
 python -m backend.scripts.publish_view_library docs/examples/search-and-rules/packs/governance.library.json --data-source <data source id>
 ```

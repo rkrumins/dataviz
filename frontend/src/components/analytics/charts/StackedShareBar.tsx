@@ -39,24 +39,36 @@ const OTHER_KEY = 'Other'
  */
 function assignColours(
     slices: ShareSlice[], series: readonly string[], neutral: string,
+    slotOf?: (key: string) => number | undefined,
 ): string[] {
     let slot = 0
-    return slices.map((s) =>
-        s.key === OTHER_KEY ? neutral : series[slot++ % series.length])
+    return slices.map((s) => {
+        if (s.key === OTHER_KEY) return neutral
+        if (!slotOf) return series[slot++ % series.length]
+        const fixed = slotOf(s.key)
+        return fixed === undefined ? neutral : series[fixed % series.length]
+    })
 }
 
 interface Props {
     slices: ShareSlice[]
     /** Prettify raw enum keys (`local_signup` → `Local signup`). */
     labelOf?: (key: string) => string
+    /**
+     * The slot each class keeps, for a class the page also draws elsewhere —
+     * without it, slots are handed out in order and the same class can come
+     * out a different colour on the chart beside this one. `undefined` marks
+     * a residual, drawn in the neutral mark.
+     */
+    slotOf?: (key: string) => number | undefined
     className?: string
 }
 
-export function StackedShareBar({ slices, labelOf, className }: Props) {
+export function StackedShareBar({ slices, labelOf, slotOf, className }: Props) {
     const theme = useChartTheme()
     const total = slices.reduce((sum, s) => sum + s.count, 0)
     const label = labelOf ?? humanise
-    const colours = assignColours(slices, theme.series, theme.neutralMark)
+    const colours = assignColours(slices, theme.series, theme.neutralMark, slotOf)
 
     if (total === 0) {
         return (

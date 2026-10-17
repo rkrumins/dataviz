@@ -135,6 +135,77 @@ async def test_kinds_with_nothing_to_probe_report_unknown_not_ok():
         assert health.status == "unknown", kind
 
 
+# ── Enterprise gateway connections ───────────────────────────────────
+#
+# Never a live request: what fails in practice is allowlist drift, so the
+# check is that the server's destinations are configured and permitted —
+# and which destinations depends on where the exchange runs.
+
+GATEWAY = "https://10.20.30.40:8443/redeem"
+ALLOWED = frozenset({"10.20.30.40:8443"})
+
+
+@pytest.mark.asyncio
+async def test_a_server_mode_gateway_needs_its_gateway_url():
+    health = await probe_provider("idp_4", "corp", "backchannel", {})
+    assert health.status == "unavailable"
+    assert health.detail == "No gateway_url configured; this provider cannot sign anyone in."
+
+
+@pytest.mark.asyncio
+async def test_a_server_mode_gateway_must_be_allowlisted():
+    settings = {"gateway_url": GATEWAY}
+    refused = await probe_provider("idp_4", "corp", "backchannel", settings)
+    assert refused.status == "unavailable"
+    assert refused.detail.startswith("gateway_url:")
+
+    allowed = await probe_provider("idp_4", "corp", "backchannel", settings, ALLOWED)
+    assert allowed.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_browser_mode_gateway_needs_no_gateway_url():
+    """The browser runs the translate call: there is no gateway URL to
+    have, and a working connection must not read as unable to sign in."""
+    health = await probe_provider("idp_5", "corp", "backchannel", {
+        "exchange_mode": "browser",
+        "browser_exchange_url": "https://sso.corp.example/translate",
+        "jwt_public_key": "-----BEGIN PUBLIC KEY-----…",
+    })
+    assert health.status == "ok"
+    assert health.detail == (
+        "The browser runs the exchange; the server has no endpoint to call."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_browser_mode_gateway_needs_its_exchange_url():
+    health = await probe_provider("idp_5", "corp", "backchannel", {
+        "exchange_mode": "browser",
+    })
+    assert health.status == "unavailable"
+    assert health.detail == (
+        "No browser_exchange_url configured; this provider cannot sign anyone in."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_browser_mode_key_set_must_be_allowlisted():
+    """Its one server-side request: the JWKS it verifies tokens against."""
+    settings = {
+        "exchange_mode": "browser",
+        "browser_exchange_url": "https://sso.corp.example/translate",
+        "jwks_url": "https://10.20.30.40:8443/jwks",
+    }
+    refused = await probe_provider("idp_5", "corp", "backchannel", settings)
+    assert refused.status == "unavailable"
+    assert refused.detail.startswith("jwks_url:")
+
+    allowed = await probe_provider("idp_5", "corp", "backchannel", settings, ALLOWED)
+    assert allowed.status == "ok"
+    assert "key set" in allowed.detail
+
+
 # ── The sweep and the endpoint ───────────────────────────────────────
 
 

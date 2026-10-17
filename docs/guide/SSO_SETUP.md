@@ -301,7 +301,7 @@ endpoint to call. Two things to know before you do:
 - It runs **automatically**, once per browser tab, for anyone opening
   {brand}. A session the machine already holds should not need a button
   press. If it fails — an off-network laptop, a browser that has not
-  been told to answer for that host — the ordinary sign-in form is still
+  been told to answer for that host — the ordinary sign-in page is still
   there, and pressing the button will say what went wrong.
 - There is a **switch** on the section. Turning it off stops the call
   without losing what you configured, which is what you want during an
@@ -394,8 +394,10 @@ Ask them for:
   says so where you type them: those calls are made *by* the browser, so their
   headers are public.)
 - **Whether their reply includes an authentication time.** Without one there is
-  no way to tell how long ago somebody actually signed in, and the daily
-  re-authentication ceiling stops applying to them.
+  no way to tell when somebody actually signed in at your portal, so the daily
+  re-authentication ceiling is measured from each sign-in to {brand} instead.
+  The sign-in still succeeds, and the rehearsal verdict says when this happens.
+  With the time included, the ceiling measures from their own sign-in.
 - **A validate-only endpoint, if they have one.** The session re-check calls it
   instead of the redeem endpoint (the connection's **Re-check URL**), so
   renewals stop minting a token apiece.
@@ -452,16 +454,16 @@ The five-step flow is the same, with the differences you would expect:
 | Step | What is different |
 |---|---|
 | **Connect** | No **Fetch** — there is no document to read. You fill in the two endpoints and where the token and the user details sit in their replies. |
-| **Map** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
+| **Fields** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
 | **Rehearse** | Works exactly as it does elsewhere, and matters more here: it is the only way to see what your gateway actually returned before anyone else depends on it. |
 | **Publish** | Refused if the connection is not configured enough to work. |
 
 If something is wrong, saving tells you which field and why. If a sign-in fails
-afterwards, see *Running Single Sign-On* → **Why a sign-in failed**.
+afterwards, see [When a sign-in fails](/guide/sso-operations#when-a-sign-in-fails).
 
 There is a document written for the team that owns the gateway rather
-than for you — `docs/SSO_BACKCHANNEL_CONTRACT.md` in the {brand}
-repository. It states what their endpoints have to do, and is worth
+than for you — the [Back-channel SSO Contract](/docs/sso-backchannel-contract)
+in the documentation. It states what their endpoints have to do, and is worth
 sending them before the work starts rather than after. The section on
 status codes is the one that cannot be fixed from this side afterwards:
 if their service returns a server error for an expired session, nobody
@@ -537,8 +539,11 @@ Closing with unsaved edits asks first.
 - **Turn off one connection** — the power button on its card. The configuration
   is kept; sign-ins through it stop.
 - **Turn off all SSO** — Settings → *Single sign-on*. The master switch.
-- **SSO only, no passwords** — Settings → *Passwords*. Refused if it would lock
-  out an admin who has no SSO identity.
+- **SSO only, no passwords** — Settings → *Passwords*. Refused until a
+  break-glass account is ready, and lists any Super Admin it would leave
+  without a way in. See
+  [When your identity provider is down](/guide/sso-operations#when-your-identity-provider-is-down)
+  for who can still get in during an outage.
 
 The Settings tab opens with one sentence describing what somebody arriving at the
 sign-in page gets right now, because four independent switches do not add up to
@@ -548,10 +553,12 @@ one combination no individual switch can warn you about.
 
 ---
 
-## What next
+## Where to next
 
-Your connection is live and people are signing in. The questions from here are
-about running it: who gets what, what happens when somebody leaves, and why one
-person cannot sign in when everybody else can.
-
-**→ [Running Single Sign-On](/guide/sso-operations)**
+- [Running Single Sign-On](/guide/sso-operations) — when your connection is
+  live and you want to decide who gets what, handle somebody leaving, or find
+  out why one person cannot sign in when everybody else can.
+- [Users & Access](/guide/users-access) — when you want to understand the roles
+  and groups your access rules grant.
+- [Troubleshooting](/guide/troubleshooting#a-new-user-cant-log-in) — when
+  someone can't sign in at all and you need the quick checks.

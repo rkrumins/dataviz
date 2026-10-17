@@ -1,0 +1,5 @@
+# Optional: the S3-compatible object store (OBJECT_STORE_BACKEND=s3 — Amazon S3, MinIO, or GCS
+# through its XML API). Not in requirements.txt: the default image runs without it, and only the s3
+# backend imports it. Install on top of requirements.txt in an image that uses that backend:
+#   pip install -r backend/requirements.txt -r backend/requirements-s3.txt
+boto3>=1.43.109          # >=1.36: request_checksum_calculation='when_required' (GCS refuses the default CRC32 checksums)

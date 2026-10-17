@@ -15,28 +15,39 @@
  * Each of these reads a table the dashboard previously ignored entirely.
  */
 import {
-    AlertTriangle, CheckCircle2, Clock, DatabaseZap, Layers, MailCheck,
-    ShieldQuestion, Timer,
+    AlertTriangle, Bot, CheckCircle2, Clock, DatabaseZap, Hand, Layers, MailCheck,
+    Percent, ShieldQuestion, Timer,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { compact, exact, percent } from '@/lib/formatMetric'
-import { humaniseKey } from '@/lib/domainLabels'
-import type { AnalyticsRangeSelection, AnalyticsSummary } from '@/services/analyticsService'
+import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
+import { humaniseKey, runOriginLabel } from '@/lib/domainLabels'
+import { timeAgo } from '@/lib/timeAgo'
+import type {
+    AnalyticsRangeSelection, AnalyticsSummary, AnalyticsUsageDoc,
+} from '@/services/analyticsService'
+import type { AnalyticsUsageState } from '@/hooks/useAnalytics'
+import { cadencePhrase } from '@/components/activity/activityMeta'
 import { KpiCard } from './KpiCard'
+import { Leaderboard } from './Leaderboard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { StackedShareBar } from './charts/StackedShareBar'
+import { StackedAreaChart } from './charts/StackedAreaChart'
 import { WithheldPanel } from './Redacted'
-import { rangePhrase } from './RangePicker'
+import { comparisonLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
+import { UsageSection } from './UsageSection'
+import { RUN_ORIGIN_SLOT } from './slots'
 
 export function HealthTab({
-    data, range, isStale,
+    data, range, isStale, usage,
 }: {
     data: AnalyticsSummary
     range: AnalyticsRangeSelection
     isStale: boolean
+    /** How ingestion is driven, from the usage document. */
+    usage?: AnalyticsUsageState
 }) {
     const theme = useChartTheme()
     const { reliability, access, semanticLayer } = data.health
@@ -138,6 +149,32 @@ export function HealthTab({
                 )}
             </section>
 
+            {/* ── How ingestion is driven ──────────────────────────────
+                Withheld below the posture that shows operations, like refresh
+                outcomes: how often people rebuild a source says how reliable
+                it is. Heading kept, as above. */}
+            {usage && (
+                <section aria-labelledby="health-ingestion">
+                    <h2 id="health-ingestion" className="text-sm font-bold text-ink mb-1">
+                        How ingestion is driven
+                    </h2>
+                    <p className="text-[11px] text-ink-muted mb-3">
+                        Every run a person starts is one that automation did not.
+                    </p>
+                    <UsageSection usage={usage}>
+                        {(u) => (u.health ? (
+                            <IngestionDriven health={u.health} range={range} isStale={usage.isFetching} />
+                        ) : (
+                            <WithheldPanel
+                                title="Who starts ingestion runs is hidden"
+                                shape="stats"
+                                reason="How often people rebuild each source by hand, and how often runs fail, is visible to administrators and auditors."
+                            />
+                        ))}
+                    </UsageSection>
+                </section>
+            )}
+
             {/* ── Access friction ──────────────────────────────────────
                 Withheld likewise: pending requests and invite acceptance
                 identify people by implication. Heading kept, as above. */}
@@ -238,6 +275,104 @@ export function HealthTab({
                     />
                 </div>
             </section>
+        </div>
+    )
+}
+
+function IngestionDriven({
+    health, range, isStale,
+}: {
+    health: NonNullable<AnalyticsUsageDoc['health']>
+    range: AnalyticsRangeSelection
+    isStale: boolean
+}) {
+    const theme = useChartTheme()
+    const window = `in ${rangePhrase(range)}`
+    const total = Object.values(health.totals).reduce((a, b) => a + b, 0)
+    const bands = health.runs.map((r) => ({
+        key: r.key,
+        label: runOriginLabel(r.key),
+        values: r.values,
+        slot: RUN_ORIGIN_SLOT[r.key] ?? 5,
+        residual: RUN_ORIGIN_SLOT[r.key] === undefined,
+    }))
+
+    return (
+        <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <KpiCard
+                    label="Runs started by hand" metric="runsByHand" icon={Hand} accent="amber"
+                    value={health.byHand.current ?? 0}
+                    changePct={health.byHand.changePct} comparisonLabel={comparisonLabel(range)}
+                    // More manual runs is not good news: it is toil.
+                    higherIsBetter={false}
+                />
+                <KpiCard
+                    label="Share started by hand" icon={Percent} accent="violet"
+                    value={percent(health.manualShare)}
+                    sub={total ? `of ${exact(total)} runs ${window}` : `No runs ${window}`}
+                    higherIsBetter={false}
+                />
+                <KpiCard
+                    label="Run failure rate" metric="ingestionFailureRate" icon={AlertTriangle}
+                    accent={health.failureRate != null && health.failureRate > 0.1 ? 'pink' : 'emerald'}
+                    value={percent(health.failureRate, 1)}
+                    sub="Of runs that finished"
+                    higherIsBetter={false}
+                />
+                <KpiCard
+                    label="Automatic runs" icon={Bot} accent="indigo"
+                    value={compact(health.totals.automatic)}
+                    sub={`${exact(health.totals.onboarding)} onboarding · ${exact(health.totals.other)} other`}
+                />
+            </div>
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                <ChartFrame
+                    title="Runs, by who started them"
+                    subtitle={`Every aggregation run ${window}`}
+                    className="xl:col-span-2"
+                    isStale={isStale}
+                    isEmpty={total === 0}
+                    emptyLabel="No aggregation runs in this range."
+                    series={bands.map((b) => ({
+                        key: b.key, label: b.label, shape: 'area' as const,
+                        color: b.residual ? theme.neutralMark : theme.series[b.slot],
+                    }))}
+                    table={
+                        <ChartTable
+                            rowLabel="Date"
+                            rows={health.buckets.map((b) => shortDate(b, true))}
+                            columns={bands.map((b) => ({ key: b.key, label: b.label, values: b.values }))}
+                        />
+                    }
+                >
+                    <StackedAreaChart
+                        buckets={health.buckets} series={bands} height={220}
+                        formatBucket={(b) => shortDate(b, true)}
+                        axisLabels={health.buckets.map((b) => shortDate(b))}
+                    />
+                </ChartFrame>
+                <ChartFrame
+                    title="Most hands-on sources"
+                    subtitle="Operations people ran by hand, and how often"
+                    isStale={isStale}
+                >
+                    <Leaderboard
+                        unit="operations"
+                        slot={1}
+                        emptyLabel="Nobody operated a source by hand in this range."
+                        rows={health.handsOnSources.map((s, i) => ({
+                            id: s.dataSourceId ?? `hidden-${i}`,
+                            label: s.redacted
+                                ? <span className="italic text-ink-muted">A source you cannot see</span>
+                                : s.name ?? <span className="font-mono text-[11px]">{s.dataSourceId}</span>,
+                            meta: cadencePhrase(s.medianGapHours) ?? undefined,
+                            value: s.count,
+                            detail: `last ${timeAgo(s.lastAt)}`,
+                        }))}
+                    />
+                </ChartFrame>
+            </div>
         </div>
     )
 }

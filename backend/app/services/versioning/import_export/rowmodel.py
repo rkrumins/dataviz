@@ -17,6 +17,9 @@ a field — PATCH semantics), and ``tags``/``confidence`` are coerced. ``denorma
 ``properties_json`` (mirroring the projector's native-vs-``propertiesRaw`` split so round-trips are
 lossless). In TEXT formats a flat-list ``prop.*`` value is written by ``cell_text`` as JSON and read
 back by ``parse_list_cells``.
+
+A view package's format-2 line (``stream.native_pages``) carries the stored payload whole as an
+object, which ``normalize(..., native=True)`` reads into the same normalized row.
 """
 from __future__ import annotations
 
@@ -83,8 +86,10 @@ def _assemble_properties(raw: Dict[str, Any]) -> Dict[str, Any]:
     return props
 
 
-def normalize(raw: Dict[str, Any], kind: str) -> Dict[str, Any]:
-    """Flat file record -> normalized row (``kind`` is 'node' or 'edge')."""
+def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[str, Any]:
+    """Flat file record -> normalized row (``kind`` is 'node' or 'edge'). ``native``: the record
+    comes from a view package, whose lines may be format 2 (an object ``payload``) — only there:
+    in a plain NDJSON import a ``payload`` key is the user's own column, not a format."""
     out: Dict[str, Any] = {"kind": kind}
     # ``_op`` accepts only blank/'upsert' or 'delete'. An unexpected value almost always means the
     # user's columns are shifted (e.g. a property value that fell into the _op slot) — flag it as
@@ -104,6 +109,9 @@ def normalize(raw: Dict[str, Any], kind: str) -> Dict[str, Any]:
     out["entity_id"] = str(raw.get("entity_id") or "").strip()
     if not _blank(raw.get("baseVersion")):
         out["baseVersion"] = _clean(raw["baseVersion"])
+    if native and isinstance(raw.get("payload"), dict):
+        _expand_payload(out, raw, kind)
+        return out
 
     for field in (_NODE_CORE if kind == "node" else _EDGE_CORE):
         if not _blank(raw.get(field)):
@@ -119,6 +127,41 @@ def normalize(raw: Dict[str, Any], kind: str) -> Dict[str, Any]:
 
     out["properties"] = _assemble_properties(raw)
     return out
+
+
+#: The portable names of an edge's ends, which a format-2 package line carries beside its payload
+#: (an edge's payload holds only its endpoints' entity ids, minted per graph).
+_EDGE_ENDS = ("sourceQualifiedName", "targetQualifiedName", "sourceUrn", "targetUrn")
+
+
+def _expand_payload(out: Dict[str, Any], raw: Dict[str, Any], kind: str) -> None:
+    """A format-2 package line — ``{kind, entity_id, baseVersion, payload}``, the stored payload
+    whole — as the normalized row its format-1 (flat) record gives: the same fields, read from the
+    payload rather than from columns. No ``prop.*`` spill, ``properties_json`` or comma-joined tags
+    to undo, so the properties arrive exactly as they were stored. The payload's other top-level
+    keys (a node's ``lastSyncedAt``, an edge's ``discriminator``) are not read: a format-1 record
+    has no column for them, and the import writes only these fields (``resolve``)."""
+    payload = raw["payload"]
+    if kind == "node":
+        for field in _NODE_CORE:
+            if not _blank(payload.get(field)):
+                out[field] = _clean(payload[field])
+        tags = payload.get("tags")
+        if tags:
+            out["tags"] = tags if isinstance(tags, list) else [
+                s.strip() for s in str(tags).split(",") if s.strip()
+            ]
+    else:
+        for field, key in (("edgeType", "edgeType"), ("source_entity_id", "sourceEntityId"),
+                           ("target_entity_id", "targetEntityId")):
+            if not _blank(payload.get(key)):
+                out[field] = _clean(payload[key])
+        for field in _EDGE_ENDS:
+            if not _blank(raw.get(field)):
+                out[field] = _clean(raw[field])
+        if payload.get("confidence") is not None:
+            out["confidence"] = float(payload["confidence"])
+    out["properties"] = dict(payload.get("properties") or {})
 
 
 def _spill_properties(rec: Dict[str, Any], properties: Optional[Dict[str, Any]]) -> None:

@@ -1,12 +1,14 @@
-"""Standalone versioning projection worker.
+"""Standalone versioning worker: the lanes ``GRAPHVER_WORKER_LANES`` names (all by default).
 
 Run: ``python -m backend.app.services.versioning``
 
 Builds a provider-aware FalkorDB graph factory (registry-routed per
 ``projection_state.falkor_provider``, env ``FALKORDB_HOST/PORT`` as the default
-instance), bootstraps the graphver schema, and runs the :class:`ProjectionWorker`
-(poll loop + Redis-stream consumer). Mirrors
-``backend/app/services/aggregation/__main__.py``.
+instance), bootstraps the graphver schema, and runs the :class:`ProjectionWorker`'s
+enabled lanes — projection (poll loop + Redis-stream consumer), transfer (import /
+export / publish / inspect jobs), bootstrap (bootstraps, purges, the reaper). Job leases
+are renewed by a heartbeat thread (``job_lease.LeaseKeeper``) that also exits the
+process if its event loop wedges. Mirrors ``backend/app/services/aggregation/__main__.py``.
 """
 from __future__ import annotations
 
@@ -16,13 +18,14 @@ import os
 import signal
 
 from . import config, db, models
+from .job_lease import LeaseKeeper
 from .messaging import close_broker_redis
-from .bootstrap_worker import BootstrapRunner
-from .import_export.runner import TransferRunner
-from .purge_worker import PurgeRunner, Reaper
 from .projection import FalkorProjector, make_falkor_graph_factory
-from .service import GraphVersioningService
-from .worker import ProjectionWorker
+from .worker import build_worker
+from backend.app.observability.event_loop_monitor import (
+    EventLoopLagStats,
+    run_event_loop_monitor,
+)
 from backend.app.providers.eviction_budget import make_registry_budget_resolver
 from backend.app.services.projection_target import repair_projection_target
 
@@ -68,6 +71,10 @@ def _import_export_service():
 
 
 async def _amain() -> None:
+    lanes = config.worker_lanes()
+    if not os.getenv("GRAPHVER_POOL_SIZE"):
+        # Before the first session: the engine is built from this on first use.
+        config.POOL_SIZE = config.lane_pool_size(lanes)
     await models.create_schema_and_partitions()
     # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
     # on every projection, so the standalone worker matches the interactive project_now path.
@@ -93,26 +100,26 @@ async def _amain() -> None:
                                 edge_types_resolver=resolve_aggregation_edge_types,
                                 on_rollups_stale=make_rollup_rebuild_hook(_get_agg_service),
                                 on_projected=after_projection)
-    worker = ProjectionWorker(
-        projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
-        versioning=GraphVersioningService(),
+    worker = build_worker(
+        projector, graph_factory, lanes=lanes, import_export=_import_export_service,
+        consumer=os.getenv("HOSTNAME"),
         # Per-provider eviction budgets come from the provider registry (env
         # GRAPHVER_FALKOR_* as fallback); the loop no-ops until a provider's
         # falkorMaxResident is set.
         evict_budget=make_registry_budget_resolver(),
-        # "Enable version control" jobs: a 10M-entity source is copied here, off the
-        # web tier, in resumable windows (see bootstrap_worker).
-        bootstrap=BootstrapRunner(graph_factory, consumer=os.getenv("HOSTNAME", "boot-1")),
-        purge=PurgeRunner(graph_factory, consumer=os.getenv("HOSTNAME", "purge-1")),
-        reaper=Reaper(),
-        # Import and export jobs the API queued (GRAPHVER_TRANSFER_INPROCESS off): run here, off
-        # the web tier, GRAPHVER_TRANSFER_SLOTS at a time.
-        transfers=TransferRunner(_import_export_service),
     )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, worker.stop)
+
+    # The loop monitor's ticks are what the lease keeper's wedge guard watches: a loop that stops
+    # ticking for GRAPHVER_JOB_WEDGE_SECS takes the process down, so its jobs are taken over.
+    monitor_stop = asyncio.Event()
+    monitor = asyncio.create_task(
+        run_event_loop_monitor(stats=EventLoopLagStats(), shutdown=monitor_stop),
+        name="event-loop-monitor")
+    keeper = LeaseKeeper(exit_on_wedge=True).start()
 
     # This process caches provider configs + graph clients (via the registry factory)
     # and has NO warmup loop, so an admin repointing a provider would otherwise leave
@@ -125,17 +132,21 @@ async def _amain() -> None:
     except Exception as exc:
         logger.warning("Provider invalidation listener failed to start: %s", exc)
 
-    logger.info("versioning projection worker starting (poll=%ss)", config.PROJECTION_POLL_SECS)
+    logger.info("versioning worker starting (lanes=%s, pool=%s)", ",".join(sorted(lanes)),
+                config.POOL_SIZE)
     try:
         await worker.run()
     finally:
+        keeper.stop()
+        monitor_stop.set()
+        await asyncio.gather(monitor, return_exceptions=True)
         try:
             await invalidation_listener.stop()
         except Exception:
             pass
         await close_broker_redis()
         await db.dispose_engine()
-        logger.info("versioning projection worker stopped")
+        logger.info("versioning worker stopped")
 
 
 def main() -> None:

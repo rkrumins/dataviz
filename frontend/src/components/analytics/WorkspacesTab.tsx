@@ -15,19 +15,33 @@ import { useMemo, useState } from 'react'
 import { ArrowUpDown, ChevronDown, ChevronUp, Lock, MoonStar } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import type { AnalyticsRangeSelection } from '@/services/analyticsService'
+import type { AnalyticsRangeSelection, AnalyticsUsageDoc } from '@/services/analyticsService'
+import type { AnalyticsUsageState } from '@/hooks/useAnalytics'
 import { timeAgo } from '@/lib/timeAgo'
 import { WithheldValue } from './Redacted'
 import { WorkspaceLink } from './EntityLink'
 import { RequestAccessButton } from './RequestAccessButton'
 import { WorkspaceEstate } from './WorkspaceEstate'
-import { compact, exact } from '@/lib/formatMetric'
+import { compact, exact, shortDate } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
 import { useChartTheme } from './charts/chartTheme'
+import { ChartFrame } from './charts/ChartFrame'
+import { ChartTable } from './charts/ChartTable'
+import { PulseMatrix } from './charts/PulseMatrix'
+import { MetricInfo } from './MetricInfo'
+import { UsageSection } from './UsageSection'
 import { rangePhrase } from './RangePicker'
 
 type SortKey = 'name' | 'members' | 'views' | 'newViews' | 'activity'
-    | 'opens' | 'activeUsers' | 'nodes' | 'lastActivityAt'
+    | 'opens' | 'activeUsers' | 'manualOperations' | 'accessChanges'
+    | 'nodes' | 'lastActivityAt'
+
+/** A row, with the two counts the usage document adds once it arrives —
+ *  `undefined` until then, `null` where they are withheld. */
+type Row = WorkspaceAnalyticsRow & {
+    manualOperations?: number | null
+    accessChanges?: number | null
+}
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean; hint?: string }[] = [
     { key: 'name', label: 'Workspace', numeric: false },
@@ -37,22 +51,36 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean; hint?: string }[
     { key: 'activeUsers', label: 'Active', numeric: true, hint: 'Distinct people who did something in range' },
     { key: 'opens', label: 'Opens', numeric: true },
     { key: 'activity', label: 'Actions', numeric: true },
+    { key: 'manualOperations', label: 'By hand', numeric: true, hint: 'Rebuilds, refreshes and other operations people started on this workspace’s sources' },
+    { key: 'accessChanges', label: 'Access', numeric: true, hint: 'Members and roles granted, changed or revoked' },
     { key: 'nodes', label: 'Nodes', numeric: true, hint: 'Graph scale across this workspace’s data sources' },
     { key: 'lastActivityAt', label: 'Last active', numeric: false },
 ]
 
 export function WorkspacesTab({
-    rows, range, isStale, onSelect, selectedId,
+    rows: summaryRows, range, isStale, onSelect, selectedId, usage,
 }: {
     rows: WorkspaceAnalyticsRow[]
     range: AnalyticsRangeSelection
     isStale: boolean
     onSelect: (workspaceId: string) => void
     selectedId: string | null
+    /** The pulse and the hands-on counts, from the usage document. */
+    usage?: AnalyticsUsageState
 }) {
     const theme = useChartTheme()
     const [sortKey, setSortKey] = useState<SortKey>('activity')
     const [asc, setAsc] = useState(false)
+
+    // Joined by id: the two documents are cached apart and either may lead.
+    const usageRows = usage?.data?.workspaces.rows
+    const rows: Row[] = useMemo(() => {
+        const byId = new Map((usageRows ?? []).map((r) => [r.workspaceId, r]))
+        return summaryRows.map((r) => {
+            const u = byId.get(r.workspaceId)
+            return u ? { ...r, manualOperations: u.manualOperations, accessChanges: u.accessChanges } : r
+        })
+    }, [summaryRows, usageRows])
 
     const sorted = useMemo(() => {
         const copy = [...rows]
@@ -109,6 +137,15 @@ export function WorkspacesTab({
                     </span>
                 </p>
             )}
+
+            <UsageSection usage={usage}>
+                {(u) => (
+                    <Pulse
+                        workspaces={u.workspaces} isStale={!!usage?.isFetching}
+                        onSelect={onSelect}
+                    />
+                )}
+            </UsageSection>
 
             <div className="overflow-x-auto rounded-2xl border border-glass-border bg-canvas-elevated shadow-sm">
                 <table className="w-full text-xs">
@@ -241,6 +278,8 @@ export function WorkspacesTab({
                                     <Cell value={row.activeUsers} meter={meterFor('activeUsers')} />
                                     <Cell value={row.opens} meter={meterFor('opens')} />
                                     <Cell value={row.activity} meter={meterFor('activity')} />
+                                    <Cell value={row.manualOperations} meter={meterFor('manualOperations')} />
+                                    <Cell value={row.accessChanges} meter={meterFor('accessChanges')} />
                                     <Cell value={row.nodes} compactValue meter={meterFor('nodes')} />
                                     <td className="px-3 py-2.5 text-ink-muted whitespace-nowrap">
                                         {row.lastActivityAt ? timeAgo(row.lastActivityAt) : '—'}
@@ -300,11 +339,15 @@ export function WorkspacesTab({
 function Cell({
     value, compactValue, meter,
 }: {
-    value: number | null
+    /** `undefined` while the figure is still on its way. */
+    value: number | null | undefined
     compactValue?: boolean
     /** Share of the column's peak, for the one column being sorted. */
     meter?: { share: number; color: string }
 }) {
+    if (value === undefined) {
+        return <td className="px-3 py-2.5 text-right text-ink-muted/70">—</td>
+    }
     // `null` is a refusal, not a measurement. Rendering it as 0 would put a
     // real-looking number in a column people sort and total.
     if (value === null) {
@@ -334,5 +377,64 @@ function Cell({
                 />
             )}
         </td>
+    )
+}
+
+/**
+ * Each workspace, period by period. Names open the drill-in, as a row of the
+ * table below does; a workspace the reader cannot see keeps its row — its
+ * activity is real — and loses its name.
+ */
+function Pulse({
+    workspaces, isStale, onSelect,
+}: {
+    workspaces: AnalyticsUsageDoc['workspaces']
+    isStale: boolean
+    onSelect: (workspaceId: string) => void
+}) {
+    const { buckets, pulse } = workspaces
+    const nameOf = (p: (typeof pulse)[number]) => p.name ?? 'Unnamed workspace'
+    return (
+        <ChartFrame
+            id="chart-workspace-pulse"
+            title="Workspace pulse"
+            subtitle={pulse.length > 1
+                ? `The ${pulse.length} busiest workspaces, period by period`
+                : 'Activity, period by period'}
+            isStale={isStale}
+            isEmpty={pulse.length === 0}
+            emptyLabel="Nothing happened in any workspace in this range."
+            action={<MetricInfo metric="workspacePulse" />}
+            table={
+                <ChartTable
+                    rowLabel="Date"
+                    rows={buckets.map((b) => shortDate(b, true))}
+                    columns={pulse.map((p) => ({ key: p.workspaceId, label: nameOf(p), values: p.values }))}
+                    caption="Activity per workspace and period"
+                />
+            }
+        >
+            <PulseMatrix
+                buckets={buckets}
+                rows={pulse.map((p) => ({
+                    id: p.workspaceId,
+                    title: nameOf(p),
+                    values: p.values,
+                    total: p.total,
+                    label: p.redacted ? (
+                        <span className="italic font-normal text-ink-muted">{nameOf(p)}</span>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={() => onSelect(p.workspaceId)}
+                            title={`Open analytics for ${nameOf(p)}`}
+                            className="max-w-full truncate rounded text-left outline-none hover:text-indigo-600 dark:hover:text-indigo-400 focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                        >
+                            {nameOf(p)}
+                        </button>
+                    ),
+                }))}
+            />
+        </ChartFrame>
     )
 }

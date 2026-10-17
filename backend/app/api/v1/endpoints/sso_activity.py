@@ -60,7 +60,7 @@ OUTCOMES: dict[str, tuple[str, ...]] = {
     "session_ended": (
         "user.session_refused", "user.sso_session_expired",
         "user.sso_session_ended_upstream", "user.session_revoked",
-        "user.sessions_ended_by_admin",
+        "user.sessions_ended_by_admin", "user.password_fallback_session_ended",
     ),
     "signed_out": ("user.logged_out",),
     "account": (
@@ -68,15 +68,27 @@ OUTCOMES: dict[str, tuple[str, ...]] = {
         "user.identity.linked", "user.identity.unlinked",
         "user.identity.admin_linked", "user.identity.admin_unlinked",
     ),
-    "trust": ("user.sso_unsigned_accepted", "user.sso_header_accepted"),
+    # Trust the platform could not get from the IdP: an unsigned profile, a
+    # proxy's header, a session renewed while its IdP was down.
+    "trust": (
+        "user.sso_unsigned_accepted", "user.sso_header_accepted",
+        "user.sso_reauth_deferred",
+    ),
     "config": (
         "idp.provider.created", "idp.provider.updated",
         "idp.provider.deleted", "idp.provider.published",
         "idp.provider.sessions_ended",
         "auth.config.updated", "auth.config.sso_sessions_ended",
         "auth.config.all_sessions_ended",
+        "auth.config.password_fallback_opened",
+        "auth.config.password_fallback_extended",
+        "auth.config.password_fallback_closed",
+        "auth.config.password_fallback_expired",
+        "idp.outage.detected", "idp.outage.resolved",
+        "user.system_account_changed",
         "rbac.sso_mapping.created", "rbac.sso_mapping.updated",
         "rbac.sso_mapping.deleted",
+        "sso.backchannel_host_allowed", "sso.backchannel_host_withdrawn",
     ),
 }
 EVENT_TYPES: tuple[str, ...] = tuple(t for ts in OUTCOMES.values() for t in ts)
@@ -176,6 +188,10 @@ def _cursor_predicate(cursor: str):
 def _reason(event_type: str, p: dict) -> tuple[Optional[str], Optional[str]]:
     if event_type == "user.sso_link_denied" and p.get("deny_reasons"):
         return ", ".join(str(r) for r in p["deny_reasons"]), None
+    if event_type == "user.logged_in" and p.get("via"):
+        # The door a password came through while SSO is enforced — the one
+        # thing a plain "Signed in" row would hide.
+        return str(p["via"]), None
     if not p.get("reason"):
         return None, p.get("detail")
     code, embedded = split_reason(p.get("reason"))

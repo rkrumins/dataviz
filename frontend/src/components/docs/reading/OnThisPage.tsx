@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { List } from 'lucide-react'
+import { List, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Heading } from './headings'
 import { useScrollContainer } from './ScrollContainerContext'
@@ -83,5 +83,43 @@ export function OnThisPage({ headings }: { headings: Heading[] }) {
         </nav>
       </div>
     </aside>
+  )
+}
+
+/**
+ * "On this page" for screens too narrow for the rail: a collapsed list at
+ * the top of the article that jumps to a heading and folds itself away.
+ */
+export function OnThisPageInline({ headings }: { headings: Heading[] }) {
+  const ref = useRef<HTMLDetailsElement>(null)
+  const jump = (e: React.MouseEvent, id: string) => {
+    e.preventDefault()
+    const el = document.getElementById(id)
+    if (!el) return
+    if (ref.current) ref.current.open = false
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    window.history.replaceState(null, '', `#${id}`)
+  }
+  return (
+    <details ref={ref} className="group lg:hidden mb-6 rounded-xl border border-glass-border bg-canvas-elevated">
+      <summary className="flex items-center gap-2 px-4 py-2.5 cursor-pointer list-none text-xs font-semibold text-ink-secondary [&::-webkit-details-marker]:hidden">
+        <List className="w-3.5 h-3.5 text-ink-muted" aria-hidden />
+        On this page
+        <span className="text-ink-muted font-normal">({headings.length})</span>
+        <ChevronDown className="ml-auto w-3.5 h-3.5 text-ink-muted transition-transform group-open:rotate-180" aria-hidden />
+      </summary>
+      <nav className="px-4 pb-3 border-t border-glass-border pt-2" aria-label="On this page">
+        {headings.map((h) => (
+          <a
+            key={h.id}
+            href={`#${h.id}`}
+            onClick={(e) => jump(e, h.id)}
+            className={cn('block py-1.5 text-sm text-ink-secondary hover:text-accent-lineage', h.level === 3 && 'pl-4 text-xs')}
+          >
+            {h.text}
+          </a>
+        ))}
+      </nav>
+    </details>
   )
 }

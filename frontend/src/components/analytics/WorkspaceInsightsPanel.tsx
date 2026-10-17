@@ -9,10 +9,10 @@ import { useEffect, useRef } from 'react'
 import { Activity, LayoutGrid, MousePointerClick, Users, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
-import type { AnalyticsRangeSelection } from '@/services/analyticsService'
+import { runOriginLabel, viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
+import type { AnalyticsRangeSelection, LevelChange, RunOrigin } from '@/services/analyticsService'
 import { timeAgo } from '@/lib/timeAgo'
-import { exact, shortDate } from '@/lib/formatMetric'
+import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useWorkspaceAnalyticsDetail } from '@/hooks/useAnalytics'
 import { ViewLink } from './EntityLink'
@@ -27,6 +27,7 @@ import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { comparisonLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
+import { RUN_ORIGIN_SLOT } from './slots'
 
 export function WorkspaceInsightsPanel({
     workspaceId, range, onClose,
@@ -245,6 +246,64 @@ export function WorkspaceInsightsPanel({
                                 )}
                             </div>
 
+                            {/* Both absent from a document cached before they
+                                existed, and operations is withheld below the
+                                posture that shows it — so each stands alone. */}
+                            {(data.series.entities || data.operations) && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {data.series.entities && data.series.relationships && (
+                                        <ChartFrame
+                                            title="What it holds"
+                                            subtitle={data.growth
+                                                ? holdingsPhrase(data.growth.entities, rangePhrase(range))
+                                                : 'Entities and relationships at the end of each period'}
+                                            series={[
+                                                { key: 'entities', label: 'Entities', color: theme.series[0], shape: 'line' },
+                                                { key: 'relationships', label: 'Relationships', color: theme.series[4], shape: 'line' },
+                                            ]}
+                                            isEmpty={data.series.entities.every((v) => v === 0)
+                                                && data.series.relationships.every((v) => v === 0)}
+                                            emptyLabel="No profiled sources here in this range."
+                                            table={
+                                                <ChartTable
+                                                    rowLabel="Date"
+                                                    rows={data.series.buckets.map((b) => shortDate(b, true))}
+                                                    columns={[
+                                                        { key: 'entities', label: 'Entities', values: data.series.entities },
+                                                        { key: 'relationships', label: 'Relationships', values: data.series.relationships },
+                                                    ]}
+                                                />
+                                            }
+                                        >
+                                            <TimeSeriesChart
+                                                buckets={data.series.buckets}
+                                                height={160}
+                                                series={[
+                                                    { key: 'entities', label: 'Entities', values: data.series.entities, slot: 0 },
+                                                    { key: 'relationships', label: 'Relationships', values: data.series.relationships, slot: 4 },
+                                                ]}
+                                            />
+                                        </ChartFrame>
+                                    )}
+                                    {data.operations && (
+                                        <ChartFrame
+                                            title="How its ingestion ran"
+                                            subtitle={data.operations.total
+                                                ? `${exact(data.operations.total)} runs · ${exact(data.operations.failed)} failed · ${percent(data.operations.manualShare)} by hand`
+                                                : `No aggregation runs in ${rangePhrase(range)}`}
+                                            isEmpty={data.operations.total === 0}
+                                            emptyLabel="Nothing was built here in this range."
+                                        >
+                                            <StackedShareBar
+                                                slices={data.operations.runs.filter((r) => r.count > 0)}
+                                                labelOf={runOriginLabel}
+                                                slotOf={(key) => RUN_ORIGIN_SLOT[key as RunOrigin]}
+                                            />
+                                        </ChartFrame>
+                                    )}
+                                </div>
+                            )}
+
                             <ChartFrame title="Graph scale" subtitle="Across this workspace's data sources">
                                 <dl className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                     <PanelStat label="Nodes" value={data.graph.nodes} />
@@ -259,6 +318,12 @@ export function WorkspaceInsightsPanel({
             </aside>
         </>
     )
+}
+
+/** "+1.2k entities in the last 30 days". */
+function holdingsPhrase(level: LevelChange, phrase: string): string {
+    if (level.change === 0) return `No change in entities in ${phrase}`
+    return `${level.change > 0 ? '+' : '−'}${compact(Math.abs(level.change))} entities in ${phrase}`
 }
 
 function PanelStat({ label, value }: { label: string; value: number }) {

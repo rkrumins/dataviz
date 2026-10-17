@@ -86,7 +86,10 @@ export function AppearanceSection({
                         placeholder={ed.draft.displayName || 'Sign in with…'}
                     />
                 </Field>
-                <Field label="Priority" hint="Login-page order, lowest first.">
+                <Field
+                    label="Priority"
+                    hint="Login-page order, lowest first. The first enabled connection is the primary: email addresses that match no domain go there."
+                >
                     <TextField
                         type="number"
                         mono={false}
@@ -118,7 +121,7 @@ export function AppearanceSection({
 
             <Field
                 label={<>Email domains <span className="font-normal text-ink-muted">(optional)</span></>}
-                hint="Routes these domains straight here when email-first sign-in is on (Settings tab). Ignored otherwise."
+                hint="Someone who types an address at one of these domains on the sign-in page goes straight here, whenever single sign-on is on. Addresses matching no connection go to the primary."
             >
                 <TextField
                     value={ed.draft.emailDomains}

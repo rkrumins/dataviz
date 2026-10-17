@@ -35,6 +35,7 @@ import { AdminInvites } from './AdminInvites'
 import { InviteWizard } from './InviteWizard'
 import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
+import { apiKeyService } from '@/services/apiKeyService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -306,6 +307,41 @@ function UserIdChip({ id }: { id: string }) {
 }
 
 
+/**
+ * "API keys — 2 active · View": a person's keys, one click from their record.
+ *
+ * Keys outlive sessions — ending someone's sessions leaves their keys working
+ * — so the count belongs beside their activity. A plain link, because the
+ * inventory reads its filter from the address; it says nothing at all when
+ * the count cannot be had, since the rest of the drawer does not depend on it.
+ */
+function ApiKeysFact({ userId }: { userId: string }) {
+    const [active, setActive] = useState<number | null>(null)
+    useEffect(() => {
+        let live = true
+        apiKeyService.adminStats({ ownerId: userId })
+            .then((s) => { if (live) setActive(s.byStatus.active) })
+            .catch(() => {})
+        return () => { live = false }
+    }, [userId])
+    if (active === null) return null
+    return (
+        <div className="flex items-baseline gap-3">
+            <dt className="w-24 shrink-0 text-ink-muted">API keys</dt>
+            <dd className="min-w-0 truncate text-ink-secondary">
+                {active === 0 ? 'None active' : `${active} active`}
+                <span className="text-ink-muted"> · </span>
+                <a
+                    href={`/admin/api-keys?ownerId=${encodeURIComponent(userId)}`}
+                    className="font-semibold text-accent-lineage hover:underline"
+                >
+                    View
+                </a>
+            </dd>
+        </div>
+    )
+}
+
 export function AdminUsers() {
     // Phase 6: only super_admins can grant super_admin. Org admins
     // see ``org_admin`` only — the dropdown shouldn't tease a role
@@ -313,6 +349,7 @@ export function AdminUsers() {
     // ``PUT /admin/users/{id}/role`` (which checks ``system:admin``
     // legacy + claim) so the FE filter agrees with the BE gate.
     const canGrantSuperAdmin = usePermission('system:admin')
+    const canSeeApiKeys = usePermission('system:audit:read')
     const { notify } = useAppNotifications()
     const assignableRoles = useMemo(
         () =>
@@ -1050,15 +1087,15 @@ export function AdminUsers() {
                                                                 RESET
                                                             </span>
                                                         )}
-                                                        {/* An account still on the password it
-                                                            shipped with — which is printed in the
-                                                            setup docs, so it is public knowledge.
-                                                            Worth seeing without opening the row. */}
+                                                        {/* An account still on a password somebody
+                                                            else chose — its starting password, or one
+                                                            an administrator set. Worth seeing without
+                                                            opening the row. */}
                                                         {user.mustChangePassword && (
                                                             <span
-                                                                title="This account is still using its default password. It must choose a new one at next sign-in."
+                                                                title="This account's password was chosen by someone else. It must choose its own the next time it signs in with that password; signing in through SSO is unaffected."
                                                                 className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
-                                                                DEFAULT PASSWORD
+                                                                MUST CHANGE PASSWORD
                                                             </span>
                                                         )}
                                                     </div>
@@ -1319,7 +1356,8 @@ export function AdminUsers() {
                                         Every browser and device this person is signed in on is
                                         signed out on its next request. Their account is unchanged,
                                         and they can sign straight back in — for a lost laptop or a
-                                        session you do not trust.
+                                        session you do not trust. Their API keys keep working:
+                                        revoke those under Administration → API keys.
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleEndSessionsConfirm}
                                         confirmLabel="End their sessions" confirmIcon={LogOut} confirmClass="bg-amber-500 hover:bg-amber-600 shadow-amber-500/20"
@@ -1543,7 +1581,7 @@ export function AdminUsers() {
                                                             className="input pl-10 h-11 w-full text-sm" autoFocus minLength={8} />
                                                     </div>
                                                     <p className="text-[11px] text-ink-muted mt-1.5">
-                                                        Set the password directly. The user will need to be informed of the new password.
+                                                        Set the password directly, then tell the user what it is. They'll be asked to choose their own the next time they sign in.
                                                     </p>
                                                 </div>
                                             )}
@@ -1639,6 +1677,7 @@ export function AdminUsers() {
                                             </dd>
                                         </div>
                                     ))}
+                                    {canSeeApiKeys && <ApiKeysFact userId={accessUser.id} />}
                                 </dl>
                             </div>
                             {/* Body: show skeleton placeholders while the

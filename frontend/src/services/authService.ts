@@ -48,9 +48,15 @@ export interface AuthUser {
     updatedAt: string
     /** Chosen avatar illustration, or null for the initials fallback. */
     avatarId?: string | null
-    /** True while the account must rotate its password before it can do
-     *  anything else. The API refuses everything but the change screen. */
+    /** The account's flag: its password was chosen by somebody else and
+     *  must be replaced at the next password sign-in. */
     mustChangePassword?: boolean
+    /** Whether THIS session must change the password before it can do
+     *  anything else — the API refuses everything but the change screen.
+     *  False for a session signed in through an identity provider, even
+     *  while the account's own password is pending a change. Set from
+     *  the session response by ``adoptSession``. */
+    passwordChangeRequired?: boolean
     /** IdP-mapped extras (department, employee_id, …). Phase 3. */
     attributes?: Record<string, unknown>
 }
@@ -61,7 +67,7 @@ export interface SsoProviderSummary {
     id: string
     slug: string
     displayName: string
-    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+    kind: string                 // 'oidc' | 'saml2' | 'custom' | 'custom_profile' | 'backchannel'
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
@@ -95,16 +101,31 @@ export interface SsoProviderSummary {
     }
 }
 
+/** Who may sign in with a password right now. ``administrators`` is a
+ *  confirmed SSO outage with passwords otherwise off: break-glass accounts
+ *  and Super Admins with a password. ``break_glass`` is the system
+ *  accounts alone. */
+export type PasswordAccess = 'everyone' | 'administrators' | 'break_glass'
+
 /** What the login page needs to pick its shape.
  *
- *  ``allowLocalLogin`` off means the password form must not render at all
- *  — the server refuses it, so offering it is offering a dead control.
+ *  ``allowLocalLogin`` on means everyone may use a password right now —
+ *  the switch is on, or an administrator opened the emergency window.
  *  ``emailFirstLogin`` on means route by email domain instead of showing
- *  every provider as a button. */
+ *  every provider as a button.
+ *
+ *  The last three are absent from a server that predates them; the page
+ *  reads them through ``loginShape``, which treats absence as no outage,
+ *  no window, and ``allowLocalLogin`` deciding who may use a password. */
 export interface LoginContext {
     allowLocalLogin: boolean
     emailFirstLogin: boolean
     providers: SsoProviderSummary[]
+    passwordAccess?: PasswordAccess
+    /** Connections the server has confirmed unreachable, by slug. */
+    ssoOutage?: { since: string; providers: string[] } | null
+    /** When the emergency password window closes, while it is open. */
+    passwordFallbackUntil?: string | null
 }
 
 /** Sources whose payload only JavaScript can reach — cookie and header
@@ -553,6 +574,8 @@ export interface SessionResponse {
      *  the backend sets no ``AUTH_ENVIRONMENT_ID``, which is also when
      *  those names are unscoped. */
     environment_id?: string | null
+    /** Whether this session must change the password first. */
+    passwordChangeRequired?: boolean
 }
 
 /**
@@ -581,8 +604,15 @@ export interface PermissionClaims {
  * are read by an environment-scoped name, and this is the only place the
  * page learns the name: an in-page sign-in never makes the bootstrap call.
  */
-function adoptSession<T extends { environment_id?: string | null }>(resp: T): T {
+function adoptSession(resp: SessionResponse): SessionResponse {
     adoptEnvironmentId(resp?.environment_id)
+    // The session's own requirement rides on the user the store keeps. A
+    // server that predates the field is answered as before, by the
+    // account's flag.
+    if (resp?.user) {
+        resp.user.passwordChangeRequired =
+            resp.passwordChangeRequired ?? resp.user.mustChangePassword ?? false
+    }
     return resp
 }
 

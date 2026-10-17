@@ -112,3 +112,39 @@ def test_edges_carry_their_endpoint_urns():
     assert (rec["sourceUrn"], rec["targetUrn"]) == ("urn:orders", "urn:revenue")
     row = normalize(rec, "edge")
     assert (row["sourceUrn"], row["targetUrn"]) == ("urn:orders", "urn:revenue")
+
+
+def test_a_package_format_2_line_reads_its_stored_payload_whole():
+    """A view package's format-2 line carries the stored payload as an object: it normalizes into
+    the same row a flat record gives, with the properties exactly as stored (nested ones too, and
+    no ``prop.*``/``properties_json`` to undo), the tags as the list they are, and an edge's ends by
+    entity id (from the payload) and by URN and qualified name (beside it)."""
+    from backend.app.services.versioning.import_export.rowmodel import normalize
+
+    node = normalize({"kind": "node", "entity_id": "n1", "baseVersion": "h1", "payload": {
+        "urn": "urn:orders", "entityType": "Table", "displayName": " Orders ", "tags": ["pii", "a,b"],
+        "properties": {"owner": "", "schema": {"cols": [1, 2]}, "rows": 5},
+    }}, "node", native=True)
+    assert node == {"kind": "node", "op": "upsert", "entity_id": "n1", "baseVersion": "h1",
+                    "urn": "urn:orders", "entityType": "Table", "displayName": "Orders",
+                    "tags": ["pii", "a,b"],
+                    "properties": {"owner": "", "schema": {"cols": [1, 2]}, "rows": 5}}
+
+    edge = normalize({"kind": "edge", "entity_id": "e1", "baseVersion": "h2", "sourceUrn": "urn:orders",
+                      "targetUrn": "urn:revenue", "sourceQualifiedName": "db.orders", "payload": {
+                          "edgeType": "PRODUCES", "sourceEntityId": "n1", "targetEntityId": "n2",
+                          "confidence": "0.5", "properties": {"via": "etl"}}}, "edge", native=True)
+    assert edge == {"kind": "edge", "op": "upsert", "entity_id": "e1", "baseVersion": "h2",
+                    "edgeType": "PRODUCES", "source_entity_id": "n1", "target_entity_id": "n2",
+                    "sourceUrn": "urn:orders", "targetUrn": "urn:revenue", "sourceQualifiedName": "db.orders",
+                    "confidence": 0.5, "properties": {"via": "etl"}}
+
+    gone = normalize({"kind": "node", "entity_id": "n1", "_op": "delete", "payload": {}}, "node",
+                     native=True)
+    assert gone["op"] == "delete" and gone["properties"] == {}
+    flat = normalize({"kind": "node", "urn": "urn:x", "payload": "not an object"}, "node", native=True)
+    assert flat["urn"] == "urn:x", "only an object payload is a format-2 line"
+    # Outside a package a ``payload`` column is the user's own: the record is read flat.
+    plain = normalize({"kind": "node", "urn": "urn:y", "entityType": "Table",
+                       "payload": {"urn": "urn:other"}}, "node")
+    assert (plain["urn"], plain["entityType"]) == ("urn:y", "Table")

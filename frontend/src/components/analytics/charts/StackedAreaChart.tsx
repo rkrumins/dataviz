@@ -21,8 +21,12 @@
  * clearest evidence something deleted data, so it is drawn as a MARK: a rule
  * at the moment it happened, in the band's own colour, with the type named.
  * An absence becomes an event.
+ *
+ * Given `onSelectSpan`, the chart is also a way to pick time, the way a log
+ * console's histogram is: drag across it, or click one bucket, and the span
+ * under the pointer is handed back.
  */
-import { useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { compact, exact } from '@/lib/formatMetric'
@@ -64,6 +68,14 @@ interface Props {
      * rather than as an even split, because an even split is a claim.
      */
     share?: boolean
+    /**
+     * Pick a span by dragging across the chart, or one bucket by clicking it:
+     * called with the first and last bucket indexes, inclusive. Without it
+     * the chart only reads.
+     */
+    onSelectSpan?: (first: number, last: number) => void
+    /** Names the span being dragged, e.g. "3 – 9 Oct". */
+    formatSpan?: (first: number, last: number) => string
     className?: string
 }
 
@@ -76,12 +88,32 @@ function niceMax(value: number): number {
 }
 
 export function StackedAreaChart({
-    buckets, series, height = 260, formatBucket, axisLabels, share, className,
+    buckets, series, height = 260, formatBucket, axisLabels, share,
+    onSelectSpan, formatSpan, className,
 }: Props) {
     const theme = useChartTheme()
     const clipId = useId()
     const [wrapRef, width] = useChartWidth()
-    const [hover, setHover] = useState<number | null>(null)
+    const svgRef = useRef<SVGSVGElement>(null)
+    // Hover and drag are bucket indexes, so each holds only for the buckets it
+    // was taken on. A zoom redraws the chart under a pointer that has not
+    // moved, and a refetch can land mid-drag: read against new buckets, an
+    // index names another day, or none at all.
+    const shape = `${buckets.length}:${buckets[0]}:${buckets[buckets.length - 1]}`
+    const [hoverAt, setHoverAt] = useState<{ shape: string; i: number } | null>(null)
+    const hover = hoverAt?.shape === shape ? hoverAt.i : null
+    const setHover = (i: number | null) => setHoverAt(i === null ? null : { shape, i })
+    // The bucket the drag started on, and the one under the pointer now.
+    const [dragAt, setDragAt] = useState<{ shape: string; from: number; to: number } | null>(null)
+    const drag = dragAt?.shape === shape ? dragAt : null
+
+    // Esc lets go of a drag without picking anything.
+    useEffect(() => {
+        if (!drag) return
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDragAt(null) }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [drag])
 
     const plotW = Math.max(1, width - PAD.left - PAD.right)
     const plotH = height - PAD.top - PAD.bottom
@@ -156,6 +188,42 @@ export function StackedAreaChart({
     const label = (b: string) => (formatBucket ? formatBucket(b) : b)
     const active = hover ?? buckets.length - 1
 
+    // ── Picking a span ─────────────────────────────────────────────────
+    const selectable = !!onSelectSpan && buckets.length > 1
+    /** The bucket nearest a pointer's x. */
+    const indexAt = (clientX: number) => {
+        const left = svgRef.current?.getBoundingClientRect().left ?? 0
+        const t = (clientX - left - PAD.left) / plotW
+        return Math.min(buckets.length - 1, Math.max(0, Math.round(t * (buckets.length - 1))))
+    }
+    /** Where a bucket's share of the axis begins (-1) or ends (+1): halfway
+     *  to its neighbours, so a span covers the days it names, edge to edge. */
+    const edge = (i: number, side: -1 | 1) => {
+        const half = plotW / (buckets.length - 1) / 2
+        return Math.min(PAD.left + plotW, Math.max(PAD.left, x(i) + side * half))
+    }
+    const span = drag && { lo: Math.min(drag.from, drag.to), hi: Math.max(drag.from, drag.to) }
+    const pointer = selectable ? {
+        onPointerDown: (e: React.PointerEvent<SVGSVGElement>) => {
+            if (e.button !== 0) return
+            const i = indexAt(e.clientX)
+            setDragAt({ shape, from: i, to: i })
+            e.currentTarget.setPointerCapture?.(e.pointerId)
+        },
+        onPointerMove: (e: React.PointerEvent<SVGSVGElement>) => {
+            if (!drag) return
+            const i = indexAt(e.clientX)
+            setHover(i)
+            setDragAt((d) => (d && d.shape === shape && d.to !== i ? { ...d, to: i } : d))
+        },
+        onPointerUp: () => {
+            if (!span) return
+            setDragAt(null)
+            onSelectSpan!(span.lo, span.hi)
+        },
+        onPointerCancel: () => setDragAt(null),
+    } : {}
+
     // Axis ticks: at most six, always including both ends.
     const tickStep = Math.max(1, Math.ceil(buckets.length / 6))
     const tickIndexes = buckets
@@ -165,6 +233,7 @@ export function StackedAreaChart({
     return (
         <div ref={wrapRef} className={cn('relative w-full', className)}>
             <svg
+                ref={svgRef}
                 width={width} height={height} role="img"
                 aria-label={
                     share
@@ -174,6 +243,9 @@ export function StackedAreaChart({
                           + `${ordered.length} series, peak ${exact(max)}`
                 }
                 onMouseLeave={() => setHover(null)}
+                // Sideways drags pick a span; vertical ones still scroll the page.
+                className={cn(selectable && 'cursor-crosshair touch-pan-y select-none')}
+                {...pointer}
             >
                 <defs>
                     <clipPath id={clipId}>
@@ -256,11 +328,22 @@ export function StackedAreaChart({
                     )
                 })}
 
-                {hover !== null && (
+                {hover !== null && !span && (
                     <line
                         x1={x(hover)} x2={x(hover)}
                         y1={PAD.top} y2={PAD.top + plotH}
                         stroke={theme.muted} strokeWidth={1}
+                    />
+                )}
+
+                {span && (
+                    <rect
+                        data-testid="chart-span"
+                        x={edge(span.lo, -1)} y={PAD.top}
+                        width={edge(span.hi, 1) - edge(span.lo, -1)} height={plotH}
+                        className="fill-accent-lineage/10 stroke-accent-lineage/60"
+                        strokeWidth={1}
+                        pointerEvents="none"
                     />
                 )}
 
@@ -302,7 +385,20 @@ export function StackedAreaChart({
               must never gate it: on touch, and for anyone reading with a
               keyboard, a hover-only value is no value at all.
             */}
-            {hover !== null && (
+            {span && (
+                <span
+                    aria-live="polite"
+                    className="pointer-events-none absolute top-0 z-10 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-md bg-accent-lineage px-2 py-0.5 text-[10px] font-semibold text-white shadow-md tabular-nums"
+                    style={{ left: `${(((edge(span.lo, -1) + edge(span.hi, 1)) / 2) / Math.max(1, width)) * 100}%` }}
+                >
+                    {formatSpan
+                        ? formatSpan(span.lo, span.hi)
+                        : span.lo === span.hi
+                            ? label(buckets[span.lo])
+                            : `${label(buckets[span.lo])} – ${label(buckets[span.hi])}`}
+                </span>
+            )}
+            {hover !== null && !span && (
                 <StackedTooltip
                     bucket={label(buckets[hover])}
                     total={totals[hover] || 0}

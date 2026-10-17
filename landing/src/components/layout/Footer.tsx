@@ -1,4 +1,4 @@
-import { GitBranch, MessageCircle } from 'lucide-react'
+import { BookOpen, MessageCircle } from 'lucide-react'
 import { useBrand } from '@/context/BrandContext'
 
 const PRODUCT_LINKS = [
@@ -23,7 +23,7 @@ const COMPANY_LINKS = [
 ]
 
 const SOCIAL_LINKS = [
-  { label: 'GitHub', href: 'https://github.com', icon: GitBranch },
+  { label: 'Documentation', href: '/docs', icon: BookOpen },
   { label: 'Discord', href: 'https://discord.gg', icon: MessageCircle },
 ]
 
@@ -51,8 +51,8 @@ export function Footer() {
                   href={href}
                   className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-canvas transition-colors"
                   aria-label={label}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  target={href.startsWith('http') ? '_blank' : undefined}
+                  rel={href.startsWith('http') ? 'noopener noreferrer' : undefined}
                 >
                   <Icon size={18} />
                 </a>

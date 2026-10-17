@@ -21,6 +21,9 @@
     --nx-bg-overlay: rgba(255, 255, 255, 0.95);
     --nx-bg-glass: rgba(255, 255, 255, 0.72);
     --nx-border-glass: rgba(255, 255, 255, 0.4);
+    /* The ink every `glass-border/NN` divider is drawn in, as raw channels
+       (tailwind.config.js `divider`): dark on light, light on dark. */
+    --nx-divider-rgb: 15 23 42;
     --nx-border-subtle: rgba(0, 0, 0, 0.08);
     
     /* Text */
@@ -93,6 +96,7 @@
     --nx-bg-overlay: rgba(22, 27, 34, 0.95);
     --nx-bg-glass: rgba(30, 35, 45, 0.78);
     --nx-border-glass: rgba(255, 255, 255, 0.06);
+    --nx-divider-rgb: 255 255 255;
     --nx-border-subtle: rgba(255, 255, 255, 0.08);
     
     --nx-text-primary: #e6edf3;
@@ -762,6 +766,25 @@
      instead of flush against the scroll container's edge. */
   .prose-synodic :is(h1, h2, h3, h4) {
     scroll-margin-top: 1.5rem;
+  }
+
+  /* The section a link or a search result opened the page at: a brief
+     highlight, so the eye finds it (reading/useScrollLanding.ts). */
+  .reader-landed {
+    border-radius: 6px;
+    animation: reader-landed 2.2s ease-out;
+  }
+
+  @keyframes reader-landed {
+    0%,
+    35% {
+      background-color: rgb(var(--nx-accent-lineage-rgb) / 0.14);
+      box-shadow: 0 0 0 6px rgb(var(--nx-accent-lineage-rgb) / 0.14);
+    }
+    100% {
+      background-color: transparent;
+      box-shadow: 0 0 0 6px transparent;
+    }
   }
 
   .prose-synodic h1 {

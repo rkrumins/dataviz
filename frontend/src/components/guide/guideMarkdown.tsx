@@ -7,10 +7,10 @@ import { markdownComponents } from '@/components/docs/MarkdownComponents'
 // opening them as external links in a new tab.
 export const guideMarkdownComponents: Components = {
   ...markdownComponents,
-  a: ({ href, children, ...props }) => {
+  a: ({ node: _node, href, children, ...props }) => {
     if (!href) return <a {...props}>{children}</a>
 
-    if (href.startsWith('/guide/') || href.startsWith('/docs')) {
+    if (/^\/(docs|guide)(\/|#|$)/.test(href)) {
       return (
         <RouterLink to={href} {...props}>
           {children}

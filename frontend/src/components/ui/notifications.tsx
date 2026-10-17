@@ -393,7 +393,9 @@ export function NotificationStack() {
       // the click that collapses them. Surfaces that reserve that corner
       // publish their height as `--canvas-dock-height` on the document
       // element; the stack starts above whatever is reserved, and the var
-      // is absent (0px) everywhere else in the app.
+      // is absent (0px) everywhere else in the app. The export tray, which
+      // sits above the dock in the same corner, reserves its own height the
+      // same way (`--export-tray-height`).
       data-testid="notification-stack"
       // Mounted for the life of the app, so it — not the card — is the live
       // region: a card that arrived carrying its own `aria-live` would be
@@ -404,7 +406,7 @@ export function NotificationStack() {
       // from every user of the deployment without a word.
       role="status"
       aria-live="polite"
-      style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}
+      style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px) + var(--export-tray-height, 0px))' }}
       // `items-end` pins every card's right edge, so the column reads as one
       // stack however wide a message makes a card.
       className="fixed right-6 z-[80] flex flex-col-reverse items-end gap-2 pointer-events-none"

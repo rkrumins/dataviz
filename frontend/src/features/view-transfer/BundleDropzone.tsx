@@ -2,8 +2,9 @@
  * The file well for view files, and for views with their data (packages): drop or browse, then it
  * says what it found.
  *
- * Five states, one component: waiting, a file dragged over it, checking, checked, refused. The
- * file is only ever READ here (the server inspects it); nothing is written until the last step.
+ * Five states, one component: waiting, a file dragged over it, checking (a package says how much
+ * of it is up, then that it is checked), checked, refused. The file is only ever READ here (the
+ * server inspects it); nothing is written until the last step.
  */
 import { useCallback, useRef, useState } from 'react'
 import { AlertTriangle, FileArchive, FileJson2, FileUp, Loader2, RefreshCw, Shield, ShieldAlert, ShieldCheck } from 'lucide-react'
@@ -39,11 +40,13 @@ export function IntegrityBadge({ integrity, environment }: { integrity: BundleIn
 }
 
 export function BundleDropzone({
-  fileName, size, busy, error, integrity, environment, packaged = false, onFile,
+  fileName, size, busy, progress = null, error, integrity, environment, packaged = false, onFile,
 }: {
   fileName: string | null
   size: number
   busy: boolean
+  /** While busy: what it is doing, and how far it has got when that is known (a percentage). */
+  progress?: { label: string; percent: number | null } | null
   error: string | null
   integrity: BundleIntegrity | null
   environment?: string | null
@@ -88,8 +91,15 @@ export function BundleDropzone({
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink truncate" title={fileName}>{fileName}</p>
           <p className="text-[11px] text-ink-muted">
-            {busy ? 'Checking the file…' : `${packaged ? 'A view with its data · ' : ''}${fileSize(size)}`}
+            {busy ? progress?.label ?? 'Checking the file…' : `${packaged ? 'A view with its data · ' : ''}${fileSize(size)}`}
           </p>
+          {busy && progress?.percent != null && (
+            <div className="mt-1.5 h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">
+              <div role="progressbar" aria-valuenow={progress.percent} aria-valuemin={0} aria-valuemax={100}
+                className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 transition-[width]"
+                style={{ width: `${progress.percent}%` }} />
+            </div>
+          )}
         </div>
         {!busy && integrity && <IntegrityBadge integrity={integrity} environment={environment} />}
         {!busy && (

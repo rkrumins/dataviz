@@ -14,6 +14,7 @@ from typing import Optional
 
 from sqlalchemy import select, func, delete, or_, update
 
+from backend.app.common import activity_context
 from backend.common.display_name import resolve_display_name
 from backend.auth_service.activity import (
     RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
@@ -855,10 +856,14 @@ async def create_outbox_event(
     needs to be *found* by subject later — ``idx_outbox_aggregate``
     covers that pair, whereas locating the same row through the JSON
     payload means an unindexed scan.
+
+    The request's correlation id and the reason a person gave, when there
+    is one, ride along in the payload (``activity_context.envelope``) —
+    under their own keys, and only where the payload has not set them.
     """
     event = OutboxEventORM(
         event_type=event_type,
-        payload=json.dumps(payload),
+        payload=json.dumps(activity_context.envelope(dict(payload))),
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
     )
@@ -869,16 +874,24 @@ async def create_outbox_event(
 
 # ── Password management ───────────────────────────────────────────────
 
-async def update_password(session: AsyncSession, user_id: str, password_hash: str) -> Optional[UserORM]:
+async def update_password(
+    session: AsyncSession, user_id: str, password_hash: str,
+    *, must_change: bool = False,
+) -> Optional[UserORM]:
+    """Set a new password and retire any pending reset.
+
+    ``must_change`` is for a password somebody else chose — an
+    administrator setting it for this account — which the account must
+    replace at its next sign-in. A password the account holder chose
+    (self-service change, reset link) clears the requirement.
+    """
     user = await get_user_by_id(session, user_id)
     if user is None:
         return None
     user.password_hash = password_hash
     user.reset_token_hash = None
     user.reset_token_expires_at = None
-    # Whatever route got them here — self-service, admin reset, token —
-    # the account is no longer holding the password it had to rotate.
-    user.must_change_password = False
+    user.must_change_password = must_change
     user.updated_at = _now()
     await session.flush()
     return user
@@ -1162,6 +1175,9 @@ async def get_identities_by_ids(
             UserORM.status,
             UserORM.deleted_at,
             UserORM.avatar_id,
+            # Whether there is a picture, not the picture: IS NOT NULL is
+            # answered from the row header, never by reading the image.
+            UserORM.avatar_image.is_not(None),
         ).where(UserORM.id.in_(ids))
     )).all()
     return {
@@ -1177,6 +1193,10 @@ async def get_identities_by_ids(
             # The picked illustration, for surfaces that draw an avatar.
             # Additive: callers that only name people ignore it.
             "avatar_id": r[7],
+            # A provider picture to load. Without one, a list of people
+            # asks for none of them — rather than one 404 per face. A
+            # deleted account's picture is not served, so it has none.
+            "has_image": bool(r[8]) and r[6] is None,
         }
         for r in rows
     }

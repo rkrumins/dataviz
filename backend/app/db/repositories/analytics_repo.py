@@ -157,6 +157,16 @@ class Window:
             out.append(total)
         return out
 
+    def closing_days(self) -> list[str]:
+        """Each bucket's last day inside the window, in bucket order — where a
+        LEVEL (how many entities there were) is read, as opposed to a flow,
+        which :meth:`align` sums."""
+        last: dict[str, str] = {}
+        for day, bucket in self._day_to_bucket.items():
+            if day > last.get(bucket, ""):
+                last[bucket] = day
+        return [last[b] for b in self.buckets]
+
 
 class InvalidWindow(ValueError):
     """A caller-supplied date range that cannot be measured."""
@@ -1237,6 +1247,9 @@ def redact_workspace_detail(doc: dict, scope) -> dict:
         if show_people or scope.is_self(c.get("userId"))
     ]
     doc["topViews"] = [_redact_view_row(v, scope) for v in doc.get("topViews", [])]
+    # How often its people rebuild things is operations, as on the summary.
+    if not scope.shows_operations:
+        doc.pop("operations", None)
     doc["redaction"] = {
         "applied": True,
         "showsPeople": show_people,
@@ -2752,6 +2765,29 @@ async def workspace_detail(
     )).all()))
     names = await resolve_user_ids(session, {a for a, _ in contributors.most_common(TOP_N)})
 
+    # What the workspace holds over time, from the Data tab's own rollup read,
+    # and how its ingestion was driven. Imported here because both modules
+    # build on this one.
+    from backend.app.db.repositories import analytics_data_repo
+    from backend.app.db.repositories.analytics_usage_repo import ORIGINS, run_origin
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    data_growth = await analytics_data_repo.workspace_growth(session, w, workspace_id)
+    by_person = AggregationJobORM.triggered_by.is_not(None)
+    runs: Counter = Counter()
+    failed = 0
+    for trigger, person, status, n in (await session.execute(
+        select(AggregationJobORM.trigger_source, by_person, AggregationJobORM.status, func.count())
+        .where(
+            AggregationJobORM.workspace_id == workspace_id,
+            AggregationJobORM.created_at >= w.start, AggregationJobORM.created_at < w.end,
+        )
+        .group_by(AggregationJobORM.trigger_source, by_person, AggregationJobORM.status)
+    )).all():
+        runs[run_origin(trigger, bool(person))] += int(n)
+        failed += int(n) if status == "failed" else 0
+    runs_total = sum(runs.values())
+
     detail = {
         "workspaceId": workspace.id,
         "name": workspace.name,
@@ -2786,6 +2822,15 @@ async def workspace_detail(
             "activityEvents": w.align(activity_by_day),
             "activeUsers": [len(actors_per_bucket[b]) for b in w.buckets],
             "viewOpens": w.align(opens_by_day),
+            "entities": data_growth["entities"],
+            "relationships": data_growth["relationships"],
+        },
+        "growth": data_growth["totals"],
+        "operations": {
+            "runs": [{"key": o, "count": runs.get(o, 0)} for o in ORIGINS],
+            "total": runs_total,
+            "failed": failed,
+            "manualShare": round(runs.get("byHand", 0) / runs_total, 4) if runs_total else None,
         },
         "breakdowns": {
             "viewsByVisibility": _fold_tail(

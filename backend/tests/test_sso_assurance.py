@@ -26,6 +26,7 @@ from backend.auth_service.providers.assurance import (
     ASSURANCE_ORDER,
     UNVERIFIED,
     VERIFIED,
+    assurance_explained,
     assurance_for,
     at_least,
 )
@@ -148,6 +149,34 @@ def test_every_level_has_an_explanation():
     """A new level must not ship without copy explaining it to an operator."""
     for level in ASSURANCE_ORDER:
         assert ASSURANCE_DESCRIPTIONS.get(level, "").strip()
+
+
+@pytest.mark.parametrize("kind, settings, names", [
+    # Each weak row names ITS cause and the change that fixes it — the
+    # generic "anyone can be anyone" never said which switch was to blame.
+    ("backchannel", {"exchange_mode": "browser", "trust_unsigned": True},
+     ["Trust unsigned is on", "JWKS URL, public key or shared secret"]),
+    ("backchannel", {"exchange_mode": "server", "tls_verify": False},
+     ["TLS verification is off", "SSO_OUTBOUND_TLS_CA_CERTS"]),
+    ("backchannel",
+     {"exchange_mode": "browser", "tls_verify": False, "jwks_url": "https://gw/jwks"},
+     ["TLS verification is off", "public key in place of its JWKS URL"]),
+    ("custom_profile", {"source": "cookie", "payload_format": "json"},
+     ["anyone able to set the cookie can sign in as anyone", "sign it as a JWT"]),
+    ("custom_profile", {"source": "local_storage", "trust_unsigned": True},
+     ["browser storage key"]),
+    ("custom", {}, ["development sign-in"]),
+    # A strong row says what stands behind it — for a server-mode gateway
+    # that is the call itself, not a signature.
+    ("backchannel", {}, ["over verified TLS"]),
+    ("backchannel", {"exchange_mode": "browser", "jwks_url": "https://gw/jwks"},
+     ["signature-checked"]),
+])
+def test_the_reason_names_this_rows_cause(kind, settings, names):
+    level, reason = assurance_explained(kind, settings)
+    assert level == assurance_for(kind, settings)
+    for phrase in names:
+        assert phrase in reason
 
 
 # ── Write-time gate ──────────────────────────────────────────────────
@@ -439,3 +468,203 @@ async def test_reconciler_withholds_platform_roles_from_unsigned_backchannel(
         db_session, subject_type="user", subject_id="usr_bc_drift",
     )
     assert [b.role_name for b in bindings] == []
+
+
+# ── An unverified connection never claims a Super Admin ──────────────
+#
+# Its claims are whatever the sender wrote, ``email_verified`` included.
+# Linking by email would hand the break-glass account or any Super Admin to
+# anyone able to reach the sign-in endpoint with a hand-written payload.
+# Every other account still links — an org admin's included — so an
+# unsigned connection keeps working for the people it was trusted for.
+
+
+def _sso_service(db_session, *, checks_admins=True):
+    from contextlib import asynccontextmanager
+
+    from backend.app.db.repositories import user_identity_repo, user_repo
+    from backend.app.db.repositories.refresh_token_repo import make_refresh_store
+    from backend.auth_service.service import LocalIdentityService
+
+    @asynccontextmanager
+    async def factory():
+        yield db_session
+
+    async def is_super_admin(session, user_id):
+        return user_id in await binding_repo.super_admin_user_ids(session)
+
+    return LocalIdentityService(
+        session_factory=factory, user_repo=user_repo,
+        user_identity_repo=user_identity_repo,
+        refresh_store_factory=make_refresh_store,
+        super_admin_checker=is_super_admin if checks_admins else None,
+    )
+
+
+def _claims(email, sub):
+    from backend.auth_service.providers.base import ProviderIdentity
+    return ProviderIdentity(
+        provider="backchannel", external_id=sub, email=email,
+        first_name="Not", last_name="Them", raw_claims={"email_verified": True},
+    )
+
+
+async def _gateway_row(db_session, slug):
+    row = await idp_provider_repo.create_provider(
+        db_session, slug=slug, display_name=slug, kind="backchannel",
+        settings={"exchange_mode": "browser",
+                  "browser_exchange_url": "https://sso.corp.example/translate",
+                  "trust_unsigned": True},
+    )
+    await db_session.flush()
+    return row
+
+
+async def _local_account(db_session, email, *, system=False, role=None):
+    from datetime import datetime, timezone
+
+    from backend.app.db.models import RoleBindingORM
+    from backend.app.db.repositories import user_repo
+    user = await user_repo.create_user(
+        db_session, email=email, password_hash="x", first_name="Local",
+        last_name="Account", status="active",
+    )
+    user.is_system_account = system
+    if role:
+        db_session.add(RoleBindingORM(
+            id=f"bnd_{user.id}", subject_type="user", subject_id=user.id,
+            role_name=role, scope_type="global", scope_id=None,
+            granted_at=datetime.now(timezone.utc).isoformat(), source="local",
+        ))
+    await db_session.flush()
+    return user
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_cannot_claim_the_break_glass_account(db_session):
+    from backend.auth_service.interface import SSOAuthError
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    await _local_account(db_session, "glass@corp.example", system=True)
+    svc = _sso_service(db_session)
+
+    with pytest.raises(SSOAuthError) as err:
+        await svc.complete_sso_login(
+            _claims("glass@corp.example", "forged-1"), provider_id=gw.id,
+            linking_policy="strict", assurance=UNVERIFIED,
+        )
+    assert str(err.value) == "unsafe_auto_link"
+    assert "unverified_connection" in err.value.deny_reasons
+
+    # The rehearsal says the same, from the same decision.
+    preview = await svc.preview_sso_login(
+        _claims("glass@corp.example", "forged-1"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED,
+    )
+    assert preview["action"] == "rejected"
+    assert "unverified_connection" in preview["deny_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_cannot_claim_a_super_admin(db_session):
+    from backend.auth_service.interface import SSOAuthError
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    await _local_account(db_session, "boss@corp.example", role="super_admin")
+
+    with pytest.raises(SSOAuthError) as err:
+        await _sso_service(db_session).complete_sso_login(
+            _claims("boss@corp.example", "forged-2"), provider_id=gw.id,
+            linking_policy="strict", assurance=UNVERIFIED,
+        )
+    assert "unverified_connection" in err.value.deny_reasons
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_links_an_org_admin(db_session):
+    """An org admin runs workspaces, not the platform: no SSO settings, no
+    user management. Their first sign-in through the gateway links their
+    account like anyone else's."""
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    org_admin = await _local_account(db_session, "ops@corp.example", role="org_admin")
+
+    user, _ = await _sso_service(db_session).complete_sso_login(
+        _claims("ops@corp.example", "emp-ops"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED,
+    )
+    assert user.id == org_admin.id
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_still_links_an_ordinary_account(db_session):
+    """Someone who had a local account signs in through the unsigned
+    gateway for the first time: same account, now linked."""
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    local = await _local_account(db_session, "member@corp.example")
+
+    user, _ = await _sso_service(db_session).complete_sso_login(
+        _claims("member@corp.example", "emp-7"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED,
+    )
+    assert user.id == local.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system, role", [(True, None), (False, "super_admin")])
+async def test_the_operator_can_let_an_unverified_connection_link_administrators(
+    db_session, system, role,
+):
+    """``link_admin_accounts`` on the connection: every existing account
+    links, Super Admins and break-glass included — the operator's call."""
+    gw = await _gateway_row(db_session, "trusted-unsigned-gw")
+    admin = await _local_account(
+        db_session, "chief@corp.example", system=system, role=role,
+    )
+    svc = _sso_service(db_session)
+
+    user, _ = await svc.complete_sso_login(
+        _claims("chief@corp.example", "emp-chief"), provider_id=gw.id,
+        linking_policy="strict", assurance=UNVERIFIED, link_admin_accounts=True,
+    )
+    assert user.id == admin.id
+
+
+@pytest.mark.asyncio
+async def test_without_an_answer_every_account_counts_as_a_super_admin(db_session):
+    """Nothing wired to say who the Super Admins are: fail closed."""
+    from backend.auth_service.interface import SSOAuthError
+    gw = await _gateway_row(db_session, "unsigned-gw")
+    await _local_account(db_session, "plain@corp.example")
+
+    with pytest.raises(SSOAuthError):
+        await _sso_service(db_session, checks_admins=False).complete_sso_login(
+            _claims("plain@corp.example", "emp-8"), provider_id=gw.id,
+            linking_policy="strict", assurance=UNVERIFIED,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_verified_connection_still_links_an_administrator(db_session):
+    gw = await _gateway_row(db_session, "signed-gw")
+    glass = await _local_account(db_session, "linked@corp.example", system=True)
+
+    user, _ = await _sso_service(db_session).complete_sso_login(
+        _claims("linked@corp.example", "emp-1"), provider_id=gw.id,
+        linking_policy="strict", assurance=VERIFIED,
+    )
+    assert user.id == glass.id
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connection_still_serves_its_own_people(db_session):
+    """New accounts, and accounts already linked to it, are unaffected."""
+    gw = await _gateway_row(db_session, "own-gw")
+    svc = _sso_service(db_session)
+
+    first, _ = await svc.complete_sso_login(
+        _claims("new@corp.example", "emp-new"), provider_id=gw.id,
+        assurance=UNVERIFIED,
+    )
+    again, _ = await svc.complete_sso_login(
+        _claims("new@corp.example", "emp-new"), provider_id=gw.id,
+        assurance=UNVERIFIED,
+    )
+    assert again.id == first.id

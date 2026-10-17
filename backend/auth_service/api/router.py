@@ -92,6 +92,9 @@ from ..core.config import (
     RATELIMIT_REFRESH_PER_SESSION,
     sso_auth_time_is_stale,
 )
+from ..app_auth_config import (
+    password_access, password_window_open, sso_outage_slugs,
+)
 from ..core.tokens import (
     create_mock_identity_token,
     create_oidc_state_token,
@@ -102,12 +105,12 @@ from ..core.tokens import (
     decode_refresh_token,
     decode_saml_state_token,
     decode_token,
+    password_change_pending,
 )
 from ..interface import (
     IdentityService,
     InvalidCredentials,
     InvalidRefreshToken,
-    LocalLoginDisabled,
     SSOAuthError,
     SsoReauthRequired,
     User,
@@ -284,6 +287,28 @@ class SessionResponse(BaseModel):
     #: case where the names are unscoped — so the client's fallback and
     #: this field agree without either having to special-case it.
     environment_id: Optional[str] = None
+    #: Whether THIS session must change the account's password before it
+    #: can do anything else — true for a session signed in with a password
+    #: somebody else chose, false for one signed in through an identity
+    #: provider even when the account's own password is pending a change.
+    #: ``user.mustChangePassword`` is the account's flag; this is what the
+    #: SPA redirects on.
+    password_change_required: bool = Field(False, alias="passwordChangeRequired")
+
+
+def _session_response(user: User, access_token: Optional[str]) -> SessionResponse:
+    """The answer to a request that established, rotated or read a session."""
+    try:
+        payload = decode_token(access_token or "")
+    except Exception:  # noqa: BLE001 — no readable token, so nothing it could hold
+        payload = {}
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        password_change_required=password_change_pending(
+            payload, bool(user.must_change_password),
+        ),
+    )
 
 
 class _Ack(BaseModel):
@@ -372,6 +397,14 @@ _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS = (
     "browser_exchange_headers", "browser_exchange_token_path",
     "browser_exchange_body_field",
 )
+
+
+def _links_admin_accounts(snap) -> bool:
+    """The operator's opt-in, on a connection below ``verified``, to link
+    administrator and break-glass accounts too. Read strictly: anything but
+    an explicit ``true`` keeps them protected. Never published — it is not
+    in the public whitelist below."""
+    return (snap.settings or {}).get("link_admin_accounts") is True
 
 
 def _public_config(snap) -> dict:
@@ -891,6 +924,8 @@ async def _dry_run_or_none(
         return None
     outcome = await svc.preview_sso_login(
         identity, provider_id=snap.id, linking_policy=snap.linking_policy,
+        assurance=assurance_for(snap.kind, snap.settings),
+        link_admin_accounts=_links_admin_accounts(snap),
     )
     if extra:
         # Flow-specific facts the preview cannot know — e.g. which
@@ -1030,6 +1065,7 @@ async def _finish_sso_login(
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
             assurance=assurance_for(snap.kind, snap.settings),
+            link_admin_accounts=_links_admin_accounts(snap),
         )
     except SSOAuthError as exc:
         who = _rejected_who(identity, exc)
@@ -1233,25 +1269,11 @@ async def login(
 
     try:
         user, tokens = await svc.login(body.email, body.password, client=client)
-    except LocalLoginDisabled:
-        # Phase 4: SSO-only mode. Don't leak the existence of any
-        # account; respond with a structured 403 so the FE can
-        # redirect to the providers picker. (System accounts are the
-        # one carve-out, resolved inside ``svc.login`` — reaching this
-        # branch means the account is not one, or does not exist, and
-        # the two are deliberately indistinguishable.)
-        await _record_password_refusal(
-            svc, body.email, "local_login_disabled", client,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error": "local_login_disabled",
-                "message": "Password sign-in is switched off for this "
-                           "deployment — use single sign-on.",
-            },
-        )
     except InvalidCredentials:
+        # Also the answer when passwords are off and nothing opens one for
+        # this account (``svc.login`` records ``local_login_disabled``):
+        # the same 401 as a wrong password, so the form says nothing about
+        # who the break-glass accounts or Super Admins are.
         # Only failures accumulate, so someone who signs in correctly
         # twenty times a day is never throttled.
         await accounts.record("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
@@ -1265,7 +1287,7 @@ async def login(
     await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────
@@ -1358,7 +1380,7 @@ async def refresh(request: Request, response: Response):
         return _refresh_refused(request, "Refresh token invalid or expired")
 
     set_session_cookies(response, tokens)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────
@@ -1427,7 +1449,7 @@ async def me(request: Request, response: Response):
     # The bootstrap GET is where a lost CSRF cookie gets healed — the
     # one moment we know the session is valid before any write happens.
     _heal_csrf_cookie(request, response)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, read_access_cookie(request))
 
 
 # ── GET /auth/csrf ────────────────────────────────────────────────────
@@ -1639,12 +1661,30 @@ async def list_providers(request: Request):
     return await _enabled_provider_summaries(request, cfg)
 
 
+class SsoOutageSummary(BaseModel):
+    """Connections the server has confirmed down, for the page to say so."""
+    model_config = ConfigDict(populate_by_name=True)
+    since: Optional[str] = None
+    providers: list[str] = Field(default_factory=list)
+
+
 class LoginContext(BaseModel):
     """Everything the login page needs to decide what to render."""
     model_config = ConfigDict(populate_by_name=True)
+    # The password step is offered to everyone: the Passwords switch is
+    # on, or an admin opened the emergency window.
     allow_local_login: bool = Field(alias="allowLocalLogin")
     email_first_login: bool = Field(alias="emailFirstLogin")
     providers: list[ProviderSummary] = Field(default_factory=list)
+    # ``app_auth_config.password_access``: everyone | administrators |
+    # break_glass.
+    password_access: str = Field(default="everyone", alias="passwordAccess")
+    sso_outage: Optional[SsoOutageSummary] = Field(
+        default=None, alias="ssoOutage",
+    )
+    password_fallback_until: Optional[str] = Field(
+        default=None, alias="passwordFallbackUntil",
+    )
 
 
 @router.get("/login-context", response_model=LoginContext,
@@ -1659,10 +1699,11 @@ async def login_context(request: Request):
     email-domain resolve on every deployment, including the ~99% with
     email-first off, because it had no way to know.
 
-    The two booleans are disclosed to anonymous callers. That is
-    deliberate: the page cannot be correct without them, and neither tells
-    an attacker anything that attempting a login would not. The provider
-    list is the same one ``/providers`` has always served publicly.
+    The posture is disclosed to anonymous callers. That is deliberate:
+    the page cannot be correct without it, and none of it tells an
+    attacker anything that attempting a login would not — an IdP outage
+    included, which the page exists to announce. The provider list is the
+    same one ``/providers`` has always served publicly.
 
     Fails soft — a posture read that raises yields the permissive default
     (local login on, email-first off), which is the shape that always has a
@@ -1677,10 +1718,28 @@ async def login_context(request: Request):
         except Exception as exc:  # noqa: BLE001 — see docstring
             logger.warning("Login context: posture read failed: %s", exc)
 
+    if cfg is None:
+        return LoginContext(
+            allow_local_login=True, email_first_login=False,
+            providers=await _enabled_provider_summaries(request, cfg),
+        )
+    access = password_access(cfg)
+    down = sso_outage_slugs(cfg)
     return LoginContext(
-        allow_local_login=bool(getattr(cfg, "allow_local_login", True)),
+        allow_local_login=access == "everyone",
         email_first_login=bool(getattr(cfg, "email_first_login", False)),
         providers=await _enabled_provider_summaries(request, cfg),
+        password_access=access,
+        # The outage is said whatever the posture: with passwords on, the
+        # page leads with the password step because of it.
+        sso_outage=SsoOutageSummary(
+            since=getattr(cfg, "sso_outage_since", None), providers=list(down),
+        ) if down else None,
+        password_fallback_until=(
+            cfg.password_fallback_until
+            if password_window_open(cfg) and not cfg.allow_local_login
+            else None
+        ),
     )
 
 
@@ -1704,9 +1763,10 @@ async def resolve_email_domain(request: Request, body: _ResolveBody):
     it publishes the org's IdP topology to anyone who loads /login. Asking
     for the email first removes both problems.
 
-    Off unless ``app_auth_config.email_first_login`` is on: this changes what
-    every user sees, and a wrong domain mapping strands them with no visible
-    alternative.
+    Answers whenever SSO is on: the sign-in page routes the address on
+    Enter in every posture with a connection, not only under email-first. A
+    miss is never a dead end there — the page falls back to its primary
+    connection or the password step.
 
     Deliberately NOT an enumeration oracle. Every miss — feature off, unknown
     domain, disabled provider, malformed input — returns the same empty body,
@@ -1717,9 +1777,7 @@ async def resolve_email_domain(request: Request, body: _ResolveBody):
     empty = ResolveResult(provider=None)
 
     cfg = await svc.auth_config() if hasattr(svc, "auth_config") else None
-    if cfg is None or not getattr(cfg, "email_first_login", False):
-        return empty
-    if not cfg.sso_enabled:
+    if cfg is None or not cfg.sso_enabled:
         return empty
 
     _local, _, domain = (body.email or "").partition("@")
@@ -1798,6 +1856,30 @@ def _allowed_host_or_default(claimed: str) -> str:
     return ALLOWED_HOSTS[0]
 
 
+async def _idp_unreachable(
+    request: Request, slug: str, provider, exc: Exception,
+) -> RedirectResponse:
+    """The sign-in could not even start: the IdP's discovery document or
+    metadata did not arrive. Back to the sign-in page with a reference,
+    like every other SSO failure, rather than a bare 503 JSON body — the
+    page says what happened and offers whatever password door is open."""
+    ref = _failure_ref()
+    # The provider's own id, not the slug from the URL: the line stays
+    # free of request text, and the ref finds the record that has both.
+    logger.warning(
+        "SSO authorize build failed (provider=%s, ref=%s): %s",
+        getattr(provider, "provider_id", None), ref, exc,
+    )
+    await _record_sso_failure(
+        _identity_service(request), ref=ref, slug=slug,
+        provider_id=getattr(provider, "provider_id", None),
+        reason="idp_unreachable", request=request, detail=str(exc),
+    )
+    return RedirectResponse(
+        _failure_redirect(ref), status_code=status.HTTP_302_FOUND,
+    )
+
+
 @router.get("/{slug}/login")
 @limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def sso_login(
@@ -1829,11 +1911,7 @@ async def sso_login(
                 next_path, force_reauth=force_flag,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OIDC authorize build failed (%s): %s", slug, exc)
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "OIDC temporarily unavailable",
-            )
+            return await _idp_unreachable(request, slug, provider, exc)
         state_token = create_oidc_state_token(
             state=flow["state"], nonce=flow["nonce"],
             code_verifier=flow["code_verifier"],
@@ -1853,11 +1931,7 @@ async def sso_login(
                 next_path=next_path, force_authn=force_flag,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("SAML authorize build failed (%s): %s", slug, exc)
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "SAML temporarily unavailable",
-            )
+            return await _idp_unreachable(request, slug, provider, exc)
         state_token = create_saml_state_token(
             relay_state=relay_state, next_path=next_path,
             provider_id=provider.provider_id, request_id=request_id,
@@ -2222,6 +2296,7 @@ async def _complete_custom_profile(
         linking_policy=snap.linking_policy,
         link_intent_user_id=link_intent_user_id,
         assurance=assurance_for(snap.kind, snap.settings),
+        link_admin_accounts=_links_admin_accounts(snap),
     )
 
 
@@ -2551,6 +2626,7 @@ async def backchannel_handle_login(
             linking_policy=snap.linking_policy,
             link_intent_user_id=link_intent_user_id,
             assurance=assurance_for(snap.kind, snap.settings),
+            link_admin_accounts=_links_admin_accounts(snap),
         )
     except SSOAuthError as exc:
         ref = _failure_ref()
@@ -2577,7 +2653,7 @@ async def backchannel_handle_login(
     if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("Back-channel login succeeded (slug=%s, user=%s)", slug, user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
@@ -2668,4 +2744,4 @@ async def custom_profile_browser_login(
         clear_link_intent_cookie(response)
     logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
                 slug, user.id, provider.settings.source)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)

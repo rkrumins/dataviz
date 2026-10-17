@@ -2,7 +2,7 @@ import type { ComponentProps } from 'react'
 import { Children, isValidElement, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
-import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, type LucideIcon } from 'lucide-react'
+import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, ClipboardCheck, LifeBuoy, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
 import { ZoomableImage } from './reading/ZoomableImage'
@@ -23,7 +23,6 @@ export const filenameMap: Record<string, string> = {
   'FRONTEND.md': 'frontend',
   'DATA_ARCHITECTURE.md': 'data-architecture',
   'API_FEATURES.md': 'api-features',
-  'TECHNICAL_DEBT.md': 'technical-debt',
   'SIGNUP_USER_SERVICE_PLAN.md': 'signup-service',
   'architecture-when-scaling.md': 'scaling-architecture',
   'AGGREGATION_PIPELINE.md': 'aggregation-pipeline',
@@ -44,6 +43,22 @@ export const filenameMap: Record<string, string> = {
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
   'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',
+  'CONTRIBUTING.md': 'contributing',
+  'TESTING_AND_CI.md': 'testing-and-ci',
+  'CONFIGURATION.md': 'configuration',
+  'SECURITY_OVERVIEW.md': 'security-overview',
+  'SSO_BACKCHANNEL_CONTRACT.md': 'sso-backchannel-contract',
+  'API_GUIDE.md': 'api-guide',
+  'ONBOARDING_A_SOURCE.md': 'onboarding-a-source',
+  'KUBERNETES.md': 'kubernetes',
+  'OBSERVABILITY.md': 'observability',
+  'RUNBOOKS.md': 'runbooks',
+  'UPGRADE_2026-09-10_graph-availability.md': 'upgrade-2026-09-10',
+  'PROPERTY_STORAGE.md': 'property-storage',
+  'TOP_LEVEL_NODES_PERFORMANCE.md': 'top-level-nodes-performance',
+  // Registered docs that live outside docs/, keyed by their repository path
+  'backend/app/db/DOMAIN_OWNERSHIP.md': 'domain-ownership',
+  'deploy/k8s/overlays/production-cluster/README.md': 'kubernetes-cluster-overlay',
   // Platform Services (subfolder; keys path-qualified to avoid basename clashes)
   'services/OVERVIEW.md': 'services-overview',
   'services/INSIGHTS.md': 'services-insights',
@@ -59,8 +74,35 @@ export const filenameMap: Record<string, string> = {
   'features/external-change-notification.md': 'feature-external-change-notification',
   'features/view-portability.md': 'feature-view-portability',
   'features/search-and-rules-reference.md': 'feature-search-and-rules-reference',
+  'features/feature-flags.md': 'feature-flags-lifecycle',
   'aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
   'external-change-notification.md': 'feature-external-change-notification',
+  // Versioning suite (subfolder; the chapters link each other by basename and
+  // other docs link them by path). Only docs/versioning/ links a bare README.md.
+  'versioning/README.md': 'versioning-guide',
+  'versioning/README-index.md': 'versioning-deep-dives',
+  'versioning/01-overview-and-architecture.md': 'versioning-overview',
+  'versioning/02-data-model.md': 'versioning-data-model',
+  'versioning/03-branching-commits-merge.md': 'versioning-branching-and-merge',
+  'versioning/04-projection-and-cache.md': 'versioning-projection-and-cache',
+  'versioning/05-ontology-governance.md': 'versioning-ontology-governance',
+  'versioning/06-api-reference.md': 'versioning-api-reference',
+  'versioning/07-frontend-integration.md': 'versioning-frontend-integration',
+  'versioning/08-import-export.md': 'versioning-import-export',
+  'versioning/09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
+  'versioning/10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
+  'versioning/11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  'README.md': 'versioning-guide',
+  '02-data-model.md': 'versioning-data-model',
+  '03-branching-commits-merge.md': 'versioning-branching-and-merge',
+  '04-projection-and-cache.md': 'versioning-projection-and-cache',
+  '05-ontology-governance.md': 'versioning-ontology-governance',
+  '07-frontend-integration.md': 'versioning-frontend-integration',
+  '08-import-export.md': 'versioning-import-export',
+  '09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
+  '10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
+  '11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 
 // ── Callouts ────────────────────────────────────────────────────────
@@ -75,7 +117,19 @@ const CALLOUTS: Record<string, { icon: LucideIcon; box: string; icon_cls: string
   important: { icon: AlertCircle, box: 'border-violet-500/30 bg-violet-500/[0.06]', icon_cls: 'text-violet-500' },
   warning: { icon: AlertTriangle, box: 'border-amber-500/30 bg-amber-500/[0.08]', icon_cls: 'text-amber-500' },
   caution: { icon: AlertTriangle, box: 'border-red-500/30 bg-red-500/[0.06]', icon_cls: 'text-red-500' },
+  // The guide's own bold labels: what to have ready before a task, what to do
+  // when the screen doesn't match the steps, and what only administrators need.
+  prerequisites: { icon: ClipboardCheck, box: 'border-indigo-500/30 bg-indigo-500/[0.06]', icon_cls: 'text-indigo-500' },
+  fallback: { icon: LifeBuoy, box: 'border-orange-500/30 bg-orange-500/[0.06]', icon_cls: 'text-orange-500' },
+  admins: { icon: ShieldCheck, box: 'border-teal-500/30 bg-teal-500/[0.06]', icon_cls: 'text-teal-500' },
 }
+
+/** Bold labels (`> **Before you start:** …`) that open one of the guide's callouts. */
+const LABELLED_CALLOUTS: Array<[RegExp, keyof typeof CALLOUTS]> = [
+  [/^before you start:$/i, 'prerequisites'],
+  [/^if\b.+:$/i, 'fallback'],
+  [/^admins:$/i, 'admins'],
+]
 
 /** Recursively pull the plain text out of react-markdown children. */
 function nodeText(node: React.ReactNode): string {
@@ -88,21 +142,39 @@ function nodeText(node: React.ReactNode): string {
   return ''
 }
 
+/** The text of a bold label opening the blockquote's first paragraph, if any. */
+function leadingBoldLabel(children: React.ReactNode): string | null {
+  const first = Children.toArray(children).find(isValidElement)
+  if (!first) return null
+  const lead = Children.toArray((first.props as { children?: React.ReactNode }).children)[0]
+  return isValidElement(lead) && lead.type === 'strong' ? nodeText(lead).trim() : null
+}
+
 /** Detect a leading callout label, tolerant of `[!NOTE]` or `**Note:**`. */
 function calloutKind(children: React.ReactNode): keyof typeof CALLOUTS | null {
   const text = nodeText(children).trimStart()
   const m = /^\[!(\w+)\]|^(note|tip|important|warning|caution)\b\s*:/i.exec(text)
   const raw = (m?.[1] ?? m?.[2] ?? '').toLowerCase()
-  return raw in CALLOUTS ? (raw as keyof typeof CALLOUTS) : null
+  if (raw in CALLOUTS) return raw as keyof typeof CALLOUTS
+  const label = leadingBoldLabel(children)
+  return label ? LABELLED_CALLOUTS.find(([re]) => re.test(label))?.[1] ?? null : null
 }
 
-function rewriteDocLink(href: string): string {
-  const cleaned = href.replace(/^\.\//, '')
-  if (cleaned.endsWith('.md')) {
-    const slug = filenameMap[cleaned]
-    if (slug) return `/docs/${slug}`
+/**
+ * Route a relative markdown link to its in-app doc. The path is read the way
+ * it resolves in the repository — leading `./` and `../` segments, and the
+ * `docs/` prefix that root-level docs such as CHANGELOG.md write, are dropped
+ * before the lookup — and an `#anchor` is kept, so one relative link works
+ * both on disk and in this reader. Anything else comes back unchanged.
+ */
+export function rewriteDocLink(href: string): string {
+  const hashAt = href.indexOf('#')
+  const path = hashAt === -1 ? href : href.slice(0, hashAt)
+  const key = path.replace(/^(?:\.\.?\/)+/, '').replace(/^docs\//, '')
+  if (key.endsWith('.md')) {
+    const slug = filenameMap[key]
+    if (slug) return `/docs/${slug}${hashAt === -1 ? '' : href.slice(hashAt)}`
   }
-  if (href.startsWith('#')) return href
   return href
 }
 
@@ -147,7 +219,7 @@ function CodeCopyButton({ text }: { text: string }) {
           window.setTimeout(() => setCopied(false), 1500)
         })
       }
-      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted opacity-0 backdrop-blur-sm transition-opacity hover:text-ink focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
+      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted backdrop-blur-sm transition-opacity hover:text-ink [@media(hover:hover)]:opacity-0 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
     >
       {copied ? (
         <>
@@ -229,7 +301,8 @@ export const markdownComponents: Components = {
 
   // Intercept <pre> to detect mermaid blocks (avoids nesting <div> inside <pre>)
   // and to overlay a copy-to-clipboard control on ordinary code blocks.
-  pre: ({ children, ...props }) => {
+  // `node` is react-markdown's syntax-tree node: not an attribute for the DOM.
+  pre: ({ node: _node, children, ...props }) => {
     const info = extractCodeFromPre(children)
     if (info?.lang === 'mermaid') {
       return <MermaidBlock code={info.text} />
@@ -248,7 +321,7 @@ export const markdownComponents: Components = {
   },
 
   // Tables: scrollable wrapper
-  table: ({ children, ...props }) => (
+  table: ({ node: _node, children, ...props }) => (
     <div className="overflow-x-auto my-4 rounded-xl border border-glass-border">
       <table {...props}>{children}</table>
     </div>
@@ -275,12 +348,12 @@ export const markdownComponents: Components = {
   },
 
   // Links: rewrite .md links to SPA routes
-  a: ({ href, children, ...props }) => {
+  a: ({ node: _node, href, children, ...props }) => {
     if (!href) return <a {...props}>{children}</a>
 
     const rewritten = rewriteDocLink(href)
 
-    if (rewritten.startsWith('/docs/')) {
+    if (/^\/(docs|guide)(\/|#|$)/.test(rewritten)) {
       return (
         <RouterLink to={rewritten} {...props}>
           {children}

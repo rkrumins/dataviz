@@ -12,7 +12,10 @@
  *
  * "View + data" packages the views WITH their graph data (a .view-package.zip), for a data
  * source under version control: the view's own entities or the whole source, as published or as
- * in the person's draft. An export job builds it on the server; the dialog follows it.
+ * in the person's draft. An export job builds it on the server, and the package downloads by
+ * itself once ready, wherever the person is by then: closed meanwhile, the dialog hands it to the
+ * export tray (`backgroundExports`); opened again on the same views, it shows it once more. It can
+ * be cancelled while it is built.
  *
  * Two columns, like the graph ExportDialog: what travels (and what doesn't) on the left, the
  * version choice and a preview of the file on the right.
@@ -22,7 +25,7 @@ import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, Check, CheckCircle2, Copy, Database, Download, EyeOff, FileJson2, Fingerprint,
-  GitPullRequestDraft, History, Layers, Loader2, Package, RefreshCw, Tag, X,
+  GitPullRequestDraft, History, Info, Layers, Loader2, Package, RefreshCw, Tag, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -30,11 +33,16 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { invalidateViewVersions, useViewVersions } from '@/hooks/useViewVersions'
 import {
-  exportViewPackage, exportViews, previewExport, type ExportedFile, type ExportedPackage, type ExportPreview,
-  type PackageDataVersion, type PackageScope,
+  exportViews, newRequestId, previewExport, startViewPackage,
+  type ExportedFile, type ExportPreview, type PackageDataVersion, type PackageScope,
 } from '@/services/viewTransferApiService'
 import type { ViewVersionSummary } from '@/services/viewVersionsApiService'
-import { queuePosition, type Job } from '@/services/importExportApiService'
+import {
+  downloadExportFile, exportStage, findRunningExport, retryExport, trackExport, useBackgroundExport, useShownExport,
+  type BackgroundExport,
+} from '@/features/import-export/backgroundExports'
+import { CancelExport } from '@/features/import-export/CancelExport'
+import { ExportProgressPanel } from '@/features/import-export/ExportProgress'
 import { recordEvent } from '@/services/telemetryService'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
@@ -53,7 +61,9 @@ export interface ExportViewDialogProps {
   onClose: () => void
 }
 
-type Phase = 'choose' | 'running' | 'done' | 'failed'
+/** `running`: the view file being written, or a package being asked for; `package`: the package
+ *  the server builds, at whatever stage it is. */
+type Phase = 'choose' | 'running' | 'done' | 'failed' | 'package'
 
 /** The server's cap on views in one file (`view_transfer.limits.MAX_VIEWS_PER_BUNDLE`). */
 export const MAX_VIEWS_PER_FILE = 200
@@ -98,57 +108,89 @@ function usePackageOption(views: Array<{ id: string }>, preview: ExportPreview[]
   }
 }
 
+/** A package of exactly these views, however they were listed. */
+const ofViews = (ids: string[]) => {
+  const key = [...ids].sort().join(',')
+  return (e: BackgroundExport) => e.kind === 'package' && [...(e.viewIds ?? [])].sort().join(',') === key
+}
+
 export function ExportViewDialog({ views, initialVersion, initialContent = 'view', onClose }: ExportViewDialogProps) {
   const single = views.length === 1
-  const [phase, setPhase] = useState<Phase>('choose')
+  // A package of these views the server was building when the dialog last closed: it opens on that.
+  const [earlier] = useState(() => findRunningExport(ofViews(views.map((v) => v.id))))
+  const [phase, setPhase] = useState<Phase>(earlier ? 'package' : 'choose')
   const [pick, setPick] = useState<'current' | number>(initialVersion ?? 'current')
   const [note, setNote] = useState('')
   const [result, setResult] = useState<ExportedFile | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [content, setContent] = useState<'view' | 'data'>(initialContent)
+  const [content, setContent] = useState<'view' | 'data'>(earlier ? 'data' : initialContent)
   const [scope, setScope] = useState<PackageScope>(single ? 'view' : 'source')
   const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
-  const [packaged, setPackaged] = useState<ExportedPackage | null>(null)
-  const [job, setJob] = useState<Job | null>(null)
-  const queued = queuePosition(job)
+  // The package the server builds, followed app-wide: it carries on, and downloads, once this closes.
+  const [jobId, setJobId] = useState<string | null>(earlier?.jobId ?? null)
+  const packaging = useBackgroundExport(phase === 'package' ? jobId : null)
+  useShownExport(packaging?.jobId)
+  // A package no longer followed here (let go of in another tab) leaves the choice open again.
+  const view: Phase = phase === 'package' && !packaging ? 'choose' : phase
+  const stage = packaging ? exportStage(packaging) : null
+  const working = stage === 'queued' || stage === 'running'
+  // One request id per distinct package asked for, reused by its retries: a retry of a request
+  // whose answer was lost answers with the job it started instead of starting another.
+  const attempt = useRef<{ key: string; requestId: string } | null>(null)
   const tooMany = views.length > MAX_VIEWS_PER_FILE
-  const preview = useExportPreview(views, !tooMany && phase === 'choose')
+  const preview = useExportPreview(views, !tooMany && view === 'choose')
   const packageOption = usePackageOption(views, preview.data?.views)
   const withData = content === 'data' && packageOption.available
+  // A package picked up again on opening is one too, whatever the choices now show.
+  const asPackage = withData || !!packaging
+  const ready = stage === 'ready' || stage === 'downloaded'
+  // It finished just as it was cancelled: it is the person's to download, or not.
+  const unasked = stage === 'ready' && !!packaging?.cancelRequested
+  const failed = stage === 'failed' || stage === 'expired' || stage === 'lost'
   const queryClient = useQueryClient()
   // Stable for the dialog's whole life: the a11y hook re-focuses the panel whenever its callback
   // changes, which would pull the cursor out of the note field on any parent re-render.
-  const runningRef = useRef(false)
   const onCloseRef = useRef(onClose)
   useEffect(() => {
-    runningRef.current = phase === 'running'
     onCloseRef.current = onClose
   })
-  const close = useCallback(() => { if (!runningRef.current) onCloseRef.current() }, [])
+  const close = useCallback(() => onCloseRef.current(), [])
   const panelRef = useModalA11y(true, close)
+
+  /** Choose another export: the package being built carries on, and downloads from the tray. */
+  function exportSomethingElse() {
+    setJobId(null)
+    setPhase('choose')
+  }
 
   async function run() {
     setPhase('running')
     setError(null)
-    setJob(null)
+    const refs = views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null }))
     try {
       if (withData) {
-        const done = await exportViewPackage(
-          views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null })),
-          { scope: single ? scope : 'source', dataVersion: single ? dataVersion : 'published', message: note.trim() || undefined },
-          setJob,
-        )
-        setPackaged(done)
-        setPhase('done')
+        const options = {
+          scope: single ? scope : 'source', dataVersion: single ? dataVersion : 'published', message: note.trim() || undefined,
+        } as const
+        const key = JSON.stringify([refs, options])
+        if (attempt.current?.key !== key) attempt.current = { key, requestId: newRequestId() }
+        const started = await startViewPackage(refs, { ...options, requestId: attempt.current.requestId })
+        attempt.current = null
+        // Asking for it saved any unsaved changes as a version: the history and header chip moved.
         views.forEach((v) => invalidateViewVersions(queryClient, v.id))
         void queryClient.invalidateQueries({ queryKey: [EXPORT_PREVIEW_QUERY_KEY] })
         recordEvent('view.export', { views: views.length, withData: true, scope, dataVersion })
+        // The server builds it, and it downloads once ready, wherever the person is in the app by then.
+        trackExport({
+          jobId: started.jobId, kind: 'package', wsId: started.workspaceId, graphId: started.graphId,
+          fileName: started.fileName, viewIds: views.map((v) => v.id),
+          label: `${single ? views[0].name : `${views.length} views`} · view + data`,
+        })
+        setJobId(started.jobId)
+        setPhase('package')
         return
       }
-      const file = await exportViews(
-        views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null })),
-        note.trim() || undefined,
-      )
+      const file = await exportViews(refs, note.trim() || undefined)
       setResult(file)
       setPhase('done')
       // Exporting unsaved changes saved them as a version: the history and header chip moved.
@@ -161,7 +203,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
     }
   }
 
-  const title = withData
+  const title = asPackage
     ? (single ? 'Export view with its data' : `Export ${views.length} views with their data`)
     : single ? 'Export view' : `Export ${views.length} views`
 
@@ -169,7 +211,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
   // react to a click that was meant for the dialog.
   return createPortal(
     <div onClick={(e) => e.stopPropagation()}>
-      <Backdrop open onClick={phase === 'running' ? undefined : onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
+      <Backdrop open onClick={onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
         <div
           ref={panelRef}
@@ -182,7 +224,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
           <div className="border-b border-glass-border px-8 py-5 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-4 min-w-0">
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 flex-shrink-0">
-                {withData ? <Package className="w-6 h-6" /> : <FileJson2 className="w-6 h-6" />}
+                {asPackage ? <Package className="w-6 h-6" /> : <FileJson2 className="w-6 h-6" />}
               </div>
               <div className="min-w-0">
                 <h3 id="export-view-title" className="text-xl font-bold text-ink">{title}</h3>
@@ -192,15 +234,13 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                 </p>
               </div>
             </div>
-            {phase !== 'running' && (
-              <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
-                <X className="w-5 h-5" />
-              </button>
-            )}
+            <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {phase === 'choose' && (
+            {view === 'choose' && (
               <div className="grid md:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
                 <WhatTravels withData={withData} />
                 <div className="px-8 py-6 space-y-5">
@@ -216,7 +256,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                 </div>
               </div>
             )}
-            {phase === 'running' && (
+            {view === 'running' && (
               <div className="px-8 py-16 flex flex-col items-center gap-4">
                 <div className="relative w-16 h-16">
                   <div className="absolute inset-0 rounded-full bg-indigo-500/10 animate-ping" />
@@ -224,47 +264,68 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                     <Loader2 className="w-7 h-7 text-indigo-500 animate-spin" />
                   </div>
                 </div>
-                <p className="text-sm font-semibold text-ink">{withData ? 'Packaging the view with its data…' : 'Preparing the file…'}</p>
+                <p className="text-sm font-semibold text-ink">{asPackage ? 'Packaging the view with its data…' : 'Preparing the file…'}</p>
                 <p className="text-[11px] text-ink-muted">
-                  {withData
-                    ? (job?.status === 'running' ? 'Writing the graph data and packing it with the view. Large sources take a while.'
-                      : queued ? `Waiting to start: ${queued}`
-                      : 'Recording the version and starting the export.')
-                    : 'Recording the version and naming every entity it places.'} The download starts by itself.
+                  {asPackage ? 'Recording the version and starting the export.'
+                    : 'Recording the version and naming every entity it places.'}
                 </p>
+                <p className="text-[11px] text-ink-muted text-center max-w-sm">The download starts by itself.</p>
               </div>
             )}
-            {phase === 'done' && packaged && <PackageDone result={packaged} />}
-            {phase === 'done' && result && !packaged && <Done result={result} count={views.length} />}
-            {phase === 'failed' && (
-              <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
-                <div className="w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-500 flex items-center justify-center flex-shrink-0">
-                  <AlertTriangle className="w-6 h-6" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-lg font-bold text-ink">The export didn't complete</h3>
-                  <p className="text-sm text-ink-muted mt-1 break-words">{error}</p>
-                </div>
-              </div>
+            {packaging && working && <div className="px-8 py-10"><ExportProgressPanel e={packaging} /></div>}
+            {packaging && ready && (unasked ? (
+              <Ended tone="info" title="It finished before it could be stopped">
+                <span className="font-medium text-ink break-all">{packaging.fileName}</span> was ready before the cancel
+                reached the server. Download it if you still want it: the file is kept on the server for a day.
+              </Ended>
+            ) : <PackageDone result={packageResult(packaging)} />)}
+            {packaging && stage === 'cancelled' && (
+              <Ended tone="info" title="Export cancelled">
+                The server stopped building <span className="font-medium text-ink break-all">{packaging.fileName}</span>.
+                Nothing was downloaded.
+              </Ended>
+            )}
+            {view === 'done' && result && <Done result={result} count={views.length} />}
+            {(view === 'failed' || failed) && (
+              <Ended tone="error" title={stage === 'lost' ? 'Lost touch with the export' : "The export didn't complete"}>
+                {view === 'failed' ? error
+                  : stage === 'lost' ? <>{packaging?.lost} It may still be under way on the server: try again to check on it.</>
+                    : stage === 'expired' ? 'The package is no longer kept. Export it again.'
+                      : packaging?.job?.errorMessage || 'The package could not be built.'}
+              </Ended>
             )}
           </div>
 
           <div className="flex items-center justify-end gap-2 px-8 py-4 border-t border-glass-border bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
-            <button onClick={onClose} disabled={phase === 'running'} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
-              {phase === 'done' ? 'Done' : 'Cancel'}
+            {working && (
+              <button onClick={exportSomethingElse} className="mr-auto px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                Export something else
+              </button>
+            )}
+            {working && packaging && <CancelExport jobId={packaging.jobId} />}
+            <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              {view === 'done' || ready || stage === 'cancelled' ? 'Done' : view === 'running' || working ? 'Close' : 'Cancel'}
             </button>
-            {phase === 'choose' && tooMany && (
+            {view === 'choose' && tooMany && (
               <p className="mr-auto text-[11px] text-amber-600 dark:text-amber-400">
                 A file holds up to {MAX_VIEWS_PER_FILE} views. Select fewer and export them in groups.
               </p>
             )}
-            {phase === 'choose' && (
+            {view === 'choose' && (
               <button onClick={run} disabled={tooMany} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20 disabled:opacity-40 disabled:cursor-not-allowed">
                 <Download className="w-4 h-4" /> Download
               </button>
             )}
-            {phase === 'failed' && (
-              <button onClick={run} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+            {packaging && ready && (
+              <button onClick={() => downloadExportFile(packaging.jobId)} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+                <Download className="w-4 h-4" /> {unasked ? 'Download it' : 'Download again'}
+              </button>
+            )}
+            {(view === 'failed' || failed) && (
+              // A request that failed is asked again (under its request id); a package this lost
+              // touch with is checked on again; one that failed is chosen again, then built anew.
+              <button onClick={() => (view === 'failed' ? run() : stage === 'lost' && packaging ? retryExport(packaging.jobId) : exportSomethingElse())}
+                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
                 <RefreshCw className="w-4 h-4" /> Try again
               </button>
             )}
@@ -588,7 +649,43 @@ function DataChoice({ single, scope, setScope, dataVersion, setDataVersion, hasD
 
 // ── Done ─────────────────────────────────────────────────────────────────────
 
-function PackageDone({ result }: { result: ExportedPackage }) {
+/** What a built package holds, as its job says. */
+interface PackageResult {
+  fileName: string
+  bytes: number | null
+  nodes: number | null
+  edges: number | null
+  /** The views' fingerprint, as the package's manifest names it. */
+  bundleHash: string | null
+}
+
+function packageResult(e: BackgroundExport): PackageResult {
+  const summary = (e.job?.summary ?? {}) as {
+    nodes?: number; edges?: number; bytes?: number; package?: { bytes?: number; bundleHash?: string | null }
+  }
+  return {
+    fileName: e.fileName, bytes: summary.package?.bytes ?? summary.bytes ?? null, nodes: summary.nodes ?? null,
+    edges: summary.edges ?? null, bundleHash: summary.package?.bundleHash ?? null,
+  }
+}
+
+/** How a package's export ended, when it didn't end in the package. */
+function Ended({ tone, title, children }: { tone: 'info' | 'error'; title: string; children: React.ReactNode }) {
+  return (
+    <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
+      <div className={cn('w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0',
+        tone === 'error' ? 'bg-rose-50 dark:bg-rose-950/30 text-rose-500' : 'bg-indigo-50 dark:bg-indigo-950/30 text-indigo-500')}>
+        {tone === 'error' ? <AlertTriangle className="w-6 h-6" /> : <Info className="w-6 h-6" />}
+      </div>
+      <div className="min-w-0">
+        <h3 className="text-lg font-bold text-ink">{title}</h3>
+        <p className="text-sm text-ink-muted mt-1 break-words">{children}</p>
+      </div>
+    </div>
+  )
+}
+
+function PackageDone({ result }: { result: PackageResult }) {
   return (
     <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
       <div className="w-11 h-11 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 flex items-center justify-center flex-shrink-0">
@@ -603,11 +700,13 @@ function PackageDone({ result }: { result: ExportedPackage }) {
           To bring it into another environment, open the View wizard there and choose <span className="font-medium text-ink">Import a view</span>:
           it goes into a draft there, data and view together.
         </p>
-        <div className="mt-4 flex items-center gap-2 rounded-xl border border-glass-border px-3 py-2">
-          <Fingerprint className="w-4 h-4 text-indigo-500 flex-shrink-0" />
-          <span className="text-[11px] text-ink-muted">Views fingerprint</span>
-          <span className="text-xs font-mono text-ink truncate" title={result.bundleHash}>{shortHash(result.bundleHash, 16)}</span>
-        </div>
+        {result.bundleHash && (
+          <div className="mt-4 flex items-center gap-2 rounded-xl border border-glass-border px-3 py-2">
+            <Fingerprint className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+            <span className="text-[11px] text-ink-muted">Views fingerprint</span>
+            <span className="text-xs font-mono text-ink truncate" title={result.bundleHash}>{shortHash(result.bundleHash, 16)}</span>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -4,8 +4,11 @@
  *     export is then prepared on the server, named for the data source (and the view, and the
  *     draft), with the scope and version chosen, and downloaded once its file is ready;
  *   - while the server prepares it, the dialog says where it waits in the queue and how far it has
- *     got; closed meanwhile, it opens on that export again, and downloads it once it's ready; one
- *     that failed or is no longer kept is let go of quietly;
+ *     got (its steps, records, percent), that it resumed where it left off when a server took it
+ *     over, and that the download starts by itself; closed meanwhile, the export carries on and
+ *     downloads by itself once ready, and the dialog opened again shows it; one that has ended
+ *     isn't opened on; exporting something else leaves it carrying on;
+ *   - the export can be cancelled while it is prepared, asked once more first;
  *   - an export that would hold nothing says why, in the terms it was chosen in, and downloads
  *     nothing: no empty files;
  *   - an export too large for Excel says so and offers CSV, which then exports;
@@ -14,9 +17,9 @@
  *   - new property columns are offered only for the spreadsheet formats;
  *   - a failure says why and can be retried.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ExportPlan, Job } from '@/services/importExportApiService'
 
 vi.mock('@/services/importExportApiService', async (importOriginal) => ({
@@ -24,11 +27,13 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
   planExport: vi.fn(),
   createExport: vi.fn(),
   getExport: vi.fn(),
+  cancelExport: vi.fn(),
   triggerBrowserDownload: vi.fn(),
 }))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
-import { createExport, getExport, planExport, triggerBrowserDownload } from '@/services/importExportApiService'
+import { cancelExport, createExport, getExport, planExport, triggerBrowserDownload } from '@/services/importExportApiService'
+import { dismissExport, exportStage, trackExport, useBackgroundExports } from '../backgroundExports'
 import { ExportDialog, type ExportDialogProps } from '../ExportDialog'
 
 function plan(extra: Partial<ExportPlan> = {}): ExportPlan {
@@ -53,18 +58,26 @@ function downloaded(): [URL, string] {
   return [new URL(url, 'http://app'), name]
 }
 
-const REMEMBERED = 'graph-export:ws1:g1'
-
-function remember(total: number | null = 4000) {
-  localStorage.setItem(REMEMBERED, JSON.stringify({ jobId: 'j9', fileName: 'Finance-DWH.csv', format: 'csv', total, exact: true }))
+/** An export of this data source started earlier, as the app follows it (the dialog since closed). */
+function startedEarlier() {
+  trackExport({ jobId: 'j9', kind: 'data', wsId: 'ws1', graphId: 'g1', fileName: 'Finance-DWH.csv',
+    label: 'Finance DWH · CSV', format: 'csv', total: 4000, exact: true })
 }
+
+const tracked = (jobId: string) => useBackgroundExports.getState().exports.find((e) => e.jobId === jobId)
 
 beforeEach(() => {
   localStorage.clear()
   vi.mocked(planExport).mockReset()
   vi.mocked(createExport).mockReset().mockResolvedValue({ jobId: 'j1', resultUri: 'r', status: 'pending' })
   vi.mocked(getExport).mockReset().mockResolvedValue(exportJob())
+  vi.mocked(cancelExport).mockReset()
   vi.mocked(triggerBrowserDownload).mockReset()
+})
+
+afterEach(() => {
+  for (const e of useBackgroundExports.getState().exports) dismissExport(e.jobId)
+  useBackgroundExports.setState({ exports: [], shown: [] })
 })
 
 describe('ExportDialog', () => {
@@ -83,7 +96,7 @@ describe('ExportDialog', () => {
     expect(name).toBe('Finance-DWH-Revenue-lineage-draft.csv')
     expect(screen.getByText(/1,200 entities and 3,400 relationships, 5.0 MB/)).toBeInTheDocument()
     expect(screen.getByText(/your browser can pick it up where it stopped/)).toBeInTheDocument()
-    expect(localStorage.getItem(REMEMBERED)).toBeNull()
+    expect(useBackgroundExports.getState().shown).toEqual(['j1'])       // the tray leaves it to the dialog
 
     await userEvent.click(screen.getByRole('button', { name: /Download again/ }))
     expect(triggerBrowserDownload).toHaveBeenCalledTimes(2)
@@ -113,57 +126,100 @@ describe('ExportDialog', () => {
   })
 
   it('says where a prepared export waits, and how far it has got, when the dialog opens on it again', async () => {
-    remember()
     vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'pending', queuedAhead: 2, summary: null }))
+    startedEarlier()
     const { unmount } = open()
 
     await screen.findByText('Waiting to start…')
     expect(screen.getByText('2 jobs are ahead of it.')).toBeInTheDocument()
+    expect(screen.getByText('Waiting its turn')).toBeInTheDocument()
     expect(screen.getByText('Finance-DWH.csv')).toBeInTheDocument()
     expect(getExport).toHaveBeenCalledWith('ws1', 'g1', 'j9')
     expect(planExport).not.toHaveBeenCalled()
     unmount()
-    expect(localStorage.getItem(REMEMBERED)).not.toBeNull()       // closed: it carries on
+    expect(tracked('j9')).toBeDefined()                            // closed: it carries on
 
     // A spreadsheet reads every record for its columns first: halfway through writing is 62%.
     vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'running',
       summary: { nodes: 1000, edges: 0, passes: 2, bytes: 2048 } }))
+    await waitFor(() => expect(tracked('j9')?.job?.status).toBe('running'), { timeout: 3000 })
     open()
     await screen.findByText('Writing the file… 1,000 of 4,000 records, 2.0 KB')
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '62')
   })
 
-  it('downloads a prepared export that finished while the dialog was closed', async () => {
-    remember()
-    vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9' }))
+  it('shows the export as it goes: its steps, what it has written, and that the download starts by itself', async () => {
+    vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'running', attempt: 2,
+      summary: { nodes: 1000, edges: 0, passes: 2, bytes: 2048 } }))
+    startedEarlier()
     open()
 
-    await screen.findByText('Your download has started')
-    expect(downloaded()[0].pathname).toBe('/api/v1/ws1/versioning/graphs/g1/exports/j9/download')
-    expect(localStorage.getItem(REMEMBERED)).toBeNull()
+    await screen.findByText('Writing the file… 1,000 of 4,000 records, 2.0 KB')
+    expect(screen.getByText('Resumed where it left off (attempt 2).')).toBeInTheDocument()
+    expect(screen.getByText('Step 3 of 4 · Writing the file')).toBeInTheDocument()
+    const steps = screen.getByRole('list', { name: 'Export steps' })
+    expect(within(steps).getAllByRole('listitem').map((li) => li.textContent))
+      .toEqual(['Queued', 'Finding the columns', 'Writing the file', 'Download'])
+    expect(within(steps).getByText('Writing the file').closest('li')).toHaveAttribute('aria-current', 'step')
+    expect(screen.getByText('1,000')).toBeInTheDocument()
+    expect(screen.getByText('Entities')).toBeInTheDocument()
+    expect(screen.getByText('2.0 KB')).toBeInTheDocument()
+    expect(screen.getByText(/Your download starts automatically/)).toBeInTheDocument()
   })
 
-  it('lets go quietly of a prepared export that failed or is no longer kept', async () => {
+  it('downloads the export by itself once ready, its dialog closed meanwhile', async () => {
+    vi.mocked(planExport).mockResolvedValue(plan())
+    vi.mocked(getExport).mockResolvedValue(exportJob({ status: 'running', summary: null }))
+    const { unmount } = open()
+    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+    await screen.findByText(/Your download starts automatically/)
+    unmount()
+    expect(useBackgroundExports.getState().shown).toEqual([])        // the tray shows it now
+
+    vi.mocked(getExport).mockResolvedValue(exportJob())
+    await waitFor(() => expect(triggerBrowserDownload).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    expect(downloaded()[0].pathname).toBe('/api/v1/ws1/versioning/graphs/g1/exports/j1/download')
+    expect(exportStage(tracked('j1')!)).toBe('downloaded')
+  })
+
+  it('opens on the choices when the export it last showed has ended', async () => {
     for (const gone of [exportJob({ jobId: 'j9', status: 'failed', errorMessage: 'boom' }), exportJob({ jobId: 'j9', kept: false })]) {
-      remember()
       vi.mocked(getExport).mockResolvedValue(gone)
+      startedEarlier()
+      await waitFor(() => expect(tracked('j9')?.endedAt).toEqual(expect.any(Number)))
       const { unmount } = open()
       await screen.findByRole('button', { name: /Export CSV/ })
       expect(triggerBrowserDownload).not.toHaveBeenCalled()
-      expect(localStorage.getItem(REMEMBERED)).toBeNull()
       unmount()
+      dismissExport('j9')
     }
   })
 
-  it('exports something else instead, forgetting the one being prepared', async () => {
-    remember()
+  it('exports something else instead, the one being prepared carrying on', async () => {
     vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'running', summary: null }))
+    startedEarlier()
     open()
     await screen.findByText('Starting…')
     await userEvent.click(screen.getByRole('button', { name: /Export something else/ }))
 
     expect(screen.getByRole('button', { name: /Export CSV/ })).toBeInTheDocument()
-    expect(localStorage.getItem(REMEMBERED)).toBeNull()
+    expect(tracked('j9')).toBeDefined()
+    expect(useBackgroundExports.getState().shown).toEqual([])
+  })
+
+  it('cancels the export being prepared, asked once more first', async () => {
+    vi.mocked(getExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'running', summary: null }))
+    vi.mocked(cancelExport).mockResolvedValue(exportJob({ jobId: 'j9', status: 'cancelled' }))
+    startedEarlier()
+    open()
+    await screen.findByText('Starting…')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel export' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Stop export' }))
+    expect(cancelExport).toHaveBeenCalledWith('ws1', 'g1', 'j9')
+    expect(await screen.findByText('Export cancelled')).toBeInTheDocument()
+    expect(screen.getByText(/Nothing was downloaded/)).toBeInTheDocument()
+    expect(triggerBrowserDownload).not.toHaveBeenCalled()
   })
 
   it('says why an export did not finish, and exports again', async () => {
@@ -180,15 +236,24 @@ describe('ExportDialog', () => {
   })
 
   it('checks again on an export it lost touch with, rather than starting another', async () => {
-    vi.mocked(planExport).mockResolvedValue(plan())
-    vi.mocked(getExport).mockRejectedValueOnce(new Error('Failed to fetch'))
-    open()
-    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+    // A failed poll is asked again (the export runs on regardless) until the export has gone
+    // unanswered for two minutes: only then has the dialog lost touch with it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(planExport).mockResolvedValue(plan())
+      vi.mocked(getExport).mockRejectedValue(new Error('Failed to fetch'))
+      open()
+      await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+      await vi.advanceTimersByTimeAsync(125_000)
 
-    await screen.findByText('Lost touch with the export')
-    await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
-    await screen.findByText('Your download has started')
-    expect(createExport).toHaveBeenCalledTimes(1)
+      await screen.findByText('Lost touch with the export')
+      vi.mocked(getExport).mockResolvedValue(exportJob())
+      await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
+      await screen.findByText('Your download has started')
+      expect(createExport).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('never downloads an empty file: it says why there is nothing to export', async () => {

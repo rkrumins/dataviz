@@ -387,6 +387,19 @@ export interface WorkspaceAnalyticsDetail {
         activityEvents: number[]
         activeUsers: number[]
         viewOpens: number[]
+        /** What the workspace holds, per bucket — levels, not flows. Absent
+         *  from documents built before the Data tab existed. */
+        entities?: number[]
+        relationships?: number[]
+    }
+    growth?: { entities: LevelChange; relationships: LevelChange }
+    /** How its ingestion was driven. Withheld below the posture that shows
+     *  operations, as on the summary. */
+    operations?: {
+        runs: { key: RunOrigin; count: number }[]
+        total: number
+        failed: number
+        manualShare: number | null
     }
     breakdowns: {
         viewsByVisibility: ClassCount[]
@@ -408,6 +421,134 @@ export interface WorkspaceAnalyticsDetail {
         showsPeople: boolean
         member: boolean
     }
+}
+
+// ── Data: what the platform holds, and how it got there ───────────────
+
+/** A level read at the window's start and end. */
+export interface LevelChange {
+    start: number
+    end: number
+    change: number
+    changePct: number | null
+}
+
+export interface DataMover extends LevelChange {
+    dataSourceId: string | null
+    name: string
+    workspaceId: string | null
+    workspaceName: string | null
+    redacted?: boolean
+    canOpen?: boolean
+}
+
+export type VersionControlSection =
+    | { available: false }
+    | {
+        available: true
+        byKind: ClassCount[]
+        adopted: { buckets: string[]; series: { key: string; values: number[] }[] }
+        share: { versioned: number; total: number }
+    }
+
+export interface AnalyticsDataDoc {
+    windowDays: number | null
+    generatedAt: string
+    range: AnalyticsRange
+    bucket: 'day' | 'week'
+    /** `jobsKeptDays` is how long finished aggregation runs are kept, `null`
+     *  when every run is (AGGREGATION_JOB_RETENTION_DAYS=0). */
+    coverage: { entitiesSince: string | null; jobsKeptDays: number | null }
+    growth: {
+        buckets: string[]
+        entities: number[]
+        relationships: number[]
+        totals: { entities: LevelChange; relationships: LevelChange; sources: number }
+        byWorkspace: { workspaceId: string | null; name: string | null; entities: number[]; redacted?: boolean }[]
+        byProviderType: { key: string; entities: number[] }[]
+        movers: DataMover[]
+    }
+    onboarding: {
+        buckets: string[]
+        total: number[]
+        /** `null` when version control could not be read: the split is unknown. */
+        versioned: number[] | null
+        external: number[] | null
+        totals: { sources: Metric }
+        byProviderType: ClassCount[]
+        firstBuild: { medianHours: number | null; p90Hours: number | null; measured: number; awaiting: number }
+    }
+    versionControl: VersionControlSection
+    redaction?: { applied: boolean; reportsAllWorkspaces: boolean }
+}
+
+// ── Usage: what is used, when, and how ingestion is driven ────────────
+
+/** Who started an aggregation run. */
+export type RunOrigin = 'byHand' | 'automatic' | 'onboarding' | 'other'
+
+export interface BuiltVsOpened {
+    key: string
+    built: number
+    opens: number
+}
+
+export interface HandsOnSource {
+    dataSourceId: string | null
+    workspaceId: string | null
+    count: number
+    lastAt: string
+    medianGapHours: number | null
+    name: string | null
+    redacted?: boolean
+}
+
+export interface WorkspacePulseRow {
+    workspaceId: string
+    name: string | null
+    values: number[]
+    total: number
+    redacted?: boolean
+    canOpen?: boolean
+}
+
+export interface AnalyticsUsageDoc {
+    windowDays: number | null
+    generatedAt: string
+    range: AnalyticsRange
+    bucket: 'day' | 'week'
+    content: {
+        buckets: string[]
+        uniqueViewers: number[]
+        viewers: Metric
+        viewsOpened: number
+        reach: ClassCount[]
+        byType: BuiltVsOpened[]
+        byVisibility: BuiltVsOpened[]
+        firstOpen: { medianHours: number | null; withinWeek: number; opened: number; built: number }
+    }
+    engagement: {
+        presence: ClassCount[]
+        /** 7 × 24, Monday first, UTC. */
+        punchcard: number[][]
+    }
+    /** Withheld below the posture that shows operations. */
+    health?: {
+        buckets: string[]
+        runs: { key: RunOrigin; values: number[] }[]
+        totals: Record<RunOrigin, number>
+        byHand: Metric
+        manualShare: number | null
+        failureRate: number | null
+        handsOnSources: HandsOnSource[]
+    }
+    workspaces: {
+        buckets: string[]
+        pulse: WorkspacePulseRow[]
+        /** `null` figures are withheld, not zero. */
+        rows: { workspaceId: string; activity: number; manualOperations: number | null; accessChanges: number | null }[]
+    }
+    redaction?: { applied: boolean; showsOperations: boolean; hidden: string[] }
 }
 
 /**
@@ -450,6 +591,16 @@ export const analyticsService = {
         return authFetch<WorkspaceAnalyticsRow[]>(
             `${ANALYTICS_API}/workspaces?${rangeQuery(range)}`,
         )
+    },
+
+    /** What the platform holds and how it grew — the Data tab's document. */
+    getData(range: AnalyticsRangeSelection): Promise<AnalyticsDataDoc> {
+        return authFetch<AnalyticsDataDoc>(`${ANALYTICS_API}/data?${rangeQuery(range)}`)
+    },
+
+    /** How the platform is used — content, presence, ingestion, pulse. */
+    getUsage(range: AnalyticsRangeSelection): Promise<AnalyticsUsageDoc> {
+        return authFetch<AnalyticsUsageDoc>(`${ANALYTICS_API}/usage?${rangeQuery(range)}`)
     },
 
     /** Full insights for a single workspace. */

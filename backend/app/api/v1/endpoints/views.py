@@ -29,6 +29,8 @@ from backend.app.api.v1.feature_gate import (
     feature_disabled,
     resolve_enterprise_view_policy,
 )
+from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
+from backend.app.auth import api_key_errors
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -44,7 +46,7 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import view_access, view_library
+from backend.app.services import view_access, view_library, view_source_kinds
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
@@ -69,6 +71,9 @@ from backend.common.models.management import (
     ViewListResponse,
     ViewFacetsResponse,
     ViewCatalogStats,
+    ViewCountResponse,
+    ViewHistogramBucket,
+    ViewHistogramResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,6 +166,52 @@ def _category_filters(
     return list(scope.granted_view_ids), user.id if user else None
 
 
+_SOURCE_KIND_UNAVAILABLE = (
+    "We can't tell which data sources are versioned right now, so the "
+    "Versioned/External filter can't be applied. Try again in a minute, "
+    "or remove that filter."
+)
+
+
+async def _source_kind_filter_sets(
+    session: AsyncSession, f: ViewFilterQuery,
+) -> Optional[view_source_kinds.SourceKindSets]:
+    """What the Versioned/External filter needs; None when not filtering by it.
+
+    Unlike annotation, required: a filter we cannot apply would return the
+    unfiltered catalog dressed as the answer, so that is a 503.
+    """
+    if not f.source_kind:
+        return None
+    try:
+        return await view_source_kinds.load_sets(session, required=True)
+    except view_source_kinds.SourceKindUnavailable:
+        raise HTTPException(status_code=503, detail=_SOURCE_KIND_UNAVAILABLE)
+
+
+async def _annotate_source_kinds(
+    session: AsyncSession,
+    views: List[ViewResponse],
+    sets: Optional[view_source_kinds.SourceKindSets] = None,
+) -> None:
+    """Stamp ``sourceKind`` on views, leaving it None (unknown) when the lookup
+    fails — the versioning store being down must never fail a view read.
+
+    Without ``sets`` (the request is not filtering by kind), only the workspace
+    defaults these views read are loaded: none at all when each names its own
+    source.
+    """
+    if sets is None:
+        sets = await view_source_kinds.load_sets(
+            session, required=False,
+            workspace_ids={v.workspace_id for v in views if not v.data_source_id},
+        )
+    if sets is None:
+        return
+    for view in views:
+        view.source_kind = sets.kind_for(view.data_source_id, view.workspace_id)
+
+
 # Suppress the "imported but unused" hint while os is referenced via
 # rbac_flag. The flag wrapper itself reads os.environ.
 _ = os
@@ -172,6 +223,15 @@ _ANONYMOUS_USER = "anonymous"
 def _user_id(user) -> str:
     """Extract user_id from the optional user dependency, or fall back to anonymous."""
     return user.id if user else _ANONYMOUS_USER
+
+
+def _flight_principal(user, claims: PermissionClaims) -> str:
+    """Who a coalesced read is for. An API key sees less than the person who
+    owns it, so a request made with the key and one made by its owner must
+    never be merged into one result — in either direction."""
+    principal = normalised_principal(_user_id(user))
+    key = claims.key_scope
+    return f"{principal}#{key.key_id}" if key is not None else principal
 
 
 def _view_update_changes(old, req) -> dict:
@@ -352,14 +412,17 @@ async def list_popular_views(
     herd against the views + favourites tables.
     """
     clause, _scope = await _readable_clause(session, user, claims)
-    principal = normalised_principal(_user_id(user))
+    principal = _flight_principal(user, claims)
     key = ("popular", principal, limit)
-    return await read_views_sf.run(
-        key,
-        lambda: view_repo.list_popular_views(
+
+    async def _popular() -> List[ViewResponse]:
+        views = await view_repo.list_popular_views(
             session, limit=limit, user_id=_user_id(user), readable=clause,
-        ),
-    )
+        )
+        await _annotate_source_kinds(session, views)
+        return views
+
+    return await read_views_sf.run(key, _popular)
 
 
 @router.get("/audience", response_model=ViewAudience)
@@ -393,53 +456,82 @@ async def get_workspace_audience(
     )
 
 
+async def _facet_source_kind_sets(
+    session: AsyncSession, f: ViewFilterQuery, fields: tuple,
+) -> Optional[view_source_kinds.SourceKindSets]:
+    """The classification the requested facets need, if any.
+
+    Filtering by kind needs it for every facet but ``sourceKinds`` (which
+    leaves its own filter out), so then it is required, as for the list.
+    Otherwise only the ``sourceKinds`` counts and each data source's ``kind``
+    use it, and both read as unknown while it is unavailable.
+    """
+    if f.source_kind and set(fields) - {"sourceKinds"}:
+        return await _source_kind_filter_sets(session, f)
+    if {"sourceKinds", "dataSources"} & set(fields):
+        return await view_source_kinds.load_sets(session, required=False)
+    return None
+
+
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
+    f: ViewFilterQuery = Depends(view_filter_query),
+    fields: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Facets to compute (repeatable): " + ", ".join(view_repo.FACET_FIELDS)
+            + ". All when absent; the others come back empty (sourceKinds null)."
+        ),
+    ),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
-    """Return distinct tags, view types, and creators across the views
-    the caller can read.
+    """Filter menus for the views the caller can read: each facet's values and
+    how many views each would leave.
 
-    Used to populate the Explorer's Tag / View Type / Creator filter
-    dropdowns from the authoritative set of values rather than deriving
-    them from the currently-loaded page (which would miss tags/creators
-    beyond the first page at scale). Scoped per principal — an
-    unscoped facet aggregate leaks private views' tags and creator
-    identities, which is how this endpoint shipped originally.
+    Takes the list's filters. Each facet is counted under all of them except
+    its own, so a count is the list's ``total`` were that option chosen
+    instead. Built from the authoritative set of values rather than the
+    currently-loaded page (which would miss tags/creators beyond the first
+    page at scale). Scoped per principal — an unscoped facet aggregate leaks
+    private views' tags and creator identities, which is how this endpoint
+    shipped originally.
 
-    Single-flight wrapped per principal: the response depends on who
-    asks, so the key must too.
+    Single-flight wrapped: the response depends on who asks and on every
+    filter and field asked for, so the key holds all of them.
     """
-    clause, _scope = await _readable_clause(session, user, claims)
-    principal = normalised_principal(_user_id(user))
+    unknown = set(fields or ()) - set(view_repo.FACET_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"fields must be any of: {', '.join(view_repo.FACET_FIELDS)}",
+        )
+    wanted = tuple(sorted(set(fields or view_repo.FACET_FIELDS)))
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    principal = _flight_principal(user, claims)
+
+    async def _facets() -> ViewFacetsResponse:
+        return await view_repo.get_view_facets(
+            session,
+            fields=wanted,
+            **f.repo_kwargs(),
+            source_kind_sets=await _facet_source_kind_sets(session, f, wanted),
+            created_by_not=created_by_not,
+            ids_in=ids_in,
+            user_id=_user_id(user),
+            readable=clause,
+        )
+
     return await read_views_sf.run(
-        ("facets", principal),
-        lambda: view_repo.get_view_facets(session, readable=clause),
+        ("facets", principal, f.cache_key(), wanted), _facets,
     )
 
 
 @router.get("/stats", response_model=ViewCatalogStats)
 async def get_view_stats(
-    visibility: Optional[str] = Query(None),
-    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
-    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
-    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
-    context_model_id: Optional[str] = Query(None, alias="contextModelId"),
-    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
-    view_type: Optional[str] = Query(None, alias="viewType"),
-    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
-    created_by: Optional[str] = Query(None, alias="createdBy"),
-    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
-    created_after: Optional[str] = Query(None, alias="createdAfter"),
-    search: Optional[str] = Query(None),
-    tags: Optional[List[str]] = Query(None),
-    favourited_only: bool = Query(False, alias="favouritedOnly"),
-    include_deleted: bool = Query(False, alias="includeDeleted"),
-    deleted_only: bool = Query(False, alias="deletedOnly"),
-    attention_only: bool = Query(False, alias="attentionOnly"),
-    category: Optional[str] = Query(None),
+    f: ViewFilterQuery = Depends(view_filter_query),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -450,48 +542,122 @@ async def get_view_stats(
     would actually return.
     """
     clause, scope = await _readable_clause(session, user, claims)
-    ids_in, created_by_not = _category_filters(category, scope, user)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    sets = await _source_kind_filter_sets(session, f)
     return await view_repo.get_view_stats(
         session,
-        visibility=visibility,
-        visibility_in=visibility_in,
-        workspace_id=workspace_id,
-        workspace_ids=workspace_ids,
-        context_model_id=context_model_id,
-        data_source_id=data_source_id,
-        view_type=view_type,
-        view_types=view_types,
-        created_by=created_by,
-        created_by_in=created_by_in,
+        **f.repo_kwargs(),
+        source_kind_sets=sets,
         created_by_not=created_by_not,
-        created_after=created_after,
-        search=search,
-        tags=tags,
         ids_in=ids_in,
         user_id=_user_id(user),
-        favourited_only=favourited_only,
-        include_deleted=include_deleted,
-        deleted_only=deleted_only,
-        attention_only=attention_only,
         readable=clause,
+    )
+
+
+# Declared before ``/{view_id}``, which would otherwise take "count" for an id.
+@router.get("/count", response_model=ViewCountResponse)
+async def count_views(
+    f: ViewFilterQuery = Depends(view_filter_query),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewCountResponse:
+    """How many views the list's filters leave — its ``total``, from the same
+    count, without loading and enriching a page of rows."""
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    total = await view_repo.count_views(
+        session,
+        **f.repo_kwargs(),
+        source_kind_sets=await _source_kind_filter_sets(session, f),
+        created_by_not=created_by_not,
+        ids_in=ids_in,
+        user_id=_user_id(user),
+        readable=clause,
+    )
+    return ViewCountResponse(total=total)
+
+
+_HISTOGRAM_FIELDS = ("created", "updated")
+_HISTOGRAM_GRAINS = ("hour", "10min")
+# Bounds the response however busy the catalog is: even at ten minutes, 400
+# days is at most 57,600 buckets.
+_HISTOGRAM_MAX_SPAN = timedelta(days=400)
+
+
+def _window_bound(value: str, name: str) -> str:
+    """A window end in the stored timestamps' shape (``_instant``). An empty value,
+    which a filter reads as "not set", is an error here: a window needs both ends."""
+    bound = _instant(value, name)
+    if bound is None:
+        raise HTTPException(status_code=422, detail=f"{name} must be an ISO date or date-time")
+    return bound
+
+
+# Declared before ``/{view_id}``, like ``/count``. Not single-flighted: the key
+# would hold the caller, every filter and the window — which follows the
+# reader's own midnights — so concurrent requests would almost never share one,
+# and the work is one GROUP BY over the filtered views in one window.
+@router.get("/histogram", response_model=ViewHistogramResponse)
+async def get_view_histogram(
+    field: str = Query(..., description="created | updated (the later of a settings edit and a data publish)."),
+    after: str = Query(..., description="Window start, inclusive: ISO date (midnight UTC) or date-time."),
+    before: str = Query(..., description="Window end, exclusive; at most 400 days after ``after``."),
+    grain: str = Query("hour", description="Bucket size: hour | 10min (UTC)."),
+    f: ViewFilterQuery = Depends(view_filter_query),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewHistogramResponse:
+    """How many views were created, or last changed, in each UTC hour (or ten
+    minutes) of ``[after, before)`` — among exactly the views ``/views/count``
+    counts for the same filters, which apply too (ANDed).
+
+    UTC because the server cuts its stored timestamps as text; the client folds
+    the buckets into its reader's local days, which hour buckets land on exactly
+    in every whole-hour time zone and ten-minute ones in the half-hour zones.
+    """
+    if field not in _HISTOGRAM_FIELDS:
+        raise HTTPException(status_code=422, detail="field must be one of: created, updated")
+    if grain not in _HISTOGRAM_GRAINS:
+        raise HTTPException(status_code=422, detail="grain must be one of: hour, 10min")
+    start, end = _window_bound(after, "after"), _window_bound(before, "before")
+    span = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    if span <= timedelta(0):
+        raise HTTPException(status_code=422, detail="after must be earlier than before")
+    if span > _HISTOGRAM_MAX_SPAN:
+        raise HTTPException(
+            status_code=422, detail="after and before can be at most 400 days apart",
+        )
+    clause, scope = await _readable_clause(session, user, claims)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    rows = await view_repo.view_histogram(
+        session,
+        field=field,
+        grain=grain,
+        after=start,
+        before=end,
+        **f.repo_kwargs(),
+        source_kind_sets=await _source_kind_filter_sets(session, f),
+        created_by_not=created_by_not,
+        ids_in=ids_in,
+        user_id=_user_id(user),
+        readable=clause,
+    )
+    return ViewHistogramResponse(
+        field=field,
+        grain=grain,
+        after=start,
+        before=end,
+        total=sum(n for _, n in rows),
+        buckets=[ViewHistogramBucket(t=t, n=n) for t, n in rows],
     )
 
 
 @router.get("/", response_model=ViewListResponse)
 async def list_views(
-    visibility: Optional[str] = Query(None),
-    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
-    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
-    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
-    context_model_id: Optional[str] = Query(None, alias="contextModelId"),
-    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
-    view_type: Optional[str] = Query(None, alias="viewType"),
-    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
-    created_by: Optional[str] = Query(None, alias="createdBy"),
-    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
-    created_after: Optional[str] = Query(None, alias="createdAfter"),
-    search: Optional[str] = Query(None),
-    tags: Optional[List[str]] = Query(None),
+    f: ViewFilterQuery = Depends(view_filter_query),
     sort: Optional[str] = Query(
         None,
         description=(
@@ -502,10 +668,6 @@ async def list_views(
     ),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
-    favourited_only: bool = Query(False, alias="favouritedOnly"),
-    include_deleted: bool = Query(False, alias="includeDeleted"),
-    deleted_only: bool = Query(False, alias="deletedOnly"),
-    attention_only: bool = Query(False, alias="attentionOnly"),
     include: List[str] = Query(
         default_factory=list,
         description=(
@@ -520,14 +682,6 @@ async def list_views(
         le=100,
         alias="popularLimit",
         description="Cap on the embedded popular list when include=popular.",
-    ),
-    category: Optional[str] = Query(
-        None,
-        description=(
-            "Explorer category with server-side meaning: "
-            "``shared-with-me`` = views shared with the caller through "
-            "an explicit grant (excluding their own)."
-        ),
     ),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -549,40 +703,40 @@ async def list_views(
     - ``createdBy`` / ``createdByIn``
 
     Additional filters:
-    - ``createdAfter`` — ISO timestamp; returns views created on or after.
+    - ``createdAfter`` / ``createdBefore`` — ISO date or date-time (a bare
+      date is midnight UTC; no offset means UTC); after is inclusive,
+      before exclusive. Anything else is a 422.
+    - ``updatedAfter`` / ``updatedBefore`` — the same, on when the view last
+      changed: the later of its last settings/layout edit and its last data
+      publish.
+    - ``contributorIn`` (repeatable, at most 50) — views these people created
+      or last edited; ``contributorRole=created|edited|published`` narrows it
+      to one role (published = last published the data behind the view).
+      ANDed with ``createdBy``.
+    - ``sourceKind=versioned|external`` — by the view's data source, else its
+      workspace's default; a view with neither is in neither. 503 while the
+      versioned set cannot be read.
     - ``tags`` — OR semantics across the supplied tags.
     - ``attentionOnly`` — stale (>90d), inactive workspace/source, or
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
     - ``category=shared-with-me`` — explicit-grant shares only.
+
+    Every item (and ``popular``) carries ``sourceKind``; null when unknown.
     """
     clause, scope = await _readable_clause(session, user, claims)
-    ids_in, created_by_not = _category_filters(category, scope, user)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    sets = await _source_kind_filter_sets(session, f)
     response = await view_repo.list_views_filtered(
         session,
-        visibility=visibility,
-        visibility_in=visibility_in,
-        workspace_id=workspace_id,
-        workspace_ids=workspace_ids,
-        context_model_id=context_model_id,
-        data_source_id=data_source_id,
-        view_type=view_type,
-        view_types=view_types,
-        created_by=created_by,
-        created_by_in=created_by_in,
+        **f.repo_kwargs(),
+        source_kind_sets=sets,
         created_by_not=created_by_not,
-        created_after=created_after,
-        search=search,
-        tags=tags,
         ids_in=ids_in,
         sort=sort,
         limit=limit,
         offset=offset,
         user_id=_user_id(user),
-        favourited_only=favourited_only,
-        include_deleted=include_deleted,
-        deleted_only=deleted_only,
-        attention_only=attention_only,
         readable=clause,
     )
 
@@ -595,6 +749,7 @@ async def list_views(
             readable=clause,
         )
 
+    await _annotate_source_kinds(session, response.items + (response.popular or []), sets)
     return response
 
 
@@ -621,6 +776,27 @@ async def authorize_view_create(
             status_code=422,
             detail="visibility must be one of: private, workspace, enterprise",
         )
+
+    key = claims.key_scope
+    if key is not None:
+        # A new view lands in a workspace, not in any view or data source the
+        # key may have been limited to, so creating one needs the whole
+        # workspace in reach. Creating it straight onto the enterprise tier
+        # needs the key's own publish: in an open workspace the rules below
+        # let any creator publish at birth, and a key minted to build views
+        # was not minted to share them with everyone.
+        if not (
+            key.allows("workspace:view:create")
+            and key.selects_workspace(workspace_id)
+        ):
+            raise api_key_errors.out_of_scope(
+                "This API key cannot create views in this workspace.",
+            )
+        if visibility == "enterprise" and not key.allows("workspace:view:publish"):
+            raise api_key_errors.key_forbidden(
+                "api_key_cannot_publish",
+                "This API key was not given permission to publish views.",
+            )
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         from backend.app.services.permission_service import has_permission
@@ -751,6 +927,8 @@ async def get_view(
             view.data_source_name = ds.label or view.data_source_name
     if ds is not None:
         view.provider_id = ds.provider_id
+    # Classified by the source just resolved (its own, else the workspace default).
+    await _annotate_source_kinds(session, [view])
 
     view.audience = ViewAudience(
         workspaceMemberCount=await notification_repo.workspace_member_count(
@@ -1012,7 +1190,7 @@ async def update_view_visibility(
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
         ctx = await _viewer_context(session, user, claims)
-        if not view_access.can_change_visibility(ctx, view_orm):
+        if not view_access.can_change_visibility(ctx, view_orm, to=visibility):
             raise HTTPException(
                 status_code=403,
                 detail="Only the creator or a workspace admin can change visibility",
@@ -1167,10 +1345,7 @@ async def withdraw_publication_request(
     have answered it."""
     view_orm = await _load_view_orm(session, view_id)
     ctx = await _viewer_context(session, user, claims)
-    is_requester = view_orm.publish_requested_by == user.id
-    if rbac_flag("RBAC_ENFORCE_VIEWS") and not (
-        is_requester or view_access.can_answer_publish_request(ctx, view_orm)
-    ):
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_withdraw_publish_request(ctx, view_orm):
         raise HTTPException(status_code=403, detail="Not your request to withdraw")
     _clear_publish_request(view_orm)
     await session.flush()

@@ -712,6 +712,20 @@ describe('fleet-wide hold', () => {
         expect(putReconciliation).not.toHaveBeenCalled()
     })
 
+    it('sends the reason given with the hold change, then clears it for the next one', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Maintenance window' }))
+        await userEvent.selectOptions(screen.getByLabelText('Pause every rebuild for'), '3600')
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledTimes(1))
+        expect(putReconciliation).toHaveBeenCalledWith(
+            { pausedUntil: expect.any(String) }, { reason: 'Maintenance window' },
+        )
+        await waitFor(() => expect(screen.getByLabelText(/why\?/i)).toHaveValue(''))
+    })
+
     it('a timed pause is never confirmed — it says when it ends', async () => {
         wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
         await openAdvanced('Act')

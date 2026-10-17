@@ -2,7 +2,7 @@
  * Shared avatar helpers.
  *
  * Derives initials and a deterministic colour palette from a user id so
- * every surface that renders a creator avatar (CreatorHoverCard, the
+ * every surface that renders a creator avatar (PersonHoverCard, the
  * Creator filter dropdown, the view card footer) stays visually
  * consistent — the same person always gets the same swatch.
  */

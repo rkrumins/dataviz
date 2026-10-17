@@ -381,6 +381,129 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 1,
         "deprecated": False,
     },
+    {
+        "key": "apiKeysEnabled",
+        "name": "API keys",
+        "description": (
+            "Let people create API keys from their account, so scripts and services can read "
+            "and change the views and data they can reach, acting as them. Each key can be "
+            "limited to particular workspaces, views and data sources, and to reading only."
+        ),
+        "impact_when_off": (
+            "Every API key stops working within half a minute, and nobody can create a new one. "
+            "Keys are not deleted: people can still see and revoke theirs, and turning this back "
+            "on brings back every key that has not expired or been revoked. Signing in with a "
+            "browser is unaffected."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "This is the kill switch for every key at once — use it if keys are being misused "
+            "and you need them all stopped while you look. To stop one person's keys, revoke "
+            "them from Administration → API keys instead."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "apiKeyMaxLifetime",
+        "name": "Longest an API key may live",
+        "description": (
+            "The most time any API key may stay valid, counted from when it was created. "
+            "People choose their key's expiry within this."
+        ),
+        "impact_when_off": (
+            "This is a ceiling, not a switch. Lowering it also shortens keys that already "
+            "exist: a key older than the new maximum stops working at once, and its owner "
+            "has to create a new one. 'No maximum' lets people create keys that never expire."
+        ),
+        "category_id": "auth",
+        "type": "string",
+        "default_value": json.dumps("none"),
+        "options": json.dumps([
+            {"id": "none", "label": "No maximum"},
+            {"id": "365", "label": "1 year"},
+            {"id": "180", "label": "180 days"},
+            {"id": "90", "label": "90 days"},
+            {"id": "30", "label": "30 days"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Keys that never expire are the ones still working long after the person who made "
+            "them has forgotten them. If your organisation rotates credentials on a schedule, "
+            "set this to match it."
+        ),
+        "sort_order": 3,
+        "deprecated": False,
+    },
+    {
+        "key": "apiKeySsoSignInWindow",
+        "name": "Pause keys of people who stop signing in",
+        "description": (
+            "For people who sign in through your identity provider: their API keys pause when "
+            "they have not signed in through it for this long, and resume the next time they "
+            "do. This is how someone who has left — and so can no longer sign in — stops "
+            "having working keys."
+        ),
+        "impact_when_off": (
+            "With 'Never pause', a person removed from your identity provider keeps working "
+            "API keys until an administrator suspends their account or revokes the keys: the "
+            "platform only learns they have gone when they next try to sign in. A shorter "
+            "window stops a leaver's keys sooner, and asks everyone else to sign in a little "
+            "more often."
+        ),
+        "category_id": "auth",
+        "type": "string",
+        "default_value": json.dumps("30"),
+        "options": json.dumps([
+            {"id": "14", "label": "After 14 days"},
+            {"id": "30", "label": "After 30 days"},
+            {"id": "90", "label": "After 90 days"},
+            {"id": "off", "label": "Never pause"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Keep this on unless your identity provider also deprovisions people here directly. "
+            "People who sign in with a password are not affected: suspending their account "
+            "stops their keys at once."
+        ),
+        "sort_order": 4,
+        "deprecated": False,
+    },
+    {
+        "key": "apiKeySsoRoundTripStepUp",
+        "name": "Accept a fresh sign-in round trip for API keys",
+        "description": (
+            "Creating or rotating an API key asks the person to confirm it's them. Through an "
+            "identity provider, that means a sign-in the provider proves happened in the last 15 "
+            "minutes — which OIDC and SAML connections report — or, through an Enterprise "
+            "gateway, the gateway confirming the company session. Portal connections can do "
+            "neither; with this on, a sign-in through one in the last 15 minutes is accepted "
+            "instead."
+        ),
+        "impact_when_off": (
+            "People whose sign-in goes through a portal connection can't create or rotate API "
+            "keys; they can still use and revoke the keys they have. People on OIDC, SAML or "
+            "Enterprise gateway connections, and people who sign in with a password, are not "
+            "affected."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Off is the safer choice: a provider that signs someone back in silently from a "
+            "session it still holds proves nothing about who is at the keyboard, so on an "
+            "unlocked machine anyone could mint a key. Turn it on only if your gateway or "
+            "portal users need keys and you accept that."
+        ),
+        "sort_order": 5,
+        "deprecated": False,
+    },
     # ── Lineage ────────────────────────────────────────────────────────────────
     {
         "key": "versioningEnabled",

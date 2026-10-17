@@ -9,7 +9,7 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2,
     GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users, ShieldOff, Send, GitPullRequestArrow, LineChart,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -40,6 +40,9 @@ import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
+import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
+import { workspaceActivityScope } from '@/components/activity/activityMeta'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -90,8 +93,8 @@ export function WorkspaceDetailPage() {
     // link straight to a specific tab — used by the WorkspacesPage
     // "Members" shortcut.
     const tabParam = searchParams.get('tab') as
-        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
+        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity'>(
         tabParam ?? 'sources',
     )
     // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
@@ -102,6 +105,12 @@ export function WorkspaceDetailPage() {
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+    // The Activity tab: a workspace admin reads this workspace's activity; an
+    // auditor reads everything recorded against it, through the platform log.
+    const isAuditor = usePermission('system:audit:read')
+    const activityScope = workspaceActivityScope(wsId, { isAdmin: canManageMembers, isAuditor })
+    // Rebuilds and purges from this page confirm here, and ask why.
+    const [reasonPrompt, askReason] = useReasonPrompt()
     // Data-source mutations (Add / Edit / Delete / Re-aggregate / Purge)
     // gate on workspace:datasource:manage. Edit + Delete are gated
     // inside the detail panel itself; Add lives here. system:admin is
@@ -295,6 +304,15 @@ export function WorkspaceDetailPage() {
 
     const handleReaggregate = async (ds: DataSourceResponse) => {
         if (!wsId) return
+        const answer = await askReason({
+            title: `Re-trigger aggregation for "${ds.label || 'this data source'}"?`,
+            message: 'Rebuilds its aggregated lineage with the current settings.',
+            confirmLabel: 'Re-trigger',
+            confirmIcon: RefreshCw,
+            context: 'aggregation',
+            audience: 'workspace',
+        })
+        if (!answer) return
         try {
             // Use the canonical service path (``aggregationService``)
             // so the structured backend error envelope —
@@ -313,7 +331,7 @@ export function WorkspaceDetailPage() {
                 // ``timeoutSecs`` is NOT resolved that way — a null column
                 // falls back to the 15-minute stall window — so it is sent.
                 timeoutSecs: DEFAULT_TIMEOUT_SECS,
-            }, 'manual')
+            }, 'manual', { reason: answer.reason })
             notify('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
         } catch (err: unknown) {
@@ -338,6 +356,15 @@ export function WorkspaceDetailPage() {
             notify('info', 'No aggregatable data sources (each needs an assigned ontology).')
             return
         }
+        const answer = await askReason({
+            title: `Rebuild all ${targets.length} aggregations?`,
+            message: 'Re-runs aggregation for every data source in this workspace that has an ontology. Sources with a run already active are skipped.',
+            confirmLabel: 'Rebuild all',
+            confirmIcon: RefreshCw,
+            context: 'aggregation',
+            audience: 'workspace',
+        })
+        if (!answer) return
         const results = await Promise.allSettled(
             targets.map(ds => aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
@@ -345,7 +372,7 @@ export function WorkspaceDetailPage() {
                 // Same as handleReaggregate: tuning resolves server-side,
                 // the stall timeout does not.
                 timeoutSecs: DEFAULT_TIMEOUT_SECS,
-            }, 'manual')),
+            }, 'manual', { reason: answer.reason })),
         )
         const triggered = results.filter(r => r.status === 'fulfilled').length
         const skipped = results.length - triggered
@@ -358,8 +385,18 @@ export function WorkspaceDetailPage() {
     }
 
     const handlePurge = async (ds: DataSourceResponse) => {
+        const answer = await askReason({
+            title: `Purge aggregated edges for "${ds.label || 'this data source'}"?`,
+            message: 'Removes all materialized aggregated edges and resets aggregation status. This cannot be undone.',
+            confirmLabel: 'Purge',
+            confirmIcon: Trash2,
+            context: 'purge',
+            audience: 'workspace',
+            tone: 'danger',
+        })
+        if (!answer) return
         try {
-            const result = await aggregationService.purgeAggregation(ds.id)
+            const result = await aggregationService.purgeAggregation(ds.id, { reason: answer.reason })
             notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             reload()
         } catch (err: any) {
@@ -489,6 +526,9 @@ export function WorkspaceDetailPage() {
                         : []),
                     ...(canManageMembers
                         ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
+                        : []),
+                    ...(activityScope
+                        ? [{ id: 'activity' as const, label: 'Activity', icon: History, hint: 'Who changed what in this workspace, when, and why' }]
                         : []),
                 ]).map(tab => {
                     const Icon = tab.icon
@@ -707,7 +747,14 @@ export function WorkspaceDetailPage() {
                 <WorkspaceMembers workspaceId={wsId} />
             )}
 
+            {activeSection === 'activity' && activityScope && (
+                <div className="py-4">
+                    <ActivityExplorer scope={activityScope} />
+                </div>
+            )}
+
             {/* ── Modals ──────────────────────────────────── */}
+            {reasonPrompt}
             <AddDataSourceWizard
                 isOpen={showAddDs}
                 workspaceId={wsId ?? ''}

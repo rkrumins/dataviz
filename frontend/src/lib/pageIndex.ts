@@ -163,6 +163,15 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'analytics' },
     },
     {
+        id: 'analytics-data',
+        category: 'Page',
+        title: 'Analytics · Data',
+        description: 'What the platform holds, onboarding, version control',
+        keywords: ['data', 'entities', 'relationships', 'onboarding', 'version control', 'sources'],
+        path: '/analytics?tab=data',
+        gate: { kind: 'analytics' },
+    },
+    {
         id: 'analytics-engagement',
         category: 'Page',
         title: 'Analytics · Engagement',
@@ -261,6 +270,15 @@ export const PAGE_INDEX: PageEntry[] = [
         description: 'The identity providers that can sign you in',
         keywords: ['identities', 'sso', 'idp', 'link', 'sign in', 'login'],
         path: '/me/identities',
+        gate: { kind: 'always' },
+    },
+    {
+        id: 'api-keys',
+        category: 'Setting',
+        title: 'API keys',
+        description: 'Keys that let scripts and services act as you, limited to what you choose',
+        keywords: ['api', 'key', 'token', 'bearer', 'script', 'automation', 'integration', 'service'],
+        path: '/me/api-keys',
         gate: { kind: 'always' },
     },
 
@@ -378,11 +396,20 @@ export const PAGE_INDEX: PageEntry[] = [
     {
         id: 'admin-audit',
         category: 'Setting',
-        title: 'Audit Log',
-        description: 'RBAC + user lifecycle history',
-        keywords: ['admin', 'audit', 'log', 'history', 'compliance'],
+        title: 'Activity',
+        description: 'Who did what, where and why — across the platform',
+        keywords: ['admin', 'audit', 'log', 'history', 'compliance', 'activity', 'who', 'triggered'],
         path: '/admin/audit',
         gate: { kind: 'admin', key: 'audit' },
+    },
+    {
+        id: 'admin-api-keys',
+        category: 'Setting',
+        title: 'API keys',
+        description: 'Every key, who it acts as, and when it was last used',
+        keywords: ['admin', 'api', 'keys', 'tokens', 'revoke', 'credentials'],
+        path: '/admin/api-keys',
+        gate: { kind: 'admin', key: 'api-keys' },
     },
 ]
 
