@@ -245,7 +245,9 @@ not durable state.
 ### `ViewVersioningPanel` — the review hub
 `frontend/src/features/versioning/components/ViewVersioningPanel.tsx` is a slide-over with tabs
 (`ViewVersioningPanel.tsx:24-31`): **Changes**, **Commits**, **Pull Requests**, and **Data health**
-(manager-only — filtered out for everyone else, `:88`). The Changes tab shows `PendingChanges`
+(everyone sees its status and `ProjectionHealthCard` — provider, key, platform copy or customer
+graph, node/shard/slot, epoch, backoff, liveness; only managers get Check sync and Rebuild). The same
+card, with those two actions for managers, sits on the data source's `DataSourceVersioningTab`. The Changes tab shows `PendingChanges`
 (unsaved staged edits with a "Review & Save" action, `:35-62`) above the cumulative committed tree, so
 after you save, work moves from *Pending* to *Committed* in the same view rather than vanishing. It
 requests up to **1000** top-level diff groups so "all branch changes" is genuinely complete (`:92`).

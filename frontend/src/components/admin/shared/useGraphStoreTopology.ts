@@ -20,6 +20,7 @@ export const GRAPH_STORE_KEYS = {
     topology: ['graph-store', 'topology'] as const,
     provider: (providerId: string) => ['graph-store', 'provider', providerId] as const,
     placement: (dsId: string) => ['graph-store', 'placement', dsId] as const,
+    graphPlacement: (graphId: string) => ['graph-store', 'placement', 'graph', graphId] as const,
     placements: (ids: string[]) => ['graph-store', 'placements', ids.join(',')] as const,
 }
 
@@ -54,6 +55,17 @@ export function useGraphPlacement(dsId: string | null, enabled = true): UseQuery
         queryKey: GRAPH_STORE_KEYS.placement(dsId ?? ''),
         queryFn: () => graphStoreService.getPlacement(dsId!),
         enabled: enabled && !!dsId,
+        staleTime: 15_000,
+        placeholderData: keepPreviousData,
+        retry: 1,
+    })
+}
+
+export function useGraphPlacementByGraph(graphId: string | null): UseQueryResult<GraphPlacementResponse, Error> {
+    return useQuery<GraphPlacementResponse, Error>({
+        queryKey: GRAPH_STORE_KEYS.graphPlacement(graphId ?? ''),
+        queryFn: () => graphStoreService.getPlacementByGraph(graphId!),
+        enabled: !!graphId,
         staleTime: 15_000,
         placeholderData: keepPreviousData,
         retry: 1,

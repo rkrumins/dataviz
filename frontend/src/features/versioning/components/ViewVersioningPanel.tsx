@@ -87,9 +87,6 @@ export function ViewVersioningPanel({
 }) {
   const [tab, setTab] = useState<ViewPanelTab>(initialTab)
 
-  // The "Data health" tab is a power-user (manager) surface — hidden entirely for everyone else.
-  const tabs = canManage ? TABS : TABS.filter((t) => t.id !== 'health')
-
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
   const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
@@ -126,7 +123,7 @@ export function ViewVersioningPanel({
         </div>
 
         <div className="flex items-center gap-1 px-3 pt-2 border-b border-glass-border/60">
-          {tabs.map(({ id, label, Icon }) => (
+          {TABS.map(({ id, label, Icon }) => (
             <button
               key={id}
               onClick={() => setTab(id)}
@@ -184,7 +181,10 @@ export function ViewVersioningPanel({
             <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} canManage={canManage} />
           )}
 
-          {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} dataSourceId={dataSourceId} />}
+          {/* Everyone sees the graph's health and where it lives; only managers get its actions. */}
+          {tab === 'health' && (
+            <DataHealthTab wsId={wsId} graphId={graphId} dataSourceId={dataSourceId} canManage={canManage} />
+          )}
         </div>
       </motion.aside>
     </>,

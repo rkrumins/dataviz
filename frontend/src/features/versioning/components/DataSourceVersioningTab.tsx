@@ -16,6 +16,7 @@ import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
+import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { kindMeta } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 
@@ -148,6 +149,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           </p>
         </div>
       </div>
+
+      {/* Where the graph lives; Rebuild and Check sync for managers */}
+      {graphId && <ProjectionHealthCard wsId={wsId} graphId={graphId} showActions={canManage} />}
 
       {/* Branches */}
       <section>

@@ -26,6 +26,11 @@ vi.mock('../../hooks/useVersioning', () => ({
 // The header chip's sync reading (lineage-summaries automation). Undefined by default: no row.
 let syncDoc: unknown
 vi.mock('@/features/sync-status/useSyncStatus', () => ({ useSyncStatus: () => ({ data: syncDoc }) }))
+// The projection card has its own spec; here only whether it is mounted, and with which actions.
+vi.mock('../ProjectionHealthCard', () => ({
+  ProjectionHealthCard: ({ showActions }: { showActions?: boolean }) =>
+    <div data-testid="projection-health-card" data-actions={String(!!showActions)} />,
+}))
 
 import { DataHealthTab } from '../DataHealthTab'
 
@@ -37,7 +42,7 @@ const baseReport = (over: Partial<DriftReport> = {}): DriftReport => ({
   skippedReason: null, ...over,
 })
 
-const renderTab = () => render(<DataHealthTab wsId="ws1" graphId="g1" />)
+const renderTab = () => render(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
 
 beforeEach(() => {
   syncDoc = undefined
@@ -156,13 +161,13 @@ describe('DataHealthTab', () => {
       committed: 12, projected: 0, fresh: false, status: 'rebuilding', target: 12,
       progressDone: 5000, progressTotal: 10000,
     }
-    rerender(<DataHealthTab wsId="ws1" graphId="g1" />)
+    rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
     expect(screen.getByText('Rebuilding the fast read layer…')).toBeInTheDocument()
     expect(screen.getAllByText(/5,000 of 10,000 items/).length).toBeGreaterThan(0)
 
     // Poll tick: caught up — done, and the auto-verify (shallow reconcile) reports counts.
     watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', target: 12 }
-    rerender(<DataHealthTab wsId="ws1" graphId="g1" />)
+    rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
     expect(reconcileMutate).toHaveBeenCalledWith({ deep: false }, expect.anything())
     expect(screen.getByText(/Rebuilt and verified — 40 items and 12 connections checked/)).toBeInTheDocument()
   })
@@ -174,13 +179,13 @@ describe('DataHealthTab', () => {
 
     // Poll tick: it started…
     watermark = { committed: 12, projected: 0, fresh: false, status: 'rebuilding', target: 12 }
-    rerender(<DataHealthTab wsId="ws1" graphId="g1" />)
+    rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
     // …then died: idle, still behind, reason recorded.
     watermark = {
       committed: 12, projected: 0, fresh: false, status: 'idle', target: 12,
       lastError: 'projection cancelled (timeout)',
     }
-    rerender(<DataHealthTab wsId="ws1" graphId="g1" />)
+    rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
 
     expect(screen.getByText("The rebuild couldn't finish.")).toBeInTheDocument()
     expect(screen.getByText('projection cancelled (timeout)')).toBeInTheDocument()
@@ -220,5 +225,27 @@ describe('DataHealthTab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
     expect(screen.queryByText(/lineage summaries/)).toBeNull()
     expect(screen.getByText(/The fast read layer matches the source of truth/)).toBeInTheDocument()
+  })
+
+  it('says an evicted graph was unloaded to free memory, not that it is versions behind', () => {
+    watermark = { committed: 12, projected: 0, fresh: false, status: 'evicted', target: 0 }
+    renderTab()
+    expect(screen.getByText('Unloaded to free memory')).toBeInTheDocument()
+    expect(screen.queryByText('The fast read layer is behind')).not.toBeInTheDocument()
+    expect(screen.queryByText('12 versions behind')).not.toBeInTheDocument()
+  })
+
+  it('shows where the graph lives, with the tab’s own Check sync and Rebuild as the actions', () => {
+    renderTab()
+    expect(screen.getByTestId('projection-health-card')).toHaveAttribute('data-actions', 'false')
+    expect(screen.getByRole('button', { name: 'Check sync' })).toBeInTheDocument()
+  })
+
+  it('is read-only for a viewer who cannot manage: status and placement, no Check sync or Rebuild', () => {
+    render(<DataHealthTab wsId="ws1" graphId="g1" canManage={false} />)
+    expect(screen.getByText('Everything is in sync')).toBeInTheDocument()
+    expect(screen.getByTestId('projection-health-card')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Check sync' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Rebuild/ })).not.toBeInTheDocument()
   })
 })

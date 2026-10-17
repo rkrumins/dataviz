@@ -410,6 +410,13 @@ export const graphStoreService = {
         )
     },
 
+    /** Where one versioned graph's projection lives — by graph id, so a fork's own key is placed. */
+    async getPlacementByGraph(graphId: string): Promise<GraphPlacementResponse> {
+        return authFetch<GraphPlacementResponse>(
+            `${BASE}/placement?graphId=${encodeURIComponent(graphId)}`,
+        )
+    },
+
     /** One chip's worth per source, for a list — never one request per row. */
     async getPlacements(dataSourceIds: string[]): Promise<GraphPlacementsResponse> {
         return authFetch<GraphPlacementsResponse>(
