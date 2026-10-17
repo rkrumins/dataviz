@@ -73,7 +73,7 @@ async def _run() -> None:
 
     # ── poll backstop catches up every lagging graph ─────────────────────
     gids = [await _seed_graph(svc) for _ in range(2)]
-    assert [await _watermark(g) for g in gids] == [0, 0]        # projected lags target
+    assert [await _watermark(g) for g in gids] == [1, 1]        # parked at genesis, lags the head
     await worker.reconcile_once()
     assert [await _watermark(g) for g in gids] == [2, 2]        # all caught up to head
 
@@ -86,7 +86,7 @@ async def _run() -> None:
     # ── inline-nudge → Redis stream → project (skipped if no broker) ─────
     if await _redis_ok():
         await ensure_consumer_group()
-        gid = await _seed_graph(svc)                            # projected=0, target=2
+        gid = await _seed_graph(svc)                            # projected=1, head=2
         await nudge_projection(gid)                             # XADD wake-up
         client = get_broker_redis()
         resp = await client.xreadgroup(CONSUMER_GROUP, "test", {PROJECTION_STREAM: ">"}, count=20, block=1000)

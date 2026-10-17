@@ -624,12 +624,6 @@ class CreateGraphRequest(_ApiModel):
     kind: str = "manual"
     base_ontology_id: Optional[str] = Field(default=None, alias="baseOntologyId")
     tenant_id: Optional[str] = Field(default=None, alias="tenantId")
-    # The data source's real FalkorDB graph name (so the existing reader sees
-    # versioned data); omit to use a synthetic gv_<id> fallback.
-    falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
-    # The FalkorDB provider/instance hosting this graph's cache; scopes per-provider
-    # eviction budgeting. Omit for single-instance deployments (the "default" provider).
-    falkor_provider: Optional[str] = Field(default=None, alias="falkorProvider")
     # Inline ontology vocabulary {entityTypes, edgeTypes} + strict|permissive.
     ontology_spec: Optional[dict] = Field(default=None, alias="ontologySpec")
     ontology_enforcement: Optional[str] = Field(default=None, alias="ontologyEnforcement")
@@ -1207,29 +1201,26 @@ async def _attach_user_names(
 async def create_graph(
     ws_id: str,
     body: CreateGraphRequest,
+    request: Request,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     if body.workspace_id != ws_id:
         raise HTTPException(status_code=400, detail="workspaceId must match the path workspace")
-    # Default the FalkorDB provider to the data source's so the worker's RAM-budget
-    # eviction scopes per provider; an explicit falkorProvider wins. Best-effort:
-    # provider resolution is a non-critical eviction hint, so a missing data source
-    # or a lookup error falls back to the "default" provider — never fails creation.
-    falkor_provider = body.falkor_provider
-    if falkor_provider is None:
-        try:
-            ds = await data_source_repo.get_data_source_orm(session, body.data_source_id)
-            falkor_provider = ds.provider_id if ds else None
-        except Exception:
-            logger.debug("provider lookup failed for %s; using default", body.data_source_id, exc_info=True)
-    return await svc.create_graph(
-        data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
-        base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
-        falkor_graph_name=body.falkor_graph_name, falkor_provider=falkor_provider,
-        ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
-    )
+    # The pin decides which FalkorDB graph the projector writes, so it is the data source's own
+    # graph and provider, never the caller's choice. The data source must be this workspace's,
+    # and an API key must cover it (an id in the body is invisible to requires()'s key scope).
+    from backend.app.api.v1.endpoints.graph import _data_source_in_workspace
+    ds = await _data_source_in_workspace(session, body.data_source_id, ws_id)
+    await api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)
+    with _domain_errors():                  # a key another versioned graph projects into → 409
+        return await svc.create_graph(
+            data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
+            base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
+            falkor_graph_name=ds.graph_name, falkor_provider=ds.provider_id,
+            ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
+        )
 
 
 @router.get("/blank-graphs/name-check", response_model=GraphNameCheckResponse)

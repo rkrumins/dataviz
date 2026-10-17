@@ -76,3 +76,21 @@ def _fresh_graphver_engine():
     messaging._client = None
     falkordb_connection._GRAPH_CLIENTS = falkordb_connection.TopologyGraphClients()
     yield
+
+
+@pytest.fixture
+def data_sources(monkeypatch):
+    """POST /graphs resolves its data source in the management DB and pins the new graph to that
+    data source's FalkorDB graph. The harnesses post ids that exist nowhere: here every id answers
+    as a data source in ``ws1``, pinned to the graph name this dict maps it to (unpinned if none)."""
+    from types import SimpleNamespace
+    from backend.app.db.repositories import data_source_repo
+
+    pins: dict = {}
+
+    async def get_data_source_orm(session, data_source_id):
+        return SimpleNamespace(id=data_source_id, workspace_id="ws1",
+                               graph_name=pins.get(data_source_id), provider_id=None)
+
+    monkeypatch.setattr(data_source_repo, "get_data_source_orm", get_data_source_orm)
+    return pins

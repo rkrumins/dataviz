@@ -223,3 +223,97 @@ async def test_the_preflight_and_index_migrations_round_trip(store):
             await conn.run_sync(run(rows, "upgrade"))
         finally:
             await trans.rollback()
+
+
+# ── uq_ps_key: one versioned graph per FalkorDB graph (20261017_1500_gv_ps_keys) ──────────────
+_PS_KEYS = _VERSIONS / "20261017_1500_gv_ps_keys.py"
+
+
+def test_one_versioned_graph_per_falkordb_key_is_declared_and_migrated():
+    index = next(i for i in models.ProjectionStateORM.__table__.indexes if i.name == "uq_ps_key")
+    assert index.unique
+    assert "falkor_graph_name IS NOT NULL" in str(index.dialect_options["postgresql"]["where"])
+    keys = _migration(_PS_KEYS)
+    assert keys.revision == _PS_KEYS.stem
+
+
+async def _pin(conn, name: str, *, deleted: bool = False, owns: bool = False) -> str:
+    from sqlalchemy import insert
+    gid = (await conn.execute(insert(models.GraphORM).values(
+        data_source_id="ds_keys_" + os.urandom(3).hex(), workspace_id="ws_keys", kind="manual",
+        deleted_at=models._now() if deleted else None).returning(models.GraphORM.id))).scalar_one()
+    await conn.execute(insert(models.ProjectionStateORM).values(
+        graph_id=gid, falkor_graph_name=name, owns_falkor_graph=owns))
+    return gid
+
+
+async def _pin_of(conn, gid: str):
+    return (await conn.execute(text(
+        f'SELECT falkor_graph_name FROM "{models._SCHEMA}".projection_state WHERE graph_id = :g'),
+        {"g": gid})).scalar_one()
+
+
+@contextlib.asynccontextmanager
+async def _without_ps_key(engine):
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".uq_ps_key'))
+            yield conn
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_uq_ps_key(store):
+    async with _without_ps_key(store) as conn:
+        key = "gvt_keys_" + os.urandom(3).hex()
+        live = await _pin(conn, key)
+        stale = await _pin(conn, key, deleted=True)          # a tombstoned graph not owning the key
+        await conn.run_sync(models._ensure_schema_upgrades)
+        assert "uq_ps_key" in await _indexes(conn, "projection_state")
+        assert await _pin_of(conn, stale) is None and await _pin_of(conn, live) == key
+        await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+
+
+@e2e
+async def test_live_duplicates_never_stop_a_worker_but_stop_the_migration(store, caplog):
+    async with _without_ps_key(store) as conn:
+        key = "gvt_keys_" + os.urandom(3).hex()
+        first, second = await _pin(conn, key), await _pin(conn, key)
+        await conn.run_sync(models._ensure_schema_upgrades)        # logs, never raises
+        assert "uq_ps_key" not in await _indexes(conn, "projection_state")
+        assert first in caplog.text and second in caplog.text
+
+        migration = _migration(_PS_KEYS)
+
+        def upgrade(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            migration.upgrade()
+
+        with pytest.raises(RuntimeError, match=first):
+            await conn.run_sync(upgrade)
+
+
+@e2e
+async def test_the_ps_key_migration_round_trips(store):
+    migration = _migration(_PS_KEYS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "uq_ps_key" not in await _indexes(conn, "projection_state")
+            await conn.run_sync(run("upgrade"))
+            assert "uq_ps_key" in await _indexes(conn, "projection_state")
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

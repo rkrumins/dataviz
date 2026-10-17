@@ -75,7 +75,7 @@ def _build_app():
     return app, V
 
 
-async def _run() -> None:
+async def _run(data_sources: dict) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
@@ -85,8 +85,9 @@ async def _run() -> None:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         # seed A -> B, publish (projection NOT run → projected < committed)
-        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1",
-                                                 "falkorGraphName": "gvt_" + os.urandom(3).hex()})).json()["graphId"]
+        ds = "ds_" + os.urandom(3).hex()
+        data_sources[ds] = "gvt_" + os.urandom(3).hex()
+        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={})).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", json={"ops": [
             {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"displayName": "Alpha", "entityType": "Dataset"}},
@@ -99,7 +100,8 @@ async def _run() -> None:
 
         # /state carries the watermark; projection lags (not fresh)
         st = (await c.get(f"{ws1}/graphs/{gid}/branches/{mid}/state")).json()
-        assert st["watermark"]["committed"] == 2 and st["watermark"]["projected"] == 0
+        # (the pin is the data source's own graph, so the new graph starts parked at genesis)
+        assert st["watermark"]["committed"] == 2 and st["watermark"]["projected"] == 1
         assert st["watermark"]["fresh"] is False
 
         # neighbors: projection lags → Postgres fallback, correct neighborhood
@@ -136,7 +138,7 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_reads_e2e(monkeypatch):
+def test_versioning_reads_e2e(monkeypatch, data_sources):
     from backend.app.api.v1.endpoints import versioning as V
 
     async def _no_projection(graph_id: str) -> None:
@@ -144,9 +146,9 @@ def test_versioning_reads_e2e(monkeypatch):
 
     # publish projects in-process; the test needs the projection to lag until it runs one itself
     monkeypatch.setattr(V, "project_now", _no_projection)
-    asyncio.run(_run())
+    asyncio.run(_run(data_sources))
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    asyncio.run(_run({}))
     print("versioning FalkorDB-first reads + watermark + fallback e2e: OK")

@@ -16,6 +16,7 @@ is resolved via the small, mutable :class:`EntityHeadORM` pointer table (plan
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -38,6 +39,8 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from . import config
 from .db import VersioningBase, get_engine
 from .ids import prefixed_id
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = config.graphver_schema()
 
@@ -275,6 +278,10 @@ class ProjectionStateORM(VersioningBase):
             "status IN ('idle','projecting','rebuilding','evicted')",
             name="ck_proj_status",
         ),
+        # One versioned graph per FalkorDB graph: two projecting into one key would each reconcile
+        # the other's entities away (``ensure_ps_key_index``; 20261017_1500_gv_ps_keys).
+        Index("uq_ps_key", text("coalesce(falkor_provider, 'default')"), "falkor_graph_name",
+              unique=True, postgresql_where=text("falkor_graph_name IS NOT NULL")),
     )
 
 
@@ -678,6 +685,58 @@ def _ensure_schema_upgrades(conn) -> None:
                           "(job_id, kind, row_index)"))
         conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
         conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
+    # 20261017_1500_gv_ps_keys. Never strict here, and in a savepoint: a store holding two live pins
+    # on one key, or a lock it waits too long for, starts without the index rather than not at all.
+    try:
+        with conn.begin_nested():
+            ensure_ps_key_index(conn, strict=False)
+    except Exception:
+        logger.exception("uq_ps_key was not built; the next start tries again")
+
+
+def ensure_ps_key_index(conn, *, strict: bool) -> None:
+    """Build ``uq_ps_key``: one versioned graph per FalkorDB graph (provider, name).
+
+    First, a tombstoned graph that does not own the key lets go of a key another graph also pins
+    (its pin is cleared and logged; a restore does not bring it back). Pins still shared after that
+    belong to live or owned graphs, which corrupt each other's projection and must be resolved by
+    hand: ``strict`` (the migration) raises, naming them; otherwise (every worker start) the error
+    is logged and the index left unbuilt. A no-op once the index exists. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("projection_state", schema=_SCHEMA):
+        # A database installed at head has no graphver schema until create_schema_and_partitions
+        # creates it, and that builds the index from the models.
+        return
+    if conn.execute(text("SELECT 1 FROM pg_indexes WHERE schemaname = :s AND indexname = 'uq_ps_key'"),
+                    {"s": _SCHEMA}).first():
+        return
+    ps, graphs = f'"{_SCHEMA}"."projection_state"', f'"{_SCHEMA}"."graphs"'
+    released = conn.execute(text(
+        f"UPDATE {ps} p SET falkor_graph_name = NULL FROM {graphs} g "
+        "WHERE g.id = p.graph_id AND g.deleted_at IS NOT NULL AND NOT p.owns_falkor_graph "
+        "AND p.falkor_graph_name IS NOT NULL "
+        f"AND EXISTS (SELECT 1 FROM {ps} o WHERE o.graph_id <> p.graph_id "
+        "AND o.falkor_graph_name = p.falkor_graph_name "
+        "AND coalesce(o.falkor_provider, 'default') = coalesce(p.falkor_provider, 'default')) "
+        "RETURNING p.graph_id, p.falkor_graph_name")).all()
+    for graph_id, name in released:
+        logger.warning("uq_ps_key: released FalkorDB graph %s from tombstoned graph %s", name, graph_id)
+    shared = conn.execute(text(
+        f"SELECT coalesce(falkor_provider, 'default'), falkor_graph_name, "
+        f"array_agg(graph_id ORDER BY graph_id) FROM {ps} WHERE falkor_graph_name IS NOT NULL "
+        "GROUP BY 1, 2 HAVING count(*) > 1")).all()
+    if shared:
+        message = ("versioned graphs share a FalkorDB graph, so uq_ps_key cannot be built; clear "
+                   "projection_state.falkor_graph_name on all but one of each: " + "; ".join(
+                       f"{provider}/{name}: {', '.join(ids)}" for provider, name, ids in shared))
+        if strict:
+            raise RuntimeError(message)
+        logger.error(message)
+        return
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_ps_key ON {ps} "
+        "(coalesce(falkor_provider, 'default'), falkor_graph_name) "
+        "WHERE falkor_graph_name IS NOT NULL"))
 
 
 def widen_job_type_check(conn, required) -> None:

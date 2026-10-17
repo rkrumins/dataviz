@@ -74,6 +74,7 @@ tests/integration/test_versioning_evict_live.py
 tests/integration/test_versioning_evict_loop.py
 tests/integration/test_versioning_eviction.py
 tests/integration/test_versioning_falkor_live.py
+tests/integration/test_versioning_foreign_key_guards.py
 tests/integration/test_versioning_fork.py
 tests/integration/test_versioning_lost_update.py
 tests/integration/test_versioning_merge_visibility.py

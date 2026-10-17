@@ -298,7 +298,7 @@ async def _run() -> None:
     # ── seed + first projection (pinned target: unpinned graphs are no longer projected) ──
     first_name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=first_name)
+                               actor="alice", falkor_graph_name=first_name, owns_falkor_graph=True)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A",
@@ -361,7 +361,7 @@ async def _run() -> None:
     # real graph and resets the watermark; the next projection REBUILDS that graph clean — a stale
     # row main no longer has must be gone (the additive seed alone would leave it: the reported
     # "deletes still show on Main").
-    real_name = "real_ds_graph"
+    real_name = "real_ds_graph_" + os.urandom(3).hex()      # one versioned graph per key (uq_ps_key)
     fake(real_name).nodes["gv:STALE"] = {"urn": "gv:STALE", "entityId": "STALE", "displayName": "stale"}
     old = await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=real_name)
     assert old == first_name, old                                      # returns the now-orphaned name to drop
@@ -415,7 +415,7 @@ async def _run_target_resolver() -> None:
     await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=orphan_name)
 
     # The worker's projector carries a target_resolver pinning the data source's REAL graph.
-    real_name = "real_ds_graph_b1"
+    real_name = "real_ds_graph_b1_" + os.urandom(3).hex()
 
     async def resolver(s, graph_id):                 # same contract as repair_projection_target(svc, gid)
         return await s.ensure_projection_target(graph_id=graph_id, falkor_graph_name=real_name)
@@ -485,9 +485,10 @@ class _DropFailGraph(FakeGraph):
 
 async def _seed_pinned_graph(svc, name: str) -> str:
     """Create + publish a two-node graph pinned to ``name`` (a real FalkorDB target), left at
-    watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path."""
+    watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path. The
+    platform owns the key: a key it did not mint starts parked, and is never full-replayed over."""
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},

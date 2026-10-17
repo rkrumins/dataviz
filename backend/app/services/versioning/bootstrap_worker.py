@@ -1757,7 +1757,8 @@ async def create_bootstrap_job(
     starts as not ours. ``package`` describes the package (``summary.package``, with
     ``uploadId``) and ``coverage`` how much of its types the ontology declares. Asking again for
     the same upload returns its job; a data source with any other job is
-    :class:`BootstrapConflict` ``ds_has_other_job``.
+    :class:`BootstrapConflict` ``ds_has_other_job``. A FalkorDB graph another versioned graph
+    already projects into is :class:`BootstrapConflict` ``graph_key_in_use``.
     """
     args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
                 falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind,
@@ -1816,11 +1817,15 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             main_id = await _main_branch(s, graph.id)
             gid = graph.id
         else:
-            res = await GraphVersioningService().create_graph(
-                data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
-                actor=actor, falkor_graph_name=falkor_graph_name,
-                falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
-                ontology_enforcement=ontology_enforcement, session=s)
+            try:
+                res = await GraphVersioningService().create_graph(
+                    data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
+                    actor=actor, falkor_graph_name=falkor_graph_name,
+                    falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
+                    ontology_enforcement=ontology_enforcement, session=s)
+            except ConcurrencyError as exc:
+                # Another versioned graph already projects into this FalkorDB graph.
+                raise BootstrapConflict("graph_key_in_use", str(exc))
             gid, main_id = res["graph_id"], res["main_branch_id"]
 
         await s.flush()                                   # create_graph's rows are still pending

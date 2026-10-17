@@ -48,7 +48,7 @@ from .models import (
     ProjectionStateORM,
     _now,
 )
-from .service import GraphVersioningService, _is_edge_payload
+from .service import ConcurrencyError, GraphVersioningService, _is_edge_payload
 from backend.common.derived_artifacts import is_derived_label
 
 # Reuse the existing reader's schema helpers verbatim so the projection is
@@ -67,6 +67,11 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SeedRefused(RuntimeError):
+    """A replay into a FalkorDB graph this platform did not create would delete most of it."""
+
 
 NodeUpsert = Tuple[str, str, dict]                     # (entity_id, urn, payload)
 # (entity_id, src_urn, tgt_urn, payload, src_label, tgt_label) — endpoint
@@ -505,6 +510,15 @@ class FalkorProjector:
                 # normal path. ``project_pending`` applies the same filter in SQL so the poll loop
                 # doesn't churn on these rows; this guard covers direct nudges.
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "unpinned"}
+            if graph.deleted_at is not None:
+                # A tombstoned graph keeps its pin for the undo window; nothing may reseed it.
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "deleted"}
+            try:
+                # Nothing projects while version control is being enabled: the key is the data
+                # source's own graph, mid-copy, and main is parked at genesis.
+                await self._svc._assert_not_bootstrapping(s, graph_id)
+            except ConcurrencyError:
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
             # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
             # reports "rebuilding"; an incremental window reports "projecting".
             ps.status = "rebuilding" if from_seq <= 0 else "projecting"
@@ -545,6 +559,7 @@ class FalkorProjector:
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
             level_map = await self._resolve_level_map(graph_id)
             reconciled: Optional[Dict[str, object]] = None
+            refused: Optional[str] = None
             if from_seq <= 0:
                 # Probe BEFORE writing anything. Deliberately NOT ``read_only``: it is a proof
                 # that this node takes the writes below — under ``min-replicas-to-write`` a read
@@ -558,9 +573,12 @@ class FalkorProjector:
                 # long-lived reader (Domain rendered as "Schema Field"), took the indexes, and
                 # took every :AGGREGATED rollup with it. On a fresh key the diff is simply
                 # "everything", so a first seed is the same code path.
-                reconciled = await self._reconcile_in_place(
-                    client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
-                    provider_id=provider_id)
+                try:
+                    reconciled = await self._reconcile_in_place(
+                        client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                        provider_id=provider_id, owned=owned)
+                except SeedRefused as exc:
+                    refused = str(exc)               # held back below, like an unfaithful seed
             else:
                 await self._relabel_in_place(client, retypes)
                 await self._apply(client, *changes, level_map=level_map, provider_id=provider_id)
@@ -589,13 +607,16 @@ class FalkorProjector:
             except Exception:                            # pragma: no cover - infra
                 logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
-            verify_error, healed = (
-                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
-                                            level_map=level_map, heal_outcome=heal_outcome,
-                                            rollups_moved=window_rollups_applied, owned=owned,
-                                            provider_id=provider_id)
-                if config.PROJECTION_VERIFY_ENABLED else (None, False)
-            )
+            if refused:
+                verify_error, healed = refused, False
+            else:
+                verify_error, healed = (
+                    await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
+                                                level_map=level_map, heal_outcome=heal_outcome,
+                                                rollups_moved=window_rollups_applied, owned=owned,
+                                                provider_id=provider_id)
+                    if config.PROJECTION_VERIFY_ENABLED else (None, False)
+                )
 
             published = verify_error is None
             async with self._session() as s:
@@ -820,6 +841,8 @@ class FalkorProjector:
                     ProjectionStateORM.falkor_graph_name.isnot(None),
                     ProjectionStateORM.falkor_graph_name
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
+                    # A tombstoned graph keeps its pin for the undo window and must not reseed it.
+                    GraphORM.deleted_at.is_(None),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)
@@ -1689,7 +1712,8 @@ class FalkorProjector:
     async def _reconcile_in_place(self, client, graph_id, main_id, to_seq, is_fork,
                                   level_map, track_progress: bool = False,
                                   rollups_moved_this_pass: bool = False,
-                                  provider_id: Optional[str] = None) -> Dict[str, object]:
+                                  provider_id: Optional[str] = None,
+                                  owned: bool = True) -> Dict[str, object]:
         """Make FalkorDB hold exactly committed main at ``to_seq`` by writing only the
         difference, and move the rollups by that same difference — never dropping the graph.
         See ``projection_reconcile``.
@@ -1700,12 +1724,23 @@ class FalkorProjector:
         base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
         — a heal after a publish window; its deltas assumed raw writes that did not land, so a
         second delta would double-count), rollup cells went with a node that had to be deleted
-        outright, or the graph is a fork (its chains span the parent's rows)."""
+        outright, or the graph is a fork (its chains span the parent's rows).
+
+        ``owned`` is the graph's ``owns_falkor_graph``. In a key the platform did not mint, what
+        the log never held is never deleted — urn-less nodes, extra copies of a relationship — and
+        a reconcile that would delete more than half of what the key holds raises
+        :class:`SeedRefused` before writing anything."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
                 s, graph, main_id, to_seq, level_map)
         actual_nodes, copies, actual_edges, parallel, unkeyed = await self._scan_projection(client)
+        if not owned:
+            if unkeyed or parallel:
+                logger.info("reconcile for %s keeps %d urn-less node(s) and %d parallel edge "
+                            "group(s): the key is not the platform's", graph_id, len(unkeyed),
+                            len(parallel))
+            unkeyed, parallel = [], set()
 
         # A (label, urn) held by more than one node, or a relationship key held by more than
         # one relationship, is legacy duplication: every copy is removed and the one that
@@ -1720,6 +1755,14 @@ class FalkorProjector:
         # multi-million-entity graph never stalls the requests sharing this process.
         diff = await asyncio.to_thread(
             diff_projection, nodes, edges, comparable_nodes, comparable_edges)
+        if not owned:
+            # The destructive-seed valve, before any write: a key holding data the log does not
+            # (expected empty but the key is not, or most of it unknown to main) is not replayed.
+            doomed = len(diff.node_deletes) + len(diff.edge_deletes)
+            held = sum(copies.values()) + len(actual_edges)
+            if doomed * 2 > held:
+                raise SeedRefused(f"refusing to delete {doomed} of {held} entities from a FalkorDB "
+                                  "graph this platform did not create")
 
         rollups, plan, sets = "none", None, None
         cont_types: Set[str] = set()
@@ -1934,7 +1977,7 @@ class FalkorProjector:
                 # and move the rollups by the same difference.
                 healed = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, is_fork, level_map,
-                    rollups_moved_this_pass=rollups_moved, provider_id=provider_id)
+                    rollups_moved_this_pass=rollups_moved, provider_id=provider_id, owned=owned)
                 if heal_outcome is not None:
                     heal_outcome.update(healed)
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)

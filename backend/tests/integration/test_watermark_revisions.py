@@ -13,7 +13,7 @@ from backend.tests.integration.test_versioning_projection import FakeFalkor
 from backend.tests.integration.test_versioning_reads import _build_app
 
 
-async def _run() -> None:
+async def _run(data_sources: dict) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
@@ -21,8 +21,9 @@ async def _run() -> None:
     svc = GraphVersioningService()
     ws1 = "/api/v1/ws1/versioning"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1",
-                                                 "falkorGraphName": "gvt_" + os.urandom(3).hex()})).json()["graphId"]
+        ds = "ds_" + os.urandom(3).hex()
+        data_sources[ds] = "gvt_" + os.urandom(3).hex()
+        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={})).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", json={"ops": [
             {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"displayName": "Alpha", "entityType": "Dataset"}},
@@ -47,5 +48,5 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_watermark_names_both_revisions():
-    asyncio.run(_run())
+def test_watermark_names_both_revisions(data_sources):
+    asyncio.run(_run(data_sources))

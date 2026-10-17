@@ -80,7 +80,7 @@ async def _seed_management_user() -> None:
         await s.commit()
 
 
-async def _run() -> None:
+async def _run(data_sources: dict) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
@@ -252,9 +252,10 @@ async def _run() -> None:
         # the unpinned graph has no FalkorDB target to rebuild → 409
         assert (await c.post(f"{ws1}/graphs/{gid}/projection/rebuild", headers=h)).status_code == 409
         # a PINNED graph rebuilds: started, watermark flipped to rebuilding
+        pinned_ds = "ds_" + os.urandom(4).hex()
+        data_sources[pinned_ds] = "real_" + os.urandom(3).hex()
         pinned = (await c.post(f"{ws1}/graphs", json={
-            "dataSourceId": "ds_" + os.urandom(4).hex(), "workspaceId": "ws1",
-            "falkorGraphName": "real_" + os.urandom(3).hex()}, headers=_hdr(M))).json()["graphId"]
+            "dataSourceId": pinned_ds, "workspaceId": "ws1"}, headers=_hdr(M))).json()["graphId"]
         rb = await c.post(f"{ws1}/graphs/{pinned}/projection/rebuild", headers=h)
         assert rb.status_code == 200, rb.text
         assert rb.json()["started"] is True and rb.json()["alreadyRunning"] is False
@@ -270,10 +271,10 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_api_e2e():
-    asyncio.run(_run())
+def test_versioning_api_e2e(data_sources):
+    asyncio.run(_run(data_sources))
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    asyncio.run(_run({}))
     print("versioning API (auth + RBAC + tenant + governance) e2e: OK")

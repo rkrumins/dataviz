@@ -397,6 +397,14 @@ _EMPTY_INCOMING: Dict[str, object] = {
 }
 
 
+def bootstrap_unfinished(graph_id) -> tuple:
+    """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
+    (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a
+    column, so the same test correlates into a query over many graphs."""
+    return (JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
+            JobORM.status.in_(("pending", "running", "failed")))
+
+
 @dataclass(frozen=True)
 class Viewer:
     """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
@@ -454,6 +462,8 @@ class GraphVersioningService:
         Pass ``session`` to compose with a following ingest in one transaction (the
         atomic bootstrap), so a seed failure also rolls back the graph creation."""
         async with self._session_scope(session) as s:
+            if falkor_graph_name:
+                await self._claim_projection_key(s, falkor_graph_name, falkor_provider)
             graph = GraphORM(
                 data_source_id=data_source_id,
                 workspace_id=workspace_id,
@@ -487,9 +497,13 @@ class GraphVersioningService:
             s.add(genesis)
             await s.flush()                      # materialise genesis.id before linking
             main.head_commit_id = genesis.id
+            # A key we did not mint holds data the log does not: a genesis-only graph must never
+            # full-seed into it, so it starts parked and its first projection is the first
+            # commit's window.
+            parked = bool(falkor_graph_name) and not owns_falkor_graph
             s.add(
                 ProjectionStateORM(
-                    graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1,
+                    graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
@@ -575,9 +589,7 @@ class GraphVersioningService:
         must be resumed or abandoned, never edited around. One indexed lookup
         (``ix_jobs_graph_status``)."""
         unfinished = await s.scalar(select(JobORM.status).where(
-            JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
-            JobORM.status.in_(("pending", "running", "failed")),
-        ).limit(1))
+            *bootstrap_unfinished(graph_id)).limit(1))
         if unfinished == "failed":
             raise ConcurrencyError(
                 "enabling version control for this data source didn't finish — resume it "
@@ -586,6 +598,28 @@ class GraphVersioningService:
             raise ConcurrencyError(
                 "version control is still being enabled for this data source — "
                 "try again once it finishes")
+
+    async def _claim_projection_key(self, s, name: str, provider: Optional[str], *,
+                                    exclude_graph_id: Optional[str] = None) -> None:
+        """Take FalkorDB graph ``name`` on ``provider`` as one versioned graph's projection target.
+
+        Two versioned graphs projecting into one key would each reconcile the other's entities
+        away. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
+        the ``20261017_1500_gv_ps_keys`` migration does); any other holder refuses the claim
+        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        key = [func.coalesce(ProjectionStateORM.falkor_provider, default) == (provider or default),
+               ProjectionStateORM.falkor_graph_name == name]
+        if exclude_graph_id is not None:
+            key.append(ProjectionStateORM.graph_id != exclude_graph_id)
+        await s.execute(update(ProjectionStateORM).where(
+            *key, ProjectionStateORM.owns_falkor_graph.is_(False),
+            ProjectionStateORM.graph_id.in_(
+                select(GraphORM.id).where(GraphORM.deleted_at.isnot(None))),
+        ).values(falkor_graph_name=None).execution_options(synchronize_session=False))
+        if await s.scalar(select(ProjectionStateORM.graph_id).where(*key).limit(1)):
+            raise ConcurrencyError(
+                "another versioned data source already projects into this FalkorDB graph")
 
     async def open_draft(
         self,
@@ -2559,7 +2593,10 @@ class GraphVersioningService:
         the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
         MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
         Returns the OLD name when it changed (so the caller can drop the now-orphaned graph), else
-        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph."""
+        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
+
+        Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
+        unfinished, and when another versioned graph already projects into ``falkor_graph_name``."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.fork_parent_graph_id is not None:
@@ -2567,6 +2604,9 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is None or ps.falkor_graph_name == falkor_graph_name:
                 return None
+            await self._assert_not_bootstrapping(s, graph_id)
+            await self._claim_projection_key(s, falkor_graph_name, ps.falkor_provider,
+                                             exclude_graph_id=graph_id)
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection

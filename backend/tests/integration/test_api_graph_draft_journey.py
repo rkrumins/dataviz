@@ -206,7 +206,7 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_api_graph_draft_journey_e2e():
+def test_api_graph_draft_journey_e2e(data_sources):
     asyncio.run(_run())
 
 
@@ -247,7 +247,7 @@ async def _run_bulk_param_limit() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_bulk_ingest_respects_pg_param_limit():
+def test_bulk_ingest_respects_pg_param_limit(data_sources):
     asyncio.run(_run_bulk_param_limit())
 
 

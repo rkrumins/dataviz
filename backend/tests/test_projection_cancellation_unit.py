@@ -38,6 +38,7 @@ class _FakeGraph:
     data_source_id = "ds1"
     workspace_id = "ws1"
     fork_parent_graph_id = None
+    deleted_at = None
 
 
 class _MinClient:
@@ -63,9 +64,12 @@ class _FakeSession:
 
     async def scalar(self, clause):
         # Single-flight advisory-lock acquire — project_graph holds it for the run; it always
-        # grants here (contention is covered by test_projection_single_flight).
-        assert "pg_try_advisory_lock" in str(clause), str(clause)
-        return True
+        # grants here (contention is covered by test_projection_single_flight). The only other
+        # read is the unfinished-bootstrap check, which finds none.
+        if "pg_try_advisory_lock" in str(clause):
+            return True
+        assert "jobs" in str(clause), str(clause)
+        return None
 
     async def execute(self, clause):
         # Single-flight advisory-lock release, run in project_graph's finally.

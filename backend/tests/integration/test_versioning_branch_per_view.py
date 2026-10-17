@@ -247,7 +247,7 @@ async def _run_http() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_branch_per_view_http_e2e():
+def test_versioning_branch_per_view_http_e2e(data_sources):
     asyncio.run(_run_http())
 
 

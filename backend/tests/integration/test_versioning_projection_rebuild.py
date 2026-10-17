@@ -76,7 +76,7 @@ async def _seed(svc, fake) -> tuple:
     and assert the cache equals materialized main. Returns (graph_id, projector, falkor_name)."""
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     await _edit_publish(svc, gid, "alice", [
@@ -208,7 +208,7 @@ async def _run_rollup_hook() -> None:
 
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     # No edge-type resolver: the projector cannot tell lineage from containment, so edges
     # it writes are the batch job's to roll up.
@@ -280,7 +280,7 @@ async def _run_failure_honesty() -> None:
     fake = ExplodingFalkor()
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     await _edit_publish(svc, gid, "alice", [
@@ -425,7 +425,7 @@ async def _run_holdback_on_content_drift() -> None:
     fake = _FieldDriftFalkor()
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     await _edit_publish(svc, gid, "alice", [
@@ -453,7 +453,7 @@ async def _run_holdback_on_edge_attr_drift() -> None:
     fake = _EdgeAttrDriftFalkor()
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     await _edit_publish(svc, gid, "alice", [
@@ -484,7 +484,7 @@ async def _run_publishes_with_parallel_edges() -> None:
     fake = FakeFalkor()
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     # Parallel edges arrive via BOOTSTRAP (bulk import), not write-through — the versioned publish
@@ -522,7 +522,7 @@ async def _run_deep_verify_size_gated() -> None:
     fake = _EdgeAttrDriftFalkor()
     name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     await _edit_publish(svc, gid, "alice", [

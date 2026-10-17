@@ -160,6 +160,7 @@ tests/test_profiling_series.py
 tests/test_projection_batched_payloads.py
 tests/test_projection_cancellation_unit.py
 tests/test_projection_derived_labels.py
+tests/test_projection_foreign_key_guard.py
 tests/test_projection_labeled_writes.py
 tests/test_projection_property_removal_unit.py
 tests/test_projection_reconcile_unit.py
@@ -220,6 +221,7 @@ tests/test_versioned_branch_trace_closure.py
 tests/test_versioned_sources_lookup.py
 tests/test_versioning_concurrency.py
 tests/test_versioning_core.py
+tests/test_versioning_create_graph_route.py
 tests/test_versioning_domain_errors.py
 tests/test_versioning_feature_gate.py
 tests/test_versioning_neighbors_entitytype.py

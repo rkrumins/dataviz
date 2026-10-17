@@ -36,6 +36,8 @@ _ON_LIVE_TABLES = {
     _EARLIER: ("downgrade",),
     "20261013_1300_api_key_scale.py": ("upgrade", "downgrade"),
     _LAST: ("upgrade", "downgrade"),
+    # graphver.projection_state, which every projection pass writes.
+    "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
 }
 
 
