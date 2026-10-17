@@ -196,13 +196,15 @@ _UPSERT_HEADS = text(
     "entity_kind = EXCLUDED.entity_kind, updated_at = EXCLUDED.updated_at").bindparams(*_head_arrays())
 # Add the heads of entities that have none on the branch yet; returns the ones added.
 _ADD_HEADS = text(_INSERT_HEADS + "DO NOTHING RETURNING entity_id").bindparams(*_head_arrays())
-# Advance the heads still at their pre-image (the CAS); returns the ones advanced.
+# Advance the heads still at their pre-image (the CAS); returns the ones advanced. A head whose
+# payload is {} reads as absent, so the pre-image of "absent" (:absent) matches it too.
 _ADVANCE_HEADS = text(
     f"UPDATE {EntityHeadORM.__table__.fullname} AS h SET head_version_id = v.vid, "
     "content_hash = v.hash, is_tombstone = v.tomb, entity_kind = v.kind, updated_at = :now "
     "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds, :pres) AS v(entity_id, vid, hash, tomb, kind, pre) "
     "WHERE h.graph_id = :graph_id AND h.branch_id = :branch_id AND h.entity_id = v.entity_id "
-    "AND h.content_hash = v.pre RETURNING h.entity_id",
+    "AND (h.content_hash = v.pre OR (v.pre = :absent AND h.content_hash = :empty)) "
+    "RETURNING h.entity_id",
 ).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
 
 
@@ -741,7 +743,7 @@ class GraphVersioningService:
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)   # serializes the seq allocation
             self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
             graph = await s.get(GraphORM, graph_id)
@@ -859,9 +861,7 @@ class GraphVersioningService:
         field-merged; a same-field clash raises :class:`MergeConflict` unless a
         ``resolutions`` payload (``{entity_id: payload|None}``) settles it."""
         async with self._session() as s:
-            branch = await s.get(BranchORM, branch_id)
-            if branch is None or branch.graph_id != graph_id:
-                raise ValueError("unknown branch")
+            branch = await self._lock_branch(s, graph_id, branch_id)
             self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
 
@@ -1415,13 +1415,13 @@ class GraphVersioningService:
         """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
         collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
-            graph = await s.get(GraphORM, graph_id)
-            draft = await s.get(BranchORM, branch_id)
-            if graph is None or draft is None or draft.graph_id != graph_id:
-                raise ValueError("unknown graph/branch")
+            # The draft's lock first, so main's head is read after any save, checkpoint or pull of
+            # this draft that held it has committed.
+            draft = await self._lock_branch(s, graph_id, branch_id)
             self._require_open(draft)
             if draft.kind == "main":
                 raise ValueError("main has no base to rebase")
+            graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             from_seq = draft.base_commit_seq or 0
             to_seq = graph.main_head_commit_seq
@@ -1430,8 +1430,10 @@ class GraphVersioningService:
                         "incoming": _EMPTY_INCOMING, "base_commit_seq": draft.base_commit_seq,
                         "already_up_to_date": True}
 
+            # The draft's own edits, read once: the merge and the rewrite below use the same read.
+            own = await self._branch_own_payloads(s, graph_id, draft.id)
             merged_state, conflicts, _theirs = await self._compute_merge(
-                s, graph_id, graph, draft, main_id, dict(resolutions or {})
+                s, graph_id, graph, draft, main_id, dict(resolutions or {}), own=own
             )
             if conflicts:
                 # The draft's own value of each conflicting entity, to resolve from — just those.
@@ -1446,7 +1448,6 @@ class GraphVersioningService:
             # head — entities the draft never touched come from the advanced base automatically.
             self._cascade_incident_edges(merged_state)
             self._assert_referential_integrity(merged_state)
-            own = await self._branch_own_payloads(s, graph_id, draft.id)
             deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
 
             # ALWAYS commit. The version rows written are still only the draft's own rebased edits
@@ -1471,7 +1472,8 @@ class GraphVersioningService:
             )
             s.add(commit)
             await s.flush()
-            await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
+            await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor,
+                                     occ_guard=True)
             commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             # `stats` describes what CAME IN, not the rewrite to your own edits — it's what the user
             # means by "what did I just pull". The rebase of your edits is reported separately as
@@ -1585,7 +1587,7 @@ class GraphVersioningService:
         already-merged drafts cannot be abandoned. A shared draft needs a maintainer.
         Staged rows are left in place for audit (the branch is simply unreachable)."""
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise ValueError("cannot abandon main")
             if branch.status == "abandoned":
@@ -2203,7 +2205,7 @@ class GraphVersioningService:
         Raises ``ValueError`` for an unknown or closed draft and :class:`AccessDenied` for someone
         else's."""
         async with self._session() as s:
-            draft = await self._get_branch(s, graph_id, branch_id)
+            draft = await self._lock_branch(s, graph_id, branch_id)
             if draft.kind != "draft":
                 raise ValueError("not a draft")
             self._require_open(draft)
@@ -5013,18 +5015,18 @@ class GraphVersioningService:
             out[eid] = payload_by_vid.get(vid)
         return out
 
-    async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions):
+    async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions, own=None):
         """3-way merge a draft onto current main.
 
         base   = main state at the draft's branch point (common ancestor)
-        ours   = base + the draft's own changes
+        ours   = base + the draft's own changes (``own``, when the caller already read them)
         theirs = current main state
         Returns ``(merged_state, conflicts, theirs_state)``.
         """
         base = await self._state_as_of(s, graph_id, main_id, draft.base_commit_seq or 0)
         theirs = await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
         ours = dict(base)
-        ours.update(await self._branch_own_payloads(s, graph_id, draft.id))
+        ours.update(own if own is not None else await self._branch_own_payloads(s, graph_id, draft.id))
 
         set_fields = frozenset(config.SET_FIELDS)
         merged: Dict[str, Optional[dict]] = {}
@@ -5803,12 +5805,28 @@ class GraphVersioningService:
         latency and makes the commit-seq retry converge in ~1 attempt."""
         await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph_id))))
 
+    @staticmethod
+    async def _lock_branch(s, graph_id: str, branch_id: str) -> BranchORM:
+        """Take a branch's row lock for the transaction and return the row as committed. Every
+        writer of one draft (apply_ops, stage, checkpoint, pull, claim, abandon) serializes here,
+        so a writer that waited sees what the holder committed, a closed status included. FOR NO
+        KEY UPDATE: inserts that reference the branch (its members) do not wait on it. Scoped to
+        the graph, so another graph's draft is unknown here."""
+        branch = (await s.execute(
+            select(BranchORM).where(BranchORM.id == branch_id, BranchORM.graph_id == graph_id)
+            .with_for_update(key_share=True).execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        if branch is None:
+            raise ValueError("unknown branch")
+        return branch
+
     async def apply_ops(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -5831,11 +5849,15 @@ class GraphVersioningService:
         so what the caller records with it lands or rolls back WITH the batch: an import window's
         row resolutions and its job checkpoint. A retry re-runs it with the batch; anything it
         raises rolls the batch back and propagates.
+
+        A ``branch_id`` that names main (its id or ``'main'``) raises :class:`MainWriteForbidden`
+        unless ``allow_main``: a caller that writes drafts must never be handed main. A draft that
+        is not open raises :class:`BranchNotOpen`.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-            on_commit=on_commit)
+            on_commit=on_commit, allow_main=allow_main)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -5844,6 +5866,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
@@ -5851,7 +5874,7 @@ class GraphVersioningService:
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules, on_commit=on_commit),
+                ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main),
         )
 
     async def _apply_ops_once(
@@ -5860,24 +5883,32 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
-            bid = branch_id or await self._main_branch_id(s, graph_id)
-            branch = await s.get(BranchORM, bid)
+            main_id = await self._main_branch_id(s, graph_id)
+            bid = main_id if branch_id in (None, "main") else branch_id
 
             # Serialize main-advancing writes on this graph BEFORE reading the head, so a
             # write-through composes against — and advances — the current main atomically
             # (head read → commit → head advance): the same lock publish/merge/revert take,
             # without which a write-through racing a merge reads a stale head and spuriously
-            # trips NotUpToDate / flaps the projection target. Drafts stay lock-free — their
-            # append races are resolved by the unique commit_seq constraint + _retry_seq head
-            # CAS. Xact-scoped, so _retry_seq re-takes it on each fresh-session attempt.
-            if branch.kind == "main":
+            # trips NotUpToDate / flaps the projection target. A draft write takes the draft's
+            # row lock instead, then checks the draft is still open: its writers serialize, and
+            # none lands on a merged or abandoned draft. Both are xact-scoped, so _retry_seq
+            # re-takes them on each fresh-session attempt.
+            if bid == main_id:
+                if branch_id is not None and not allow_main:
+                    raise MainWriteForbidden()
                 await self._lock_graph(s, graph_id)
+                branch = await s.get(BranchORM, bid)
+            else:
+                branch = await self._lock_branch(s, graph_id, bid)
+                self._require_open(branch)
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
@@ -6215,7 +6246,8 @@ class GraphVersioningService:
             await s.execute(_UPSERT_HEADS, {**arrays, **scalars})
             return
         advanced = set((await s.execute(
-            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads]})).scalars())
+            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads],
+                             "absent": _HASH_NONE, "empty": _HASH_EMPTY})).scalars())
         fresh = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
         if fresh:
             rest = {k: [v[i] for i in fresh] for k, v in arrays.items()}

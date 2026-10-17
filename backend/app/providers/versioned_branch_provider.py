@@ -624,9 +624,11 @@ class VersionedBranchProvider:
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
         if self._as_of is not None:
             raise PermissionError("cannot write to a historical (as-of) view")
+        # allow_main: ContextEngine serves a stale main through this provider, and its writes are
+        # the ordinary main write-through (a draft id is unaffected by the flag).
         return await self._svc.apply_ops(
             graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message,
-            containment_edge_types=self._containment_types)
+            containment_edge_types=self._containment_types, allow_main=True)
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,

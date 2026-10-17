@@ -6,7 +6,9 @@ write-through primitive) did NOT, so a write-through racing a merge could read a
 spuriously trip ``NotUpToDate`` and flap the projection target. These tests pin the fix:
 
 * a ``main``-branch ``_apply_ops_once`` takes ``_lock_graph`` before reading the head;
-* a draft-branch write stays lock-free (unique-constraint + ``_retry_seq`` CAS, unchanged);
+* a draft-branch write takes the draft's row lock (``_lock_branch``), not the graph lock, and
+  is refused when the draft is not open;
+* a write that names main (its id or ``'main'``) is refused unless the caller allows it;
 * ``_compute_fork_merge`` fails loud on a fork row with no ``fork_base_commit_seq`` instead
   of silently merging against an empty (genesis) base.
 
@@ -20,6 +22,7 @@ import contextlib
 
 import pytest
 
+from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden
 from backend.app.services.versioning.models import BranchORM, GraphORM
 from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 
@@ -58,10 +61,20 @@ def _factory(rows):
 def _svc_with_spy(rows, monkeypatch):
     svc = GraphVersioningService(session_factory=_factory(rows))
     lock_calls = []
+    svc.branch_locks = []
 
     async def spy_lock(s, gid):                 # shadows the _lock_graph staticmethod
         lock_calls.append(gid)
     monkeypatch.setattr(svc, "_lock_graph", spy_lock)
+
+    async def main_bid(s, gid):
+        return "main1"
+    monkeypatch.setattr(svc, "_main_branch_id", main_bid)
+
+    async def spy_lock_branch(s, gid, bid):     # shadows the _lock_branch staticmethod
+        svc.branch_locks.append(bid)
+        return rows[(BranchORM, bid)]
+    monkeypatch.setattr(svc, "_lock_branch", spy_lock_branch)
 
     async def stop(*a, **k):                    # first awaited service call after the lock point
         raise _StopAfterLock
@@ -77,23 +90,71 @@ def test_apply_ops_main_takes_graph_lock(monkeypatch):
             (BranchORM, "main1"): _Obj(id="main1", kind="main")}
     svc, lock_calls = _svc_with_spy(rows, monkeypatch)
 
-    async def main_bid(s, gid):
-        return "main1"
-    monkeypatch.setattr(svc, "_main_branch_id", main_bid)
-
     with pytest.raises(_StopAfterLock):
         asyncio.run(svc.apply_ops(graph_id="g1", actor="u", ops=_DEL_OP))
     assert lock_calls == ["g1"]
 
 
-def test_apply_ops_draft_skips_lock(monkeypatch):
+def test_apply_ops_draft_takes_branch_lock(monkeypatch):
+    """A draft write takes the draft's row lock, not the graph lock."""
     rows = {(GraphORM, "g1"): _Obj(id="g1"),
-            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft")}
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="open")}
     svc, lock_calls = _svc_with_spy(rows, monkeypatch)
 
     with pytest.raises(_StopAfterLock):
         asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
-    assert lock_calls == []
+    assert lock_calls == [] and svc.branch_locks == ["draft1"]
+
+
+def test_apply_ops_named_main_is_forbidden(monkeypatch):
+    """Naming main (its id or 'main') is refused before any lock; only allow_main writes through."""
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "main1"): _Obj(id="main1", kind="main", status="open")}
+    svc, lock_calls = _svc_with_spy(rows, monkeypatch)
+
+    for bid in ("main1", "main"):
+        with pytest.raises(MainWriteForbidden):
+            asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id=bid, ops=_DEL_OP))
+    assert lock_calls == [] and svc.branch_locks == []
+
+    with pytest.raises(_StopAfterLock):
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="main1", ops=_DEL_OP,
+                                  allow_main=True))
+    assert lock_calls == ["g1"]
+
+
+@pytest.mark.parametrize("status", ["merged", "abandoned", "publishing"])
+def test_apply_ops_closed_draft_refused(monkeypatch, status):
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status=status)}
+    svc, _ = _svc_with_spy(rows, monkeypatch)
+
+    with pytest.raises(BranchNotOpen) as exc:     # before _current_values (_StopAfterLock)
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
+    assert exc.value.status == status and exc.value.branch_id == "draft1"
+
+
+def test_lock_branch_is_graph_scoped_no_key_update():
+    """FOR NO KEY UPDATE (foreign-key inserts on branch_members do not wait on it), scoped to the
+    graph so a foreign draft is unknown, and re-read so a waiter sees the committed status."""
+    from sqlalchemy.dialects import postgresql
+
+    seen = []
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return None
+
+    class _S:
+        async def execute(self, stmt):
+            seen.append(stmt)
+            return _Result()
+
+    with pytest.raises(ValueError, match="unknown branch"):
+        asyncio.run(GraphVersioningService._lock_branch(_S(), "g1", "draft1"))
+    sql = str(seen[0].compile(dialect=postgresql.dialect()))
+    assert "FOR NO KEY UPDATE" in sql and "branches.graph_id" in sql, sql
+    assert seen[0].get_execution_options().get("populate_existing") is True
 
 
 def test_fork_merge_missing_base_raises():

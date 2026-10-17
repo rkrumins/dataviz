@@ -71,6 +71,7 @@ tests/integration/test_versioning_draft_read_routing.py
 tests/integration/test_versioning_draft_reader_engine.py
 tests/integration/test_versioning_draft_reads.py
 tests/integration/test_versioning_draft_sweep.py
+tests/integration/test_versioning_draft_write_fences.py
 tests/integration/test_versioning_draft_writes.py
 tests/integration/test_versioning_e2e.py
 tests/integration/test_versioning_edge_integrity.py

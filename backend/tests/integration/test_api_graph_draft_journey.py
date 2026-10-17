@@ -92,6 +92,14 @@ def _build_app():
             yield s
 
     app = FastAPI()
+    from fastapi.responses import JSONResponse
+    from backend.app.services.versioning.errors import HTTP_MAPPED
+
+    async def mapped(request, exc):                  # as main.py registers for every app route
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers=exc.headers)
+    for cls in HTTP_MAPPED:
+        app.add_exception_handler(cls, mapped)
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
     app.include_router(G.router, prefix="/api/v1/{ws_id}/graph")
     app.dependency_overrides[get_current_user] = fake_user
@@ -200,6 +208,18 @@ async def _run() -> None:
             # 10. main now carries the imported graph + the draft edit
             st2 = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()
             assert {"urn:t:root", "urn:t:child", new_urn} <= set(st2["nodes"])
+
+            # 11. a save to the published draft, or to main by name, is refused with 409
+            late = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",
+                             "payload": {"displayName": "too late"}}]}
+            r = await c.post(f"{GP}/changes", params=qd, json=late)
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["type"] == "branch_closed", r.text
+            assert r.json()["detail"]["status"] == "merged", r.text
+            for bid in (main_id, "main"):
+                r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": bid}, json=late)
+                assert r.status_code == 409, r.text
+                assert r.json()["detail"]["type"] == "main_write_forbidden", r.text
     finally:
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
         await db.dispose_engine()

@@ -1,18 +1,16 @@
-"""Same-branch concurrent-write safety — NO silent lost update (per-entity head CAS / Git-model OCC).
+"""Same-branch concurrent-write safety — NO silent lost update.
 
-Reproduces the audited Finding-4 race deterministically: writer B reads entity E's state, writer A
-commits a change to a DIFFERENT field of E *in between*, then B writes. Without a head-level
-compare-and-swap the head upsert blindly overwrites E against pre-A state, so A's committed change is
-lost from the live head (it survives only in append-only history). With per-entity head OCC, B's
-stale head write is a CAS miss → `_retry_seq` re-runs against fresh state → both edits survive
-(disjoint fields auto-merge; the same field would raise MergeConflict).
+Reproduces the audited Finding-4 race: writer B reads entity E's state, and writer A tries to
+commit a change to a DIFFERENT field of E *in between*. Without serialization B's head write then
+overwrites E against pre-A state, so A's committed change is lost from the live head (it survives
+only in append-only history).
 
-We force the exact interleaving by wrapping `_current_values` (the writer's state read) so that A
-commits immediately after B has read — no timing luck, so this is a reliable RED→GREEN test.
+We force the interleaving by wrapping `_current_values` (the writer's state read): A starts right
+after B has read. B holds the draft's row lock (`_lock_branch`), so A must still be waiting after a
+pause; once B commits, A runs against B's result and both edits survive (disjoint fields
+auto-merge). The per-entity head CAS (`occ_guard`) stays as the backstop behind the lock.
 
-On a DRAFT: writes to `main` take the graph lock before reading, so there A cannot commit between
-B's read and B's write at all (the forced interleaving would wait on B's lock forever). Drafts are
-lock-free, so the head CAS is what keeps a draft's concurrent writers from losing each other's work.
+Writes to `main` take the graph lock before reading, the same way.
 """
 import asyncio
 import os
@@ -41,17 +39,19 @@ async def _run() -> None:
                         ops=[_node("A", displayName="v0", description="d0")])
     draft = await svc.open_draft(graph_id=gid, owner="u")
 
-    # Force the losing interleaving: right after B's state read returns, A commits a DIFFERENT field.
+    # Force the losing interleaving: right after B's state read returns, A writes a DIFFERENT field.
     orig = svc._current_values
-    fired = {}
+    race = {}
 
     async def racing(s, graph_id, bid, ids):
         vals = await orig(s, graph_id, bid, ids)          # B reads (still pre-A)
-        if not fired.get("x") and "A" in list(ids):
-            fired["x"] = True
-            await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="A",  # A commits
-                                ops=[_upd("A", description="ALICE")])
-        return vals                                        # B proceeds against STALE state
+        if "A" not in race and "A" in list(ids):
+            race["A"] = asyncio.create_task(svc.apply_ops(  # A tries to commit
+                graph_id=gid, branch_id=draft, actor="alice", message="A",
+                ops=[_upd("A", description="ALICE")]))
+            await asyncio.sleep(0.2)
+            assert not race["A"].done(), "A did not wait for B's draft lock"
+        return vals                                        # B proceeds; A waits for its commit
 
     svc._current_values = racing
     try:
@@ -59,6 +59,8 @@ async def _run() -> None:
                             ops=[_upd("A", displayName="BOB")])
     finally:
         svc._current_values = orig
+        await asyncio.gather(*race.values(), return_exceptions=True)
+    await race["A"]
 
     v = await svc.entity_value(graph_id=gid, entity_id="A", branch_id=draft)
     assert v is not None, "entity A vanished"

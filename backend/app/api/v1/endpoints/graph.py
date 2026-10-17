@@ -3914,7 +3914,7 @@ async def apply_graph_changes(
     request: GraphChangesRequest = Body(...),
     dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
     branchId: str = Query(..., description="Draft branch the changes are committed to."),
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
@@ -3928,7 +3928,7 @@ async def apply_graph_changes(
     from backend.app.services.versioning.service import (
         GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
     from backend.app.services.versioning.ids import prefixed_id
-    actor = user.id if user else "system"
+    actor = user.id
     svc = GraphVersioningService()
     g = await svc.get_graph_by_data_source(dataSourceId)
     if g is None or g.get("workspace_id") != ws_id:
