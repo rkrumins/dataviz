@@ -410,6 +410,8 @@ export interface PullRequest {
   resultingCommitId?: string | null
   reviewers?: string[] | null
   approvedBy?: string[] | null
+  /** Reviewers whose approval went stale (the draft changed since): they must approve again. */
+  staleApprovedBy?: string[] | null
   approvalStatus?: string | null
   checksStatus?: Record<string, unknown> | null
   actor?: string | null          // who raised it
@@ -1492,6 +1494,17 @@ export function openMergeRequest(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/merge-requests`,
     jsonBody(data),
   )
+}
+
+/** Someone who can be asked to review: a workspace member who can approve (never the caller). */
+export interface ReviewerCandidate {
+  userId: string
+  displayName?: string | null
+  email?: string | null
+}
+
+export function listReviewerCandidates(wsId: string): Promise<ReviewerCandidate[]> {
+  return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers`)
 }
 
 export function listMergeRequests(wsId: string, graphId: string): Promise<PullRequest[]> {

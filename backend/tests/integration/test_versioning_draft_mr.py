@@ -178,6 +178,54 @@ async def _run() -> None:
     assert settled["merged_via"] == "direct_publish"                            # the review was bypassed — say so
     assert "F1" in (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
 
+    # ══ G. REVIEWERS ASKED AFTER THE PR IS OPEN, AND APPROVALS THAT RACE. Editing the reviewers
+    #       re-judges the approval; two reviewers approving at the same moment both count. ══
+    dG = await _draft(svc, gid, "alice", [_node("G1")])
+    prG = await svc.open_draft_mr(graph_id=gid, branch_id=dG, actor="alice")
+    assert (await svc.get_pr(prG))["approval_status"] is None
+    meta = await svc.update_pr(pr_id=prG, reviewers=["carol", "dave", "carol"])
+    assert meta["reviewers"] == ["carol", "dave"] and meta["approval_status"] == "pending"
+    with pytest.raises(ApprovalRequired) as ei:
+        await svc.merge_mr(mr_id=prG, actor="alice", message="G")
+    assert ei.value.pending == ["carol", "dave"]
+    # Each approval runs in its own session. Hold each one, once it has read the PR, until the
+    # other has read it too (or 1s passes: a row lock makes the second wait for the first's
+    # commit). Without the lock both read an empty approved_by and the later commit wrote its
+    # list over the earlier one's.
+    arrived, both = [], asyncio.Event()
+    next_seq = svc._next_seq
+
+    async def _rendezvous(*a, **kw):
+        arrived.append(1)
+        if len(arrived) == 2:
+            both.set()
+        try:
+            await asyncio.wait_for(both.wait(), 1.0)
+        except asyncio.TimeoutError:
+            pass
+        return await next_seq(*a, **kw)
+    svc._next_seq = _rendezvous
+    try:
+        await asyncio.gather(svc.approve_pr(pr_id=prG, actor="carol"),
+                             svc.approve_pr(pr_id=prG, actor="dave"))
+    finally:
+        del svc._next_seq
+    meta = await svc.get_pr(prG)
+    assert sorted(meta["approved_by"]) == ["carol", "dave"]
+    assert meta["approval_status"] == "approved" and meta["status"] == "approved"
+    meta = await svc.update_pr(pr_id=prG, reviewers=["carol", "dave", "erin"])   # one more asked
+    assert meta["approval_status"] == "pending" and meta["status"] == "mergeable"
+    # An edit after the approvals makes them stale, and the PR read says whose.
+    await svc.stage_changes(graph_id=gid, branch_id=dG, actor="alice", ops=[_node("G2")])
+    await svc.checkpoint(graph_id=gid, branch_id=dG, actor="alice")
+    meta = await svc.get_pr(prG)
+    assert meta["approved_by"] == [] and sorted(meta["stale_approved_by"]) == ["carol", "dave"]
+    meta = await svc.update_pr(pr_id=prG, reviewers=[])                         # no review needed
+    assert meta["reviewers"] is None and meta["approval_status"] is None
+    assert await svc.merge_mr(mr_id=prG, actor="alice", message="G")
+    with pytest.raises(ValueError):                                             # a merged PR's review is settled
+        await svc.update_pr(pr_id=prG, reviewers=["carol"])
+
     await db.dispose_engine()
 
 

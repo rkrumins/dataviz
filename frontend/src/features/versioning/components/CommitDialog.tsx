@@ -28,6 +28,7 @@ import { queryClient } from '@/lib/queryClient'
 import { MergeConflictError, NotUpToDateError, PullRequestExistsError } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
+import { ReviewerPicker } from './ReviewerPicker'
 import type { ChangeSet } from '../model/changeModel'
 
 export interface CommitDialogProps {
@@ -46,6 +47,8 @@ export interface CommitDialogProps {
 export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
+  /** Who must approve before the review can merge. */
+  const [reviewers, setReviewers] = useState<string[]>([])
   const [conflicts, setConflicts] = useState<number | null>(null)
   const [notUpToDate, setNotUpToDate] = useState(false)
   /** A review we discovered only when the server rejected our open (the race backstop). */
@@ -101,7 +104,10 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
     setConflicts(null)
     setNotUpToDate(false)
     openMr.mutate(
-      { branchId, title: message || undefined, description: description || undefined },
+      {
+        branchId, title: message || undefined, description: description || undefined,
+        reviewers: reviewers.length ? reviewers : undefined,
+      },
       {
         onSuccess: (res) => {
           notify('success', 'Sent for review.')
@@ -242,6 +248,12 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
                   rows={3}
                   className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 resize-none"
                 />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+                  Reviewers <span className="text-ink-muted/50 normal-case font-normal">· optional, they must approve before it merges</span>
+                </label>
+                <ReviewerPicker wsId={workspaceId} value={reviewers} onChange={setReviewers} />
               </div>
             </>
           )}

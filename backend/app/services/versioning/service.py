@@ -2088,9 +2088,12 @@ class GraphVersioningService:
 
         The approval is of the source branch's head now: a content commit after it makes it
         stale (:meth:`_approvals`). ``expected_head_commit_id`` is the head the reviewer saw;
-        :class:`HeadMoved` when the branch has moved on since."""
+        :class:`HeadMoved` when the branch has moved on since.
+
+        The PR row is locked for the transaction, so a second reviewer approving at the same
+        moment waits and adds to this approval rather than writing over it."""
         async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
+            pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status in ("merged", "closed"):
@@ -2131,20 +2134,45 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
+    @staticmethod
+    async def _lock_pr(s, pr_id: str) -> Optional[MergeRequestORM]:
+        """Take a PR's row lock for the transaction and return the row as committed (bounded wait,
+        :meth:`_bounded_lock`): the read-modify-writes of its review state serialize here."""
+        return (await GraphVersioningService._bounded_lock(
+            s,
+            select(MergeRequestORM).where(MergeRequestORM.id == pr_id)
+            .with_for_update().execution_options(populate_existing=True),
+            f"pr {pr_id}",
+        )).scalar_one_or_none()
+
     async def update_pr(
         self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
+        reviewers: Optional[Sequence[str]] = None,
     ) -> dict:
-        """Edit a PR's human title + description (review metadata only — does not touch the
-        merge or status). PATCH semantics: a field left ``None`` is untouched, an empty
-        string clears it."""
+        """Edit a PR's human title + description, and who must review it. PATCH semantics: a
+        field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
+        re-judge ``approval_status`` from the approvals that still stand (:meth:`_approvals`);
+        a merged or closed PR's reviewers are settled."""
         async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
+            pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if title is not None:
                 pr.title = title.strip() or None
             if description is not None:
                 pr.description = description.strip() or None
+            if reviewers is not None:
+                if pr.status in ("merged", "closed"):
+                    raise ValueError(f"pr {pr_id} is {pr.status}")
+                pr.reviewers = list(dict.fromkeys(reviewers)) or None
+                pr.approval_status = None
+                if pr.reviewers:
+                    standing, _stale = await self._approvals(s, pr)
+                    pr.approval_status = "approved" if set(pr.reviewers) <= set(standing) else "pending"
+                if pr.approval_status == "approved" and pr.status == "mergeable":
+                    pr.status = "approved"
+                elif pr.approval_status != "approved" and pr.status == "approved":
+                    pr.status = "mergeable"
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
@@ -4956,10 +4984,11 @@ class GraphVersioningService:
             behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
             behind = behind_by > 0
         # A live PR shows only the approvals that still hold, so a reviewer whose approval went
-        # stale is asked again, and the PR is no longer shown as approved.
+        # stale is asked again, and the PR is no longer shown as approved. ``stale`` names them.
         status, approved_by, approval_status = pr.status, pr.approved_by, pr.approval_status
+        stale: List[str] = []
         if approved_by and status not in ("merged", "closed"):
-            approved_by, _stale = await self._approvals(s, pr)
+            approved_by, stale = await self._approvals(s, pr)
             if pr.reviewers:
                 approval_status = "approved" if set(pr.reviewers) <= set(approved_by) else "pending"
                 if status == "approved" and approval_status != "approved":
@@ -4972,7 +5001,7 @@ class GraphVersioningService:
             "behind": behind, "behind_by": behind_by,
             "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
-            "reviewers": pr.reviewers, "approved_by": approved_by,
+            "reviewers": pr.reviewers, "approved_by": approved_by, "stale_approved_by": stale,
             "approval_status": approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
             "merged_at": pr.merged_at, "merged_by": pr.merged_by, "merged_via": pr.merged_via,

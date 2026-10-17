@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
   MergeConflictError, NotUpToDateError,
@@ -141,7 +142,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const isAuthor = !!user && pr?.actor === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
-  const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && hasReviewers
+  // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
+  // its reviewer is offered Approve again.
+  const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
+  const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && isRequested
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -362,11 +366,20 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                   {hasReviewers && (
                     <p className="text-[12px] text-ink-muted flex items-center gap-1.5 flex-wrap">
                       <ShieldCheck className="w-3.5 h-3.5" /> Reviewers:
-                      {pr.reviewers!.map((r) => (
-                        <span key={r} className={cn('px-1.5 py-0.5 rounded text-[11px]', (pr.approvedBy ?? []).includes(r) ? 'bg-emerald-500/10 text-emerald-600' : 'bg-ink/5 text-ink-muted')}>
-                          {ownerName(r, pr.userNames)}{(pr.approvedBy ?? []).includes(r) ? ' ✓' : ''}
-                        </span>
-                      ))}
+                      {pr.reviewers!.map((r) => {
+                        const who = ownerName(r, pr.userNames)
+                        if ((pr.approvedBy ?? []).includes(r)) {
+                          return <Badge key={r} tone="success" size="md" title={`${who} approved`}>{who} ✓</Badge>
+                        }
+                        if ((pr.staleApprovedBy ?? []).includes(r)) {
+                          return (
+                            <Badge key={r} tone="warning" size="md" title={`${who} approved an earlier version and must approve again`}>
+                              {who} · stale
+                            </Badge>
+                          )
+                        }
+                        return <Badge key={r} size="md" title={`${who} has not approved yet`}>{who}</Badge>
+                      })}
                     </p>
                   )}
                 </div>

@@ -1129,9 +1129,16 @@ class OpenMrRequest(_ApiModel):
 
 
 class UpdatePrRequest(_ApiModel):
-    """Edit a PR's title/description. A field left unset is untouched."""
+    """Edit a PR's title/description/reviewers. A field left unset is untouched."""
     title: Optional[str] = None
     description: Optional[str] = None
+    reviewers: Optional[List[str]] = None
+
+
+class ReviewerCandidate(_ApiModel):
+    user_id: str = Field(alias="userId")
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
 
 
 class OpenPrResponse(_ApiModel):
@@ -1160,6 +1167,8 @@ class PrResponse(_ApiModel):
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
     reviewers: Optional[List[str]] = None
     approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
+    # Reviewers whose approval went stale (a content commit since): they must approve again.
+    stale_approved_by: Optional[List[str]] = Field(default=None, alias="staleApprovedBy")
     approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
     checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
     actor: Optional[str] = None                                       # who raised it
@@ -1187,7 +1196,7 @@ class PrResponse(_ApiModel):
 _ACTOR_ID_FIELDS = (
     "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner",
 )
-_ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by")
+_ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by", "stale_approved_by")
 
 
 def _collect_actor_ids(item: dict) -> set:
@@ -3276,9 +3285,10 @@ async def update_pull_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a PR's title/description (review metadata)."""
+    """Edit a PR's title/description/reviewers (review metadata)."""
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers)
 
 
 @router.get("/pulls/{pr_id}/preview", response_model=MergePreviewResponse)
@@ -3389,6 +3399,34 @@ async def merge_pull_request(
 # --------------------------------------------------------------------------- #
 # Draft -> main merge requests (reviewed publish)                              #
 # --------------------------------------------------------------------------- #
+@router.get("/reviewers", response_model=List[ReviewerCandidate])
+async def list_reviewer_candidates(
+    ws_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who the caller can ask to review: the workspace's active members, bound directly or
+    through a group, whose role here grants manage (approve needs it; workspace admin implies
+    it). Never the caller: they are the PR's author, and an author cannot approve."""
+    from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
+    bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
+    role_perms = await permission_repo.get_role_permissions_for_roles(
+        session, sorted({b.role_name for b in bindings}))
+    ids: set = set()
+    for b in bindings:
+        if not {_MANAGE, "workspace:admin"} & set(role_perms.get(b.role_name, ())):
+            continue
+        if b.subject_type == "user":
+            ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
+    ids.discard(user.id)
+    idents = await user_repo.get_identities_by_ids(session, sorted(ids))
+    people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
+              for uid, i in idents.items() if i["status"] == "active" and not i["deleted"]]
+    return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/merge-requests",
              response_model=OpenPrResponse, status_code=201)
 async def open_merge_request(
@@ -3507,9 +3545,10 @@ async def update_merge_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a merge request's title/description (review metadata)."""
+    """Edit a merge request's title/description/reviewers (review metadata)."""
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers)
 
 
 @router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)

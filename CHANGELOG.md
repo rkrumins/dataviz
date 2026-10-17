@@ -37,6 +37,13 @@ none of the draft's own edits keeps approvals. `POST …/approve` takes an optio
 `{expectedHeadCommitId}` and answers **409 `head_moved`** `{headCommitId}` when the draft has moved
 on. The approval check now runs before the merge is computed.
 
+**Reviewers can be asked when a draft goes for review, and after.** "Submit for review" has a
+reviewer picker listing the workspace members who can approve (`GET …/versioning/reviewers`).
+`PATCH …/merge-requests/{pr}` and `PATCH …/pulls/{pr}` take `reviewers` and re-judge the approval.
+The review shows each reviewer as approved, stale (the new `staleApprovedBy`) or still to approve,
+and offers Approve to the requested reviewers only. Two reviewers approving at the same moment are
+both recorded; before, one approval could overwrite the other.
+
 ### Upgrading
 
 - A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
