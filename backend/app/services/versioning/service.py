@@ -44,8 +44,8 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit,
-                     HeadMoved, JobActive, LockBusy, MainWriteForbidden, MassDeleteBlocked,
-                     NotDraftOwner)
+                     ForkNotRestorable, HeadMoved, JobActive, LiveForks, LockBusy, MainWriteForbidden,
+                     MassDeleteBlocked, NotAFork, NotDraftOwner)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -68,6 +68,7 @@ from .models import (
     WorkingChangeORM,
     _now,
 )
+from .purge_worker import PURGE_JOB_TYPE
 # Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
 # flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
 from backend.app.providers.falkordb_provider import _sanitize_node_properties
@@ -2078,8 +2079,12 @@ class GraphVersioningService:
         ``reviewers`` makes approval a merge precondition: every listed reviewer
         must :meth:`approve_pr` before the PR can merge (plan §17 #5)."""
         async with self._session() as s:
-            fork = await s.get(GraphORM, source_graph_id)
-            if fork is None or not fork.fork_parent_graph_id:
+            # FOR KEY SHARE (15 §8): a delete_fork holding the row sees this PR, or we see its
+            # tombstone; the fork's own publishes do not wait.
+            fork = (await self._bounded_lock(s, select(GraphORM).where(
+                GraphORM.id == source_graph_id).with_for_update(read=True, key_share=True),
+                f"graph {source_graph_id}")).scalar_one_or_none()
+            if fork is None or fork.deleted_at is not None or not fork.fork_parent_graph_id:
                 raise ValueError("source graph is not a fork")
             fork_main = await self._main_branch_id(s, source_graph_id)
             await self._assert_no_live_pr(s, fork_main)
@@ -2102,6 +2107,83 @@ class GraphVersioningService:
             s.add(pr)
             await s.flush()
             return pr.id
+
+    @staticmethod
+    def _assert_minted_fork(g: GraphORM) -> None:
+        """Only a fork :meth:`fork_graph` minted (its ``dsfork_`` id) is trashed and restored on
+        its own; any other graph goes with its data source (:class:`NotAFork`)."""
+        if not g.fork_parent_graph_id or not (g.data_source_id or "").startswith("dsfork_"):
+            raise NotAFork(g.id)
+
+    async def delete_fork(self, *, graph_id: str, workspace_id: str, actor: str) -> str:
+        """Move a fork to the trash; returns its parent's id. Its drafts and pull requests are
+        kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: its
+        parent's purge takes it along. Refused while its pull request into the parent is live
+        (:class:`PullRequestExists`) or forks of its own are (:class:`LiveForks`). The row is
+        held FOR UPDATE, so an open_pr or fork_graph on it (FOR KEY SHARE) is seen or sees us."""
+        async with self._session() as s:
+            fork = (await self._bounded_lock(s, select(GraphORM).where(
+                GraphORM.id == graph_id, GraphORM.workspace_id == workspace_id)
+                .with_for_update(), f"graph {graph_id}")).scalar_one_or_none()
+            if fork is None or fork.deleted_at is not None:
+                raise ValueError("graph not found in workspace")
+            self._assert_minted_fork(fork)
+            await self._assert_no_live_pr(s, await self._main_branch_id(s, graph_id))
+            live = await s.scalar(select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == graph_id, GraphORM.deleted_at.is_(None)))
+            if live:
+                raise LiveForks(graph_id, live)
+            fork.deleted_at, fork.deleted_by = _now(), actor
+            return fork.fork_parent_graph_id
+
+    async def restore_fork(self, *, graph_id: str, workspace_id: str) -> Optional[str]:
+        """Bring a trashed fork back; returns its parent's id, or None when it was not trashed.
+        Refused once a purge of it exists (:class:`ForkNotRestorable` ``purging``), while its
+        parent is missing or trashed (``parent_deleted``), and at the parent's fork cap
+        (:class:`ForkLimit`), counted under the parent's graph lock as fork_graph counts."""
+        async with self._session() as s:
+            f = await s.get(GraphORM, graph_id)
+            if f is None or f.workspace_id != workspace_id:
+                raise ValueError("graph not found in workspace")
+            self._assert_minted_fork(f)
+            if f.deleted_at is None:
+                return None
+            parent_id = f.fork_parent_graph_id
+            await self._lock_graph(s, parent_id)
+            if await self._fork_slot(s, parent_id) is None:
+                raise ForkNotRestorable(graph_id, "parent_deleted")
+            f = (await self._bounded_lock(s, select(GraphORM).where(GraphORM.id == graph_id)
+                 .with_for_update().execution_options(populate_existing=True),
+                 f"graph {graph_id}")).scalar_one_or_none()
+            if f is None or f.workspace_id != workspace_id:
+                raise ValueError("graph not found in workspace")
+            if f.deleted_at is None:
+                return None
+            if await s.scalar(select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                                      JobORM.graph_id == graph_id).limit(1)):
+                raise ForkNotRestorable(graph_id, "purging")
+            f.deleted_at = f.deleted_by = None
+            return parent_id
+
+    async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
+        """A graph's direct forks, newest first, live and trashed: when a trashed one was
+        deleted and by whom, whether its purge is queued (no undo then), and when its undo
+        window (``config.PURGE_GRACE_DAYS``) ends."""
+        purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                          JobORM.graph_id == GraphORM.id).exists()
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(GraphORM, purging.label("purging")).where(
+                    GraphORM.fork_parent_graph_id == graph_id,
+                    GraphORM.workspace_id == workspace_id)
+                .order_by(GraphORM.created_at.desc(), GraphORM.id.desc()).limit(limit))).all()
+        return [{
+            **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
+            "purging": bool(p),
+            "purge_after": (datetime.fromisoformat(g.deleted_at)
+                            + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
+            if g.deleted_at else None,
+        } for g, p in rows]
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
@@ -2252,7 +2334,7 @@ class GraphVersioningService:
                     raise ValueError(f"pr {pr_id} is {pr.status}")
                 fork = await s.get(GraphORM, pr.graph_id)
                 parent = await s.get(GraphORM, pr.target_graph_id)
-                if fork is None or parent is None:
+                if fork is None or parent is None or fork.deleted_at is not None:
                     raise ValueError("pr endpoints missing")
                 await self._lock_graph(s, parent.id)      # serialize merges into this parent's main
                 await s.refresh(parent)                   # head may have advanced before the lock

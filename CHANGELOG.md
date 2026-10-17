@@ -67,6 +67,18 @@ dropping the staged edits.
 
 ## [Unreleased] — Versioning Stage 1: a re-sync can no longer quietly undo people's work
 
+### Added
+
+**Delete a fork, and bring it back.** `DELETE …/versioning/graphs/{forkId}` moves a fork to the
+trash and `POST …/versioning/graphs/{forkId}/restore` brings it back, both for anyone who may
+manage the workspace's data sources. Its drafts and pull requests come back with it. A fork whose
+pull request into its parent is open, or that has live forks of its own, is not deleted (**409**
+`pull_request_exists`, `live_forks`), and a fork is not restored once its purge is queued or while
+its parent is in the trash (**409** `fork_not_restorable`). `GET …/versioning/graphs/{graphId}/forks`
+lists a graph's forks, those in the trash included, with when each one's undo window ends
+(`GRAPHVER_PURGE_GRACE_DAYS`, 30 days). A data source's own graph is still deleted with its data
+source (**409** `not_a_fork`).
+
 ### Changed
 
 **A re-sync refuses to undo curation.** A sync's merge base is `main` as it stood at the last import
@@ -92,6 +104,9 @@ Anyone else gets **403 `needs_admin`**.
   cannot hold `workspace:admin`, so a key cannot override: a workspace admin has to run that sync.
 - The delete limit is set by `GRAPHVER_SYNC_DELETE_MAX_ABS` (default `500`) and
   `GRAPHVER_SYNC_DELETE_MAX_FRACTION` (default `0.05`, a fraction, not a percent).
+- A fork in the trash no longer blocks its parent's permanent delete, unless forks of its own still
+  read through it: it is purged with the parent, and can no longer be restored from then on. A purge
+  that was refused for live forks is retried by the reaper once those forks are deleted.
 
 ### Known limitations
 

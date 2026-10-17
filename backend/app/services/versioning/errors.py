@@ -121,5 +121,34 @@ class ForkLimit(_HttpMapped, RuntimeError):
                          {"type": "fork_limit", "limit": limit})
 
 
+class NotAFork(_HttpMapped, RuntimeError):
+    """A fork route reached a graph that fork_graph did not mint: a data source's graph, or a
+    fork bound to a data source. Those go to the trash and back with their data source."""
+
+    def __init__(self, graph_id: str):
+        self.graph_id = graph_id
+        super().__init__(f"graph {graph_id} is not a fork; it goes with its data source",
+                         {"type": "not_a_fork", "graphId": graph_id})
+
+
+class LiveForks(_HttpMapped, RuntimeError):
+    """The graph still has live forks, which read its history."""
+
+    def __init__(self, graph_id: str, forks: int):
+        self.graph_id, self.forks = graph_id, forks
+        super().__init__(f"{forks} live fork(s) read graph {graph_id}; delete them first",
+                         {"type": "live_forks", "graphId": graph_id, "forks": forks})
+
+
+class ForkNotRestorable(_HttpMapped, RuntimeError):
+    """A trashed fork cannot come back: its purge is queued (``purging``), or its parent is
+    gone (``parent_deleted``)."""
+
+    def __init__(self, graph_id: str, reason: str):
+        self.graph_id, self.reason = graph_id, reason
+        super().__init__(f"fork {graph_id} cannot be restored: {reason}",
+                         {"type": "fork_not_restorable", "graphId": graph_id, "reason": reason})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, HeadMoved, LockBusy, JobActive,
-               CurationAtRisk, MassDeleteBlocked, ForkLimit)
+               CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable)

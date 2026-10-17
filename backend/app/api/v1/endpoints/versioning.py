@@ -13,9 +13,9 @@ Boundary policy
   operations reuse the existing data-source permissions:
     - reads  → ``workspace:datasource:read``
     - writes → ``workspace:datasource:manage``
-  Forking needs ``manage``; opening a PR needs only ``read`` (anyone who can see a
-  fork may propose its changes); **merging** a PR into the base needs ``manage`` on
-  the base's workspace — the governance gate (plan §12.5).
+  Forking, and deleting or restoring a fork, need ``manage``; opening a PR needs only
+  ``read`` (anyone who can see a fork may propose its changes); **merging** a PR into
+  the base needs ``manage`` on the base's workspace — the governance gate (plan §12.5).
 * **Typed contract.** camelCase request/response models; domain errors map to
   HTTP (merge conflict / integrity → 409 with the conflict set; unknown id → 404).
 """
@@ -1116,6 +1116,15 @@ class ForkResponse(_ApiModel):
     fork_base_commit_seq: int = Field(alias="forkBaseCommitSeq")
 
 
+class ForkSummaryResponse(GraphResponse):
+    """One of a graph's forks, live or in the trash (``deletedAt`` set). ``purging``: its purge
+    is queued, so it can no longer be restored; ``purgeAfter``: the end of its undo window."""
+    deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
+    deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
+    purging: bool = False
+    purge_after: Optional[str] = Field(default=None, alias="purgeAfter")
+
+
 class OpenPrRequest(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -1194,7 +1203,7 @@ class PrResponse(_ApiModel):
 # resolved to names HERE — one batched, deduped lookup per request over the
 # request's management session — never as a cross-store join inside the service.
 _ACTOR_ID_FIELDS = (
-    "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner",
+    "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner", "deleted_by",
 )
 _ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by", "stale_approved_by")
 
@@ -3215,6 +3224,62 @@ async def fork_graph(
             parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
             tenant_id=meta.get("tenant_id"),
         )
+
+
+@router.get("/graphs/{graph_id}/forks", response_model=List[ForkSummaryResponse])
+async def list_forks(
+    ws_id: str, graph_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The graph's direct forks, newest first, those in the trash included."""
+    forks = await svc.list_forks(graph_id=graph_id, workspace_id=ws_id, limit=limit)
+    await _attach_user_names(session, forks)
+    return forks
+
+
+async def _record_fork_event(session: AsyncSession, verb: str, ws_id: str, graph_id: str,
+                             parent_id: str) -> None:
+    # After the graphver commit: best-effort, the fork has already moved.
+    from backend.app.services.activity import recorder
+
+    await recorder.record_for_request(
+        session, f"workspace.versioning.fork_{verb}", workspace_id=ws_id,
+        target_type="versioned_graph", target_id=graph_id,
+        details={"forkParentGraphId": parent_id}, best_effort=True)
+
+
+@router.delete("/graphs/{graph_id}", status_code=204)
+async def delete_fork(
+    ws_id: str, graph_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Move a fork to the trash, restorable until its purge is queued. Only a fork: a data
+    source's graph goes with its data source (409 ``not_a_fork``)."""
+    with _domain_errors():
+        parent_id = await svc.delete_fork(graph_id=graph_id, workspace_id=ws_id, actor=user.id)
+    await _record_fork_event(session, "deleted", ws_id, graph_id, parent_id)
+
+
+@router.post("/graphs/{graph_id}/restore", status_code=204)
+async def restore_fork(
+    ws_id: str, graph_id: str,
+    # No graph_in_workspace: it hides the trash. The service scopes the fork to ws_id.
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Bring a trashed fork back. A fork that is not in the trash is left as it is."""
+    with _domain_errors():
+        parent_id = await svc.restore_fork(graph_id=graph_id, workspace_id=ws_id)
+    if parent_id is not None:
+        await _record_fork_event(session, "restored", ws_id, graph_id, parent_id)
 
 
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)

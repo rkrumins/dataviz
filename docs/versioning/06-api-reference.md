@@ -61,7 +61,7 @@ Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLIS
 | Constant | Value | Applies to |
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
-| `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
+| `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**, and delete or restore a fork; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
 | `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, and the graph router's `/resync`. A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission` |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
@@ -128,7 +128,10 @@ Other refusals you will meet on these routers:
 | **422** | `graph_too_large_to_sync` | A sync or re-sync on a graph above the size guard ([§2.9](#29-bulk-ingest--authoritative-sync)) |
 | **409** | `curation_at_risk` | A sync or re-sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
 | **409** | `mass_delete_blocked` | A sync or re-sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
-| **409** | `fork_limit` | A fork of a graph that already has `limit` live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`, default 10); `{limit}` |
+| **409** | `fork_limit` | A fork of a graph that already has `limit` live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`, default 10), or the restore of a fork into a graph that has them; `{limit}` |
+| **409** | `not_a_fork` | A fork delete or restore on a graph `…/forks` did not make: a data source's graph, or a fork bound to a data source. It goes to the trash and back with its data source; `{graphId}` |
+| **409** | `live_forks` | The delete of a fork that has live forks of its own; `{graphId, forks}`. Delete those first |
+| **409** | `fork_not_restorable` | The restore of a fork whose purge is queued (`reason: "purging"`), or whose parent is gone or in the trash (`reason: "parent_deleted"`; restore the parent first); `{graphId, reason}` |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
 
 > **Invariant.** A conflict or violation is **atomic**: the service raises before any partial write,
@@ -276,7 +279,14 @@ scripted run. The endpoints:
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/forks` | **`_MANAGE`** | Copy-on-write fork: a new graph whose `main` starts from this graph's head without copying rows. No body → **201** `{graphId, mainBranchId, forkBaseCommitSeq}`. A graph has at most 10 live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`; a deleted fork does not count): one more is **409 `fork_limit`** `{limit}` |
+| `POST …/forks` | **`_MANAGE`** | Copy-on-write fork: a new graph whose `main` starts from this graph's head without copying rows. No body → **201** `{graphId, mainBranchId, forkBaseCommitSeq}`. A graph has at most 10 live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`; a deleted fork does not count): one more is **409 `fork_limit`** `{limit}`. **404** for a graph in the trash |
+| `GET …/forks` | `_READ` | `?limit` (1–500, default 100) → this graph's direct forks, newest first, those in the trash included: `GraphResponse` plus `deletedAt`, `deletedBy`, `purging` (its purge is queued, so it can no longer be restored) and `purgeAfter`, the end of its undo window (`deletedAt` + `GRAPHVER_PURGE_GRACE_DAYS`, default 30) |
+| `DELETE /graphs/{fork}` | **`_MANAGE`** | Move a fork to the trash → **204**. Its drafts and pull requests are kept and come back with it. It can be restored until its purge is queued; its parent's purge takes it along. **404** when it is unknown or already in the trash; **409 `not_a_fork`**; **409 `pull_request_exists`** while its pull request into the parent is open (close or merge it first); **409 `live_forks`** while forks of its own are live |
+| `POST /graphs/{fork}/restore` | **`_MANAGE`** | Bring a fork back from the trash → **204** (also when it was not in the trash; nothing changes then). **409 `fork_not_restorable`** `{reason}`; **409 `fork_limit`** when its parent already has the maximum of live forks; **409 `not_a_fork`** |
+
+None of the fork routes is open to API keys (**403 `api_key_not_allowed`**). A fork's delete and
+restore are recorded in the workspace's activity (`workspace.versioning.fork_deleted`,
+`…fork_restored`). A pull request from a fork in the trash cannot be opened or merged (**404**).
 
 ### 2.12 Pull requests (fork → base)
 

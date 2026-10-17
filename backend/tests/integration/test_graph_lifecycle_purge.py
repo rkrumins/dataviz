@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from backend.app.services.versioning import db, models, purge_worker
+from backend.app.services.versioning.errors import ForkNotRestorable
 from backend.app.services.versioning.job_lease import Lease
 from backend.app.services.versioning.models import GraphORM, JobORM
 from backend.app.services.versioning.purge_worker import (
@@ -361,7 +362,7 @@ async def test_a_parent_purge_ignores_a_trashed_fork_and_takes_it_along():
     svc = GraphVersioningService()
     ds, gid = await _graph(svc)
     fid, fds = await _fork(svc, gid)
-    await _trash(fds)
+    await svc.delete_fork(graph_id=fid, workspace_id=WS, actor="bob")
     await _trash(ds)
 
     assert await purge_state_for_data_source(data_source_id=ds) == PurgeState()
@@ -369,7 +370,9 @@ async def test_a_parent_purge_ignores_a_trashed_fork_and_takes_it_along():
     assert job_id
     (fork_job,) = await _purges(fid)
     assert fork_job.summary["parentGraphId"] == gid
-    # The fork's purge is queued: past the point of no return, so its restore is refused.
+    # The fork's purge is queued: past the point of no return, so either restore is refused.
+    with pytest.raises(ForkNotRestorable):
+        await svc.restore_fork(graph_id=fid, workspace_id=WS)
     assert (await restore_graphs_for_data_source(data_source_id=fds, workspace_id=WS)).final
     assert (await _row(fid)).deleted_at is not None
 
@@ -427,7 +430,7 @@ async def test_a_fork_row_held_by_a_restore_wins_against_the_parent_purge():
 async def test_a_live_forks_refusal_is_retried_once_the_fork_is_deleted():
     svc = GraphVersioningService()
     ds, gid = await _graph(svc)
-    fid, fds = await _fork(svc, gid)
+    fid, _fds = await _fork(svc, gid)
     await _trash(ds)
     async with db.graphver_session() as s:
         job = JobORM(job_type="purge", graph_id=gid, workspace_id=WS, data_source_id=ds,
@@ -439,7 +442,7 @@ async def test_a_live_forks_refusal_is_retried_once_the_fork_is_deleted():
     assert (await _runner().run_job(await _take(job_id)))["status"] == "failed"
     assert (await _job(job_id)).summary["failure"]["code"] == "live_forks"
 
-    await _trash(fds)
+    await svc.delete_fork(graph_id=fid, workspace_id=WS, actor="bob")
     app, _ = _app([])
     await Reaper(app_session_factory=app).run_once()
     assert (await _job(job_id)).status == "pending"

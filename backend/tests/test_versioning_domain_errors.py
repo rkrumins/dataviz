@@ -18,10 +18,13 @@ from backend.app.services.versioning.errors import (
     BranchNotOpen,
     ContentionExhausted,
     CurationAtRisk,
+    ForkNotRestorable,
     JobActive,
+    LiveForks,
     LockBusy,
     MainWriteForbidden,
     MassDeleteBlocked,
+    NotAFork,
     NotDraftOwner,
 )
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
@@ -87,6 +90,19 @@ async def test_a_private_draft_is_written_only_by_its_owner():
     assert isinstance(info.value, NotDraftOwner)
     await svc._require_edit(None, SimpleNamespace(id="br_m", kind="main", owner=None, is_shared=False),
                             "bob", ())
+
+
+def test_fork_errors_carry_their_answer():
+    for exc, detail in [
+        (NotAFork("g"), {"type": "not_a_fork", "graphId": "g"}),
+        (LiveForks("g", 2), {"type": "live_forks", "graphId": "g", "forks": 2}),
+        (ForkNotRestorable("g", "purging"),
+         {"type": "fork_not_restorable", "graphId": "g", "reason": "purging"}),
+    ]:
+        assert type(exc) in HTTP_MAPPED
+        err = _raised(exc)
+        assert err.status_code == 409
+        assert {k: err.detail[k] for k in detail} == detail and err.detail["message"]
 
 
 @pytest.mark.parametrize("status", ["merged", "abandoned", "publishing"])
