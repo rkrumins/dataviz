@@ -41,6 +41,7 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
+from .errors import BranchNotOpen
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -4690,7 +4691,7 @@ class GraphVersioningService:
         """Edits/checkpoints/publish need an ``open`` draft. Merged or abandoned
         drafts are inert (plan §17 #8); ``main`` stays open for its lifetime."""
         if branch.status != "open":
-            raise ValueError(f"branch {branch.id} is {branch.status}")
+            raise BranchNotOpen(branch.id, branch.status)
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         if not branch.is_shared:                          # private draft → workspace RBAC governs

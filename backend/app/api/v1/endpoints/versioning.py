@@ -60,6 +60,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
+from backend.app.services.versioning.errors import HTTP_MAPPED
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -478,6 +479,8 @@ def _domain_errors():
     """Translate service domain exceptions into HTTP responses."""
     try:
         yield
+    except HTTP_MAPPED as exc:       # first: BranchNotOpen is a ValueError, answered 404 below
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=exc.headers)
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except OntologyViolation as exc:

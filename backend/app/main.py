@@ -2490,6 +2490,21 @@ async def _versioning_not_enabled_handler(request, exc: _VersioningNotEnabled):
     )
 
 
+from backend.app.services.versioning.errors import HTTP_MAPPED as _VERSIONING_HTTP_MAPPED
+
+
+async def _versioning_error_handler(request, exc):
+    """Versioning errors that name their own answer (a closed draft, a busy graph, an
+    active job): routes outside the versioning router reach the client with the same
+    status and detail as routes inside it."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                        headers=exc.headers)
+
+
+for _cls in _VERSIONING_HTTP_MAPPED:
+    app.add_exception_handler(_cls, _versioning_error_handler)
+
+
 # Fallback handlers for raw connectivity errors that bypass the breaker
 # (e.g. errors raised during provider instantiation, before the proxy is in
 # place). In steady state these should be rare because every cached provider
