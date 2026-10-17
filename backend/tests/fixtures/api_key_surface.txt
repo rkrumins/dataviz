@@ -1,0 +1,211 @@
+DELETE /api/v1/api-keys/self self
+DELETE /api/v1/views/{view_id} resource
+DELETE /api/v1/views/{view_id}/library/queries/{query_id} resource
+DELETE /api/v1/views/{view_id}/library/rules/{rule_id} resource
+DELETE /api/v1/views/{view_id}/publish-request resource
+DELETE /api/v1/{ws_id}/assets/rule-sets/{rule_set_id} workspace
+DELETE /api/v1/{ws_id}/graph/edges/{edge_id} resource
+GET /api/v1/admin/catalog filtered
+GET /api/v1/admin/catalog/{item_id} filtered
+GET /api/v1/admin/data-sources/{ds_id}/aggregation-jobs resource
+GET /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id} resource
+GET /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/events resource
+GET /api/v1/admin/data-sources/{ds_id}/check-drift resource
+GET /api/v1/admin/data-sources/{ds_id}/ontology-resolution resource
+GET /api/v1/admin/data-sources/{ds_id}/projection-health resource
+GET /api/v1/admin/data-sources/{ds_id}/readiness resource
+GET /api/v1/admin/ontologies filtered
+GET /api/v1/admin/ontologies/{ontology_id} filtered
+GET /api/v1/admin/ontologies/{ontology_id}/export filtered
+GET /api/v1/admin/workspaces filtered
+GET /api/v1/admin/workspaces/{workspace_id} filtered
+GET /api/v1/admin/workspaces/{workspace_id}/data-sources workspace
+GET /api/v1/admin/workspaces/{workspace_id}/datasources/{ds_id}/cached-ontology resource
+GET /api/v1/admin/workspaces/{workspace_id}/datasources/{ds_id}/cached-schema resource
+GET /api/v1/admin/workspaces/{workspace_id}/datasources/{ds_id}/cached-stats resource
+GET /api/v1/api-keys/self self
+GET /api/v1/views/ filtered
+GET /api/v1/views/count filtered
+GET /api/v1/views/facets filtered
+GET /api/v1/views/histogram filtered
+GET /api/v1/views/me/drafts filtered
+GET /api/v1/views/me/feed filtered
+GET /api/v1/views/me/recent filtered
+GET /api/v1/views/popular filtered
+GET /api/v1/views/stats filtered
+GET /api/v1/views/workspace/{workspace_id}/activity workspace
+GET /api/v1/views/{view_id} resource
+GET /api/v1/views/{view_id}/activity resource
+GET /api/v1/views/{view_id}/library resource
+GET /api/v1/views/{view_id}/library/export resource
+GET /api/v1/views/{view_id}/versions resource
+GET /api/v1/views/{view_id}/versions/compare resource
+GET /api/v1/views/{view_id}/versions/status resource
+GET /api/v1/views/{view_id}/versions/{version} resource
+GET /api/v1/{ws_id}/assets/rule-sets resource
+GET /api/v1/{ws_id}/assets/rule-sets/{rule_set_id} resource
+GET /api/v1/{ws_id}/context-models/templates resource
+GET /api/v1/{ws_id}/context-models/templates/{template_id} resource
+GET /api/v1/{ws_id}/graph/alignment-analysis resource
+GET /api/v1/{ws_id}/graph/bootstrap/duplicates resource
+GET /api/v1/{ws_id}/graph/bootstrap/status resource
+GET /api/v1/{ws_id}/graph/edges resource
+GET /api/v1/{ws_id}/graph/export/plan data_source
+GET /api/v1/{ws_id}/graph/export/stream data_source
+GET /api/v1/{ws_id}/graph/introspection resource
+GET /api/v1/{ws_id}/graph/introspection/refresh/{job_id} resource
+GET /api/v1/{ws_id}/graph/map/{urn} resource
+GET /api/v1/{ws_id}/graph/metadata/distinct/{property} resource
+GET /api/v1/{ws_id}/graph/metadata/entity-types resource
+GET /api/v1/{ws_id}/graph/metadata/ontology resource
+GET /api/v1/{ws_id}/graph/metadata/schema resource
+GET /api/v1/{ws_id}/graph/metadata/tags resource
+GET /api/v1/{ws_id}/graph/nodes resource
+GET /api/v1/{ws_id}/graph/nodes/by-layer/{layer_id} resource
+GET /api/v1/{ws_id}/graph/nodes/by-tag/{tag} resource
+GET /api/v1/{ws_id}/graph/nodes/top-level resource
+GET /api/v1/{ws_id}/graph/nodes/{urn} resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/allowed-children resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/allowed-edges resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/ancestors resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/children resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/children-with-edges resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/delete-impact resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/descendants resource
+GET /api/v1/{ws_id}/graph/nodes/{urn}/parent resource
+GET /api/v1/{ws_id}/graph/search/discover resource
+GET /api/v1/{ws_id}/graph/search/exports/{session_id}/download resource
+GET /api/v1/{ws_id}/graph/search/schema resource
+GET /api/v1/{ws_id}/graph/search/values resource
+GET /api/v1/{ws_id}/graph/stats resource
+GET /api/v1/{ws_id}/graph/sync-status resource
+GET /api/v1/{ws_id}/graph/vocab-alignment resource
+GET /api/v1/{ws_id}/versioning/data-sources/{data_source_id}/pull-requests resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-vs-main resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/children resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-window resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/freshness resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/members resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-preview resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/state resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/view-changes resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/diff/children resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/diff/summary resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore-preview resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/squashed resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/state resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/history resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/summary resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/plan resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/stream resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/download resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/graph/neighbors resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/template resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/preview resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/merge-requests resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/publish-jobs/{job_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/watermark resource
+GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id} resource
+GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff resource
+GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff/children resource
+GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff/summary resource
+GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/preview resource
+GET /api/v1/{ws_id}/versioning/pulls/{pr_id} resource
+GET /api/v1/{ws_id}/versioning/pulls/{pr_id}/diff resource
+GET /api/v1/{ws_id}/versioning/pulls/{pr_id}/diff/children resource
+GET /api/v1/{ws_id}/versioning/pulls/{pr_id}/diff/summary resource
+GET /api/v1/{ws_id}/versioning/pulls/{pr_id}/preview resource
+GET /api/v1/{ws_id}/versioning/resolve resource
+GET /api/v1/{ws_id}/versioning/views/{view_id}/pull-requests resource
+GET /api/v1/{ws_id}/versioning/views/{view_id}/pull-requests/count resource
+PATCH /api/v1/{ws_id}/graph/edges/{edge_id} resource
+PATCH /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id} resource
+PATCH /api/v1/{ws_id}/versioning/merge-requests/{pr_id} resource
+PATCH /api/v1/{ws_id}/versioning/pulls/{pr_id} resource
+POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs resource
+POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/cancel resource
+POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/resume resource
+POST /api/v1/admin/data-sources/{ds_id}/refresh resource
+POST /api/v1/admin/data-sources/{ds_id}/source-changed resource
+POST /api/v1/views/ workspace
+POST /api/v1/views/transfer/export filtered reads-only
+POST /api/v1/views/transfer/export/preview filtered reads-only
+POST /api/v1/views/{view_id}/library/import resource
+POST /api/v1/views/{view_id}/publish-request resource
+POST /api/v1/views/{view_id}/restore resource
+POST /api/v1/views/{view_id}/versions resource
+POST /api/v1/views/{view_id}/versions/{version}/restore resource
+POST /api/v1/{ws_id}/assets/rule-sets workspace
+POST /api/v1/{ws_id}/graph/assignments/compute resource reads-only
+POST /api/v1/{ws_id}/graph/canvas/bootstrap resource reads-only
+POST /api/v1/{ws_id}/graph/canvas/expand resource reads-only
+POST /api/v1/{ws_id}/graph/changes resource
+POST /api/v1/{ws_id}/graph/commands/batch resource
+POST /api/v1/{ws_id}/graph/edges resource
+POST /api/v1/{ws_id}/graph/edges/aggregated resource reads-only
+POST /api/v1/{ws_id}/graph/edges/beneath resource reads-only
+POST /api/v1/{ws_id}/graph/edges/between resource reads-only
+POST /api/v1/{ws_id}/graph/edges/query resource reads-only
+POST /api/v1/{ws_id}/graph/introspection/refresh resource
+POST /api/v1/{ws_id}/graph/nodes/ancestor-chains resource reads-only
+POST /api/v1/{ws_id}/graph/nodes/create resource
+POST /api/v1/{ws_id}/graph/nodes/degree resource reads-only
+POST /api/v1/{ws_id}/graph/nodes/page resource reads-only
+POST /api/v1/{ws_id}/graph/nodes/query resource reads-only
+POST /api/v1/{ws_id}/graph/save resource
+POST /api/v1/{ws_id}/graph/search resource reads-only
+POST /api/v1/{ws_id}/graph/search/advanced resource reads-only
+POST /api/v1/{ws_id}/graph/search/ancestor-counts resource reads-only
+POST /api/v1/{ws_id}/graph/search/catalog resource reads-only
+POST /api/v1/{ws_id}/graph/search/counts resource reads-only
+POST /api/v1/{ws_id}/graph/search/explain resource reads-only
+POST /api/v1/{ws_id}/graph/search/exports resource reads-only
+POST /api/v1/{ws_id}/graph/search/membership resource reads-only
+POST /api/v1/{ws_id}/graph/trace resource reads-only
+POST /api/v1/{ws_id}/graph/trace/closure resource reads-only
+POST /api/v1/{ws_id}/graph/trace/expand resource reads-only
+POST /api/v1/{ws_id}/graph/trace/expand-batch resource reads-only
+POST /api/v1/{ws_id}/graph/trace/v2 resource reads-only
+POST /api/v1/{ws_id}/graph/vocab-alignment/confirm resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/abandon resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/changes resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/commit resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-requests resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/publish resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/rebase resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/bulk-ingest resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/revert resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource reads-only
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/sync resource
+POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/approve resource
+POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/close resource
+POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/merge resource
+POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/approve resource
+POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/close resource
+POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/merge resource
+PUT /api/v1/views/{view_id} resource
+PUT /api/v1/views/{view_id}/layout resource
+PUT /api/v1/views/{view_id}/library/queries resource
+PUT /api/v1/views/{view_id}/library/queries/{query_id} resource
+PUT /api/v1/views/{view_id}/library/rules resource
+PUT /api/v1/views/{view_id}/library/rules/{rule_id} resource
+PUT /api/v1/views/{view_id}/visibility resource
+PUT /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part} resource

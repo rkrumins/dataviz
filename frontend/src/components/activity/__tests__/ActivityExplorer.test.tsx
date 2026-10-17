@@ -315,6 +315,20 @@ describe('every filter is in the URL, and in the request', () => {
         })
     })
 
+    it('a key’s activity is one link: the filter, named, and removable', async () => {
+        service.listEvents.mockResolvedValue({
+            events: [ev({ apiKeyId: 'apk_ci', apiKeyName: 'Nightly sync' })], nextCursor: null, ledger: LEDGER,
+        })
+        const u = userEvent.setup()
+        renderExplorer(PLATFORM, '/admin/audit?act_key=apk_ci&act_days=365')
+        await loaded()
+        expect(lastQuery()).toMatchObject({ apiKeyId: 'apk_ci', range: { kind: 'preset', days: 365 } })
+        const chips = await screen.findByRole('list', { name: 'Active filters' })
+        expect(within(chips).getByText('Nightly sync')).toBeInTheDocument()
+        await u.click(within(chips).getByRole('button', { name: /remove the api key filter/i }))
+        await waitFor(() => expect(urlParams().get('act_key')).toBeNull())
+    })
+
     it('search is offered only over a window the server will search', async () => {
         renderExplorer(PLATFORM, '/admin/audit?act_days=180')
         await loaded()

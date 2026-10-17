@@ -388,6 +388,40 @@ assuming one — so a tab open across the deploy keeps every permission it had, 
 reload. Self-draining: after one refresh TTL no such token can exist and the compatibility
 branch in `_decode_ws` is removable.
 
+### API keys
+
+A request made with an API key carries claims built by `resolve_for_api_key`, never read
+from a session. The owner's live authority — role bindings, groups, the `workspace:admin`
+implication and the organisation-wide shortcuts — is expanded into concrete per-workspace
+grants, each narrowed to the key's profile (`KEY_GRANTABLE_PERMISSIONS`: view read, edit,
+create, delete and publish; data-source, ontology and catalog read; `datasource:manage`) and
+to the workspaces its selection touches. Per workspace, view permissions survive only where
+the workspace or one of its views is selected, data permissions only where the workspace or
+one of its data sources is.
+
+- **No global permission survives.** `global_perms` is empty, so no shortcut, fail-closed
+  permission or administration check is reachable with a key. An owner holding an
+  organisation-wide shortcut, on a key that covers everything, gets `KeyScope.org_perms`:
+  the key's permissions the owner holds in every workspace through that role.
+  `has_permission` honours them for any workspace, as it honours the shortcut for the owner,
+  so the workspaces are never listed (an organisation of 10,000 workspaces cost every claims
+  refresh 112 ms and built `IN` lists past what asyncpg takes). `build_read_scope` takes its
+  organisation-wide branch, the workspace list and lookup reach every workspace, and
+  catalogue visibility is unfiltered only when the role is (`org_unrestricted`).
+- **The selection rides on the claims.** `PermissionClaims.key_scope` (`KeyScope`) is never
+  serialized and is kept by `with_ws`. `view_access` checks it on every identity path —
+  creator, explicit grant, enterprise tier — so a workspace viewer with an editor grant on
+  one view can edit that view with a key limited to it, and nothing else in the workspace.
+  Sharing (`can_manage_grants`) is never open to a key; changing visibility needs the key's
+  publish.
+- **How fast changes reach a key.** Revocation, expiry, the owner's suspension and the SSO
+  pause are read from the database on every request, so they take effect on the next one.
+  The claims themselves are cached per key for 30 seconds (`CLAIMS_TTL_SECONDS`, one
+  resolution in flight per key), so a role or grant the owner loses reaches their keys
+  within that window. The cache never touches the owner's sessions: an earlier version
+  registered it as one, which kept the owner's session index growing for as long as a key
+  was busy.
+
 ## 403 body
 
 When a check fails, the endpoint raises a structured 403:
@@ -740,6 +774,7 @@ last 7 days. Through the API:
 | Activity explorer UI                   | `frontend/src/components/activity/`                           |
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
 | View visibility and publishing         | `backend/app/services/view_access.py`                         |
+| API key claims and scope               | `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`), `backend/app/services/api_key_service.py` (`claims_for_key`) |
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |
 | Migration                              | `backend/alembic/versions/20260603_1100_rbac_uplift.py`       |

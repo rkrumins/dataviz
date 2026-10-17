@@ -13,7 +13,7 @@ validate → scope → execute pipeline and its configuration — is in
 **This page covers:**
 
 - The **objects**: queries, saved queries, display rules, library packs
-- **Signing in from a script** (cookie session + CSRF — there are no API tokens)
+- **Signing in from a script** (an API key, or a cookie session + CSRF)
 - The **query model**: predicates, operators, scope, options, responses
 - Every **search endpoint** and every **view library endpoint**, with RBAC and errors
 - The **library pack format**, a hand-authored pack, and its JSON Schema
@@ -42,8 +42,22 @@ restrictions, [below](#what-a-rules-predicate-may-not-use)).
 
 ## Signing in from a script
 
-{brand}'s API authenticates with a **cookie session**. There are no API keys,
-bearer tokens or service accounts.
+A script authenticates with an **API key** or with a **cookie session** signed
+in with a password. Either way it acts as you. Every endpoint on this page takes
+a key.
+
+**With an API key.** Create one under **Account → API keys** — **Data: read**
+on the data sources you search, **Views: read & write** on the views whose
+library you change ([API Keys](/guide/api-keys)) — and send it in the
+`Authorization` header. No cookies, no CSRF header:
+
+```bash
+B=http://localhost:8000
+HDR=$(mktemp); printf 'Authorization: Bearer %s\n' "$API_KEY" > "$HDR"   # keeps the key off the process list
+auth=(-H @"$HDR" -H 'content-type: application/json')
+```
+
+**With a password:**
 
 1. `POST /api/v1/auth/login` with `{"email": …, "password": …}` sets the
    session cookies: `nx_access` (HttpOnly), `nx_refresh`, `nx_access_exp` and
@@ -608,14 +622,17 @@ with open("tiering.library.json", "w", encoding="utf-8") as f:
 
 ### Dry-run, then apply, to one View
 
-`backend/scripts/publish_view_library.py` signs in, imports a pack and prints
-what each View did. It uses only the Python standard library, so it runs from
-any machine with Python 3.9 or later — from the repository as a module, or
-copied on its own.
+`backend/scripts/publish_view_library.py` imports a pack and prints what each
+View did. It uses only the Python standard library, so it runs from any
+machine with Python 3.9 or later — from the repository as a module, or copied
+on its own. Give it an [API key](/guide/api-keys) that may change views: it
+checks the key, then sends it with every request, and nothing signs in, so it
+works where password sign-in is off. Without a key it signs in with an email
+and password.
 
 ```bash
 export SYNODIC_BASE_URL=https://lineage.example.com
-export SYNODIC_EMAIL=you@example.com SYNODIC_PASSWORD='…'   # or --email / --password; prompted when unset
+export SYNODIC_API_KEY=nxpat_…   # or SYNODIC_EMAIL and SYNODIC_PASSWORD (or --email / --password; prompted when unset)
 
 python -m backend.scripts.publish_view_library tiering.library.json --view view_abc           # dry run
 python -m backend.scripts.publish_view_library tiering.library.json --view view_abc --apply   # import
@@ -628,7 +645,8 @@ python -m backend.scripts.publish_view_library tiering.library.json --view view_
 | `--apply` | off | Import. Without it the run is a dry run and nothing changes |
 | `--branch BRANCH_ID` | — | Write the rules to this draft of each View. The id isn't checked: a wrong one makes rules nobody sees |
 | `--base-url` | `$SYNODIC_BASE_URL`, else `http://localhost:8000` | The API |
-| `--email` / `--password` | `$SYNODIC_EMAIL` / `$SYNODIC_PASSWORD`, else a prompt | The password is never printed |
+| `$SYNODIC_API_KEY` | — | An API key to use instead of signing in. Read only from the environment, so it stays off command lines, and never printed. A paused, expired or revoked key stops the run before any View |
+| `--email` / `--password` | `$SYNODIC_EMAIL` / `$SYNODIC_PASSWORD`, else a prompt | Used when no API key is set. The password is never printed |
 
 ### Publish a pack to every view of a data source
 
@@ -685,9 +703,11 @@ curl -s -b "$JAR" -o pii.csv \
 - **No data-source, workspace or organisation library.** Display rules and saved
   queries belong to one View. "Publish to a data source" is the fan-out above;
   there is no bulk endpoint, and a View created later doesn't inherit anything.
-- **No API tokens or service accounts.** Scripts sign in with a password and
-  echo the CSRF cookie. Where password sign-in is off for single sign-on, only
-  system accounts can.
+- **No service accounts.** A script's API key acts as the person who made it,
+  and stops working when they leave.
+- **The publish script signs in with a password** (`publish_view_library.py`
+  takes no API key). Where password sign-in is off for single sign-on, only
+  system accounts can run it; use the endpoints with a key instead.
 - **Saved queries keep only the predicate** — not the scope mode, options,
   aggregations, sort or template inputs.
 - **"Mine" searches stay in one browser**: no API, no sync, not in any export.

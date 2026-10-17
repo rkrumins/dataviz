@@ -9,6 +9,200 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — API keys: scripts and services that act as you, limited to what you choose
+
+### Added
+
+**API keys.** Anyone can create a key under **Account → API keys** (or **API keys** in the menu
+under their avatar) that lets a script or a service call the API as them — people who sign in
+through an identity provider and have no password included. A key reaches everything its owner
+can, or only chosen workspaces, views and data sources, and may read, or read and change, views
+(with or without publishing to everyone) and data. On anything it reaches it may do what its owner
+may do there at that moment, never more: access taken from a person is taken from their keys
+within 30 seconds.
+
+**Made in five guided steps.** **Purpose** starts from the job — *Read data for reporting*, *Load
+data and signal refreshes*, *Publish views from CI* or *Custom* — and names the key; **Reach**
+recommends the narrowest choice; **Permissions** says what each level lets a script do;
+**Safety** sets the expiry (shown as a date; never only where the deployment allows it) and
+networks, offering the address you are calling from; **Review** shows how exposed the key would be
+and what it could do right now, checked by the server exactly as creating it is
+(`POST /me/api-keys/preview`, which creates nothing). Creating, rotating or renewing a key asks for
+the password, or for a sign-in the identity provider dated within the last 15 minutes — or, through
+an Enterprise gateway, the gateway's word that the company sign-in is still live. The key is
+shown once, with snippets for cURL, Python, JavaScript and `.env`, and the page waits for its first
+call.
+
+**Every key, at a glance.** Each key is a card: its status, what it reaches, when it expires,
+when and from where it was last used, and its requests per day over two weeks. Open one for what it
+can do right now per workspace, view and data source, 30 days of use with refusals and errors, and
+the key it replaced or was replaced by. **Edit** renames a key or says what it is for; **Rotate**
+makes a new token with the same access and keeps the old one working for up to a week (a key is
+replaced once); **Renew** gives an expired key a fresh token; **Revoke** ends it at once. Ended keys
+stay listed for 90 days.
+
+**Scripts send one header.** `Authorization: Bearer nxpat_…` replaces the cookie jar, the CSRF
+header and renewal. `GET /api/v1/api-keys/self` says what a key is and when it stops working;
+`DELETE /api/v1/api-keys/self` revokes it, for whoever holds it, even when it is paused or expired;
+and every answer carries `X-API-Key-Expires-At`. Keys are for the data plane — views, graphs,
+version control, data-source signals and jobs. The API reference marks each operation a key may
+call, and every other route answers `403 api_key_not_allowed`.
+
+**Paused, not forgotten.** The keys of someone who signs in through an identity provider pause when
+they haven't signed in there for 30 days, and resume at their next sign-in, so the keys of someone
+who has left stop without anyone remembering them. A suspended account's keys stop at once.
+
+**Administration → API keys** opens on counts that filter the list — active, expiring within 7
+days, never expiring, unused for 90 days, paused — with tabs for every status, search by key or
+owner, and sorting by name, last use, expiry or creation. Open a key for its owner, access, usage,
+lineage and everything it did (**Its activity**); revoke it with a note its owner sees, or all of a
+person's; **Export CSV** downloads the list as filtered, up to 10,000 keys. The access drawer on
+**Administration → Users** links to a person's keys. Seeing keys needs `system:audit:read`;
+revoking needs `system:users:manage`. Four switches under **Administration → Features →
+Authentication** govern keys: **API keys**, **Longest an API key may live**, **Pause keys of
+people who stop signing in** and **Accept a fresh sign-in round trip for API keys** — off by
+default, it lets people on portal connections, which can't date a sign-in, make keys.
+
+**Enterprise gateway users make keys with nothing to switch on.** When this server can reach the
+gateway (server exchange with an ambient token), creating or rotating a key asks it, then and
+there, whether the company session behind the request is still live: confirmed makes the key, ended
+signs in through the gateway again without leaving the page, and no answer makes nothing (`503
+gateway_unreachable`; try again). No database connection is held while the gateway answers. Where
+only the browser reaches the gateway, a sign-in through it in
+the last 15 minutes counts, and an older one signs in through it again the same way. The request is
+sent again only if the same person is still signed in. Every key's record says how it was
+confirmed.
+
+**Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
+administrator revokes it (with their note), and when a revoked key is presented again or a key is
+used from a network it isn't limited to — even when it only asks about itself.
+
+**Key traffic on your dashboards.** `api_key_requests_total{outcome}` on the API's `/metrics` counts
+every request made with a key: accepted, or the code it was refused with. A wave of paused keys, a
+stranger guessing tokens or key checks failing can now raise an alert, and Observability suggests
+three. The count is never per key, so the series stay bounded; each key's own use is under
+**Administration → API keys**.
+
+### Changed
+
+- **The API Guide leads with keys.** It, and the search and versioning references, show the key
+  first and say which routes still need a password session. Scripts that sign in with a password
+  keep working unchanged.
+- **Sign out everywhere** and **End sessions** say that API keys keep working, and where to revoke
+  them.
+- **`publish_view_library.py` takes an API key.** With `SYNODIC_API_KEY` set, the view library
+  publisher checks the key and sends it instead of signing in, so it works where password sign-in
+  is off. The key is read only from the environment, never from the command line. Without one, it
+  signs in with an email and password as before.
+
+### Security
+
+- **A graph import no longer rewrites a view its caller can't edit.** An import's `?viewId=` made
+  the import rewrite that view's layout, while the route checked only that the caller could manage
+  the data source — so it reached any view on the platform. The view must now be live, in the
+  import's workspace, and editable by the caller (`create_import`, `complete_import_upload`).
+- **Everything a key does is attributed.** Every change made with a key is on **Administration →
+  Activity** with its owner as the actor and the key named — filter by the key, or open **Its
+  activity** on it — including what the control plane does for the request; an aggregation run a
+  key starts is recorded as started through the API. The access log records `authMethod=api_key`
+  with the key's id. Creating, renaming, rotating and revoking keys, and keys refused or misused,
+  are in Activity under Identity and on the owner's **Recent activity**.
+- **A search can't read a view its caller can't open.** A view named in a search's body
+  (`/graph/search/advanced`, `/graph/search/explain`) was used without checking the caller could
+  open it, and `explain` returned its roots, types and layers. It now needs the same access as
+  opening the view.
+- **A job's event stream belongs to its data source.** `GET /admin/data-sources/{ds}/aggregation-jobs/{job}/events`
+  streamed any job named in the path, whatever data source the caller was checked against. A job
+  of another data source is now `404`.
+- **A draft is reached through its own graph.** A merge preview and a draft's view changes
+  (`/versioning/graphs/{graph}/branches/{branch}/merge-preview`, `/view-changes`) did not check that
+  the draft belonged to the graph in the path, or that the caller could read it. Both now do.
+- **Signing in through an identity provider proves when.** The session records whether the
+  provider itself dated the sign-in (`auth_time_proven`), and keeps that through every renewal. A
+  sign-in it re-issued silently, or dated too long ago to use, does not count as a fresh one, and
+  only OIDC and SAML can prove one: a portal's `auth_time`, which it maps from its own payload,
+  never does. The session also names the provider it came from (`idp`), so a confirmation is asked
+  of that provider.
+- **A password confirms a key only while password sign-in is on.** With **Passwords** switched off,
+  a password session — including one opened through the emergency window or the Super Admin
+  outage door — can't create, rotate or renew a key: refused before the password is checked
+  (`step_up_unavailable`, reason `passwords_off`), so a key never outlives the emergency it was
+  made in. The create form says so up front.
+- **A break-glass account holds no keys.** Like a cloud account's root user, the account kept for
+  when nobody else can sign in shouldn't have anything running as it: a system account can't
+  create, rotate or renew a key, however it signed in (`step_up_unavailable`, reason
+  `system_account`), and keys it made before it was marked stop while it is one
+  (`api_key_owner_inactive`) and work again if the mark is removed. Nothing is revoked. The
+  inventory's **Owner suspended** tab is now **Owner inactive**. The seeded administrator is
+  marked on a fresh install, so make keys from a personal account.
+- **Nothing waits on an identity provider that is down.** While the reachability prober has the
+  session's provider confirmed down, creating, rotating or renewing a key through it is answered at
+  once — `503 idp_unreachable` with `Retry-After`, and no sign-in link — rather than asking a gateway
+  that can't answer (holding the request for up to 10 seconds) or
+  sending the person to an error page or the sign-in page's password doors. The create form says so
+  up front, and **Sign in to resume** is hidden until the provider is back. A sign-in the provider
+  proved in the last 15 minutes still counts.
+- **With Passwords off, a password is no way back in.** A key pauses when its owner has no way to
+  sign in; an owner with no single sign-on identity now has none while **Passwords** is switched
+  off — the emergency window closes, so it doesn't count — and their keys pause
+  (`owner_reauth_required`) until passwords come back on or they sign in through single sign-on.
+  Nothing is revoked. Requests read the switch from the cached sign-in posture, within 30 seconds;
+  a server that can't read the posture and has none cached takes passwords as on. The owner's page
+  and the inventory show the keys as paused.
+- **Secret scanners can stop a key being committed.** The API Keys guide gives the pattern every
+  key matches, `nxpat_[0-9A-Za-z]{38}`, to add to GitHub secret scanning with push protection,
+  gitleaks or GitGuardian. A test keeps it matching what the server issues. The guide also says a
+  key is read only from `Authorization`, so a proxy that sets or strips that header stops keys.
+
+### Upgrading
+
+- **Run the upgrade job.** Migrations `20261012_1000_api_keys` and `20261013_1000_api_key_usage`
+  add the `api_keys` and `api_key_usage` tables; `20261013_1100_merge_api_keys`,
+  `20261014_0600_merge_key_filters` and `20261014_1100_merge_sso_keys` join them to `main`'s chain;
+  `20261013_1300_api_key_scale` indexes `user_identities (user_id, last_login_at)` and a key's
+  successor; and, last, `20261014_1200_aal_api_key` adds `auth_audit_log.api_key_id` and a partial
+  index on it (`20261013_1200_activity_api_key` now builds nothing).
+- **The upgrade is one transaction, and waits at most 5 seconds for any lock.** If it fails or gives
+  up — a long-running reader, such as an activity export, holding a table it needs — nothing has
+  changed, servers still on the previous version keep working, and you run it again. Every lock is
+  held until it commits. Measured on Postgres 16 with 10 million activity events, 100,000 people
+  and a million SSO identities, the whole upgrade took 6.7 seconds: sign-ins (which write `users`
+  and `user_identities`) waited up to 4 seconds, and the activity log, changed last, was unreadable
+  for 1.5 seconds at the end.
+- **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
+  Features → Authentication**; people can still see and revoke their keys while it is off.
+- **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` (120 lookups of unknown keys a minute per address).
+- **Name your proxies.** Behind a proxy, `FORWARDED_ALLOW_IPS` must name exactly it: too narrow and
+  a key limited to networks sees the proxy's address; as wide as the shipped Compose and
+  Kubernetes settings (every private range) and a client inside them can claim any address.
+- The control plane runs one more hourly sweep, for expiry reminders and to drop usage counts
+  older than 90 days. Every API process writes its keys' usage counts every 30 seconds.
+
+### Known limitations
+
+- **No service accounts.** A key acts as the person who made it and stops when they leave. An
+  integration that must outlive a person waits for service accounts, which this is built to take
+  ([ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource)).
+- **Data sources have no grants of their own.** A key's data access follows its owner's workspace
+  roles, or reads a data source through a view its owner can open.
+- **Keys can't call** administration, sharing, settings, the inbox, inspecting or importing a view
+  file, data-source administration beyond signals and jobs, or creating a version-controlled graph.
+  Use a password session for those.
+- **Signing out everywhere, changing a password and End sessions leave keys working**, by design:
+  revoke a key you no longer trust.
+- The refresh audit (`refresh_events`) and graph commits record a key's owner, not the key.
+- **Usage counts are best-effort.** A process that stops abruptly loses up to its last 30 seconds
+  of counts, and a streamed response is counted when it starts.
+- **Portal sign-ins can't make keys** unless an administrator turns on **Accept a fresh sign-in
+  round trip for API keys**, and an Enterprise gateway that doesn't answer stops its users making
+  keys until it does.
+- **The inventory's counts take a moment on a large deployment.** A key's status depends on its
+  owner's latest identity-provider sign-in, read for every owner: measured on Postgres 16, the
+  counts take about 0.4 seconds at 100,000 keys from 30,000 owners with a million identities.
+
+---
+
 ## [Unreleased] — Single sign-on first, with a way in when the identity provider is down
 
 ### Changed

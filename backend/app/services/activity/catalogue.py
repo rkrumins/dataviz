@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from backend.app.common.activity_context import (
+    API_KEY_KEY,
     CORRELATION_KEY,
     STATED_REASON_KEY,
     clean_reason,
@@ -312,6 +313,32 @@ def _summary_login_failed(p: dict) -> str:
     return f"Failed password sign-in for {email}: {reason}"
 
 
+def _api_key_label(p: dict) -> str:
+    return f"“{p.get('key_name') or '?'}” ({p.get('token_prefix') or '?'}…)"
+
+
+_API_KEY_REVOKED_BY = {"owner": "by its owner", "self": "with itself", "admin": "by an admin"}
+
+
+def _summary_api_key_revoked(p: dict) -> str:
+    how = _API_KEY_REVOKED_BY.get(p.get("reason"), "")
+    return f"API key {_api_key_label(p)} revoked {how}".rstrip()
+
+
+def _summary_api_key_updated(p: dict) -> str:
+    renamed = ((p.get("changes") or {}).get("name") or {}).get("to")
+    if renamed:
+        return f"API key {_api_key_label(p)} renamed to “{renamed}”"
+    return f"API key {_api_key_label(p)} description changed"
+
+
+def _summary_api_key_refused(p: dict) -> str:
+    return (
+        f"API key {_api_key_label(p)} refused from {p.get('client_ip') or '?'}: "
+        f"{p.get('reason') or 'unspecified'}"
+    )
+
+
 def _summary_session_revoked(p: dict) -> str:
     reason = p.get("reason") or "unspecified"
     n = p.get("sessions_killed") or 1
@@ -401,6 +428,9 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
             "Admins may sign in with a password"
         ),
     ),
+    # A revoked key still being presented, or one used from an address it
+    # does not allow: the key is likely in the wrong hands.
+    "identity.api_key.misuse": ("critical", _summary_api_key_refused),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
     "rbac.workspace.deleted": (
@@ -419,6 +449,8 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
+    "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
+    "identity.api_key.rejected": ("warning", _summary_api_key_refused),
 
     # ── info: binds / creates / updates
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
@@ -458,6 +490,19 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+    "identity.api_key.created": (
+        "info", lambda p: f"API key {_api_key_label(p)} created",
+    ),
+    "identity.api_key.rotated": (
+        "info", lambda p: (
+            f"API key {_api_key_label(p)} created by "
+            + ("renewing an expired one" if p.get("renewed") else "rotating another")
+        ),
+    ),
+    "identity.api_key.updated": ("info", _summary_api_key_updated),
+    "identity.api_key.expiring": (
+        "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
+    ),
 
     # ── SSO sign-in outcomes.
     # ``ref`` is the handle the stuck user was shown on the login page, so it
@@ -707,6 +752,13 @@ LABELS: dict[str, str] = {
     "user.suspended": "Suspended an account",
     "user.reactivated": "Reactivated an account",
     "user.access_denied": "Was refused access",
+    "identity.api_key.created": "Created an API key",
+    "identity.api_key.rotated": "Rotated an API key",
+    "identity.api_key.updated": "Edited an API key",
+    "identity.api_key.revoked": "Revoked an API key",
+    "identity.api_key.expiring": "Reminded of an expiring API key",
+    "identity.api_key.rejected": "Refused an API key",
+    "identity.api_key.misuse": "Refused a misused API key",
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",
@@ -810,6 +862,8 @@ _UNAUTHENTICATED = frozenset({
     "user.login_failed", "user.sso_login_failed", "user.sso_link_denied",
     "user.sso_jit_blocked", "user.sso_unsigned_accepted",
     "user.sso_header_accepted",
+    # Whoever presented the key: it was refused, so not proven to be its owner.
+    "identity.api_key.rejected", "identity.api_key.misuse",
 })
 
 #: Callers that are a service rather than a person.
@@ -818,6 +872,7 @@ _SERVICE_ACTORS = frozenset({"internal", "script", "connector", "system", "sched
 _FAILURE_TYPES = frozenset({
     "user.login_failed", "user.sso_login_failed", "user.sso_link_denied",
     "user.sso_jit_blocked", "user.session_refused",
+    "identity.api_key.rejected", "identity.api_key.misuse",
 })
 _DENIED_TYPES = frozenset({"user.access_denied"})
 
@@ -931,6 +986,8 @@ def _legacy_target(
     if event_type.startswith("sso.backchannel_host"):
         host = _str(p.get("host"))
         return "backchannel_host", host, host
+    if event_type.startswith("identity.api_key."):
+        return "api_key", _str(p.get("key_id")), _str(p.get("key_name"))
     if event_type == "workspace.datasource.moved":
         return "data_source", _str(p.get("data_source_id")), None
     if event_type.startswith("visualization.view."):
@@ -992,7 +1049,7 @@ def fallback_projection(event_type: str) -> dict[str, Any]:
         "actor_id": None, "actor_kind": "system", "subject_id": None,
         "target_type": None, "target_id": None, "target_label": None,
         "workspace_id": None, "data_source_id": None,
-        "stated_reason": None, "correlation_id": None,
+        "stated_reason": None, "correlation_id": None, "api_key_id": None,
         "projection_version": PROJECTION_VERSION,
     }
 
@@ -1051,6 +1108,7 @@ def _project(
         "data_source_id": _str(p.get("data_source_id") or p.get("dataSourceId")),
         "stated_reason": clean_reason(p.get(STATED_REASON_KEY)),
         "correlation_id": valid_correlation_id(_str(p.get(CORRELATION_KEY), 128)),
+        "api_key_id": _str(p.get(API_KEY_KEY), 128),
         "projection_version": PROJECTION_VERSION,
     }
 

@@ -30,6 +30,7 @@ from backend.app.api.v1.feature_gate import (
     resolve_enterprise_view_policy,
 )
 from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
+from backend.app.auth import api_key_errors
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -224,6 +225,15 @@ def _user_id(user) -> str:
     return user.id if user else _ANONYMOUS_USER
 
 
+def _flight_principal(user, claims: PermissionClaims) -> str:
+    """Who a coalesced read is for. An API key sees less than the person who
+    owns it, so a request made with the key and one made by its owner must
+    never be merged into one result — in either direction."""
+    principal = normalised_principal(_user_id(user))
+    key = claims.key_scope
+    return f"{principal}#{key.key_id}" if key is not None else principal
+
+
 def _view_update_changes(old, req) -> dict:
     """Field-level diff between a view and an update request, for the activity
     log. Only human-meaningful top-level fields; ``config`` (filters/layers) is
@@ -402,7 +412,7 @@ async def list_popular_views(
     herd against the views + favourites tables.
     """
     clause, _scope = await _readable_clause(session, user, claims)
-    principal = normalised_principal(_user_id(user))
+    principal = _flight_principal(user, claims)
     key = ("popular", principal, limit)
 
     async def _popular() -> List[ViewResponse]:
@@ -500,7 +510,7 @@ async def get_view_facets(
     wanted = tuple(sorted(set(fields or view_repo.FACET_FIELDS)))
     clause, scope = await _readable_clause(session, user, claims)
     ids_in, created_by_not = _category_filters(f.category, scope, user)
-    principal = normalised_principal(_user_id(user))
+    principal = _flight_principal(user, claims)
 
     async def _facets() -> ViewFacetsResponse:
         return await view_repo.get_view_facets(
@@ -766,6 +776,27 @@ async def authorize_view_create(
             status_code=422,
             detail="visibility must be one of: private, workspace, enterprise",
         )
+
+    key = claims.key_scope
+    if key is not None:
+        # A new view lands in a workspace, not in any view or data source the
+        # key may have been limited to, so creating one needs the whole
+        # workspace in reach. Creating it straight onto the enterprise tier
+        # needs the key's own publish: in an open workspace the rules below
+        # let any creator publish at birth, and a key minted to build views
+        # was not minted to share them with everyone.
+        if not (
+            key.allows("workspace:view:create")
+            and key.selects_workspace(workspace_id)
+        ):
+            raise api_key_errors.out_of_scope(
+                "This API key cannot create views in this workspace.",
+            )
+        if visibility == "enterprise" and not key.allows("workspace:view:publish"):
+            raise api_key_errors.key_forbidden(
+                "api_key_cannot_publish",
+                "This API key was not given permission to publish views.",
+            )
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         from backend.app.services.permission_service import has_permission
@@ -1159,7 +1190,7 @@ async def update_view_visibility(
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
         ctx = await _viewer_context(session, user, claims)
-        if not view_access.can_change_visibility(ctx, view_orm):
+        if not view_access.can_change_visibility(ctx, view_orm, to=visibility):
             raise HTTPException(
                 status_code=403,
                 detail="Only the creator or a workspace admin can change visibility",
@@ -1314,10 +1345,7 @@ async def withdraw_publication_request(
     have answered it."""
     view_orm = await _load_view_orm(session, view_id)
     ctx = await _viewer_context(session, user, claims)
-    is_requester = view_orm.publish_requested_by == user.id
-    if rbac_flag("RBAC_ENFORCE_VIEWS") and not (
-        is_requester or view_access.can_answer_publish_request(ctx, view_orm)
-    ):
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and not view_access.can_withdraw_publish_request(ctx, view_orm):
         raise HTTPException(status_code=403, detail="Not your request to withdraw")
     _clear_publish_request(view_orm)
     await session.flush()

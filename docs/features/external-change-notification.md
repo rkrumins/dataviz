@@ -104,25 +104,31 @@ it — when a signal does less than you expected, this says which step declined.
 is the older equivalent of `scope=auto`. It still works and connectors already
 wired to it need not migrate, but new integrations should use `refresh`.
 
-### Authentication, and the constraint that will bite you
+### Authentication
 
-The route requires a user JWT holding `workspace:datasource:manage` on the
-workspace that owns the data source.
+The route requires `workspace:datasource:manage` on the workspace that owns the
+data source. A connector authenticates with an **API key** made by someone who
+holds that, with **Data: read & write** on the data source or its workspace
+([API Keys](/guide/api-keys)):
 
-> **⚠️ A token alone is not enough today.** CSRF protection is applied to every
-> non-safe method app-wide, with only auth routes exempt. It requires the
-> `nx_csrf` cookie *and* a matching `X-CSRF-Token` header. A machine client
-> presenting only `Authorization: Bearer …` and no cookies is rejected with
-> **403 `csrf_failed`** before the route ever runs.
+```http
+POST /api/v1/admin/data-sources/{ds}/refresh
+Authorization: Bearer nxpat_…
+Content-Type: application/json
 
-In practice this means **there is no polished machine-to-machine credential
-yet.** Your options today:
+{ "scope": "auto", "reason": "nightly load finished" }
+```
+
+No cookies and no CSRF header. The key may signal only the data sources it was
+limited to, and the signal is recorded as the person who made the key.
+
+Your options:
 
 1. **Rely on self-detection** (recommended) — no credential, no integration, ~2
    minutes.
-2. **Behave like a browser session** — authenticate, keep the `nx_csrf` cookie,
-   and echo it in `X-CSRF-Token` on every call. Workable, but you are using a
-   human's credential for a machine.
+2. **An API key** (above) — when the rebuild must start the moment a load
+   finishes. A cookie session signed in with a password works too, but keeps a
+   person's password in the connector.
 3. **Call the control plane directly, from inside the cluster.** The aggregation
    control plane is a separate service that applies no CSRF middleware and
    authenticates every route with a shared bearer token
@@ -184,14 +190,15 @@ never implemented**. It is described in the plan and may look real in design
 documents. It does not exist:
 
 - `POST /api/v1/ingest/source-changed` and its `:batch` twin
-- Per-tenant API keys (`sk_…`, an `ingest_api_keys` table, scoping, revocation)
+- Per-tenant ingest keys (`sk_…`, an `ingest_api_keys` table) — a personal API
+  key on `refresh` takes their place
 - `changeToken` de-duplication for exact-once client retries
-- Per-principal rate limiting and global / per-workspace rebuild budgets
+- Global or per-workspace rebuild budgets (an API key is rate-limited per key,
+  not per rebuild)
 - Refusing `force` for machine principals
-- A CSRF exemption for a bearer-authenticated ingest path
 
-Until those ship, the honest posture is: self-detection is the supported
-integration, and the paths above are what exists.
+Self-detection remains the supported default; an API key on `refresh` is the
+supported way to push.
 
 ## Checking that it worked
 

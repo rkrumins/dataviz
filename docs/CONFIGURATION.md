@@ -84,6 +84,8 @@ Sign-in, session tokens and cookies, single sign-on and the sign-in rate limits.
 | `JWT_SECRET_KEY` | — (secret, set your own) | Key that signs session tokens. Required in every environment: at least 32 characters, and not one of the example values published in this repository, or the API will not start. | `backend/auth_service/core/config.py` |
 | `JWT_SECRET_KEY_PREVIOUS` | — (secret, set your own) | Retired signing keys, comma-separated, newest first. They still verify existing sessions but never sign new ones, so you can rotate `JWT_SECRET_KEY` without signing everyone out. Remove a key once `JWT_REFRESH_EXPIRY_DAYS` have passed. | `backend/auth_service/core/config.py` |
 | `MAX_ACCESS_TTL_MINUTES` | `15` | Upper limit for `JWT_EXPIRY_MINUTES`. Above it, the API will not start when `ENV=production`, and logs a warning otherwise. | `backend/app/main.py` |
+| `RATELIMIT_API_KEY` | `1200/minute` | Requests allowed per API key. Counted per key, so one busy integration never holds back another behind the same address. | `backend/auth_service/core/config.py` |
+| `RATELIMIT_API_KEY_FAILURES_PER_IP` | `120/minute` | Refused API keys allowed per client address before further key requests from it are turned away without a database lookup. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_LOGIN_PER_ACCOUNT` | `10 per 15 minutes` | Failed sign-ins allowed per account. A successful sign-in clears the count, so people who sign in correctly are never throttled. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Requests per client address on the sign-in routes, password and single sign-on. A coarse flood guard: many users can share one address behind a proxy. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT` | `3/hour` | Forgot-password requests allowed per account. | `backend/auth_service/core/config.py` |
@@ -811,6 +813,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_FORCE` | (empty) | `backend/scripts/docker_seed.py` |
 | `SEED_SCALE` | `1` | `backend/scripts/docker_seed.py` |
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
+| `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |

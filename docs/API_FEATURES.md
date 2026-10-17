@@ -13,8 +13,9 @@ with their defaults and the server routes each one controls.
   [Feature flags: adding one, and ending one](/docs/feature-flags-lifecycle).
 
 > **Before you start:** every route under `/api/v1/admin/features` needs `system:admin` (the
-> **Super admin** role). Scripts sign in as described in
-> [Sign in from a script](/docs/api-guide#sign-in-from-a-script).
+> **Super admin** role). Scripts sign in with a password as described in
+> [Sign in from a script](/docs/api-guide#sign-in-from-a-script) — API keys cannot call
+> administration routes.
 
 ## How to read this page
 
@@ -221,6 +222,10 @@ feature open to anyone who knows the URL.
 |---|---|---|---|---|
 | Self-registration | `signupEnabled` | Off | `POST /auth/signup` refuses a sign-up that carries no valid invite | Security. Invited people can always sign up |
 | Invite links | `inviteLinksEnabled` | On | `POST /admin/users/invite` and `/admin/users/invite/bulk` refuse to create links; `GET /auth/verify-invite` reports every link unusable; `POST /auth/signup` and `POST /auth/redeem-invite` refuse invite links with `400` | Kills links already sent; turning it back on revives those that haven't expired |
+| API keys | `apiKeysEnabled` | On | Every request made with an API key is refused `401 api_keys_disabled`; `POST /me/api-keys` and `/me/api-keys/{id}/rotate` refuse `403 api_keys_disabled` | Security: unreadable means refused. Listing and revoking keys stay available |
+| Longest an API key may live | `apiKeyMaxLifetime` | `none` | A ladder (`none`, `365`, `180`, `90`, `30` days): a key older than the maximum is refused as expired, and new keys must expire within it | Applies to keys that already exist |
+| Pause keys of people who stop signing in | `apiKeySsoSignInWindow` | `30` | A ladder (`14`, `30`, `90` days, `off`): a key whose owner has an SSO identity and has not signed in through it within the window is refused `401 owner_reauth_required` until they do | Owners without an SSO identity are not affected |
+| Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from a portal session are refused `403 step_up_unavailable`. OIDC and SAML sessions need a sign-in the provider dated within 15 minutes (`auth_time_proven`); Enterprise gateway sessions need the gateway's confirmation — asked on the request when this server can reach it (`503 gateway_unreachable` if it does not answer), else a sign-in through it within 15 minutes. On: a portal sign-in within 15 minutes is accepted too | Security: unreadable means off. Password sessions are not affected |
 
 ### Lineage
 

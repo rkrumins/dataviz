@@ -86,9 +86,9 @@ become a data source.
 > Others see the providers their workspaces use, read-only, with a note to ask a platform
 > administrator.
 
-From a script, signed in as a Super admin with the API Guide's helper
-([Sign in from a script](/docs/api-guide#sign-in-from-a-script)), test the settings without saving
-them, then save:
+From a script, signed in as a Super admin with the API Guide's password helper — API keys cannot
+call administration routes ([Sign in from a script](/docs/api-guide#sign-in-from-a-script)) — test
+the settings without saving them, then save:
 
 ```bash
 P='{"name": "Lineage store", "providerType": "falkordb", "host": "<host>", "port": 6379,

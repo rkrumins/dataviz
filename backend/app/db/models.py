@@ -2182,6 +2182,10 @@ class UserIdentityORM(Base):
             name="uq_user_identities_user_provider",
         ),
         Index("idx_user_identities_user", "user_id"),
+        # A person's latest sign-in through any provider, read from the
+        # index alone: what keeps their API keys from pausing, asked on every
+        # key request and for every owner on the admin inventory.
+        Index("idx_user_identities_user_login", "user_id", "last_login_at"),
     )
 
     def __repr__(self) -> str:
@@ -3221,6 +3225,111 @@ class RefreshTokenORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# api_keys  (bearer credentials that act as their principal)           #
+# ------------------------------------------------------------------ #
+#
+# One row per key ever minted. The secret itself is never stored — only
+# its SHA-256 — so the row is useless to whoever reads it, and the token
+# is shown to its owner exactly once. Revoked and expired rows are kept:
+# the admin inventory and the audit trail both point at them.
+#
+# ``user_id`` is the principal the key acts as. Today that is always the
+# person who minted it (``kind = 'personal'``); service accounts will be
+# non-human principals minted by their managers, which is what
+# ``created_by`` is for.
+
+class ApiKeyORM(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Text, primary_key=True, default=lambda: f"apk_{uuid.uuid4().hex[:12]}")
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    kind = Column(Text, nullable=False, default="personal")
+    # Who minted it. Equal to ``user_id`` for a personal key.
+    created_by = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+
+    # ``nxpat_`` plus the first characters of the random part — enough for
+    # the owner to tell keys apart and find one in a config file.
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+
+    # The permission profile, JSON: {"views": none|read|write,
+    # "data": none|read|write, "publish": bool}.
+    permissions = Column(Text, nullable=False)
+    # The resource selection, JSON: "all", or {"workspaces": [...],
+    # "views": [...], "dataSources": [...]}.
+    resources = Column(Text, nullable=False)
+    # JSON list of CIDRs the key may be used from; NULL = anywhere.
+    allowed_cidrs = Column(Text, nullable=True)
+
+    expires_at = Column(Text, nullable=True)            # ISO; NULL = never
+    expiry_reminded_at = Column(Text, nullable=True)
+
+    created_at = Column(Text, nullable=False, default=_now)
+    created_ip = Column(Text, nullable=True)
+    created_user_agent = Column(Text, nullable=True)
+
+    # Stamped at most once per few minutes per key (see ``ActivityGate``),
+    # never on every request.
+    last_used_at = Column(Text, nullable=True)
+    last_used_ip = Column(Text, nullable=True)
+    last_used_user_agent = Column(Text, nullable=True)
+
+    revoked_at = Column(Text, nullable=True)
+    revoked_by = Column(Text, nullable=True)
+    revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self
+    # What an administrator told the owner when revoking it, if anything.
+    revoked_note = Column(Text, nullable=True)
+    # The key this one replaced, when minted by a rotation.
+    rotated_from = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_api_keys_token_hash"),
+        Index("idx_api_keys_user", "user_id"),
+        Index("idx_api_keys_expires_at", "expires_at"),
+        # The admin inventory's order, and its "unused for 90 days" filter.
+        Index("idx_api_keys_created_at", "created_at"),
+        # A key's successor, looked up whenever a key is shown or rotated.
+        # Partial: only rotations have one. (Nothing indexes the "last used"
+        # columns, so the stamp they get every few minutes stays cheap.)
+        Index(
+            "idx_api_keys_rotated_from", "rotated_from",
+            postgresql_where=text("rotated_from IS NOT NULL"),
+            sqlite_where=text("rotated_from IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "kind IN ('personal', 'service')", name="ck_api_keys_kind",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ApiKey id={self.id!r} user={self.user_id!r} prefix={self.token_prefix!r}>"
+
+
+class ApiKeyUsageORM(Base):
+    """Requests made with one API key on one day (UTC) — counted in memory
+    by each API process and added here every half minute, never written per
+    request (``api_key_usage``). No foreign key: a key deleted with its owner
+    must not fail the batch a late count arrives in; the housekeeping sweep
+    drops orphans and anything older than 90 days."""
+    __tablename__ = "api_key_usage"
+
+    key_id = Column(Text, primary_key=True)
+    day = Column(Text, primary_key=True)                # YYYY-MM-DD, UTC
+    requests = Column(Integer, nullable=False, default=0, server_default="0")
+    # Of which: changed something; refused as a key (401, 403 or 429 on the
+    # key's own account); failed otherwise (any other 4xx or 5xx).
+    writes = Column(Integer, nullable=False, default=0, server_default="0")
+    refused = Column(Integer, nullable=False, default=0, server_default="0")
+    errors = Column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (Index("idx_api_key_usage_day", "day"),)
+
+
+# ------------------------------------------------------------------ #
 # outbox_events  (transactional outbox for domain events)              #
 # ------------------------------------------------------------------ #
 
@@ -3359,6 +3468,7 @@ class AuthAuditLogORM(Base):
     data_source_id = Column(Text, nullable=True)
     stated_reason = Column(Text, nullable=True)   # the "why" a person gave
     correlation_id = Column(Text, nullable=True)  # the HTTP request it came from
+    api_key_id = Column(Text, nullable=True)      # the API key it was made with
     projection_version = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
@@ -3407,6 +3517,11 @@ class AuthAuditLogORM(Base):
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),
         Index("idx_aal_correlation", "correlation_id"),
         Index("idx_aal_projection_version", "projection_version"),
+        # What one API key did. Partial: most changes are made in a browser,
+        # so it costs a write only for those made with a key.
+        Index("idx_aal_api_key_occurred", "api_key_id", "occurred_at",
+              postgresql_where=text("api_key_id IS NOT NULL"),
+              sqlite_where=text("api_key_id IS NOT NULL")),
     )
 
     def __repr__(self) -> str:

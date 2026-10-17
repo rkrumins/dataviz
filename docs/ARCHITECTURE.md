@@ -133,6 +133,8 @@ sequenceDiagram
 
 Single sign-on ends the same way: the identity provider's callback sets the same cookies. Details: [Multi-Environment Sessions](/docs/multi-environment-sessions), [SSO](/docs/sso), and [ADR-024](/docs/decisions#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens).
 
+Scripts can skip all of this with an API key a person created under **Account → API keys**: one `Authorization: Bearer` header, checked with its owner on every request, acting as that person within the workspaces, views and data sources the key was limited to. A request carrying a key has its cookies removed and needs no CSRF token. Details: [API Keys](/guide/api-keys) and [ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource).
+
 ### 2. Open a view
 
 1. The browser opens `/views/<viewId>`. nginx serves the app, which fetches the view's definition from `GET /api/v1/views/{view_id}`.
@@ -206,6 +208,7 @@ Testing a connection before registering it (`POST /api/v1/admin/providers/test-c
 | Refresh token | Rotates on every use, 7 days by default (`JWT_REFRESH_EXPIRY_DAYS`); each one is backed by a database record, and replaying a used one outside a short grace window revokes its whole family |
 | Session ceilings | 12 hours idle and 7 days absolute for every session; SSO sessions re-authenticate with the identity provider every 24 hours |
 | CSRF | Double-submit token bound to the session, plus an origin check |
+| API keys | Hashed at rest and shown once; header only; limited to chosen resources and to the data plane; checked with the owner on every request; paused when an SSO owner stops signing in; rate-limited per key |
 | Signing keys | `JWT_SECRET_KEY` must be at least 32 characters and not a published placeholder; `JWT_SECRET_KEY_PREVIOUS` lets you rotate without signing everyone out |
 | Credentials at rest | Provider and identity-provider secrets are Fernet-encrypted with `CREDENTIAL_ENCRYPTION_KEY`; with `ENV=production`, storing one without a key is refused |
 | Headers | CSP, HSTS, `X-Frame-Options` and related headers on API responses and, from `frontend/nginx.conf`, on the app's page |
@@ -276,6 +279,7 @@ Seven backend Dockerfiles and one frontend Dockerfile:
 | Provider interface and capabilities | `backend/common/interfaces/provider.py` (`GraphDataProvider`, `PROVIDER_CAPABILITIES`) |
 | Response cache | `backend/app/services/graph_cache.py` (`GraphCache.get_or_compute`) |
 | Sessions and CSRF | `backend/auth_service/cookies.py`, `backend/auth_service/csrf.py` (`CSRFMiddleware`) |
+| API keys | `backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py` (`SURFACE`) |
 | Aggregation control plane and worker | `backend/app/services/aggregation/controlplane.py`, `backend/app/services/aggregation/__main__.py` |
 | Versioning worker | `backend/app/services/versioning/__main__.py` |
 | Stats service | `backend/insights_service/__main__.py` |

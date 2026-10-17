@@ -31,6 +31,7 @@ from .endpoints import (
     telemetry,
     analytics,
     content_insights,
+    api_keys,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -64,6 +65,20 @@ api_router.include_router(
 # RBAC Phase 1: /me/permissions for FE permission hydration.
 api_router.include_router(
     me.router, prefix="/me", tags=["me"],
+)
+# API keys: a person's own (browser session), a key describing or revoking
+# itself, and the inventory for administrators.
+api_router.include_router(
+    api_keys.router, prefix="/me/api-keys", tags=["me:api-keys"],
+)
+api_router.include_router(
+    api_keys.self_router, prefix="/api-keys", tags=["api-keys"],
+)
+api_router.include_router(
+    api_keys.admin_router, prefix="/admin/api-keys", tags=["admin:api-keys"],
+)
+api_router.include_router(
+    api_keys.admin_users_router, prefix="/admin/users", tags=["admin:api-keys"],
 )
 
 # ── Admin routers (workspace-centric) ───────────────────────────────

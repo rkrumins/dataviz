@@ -242,6 +242,9 @@ async def lifespan(app: FastAPI):
     from backend.app.services.refresh_token_gc import (
         run_sweeper as run_refresh_token_gc,
     )
+    from backend.app.services.api_key_housekeeping import (
+        run_sweeper as run_api_key_housekeeping,
+    )
     housekeeping_shutdown = asyncio.Event()
     housekeeping_tasks = [
         asyncio.create_task(
@@ -265,6 +268,10 @@ async def lifespan(app: FastAPI):
             run_warmer(get_readonly_session, housekeeping_shutdown),
             name="analytics-warmer",
         ),
+        asyncio.create_task(
+            run_api_key_housekeeping(get_jobs_session, housekeeping_shutdown),
+            name="api-key-housekeeping",
+        ),
         # The evidence the automatic SSO-outage password fallback acts on.
         asyncio.create_task(
             run_idp_reachability_loop(get_jobs_session, housekeeping_shutdown),
@@ -272,8 +279,8 @@ async def lifespan(app: FastAPI):
         ),
     ]
     logger.info(
-        "Outbox relay, retention sweeps, analytics warmer and IdP "
-        "reachability prober started"
+        "Outbox relay, retention sweeps, analytics warmer, API key "
+        "housekeeping and IdP reachability prober started"
     )
 
     # Store in app state

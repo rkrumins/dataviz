@@ -7,8 +7,8 @@ conventions every endpoint shares, and walks through the six integrations people
 most often. Each recipe is a short procedure with the real request.
 
 > **Before you start:** you need the address you open the app at, and an account that holds
-> the permissions your task needs (each recipe says which). Scripts sign in with that
-> account's password — there are no API tokens yet. You also need `curl` and `jq`, or Python
+> the permissions your task needs (each recipe says which). Scripts act as that account,
+> with an API key it creates or with its password. You also need `curl` and `jq`, or Python
 > 3 with `requests` or `httpx`.
 
 ## Your path
@@ -27,11 +27,74 @@ most often. Each recipe is a short procedure with the real request.
 
 ## Sign in from a script
 
-There are no API keys, bearer tokens or service accounts yet. A script signs in the way the
-browser does: it posts a password, keeps the session cookies, and copies one cookie into a
-header on every write. The script acts as the account it signs in with, and every change it
-makes is recorded under that person's name — so use an account that holds only what the
-script needs.
+A script acts as a person, and every change it makes is recorded under that person's name.
+It gets in one of two ways:
+
+| | API key | Password |
+|---|---|---|
+| Who can use it | Anyone — people who sign in through an identity provider too — unless your administrator switched keys off | Accounts with a password, while password sign-in is switched on |
+| What it reaches | What you chose when you created it — some workspaces, views or data sources, read-only or read & write — and never more than you can | Everything the account can |
+| What it can call | The data plane: views, graphs, drafts and publishing, data-source signals and jobs | Every route |
+| What the script handles | One header | Cookies, a CSRF header on writes, renewal every 15 minutes |
+
+Use a key unless the route you need is one a key cannot call — administration, sharing,
+settings, or importing a view file. Each recipe below says when that is.
+
+### With an API key
+
+Create the key under **Account → API keys**, limited to what the script needs — see
+[API Keys](/guide/api-keys). It is shown once: keep it in your secrets manager, and hand it
+to the script in an environment variable. Send it in the `Authorization` header on every
+request; nothing else is needed — no cookies, no CSRF header, no renewal.
+
+```bash
+B=https://lineage.example.com        # the address you open the app at
+HDR=$(mktemp)                        # the key's header; delete it when you're done
+printf 'Authorization: Bearer %s\n' "$API_KEY" > "$HDR"   # a builtin, so the key stays off the process list
+
+api() {   # api METHOD PATH [more curl options]
+  local method=$1 path=$2; shift 2
+  curl -sS -X "$method" "$B$path" -H @"$HDR" -H 'Content-Type: application/json' "$@"
+}
+
+api GET /api/v1/api-keys/self | jq -r '"\(.name): \(.status), until \(.expiresAt // "never")"'
+```
+
+```text
+nightly lineage sync: active, until 2026-11-11T09:30:00+00:00
+```
+
+In Python, set the header once on the client:
+
+```python
+import os
+import httpx      # or requests: session = requests.Session(); session.headers[...] = ...
+
+api = httpx.Client(base_url=os.environ["API_BASE"], timeout=150,
+                   headers={"Authorization": f"Bearer {os.environ['API_KEY']}"})
+print(api.get("/api/v1/api-keys/self").json()["status"])
+```
+
+- **Never put the key in a URL.** Keys in a query string are not accepted.
+- **Don't send cookies with it.** A request that carries a key is served as the key alone;
+  any session cookies on it are ignored.
+- **Name the data source.** A key limited to particular data sources must pass
+  `?dataSourceId=` on the graph routes (`/api/v1/{ws_id}/graph/…`) — it cannot fall back on
+  the workspace's primary data source.
+- **Watch the expiry.** Every answer carries `X-API-Key-Expires-At`. Rotate the key before
+  that day, in **Account → API keys**; the old token can keep working for up to a week while
+  you swap the new one in.
+
+A refused key answers `401` (the key isn't accepted: mistyped, revoked, expired, or paused
+until you next sign in) or `403` (it is, but may not do this), with the reason in
+`detail.error` — every reason is in
+[When a key is refused](/guide/api-keys#when-a-key-is-refused).
+
+### With a password
+
+A script signs in the way the browser does: it posts a password, keeps the session cookies,
+and copies one cookie into a header on every write. It can do everything the account can —
+so use an account that holds only what the script needs.
 
 ```mermaid
 sequenceDiagram
@@ -62,7 +125,7 @@ sequenceDiagram
    (`SESSION_ABSOLUTE_MAX_HOURS`, `SESSION_IDLE_MAX_HOURS`); then sign in again.
 5. **Sign out** when the script finishes: `POST /api/v1/auth/logout`.
 
-### curl
+#### curl
 
 ```bash
 B=https://lineage.example.com        # the address you open the app at
@@ -95,7 +158,7 @@ quotes intact and off the command line. The search reference's
 shows the same sign-in with the token read once into a fixed header list — fine for a session
 shorter than 15 minutes.
 
-### Python with requests
+#### Python with requests
 
 ```python
 import os
@@ -130,7 +193,7 @@ def call(method, path, **kwargs):
 print(call("GET", "/api/v1/auth/me").json()["user"]["email"])
 ```
 
-### Python with httpx
+#### Python with httpx
 
 ```python
 import os
@@ -161,12 +224,12 @@ The hook reads the cookie jar on every request, so a renewal (`api.post("/api/v1
 needs nothing else. The 150-second timeout leaves room for the slowest routes, which the server
 stops at 120 seconds.
 
-### Verify
+#### Verify
 
 `GET /api/v1/auth/me` answers `200` with your account under `user`, and a write answers
 anything but `403 csrf_failed` — for example `404` for a workspace that doesn't exist.
 
-### When sign-in is refused
+#### When sign-in is refused
 
 | Answer | Why | What to do |
 |---|---|---|
@@ -242,7 +305,7 @@ doesn't match the model, `422`), or an object that names the reason in one of th
 |---|---|---|
 | `type` | `feature_disabled`, `merge_conflict`, `ontology_violation`, `not_up_to_date`, `graph_too_large_to_sync` | Feature switches and the versioned graph |
 | `code` | `PROVIDER_BUSY`, `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `REQUEST_TIMEOUT`, `EXPORTS_BUSY`, `CONFLICT`, `VALIDATION` | The graph store's health, timeouts, exports, the feature-switch API |
-| `error` | `csrf_failed`, `local_login_disabled`, `session_foreign`, `sso_reauth_required` | Sign-in and the session |
+| `error` | `csrf_failed`, `local_login_disabled`, `session_foreign`, `sso_reauth_required`, `api_key_expired`, `api_key_out_of_scope` | Sign-in and sign-up, the session and API keys |
 
 A feature an administrator switched off answers the same way everywhere:
 
@@ -257,8 +320,8 @@ Two answers break the envelope: the retired trace route answers `{"error": {"cod
 | Status | Means |
 |---|---|
 | `400` | A rule of the request broken (a value out of range, an invalid combination) |
-| `401` | Not signed in, or the session expired — renew and retry |
-| `403` | Not allowed; a feature switched off (`feature_disabled`); the CSRF header missing (`csrf_failed`) |
+| `401` | Not signed in, the session expired — renew and retry — or the API key isn't accepted |
+| `403` | Not allowed; a feature switched off (`feature_disabled`); the CSRF header missing (`csrf_failed`); more than the API key may do (`api_key_…`) |
 | `404` | Not found, or in a workspace you can't see |
 | `409` | A conflict: someone else changed it first, a draft is behind its published graph, a job is already running |
 | `410` | A retired route (below) |
@@ -329,8 +392,10 @@ in parts — see [Bulk import and export graph data](#bulk-import-and-export-gra
 
 ## Recipes
 
-Each recipe assumes the curl sign-in above (`B` and `api`). Set `WS` and `DS` to your workspace
-and data source ids first.
+Each recipe assumes either curl helper above (`B` and `api`). Set `WS` and `DS` to your workspace
+and data source ids first. With an API key, **Needs** applies to you, and the key must allow it
+too: **Data: read** to read a graph, **Data: read & write** to change one or signal a data
+source, **Views: read & write** to change a view.
 
 ### Tell the platform a data source changed
 
@@ -396,7 +461,7 @@ views you can read and imports into each — a dry run unless you pass `--apply`
 checkout of the repository; it needs only Python's standard library:
 
 ```bash
-export SYNODIC_BASE_URL=$B SYNODIC_EMAIL=you@example.com     # it asks for the password
+export SYNODIC_BASE_URL=$B SYNODIC_API_KEY=nxpat_…     # a key that may change views; or SYNODIC_EMAIL, and it asks for the password
 python -m backend.scripts.publish_view_library governance.library.json --data-source "$DS"
 python -m backend.scripts.publish_view_library governance.library.json --data-source "$DS" --apply
 ```
@@ -408,7 +473,9 @@ The pack format, the strategies (`merge`, `copy`, `replace`) and the script's ex
 
 **Needs:** the **View versions, import and export** switch on in both environments — it ships
 off (`viewPortabilityEnabled`). Read access to the views you export; in the target,
-`workspace:view:create` in the workspace for a new view, or edit access to update one.
+`workspace:view:create` in the workspace for a new view, or edit access to update one. An API
+key can export (step 1), but not inspect, check or import: in the target, sign in with a
+password.
 
 A view file (`*.view.json`) carries a view's design — its layers, assignments, rules and
 settings — and is checked against the target's graph before anything is written.
@@ -548,7 +615,7 @@ publish.
             -d "{\"fileName\": \"lineage.ndjson\", \"size\": $SIZE, \"format\": \"ndjson\"}")
    ID=$(jq -r .uploadId <<<"$UP"); PART=$(jq -r .partBytes <<<"$UP"); PARTS=$(jq -r .parts <<<"$UP")
    for ((n = 0; n < PARTS; n++)); do
-     (( n > 0 && n % 20 == 0 )) && api POST /api/v1/auth/refresh -o /dev/null   # stay signed in
+     (( n > 0 && n % 20 == 0 )) && api POST /api/v1/auth/refresh -o /dev/null   # a password session: stay signed in
      dd if=lineage.ndjson bs="$PART" skip="$n" count=1 2>/dev/null |
        api PUT "/api/v1/$WS/versioning/graphs/$GID/imports/uploads/$ID/parts/$n" --data-binary @- -o /dev/null
    done
@@ -676,7 +743,12 @@ in [Single Sign-On](/guide/sso-setup).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Every write answers `403` `csrf_failed` | The `X-CSRF-Token` header is missing, or holds an old value after a renewal | Read `nx_csrf` again before every write, as the helpers above do |
+| Every write answers `403` `csrf_failed` | The `X-CSRF-Token` header is missing, or holds an old value after a renewal. With an API key: the request carries an `Origin` or `Referer` from another site | Read `nx_csrf` again before every write, as the helpers above do. With a key, send neither header |
+| `401` `api_key_expired`, `api_key_revoked` or `invalid_api_key` | The key is past its expiry, revoked, or not copied in full | Find it on **Account → API keys** by its first characters: rotate an expired key, create a new one for a revoked key |
+| `401` `owner_reauth_required` | The key is paused: its owner hasn't signed in through the identity provider for a while | Sign in to the app once; the key resumes |
+| `403` `api_key_not_allowed` | The route can't be called with a key — administration, sharing, settings, importing a view file | Sign in with a password for it |
+| `403` `api_key_out_of_scope` | The request reaches past what the key was limited to — or a key limited to data sources didn't name one | Pass `?dataSourceId=`, or use a key that reaches it |
+| `403` `api_key_read_only` | A read-only key asked to change something | Use a key with read & write |
 | Requests work, then all answer `401` | The access cookie expired | Renew with `POST /api/v1/auth/refresh` and retry; sign in again if the renewal is refused too |
 | `401` with `{"error": "session_foreign"}` | The cookies belong to another environment or signing key | Start a new cookie jar and sign in again |
 | `403` `feature_disabled` | An administrator switched the feature off | Ask them, or see [Feature Switches API](/docs/api-features) for which switch |
@@ -693,6 +765,11 @@ in [Single Sign-On](/guide/sso-setup).
 | Sign-in, renewal, sign-out | `backend/auth_service/api/router.py` | `login`, `refresh`, `logout`, `me` |
 | Cookie names and the environment suffix | `backend/auth_service/cookies.py` | `ACCESS_COOKIE_NAME`, `CSRF_COOKIE_NAME`, `_scoped` |
 | CSRF and origin checks | `backend/auth_service/csrf.py` | `CSRFMiddleware` |
+| API keys on a request: checks, scope fence | `backend/app/auth/api_key_auth.py` | `authenticate`, `_REFUSALS` |
+| Which routes a key may call | `backend/app/auth/api_key_surface.py` | `SURFACE` |
+| Creating, previewing, renaming, rotating and revoking keys; the key describing itself | `backend/app/api/v1/endpoints/api_keys.py` | `create_my_api_key`, `preview_my_api_key`, `update_my_api_key`, `rotate_my_api_key`, `describe_this_key` |
+| Every key: counts, filters, detail, revoking with a note, CSV export | `backend/app/api/v1/endpoints/api_keys.py`, `backend/app/db/repositories/api_key_repo.py` | `api_key_stats`, `list_api_keys`, `export_api_keys`, `status_expr` |
+| Counting each key's requests per day | `backend/app/services/api_key_usage.py` | `record_request`, `UsageRecorder.flush` |
 | Session lifetimes and sign-in limits | `backend/auth_service/core/config.py` | `JWT_EXPIRY_MINUTES`, `SESSION_ABSOLUTE_MAX_HOURS`, `RATELIMIT_LOGIN_PER_ACCOUNT` |
 | Router mounts and URL prefixes | `backend/app/api/v1/api.py` | `api_router` |
 | Explorer switch, error handlers, body and time limits | `backend/app/main.py` | `_DOCS_ENABLED`, `_feature_disabled_handler`, `_provider_busy_handler`, `_BodySizeLimitMiddleware`, `_TimeoutMiddleware` |

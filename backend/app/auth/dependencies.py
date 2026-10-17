@@ -37,6 +37,7 @@ from backend.auth_service.core.tokens import (
     decode_token, is_foreign_token_error, password_change_pending,
 )
 from backend.auth_service.interface import IdentityService, User
+from backend.app.auth import api_key_auth
 from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
@@ -236,7 +237,13 @@ async def get_current_user(request: Request) -> User:
     the platform; the JWT TTL is still the staleness floor. Fail-
     closed only applies on routes that explicitly opt-in via
     ``requires(...)`` against a sensitive permission.
+
+    A request presenting an API key authenticates with the key alone — see
+    ``api_key_auth``.
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.user
     token = read_access_cookie(request)
     user = await _identity_service(request).validate_session(token)
     if user is None:
@@ -298,7 +305,13 @@ async def get_optional_user(request: Request) -> User | None:
     Optional means "may be anonymous", not "may skip the password-change
     hold": a session that must change its password is refused here as it
     is everywhere else.
+
+    Nor does it mean "a bad API key is anonymous": a request that presents
+    a key is refused if the key is, here as everywhere.
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.user
     token = read_access_cookie(request)
     user = await _identity_service(request).validate_session(token)
     if user is None or not token:
@@ -435,7 +448,13 @@ async def get_permission_claims(request: Request) -> PermissionClaims:
     ``ws_available=False`` and an empty map. Callers that needed the
     workspace half must treat that as 503, not as a denial — see
     ``requires``.
+
+    For a request made with an API key, the key's own claims: the owner's
+    authority, narrowed to the key (``permission_service.resolve_for_api_key``).
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.claims
     token = read_access_cookie(request)
     if not token:
         raise HTTPException(
@@ -676,6 +695,28 @@ async def _audit_access_denied(
         )
 
 
+def _key_holds_the_named_source(
+    request: Request, claims: PermissionClaims, workspace_id: str,
+) -> bool:
+    """For an API key on part of a workspace, a data-source permission there
+    is held for the data sources it selects, and the request must name one
+    of those if it names any. Its claims carry the permission for the whole
+    workspace as soon as it selects one source in it, so without this a
+    route its holders need membership of would answer for a sibling source
+    the key reaches only through a view (a view's own data is the
+    capability gate's to open, read-only). A request that names no source
+    is held by its resolver (``graph_in_workspace``, …)."""
+    key = claims.key_scope
+    if key is None or key.selects_workspace(workspace_id):
+        return True
+    named = (
+        request.path_params.get("ds_id")
+        or request.path_params.get("data_source_id")
+        or request.query_params.get("dataSourceId")
+    )
+    return named is None or key.selects_data_source(named, workspace_id)
+
+
 def requires(
     permission: str,
     *,
@@ -764,6 +805,8 @@ def requires(
             allowed = has_permission_any_workspace(claims, permission)
         else:
             allowed = has_permission(claims, permission, workspace_id=workspace_id)
+        if allowed and workspace_id is not None and permission.startswith("workspace:datasource:"):
+            allowed = _key_holds_the_named_source(request, claims, workspace_id)
 
         # A denial reached by consulting a workspace map that nothing could
         # populate is not a denial — it is an unanswered question, and 403

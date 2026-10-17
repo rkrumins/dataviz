@@ -320,6 +320,10 @@ export const guideMeta: Record<string, DocMeta> = {
     "updated": "2026-10-10",
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
+  "api-keys": {
+    "updated": "",
+    "path": "docs/guide/API_KEYS.md"
+  },
   "versioning-change-control": {
     "updated": "2026-10-11",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"

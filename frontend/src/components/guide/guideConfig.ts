@@ -289,6 +289,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'Entity and relationship types, how they look, and changing them safely',
     importFn: () => import('@docs/guide/SEMANTIC_LAYER.md?raw'),
   },
+  {
+    slug: 'api-keys',
+    section: 'builder',
+    persona: 'builder',
+    title: 'API Keys',
+    description: 'Let a script or service read and change views and data as you — limited to what you choose',
+    importFn: () => import('@docs/guide/API_KEYS.md?raw'),
+  },
 
   // Versioning & Change Control
   {

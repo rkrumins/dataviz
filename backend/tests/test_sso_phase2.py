@@ -174,6 +174,27 @@ def test_refresh_token_auth_time_optional():
     assert claims.auth_time is None
 
 
+def test_only_the_sign_in_itself_can_mark_its_instant_proven():
+    """``auth_time_proven`` is what lets an SSO session mint an API key, so
+    nothing but the sign-in may set it — never an ``extra`` claim, and
+    never without an instant to prove."""
+    proven = token_module.AUTH_TIME_PROVEN_CLAIM
+    forged, claims = token_module.create_refresh_token(
+        user_id="u1", auth_time=int(time.time()), extra={proven: True},
+    )
+    assert not claims.auth_time_proven
+    assert not token_module.decode_refresh_token(forged).auth_time_proven
+    undated, claims = token_module.create_refresh_token(user_id="u1", auth_time_proven=True)
+    assert not claims.auth_time_proven
+    assert not token_module.decode_refresh_token(undated).auth_time_proven
+
+    signed_in, claims = token_module.create_refresh_token(
+        user_id="u1", auth_time=int(time.time()), auth_time_proven=True,
+    )
+    assert claims.auth_time_proven
+    assert token_module.decode_refresh_token(signed_in).auth_time_proven
+
+
 # ── Custom IdP envelope ─────────────────────────────────────────────
 
 

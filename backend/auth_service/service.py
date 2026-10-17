@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote, urlsplit
 
 import jwt as pyjwt
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .core.config import (
     JWT_EXPIRY_MINUTES,
@@ -41,9 +41,14 @@ from backend.common.identity_provenance import asserted_fields, build_snapshot
 
 from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
 from .activity import ActivityGate
+from .core import api_keys
 from .core.password import disabled_password_hash, verify_password
 from .core.tokens import (
+    AUTH_TIME_CLAIM,
+    AUTH_TIME_PROVEN_CLAIM,
+    IDP_VOUCHED_AT_CLAIM,
     SIGNIN_CLAIM,
+    SIGNIN_PROVIDER_CLAIM,
     SIGNIN_PASSWORD,
     SIGNIN_SSO,
     create_access_token,
@@ -61,11 +66,16 @@ from .app_auth_config import (
 )
 from .csrf import mint_csrf_token
 from .interface import (
+    ApiKeyIdentity,
+    ApiKeyLookupUnavailable,
+    ApiKeyPolicy,
+    ApiKeyRejected,
     InvalidCredentials,
     InvalidRefreshToken,
     SessionTokens,
     SSOAuthError,
     SsoReauthRequired,
+    StepUpTarget,
     User,
 )
 from .providers import ProviderCredentials, get_provider
@@ -232,6 +242,13 @@ class LocalIdentityService:
         SSO outage is confirmed (see :meth:`_password_door`), and when a
         connection below ``verified`` would link itself to an existing
         account.
+      * ``api_key_repo`` — the ``api_keys`` repository, for
+        :meth:`validate_api_key`. ``None`` refuses every key.
+      * ``api_key_claims_resolver(session, key)`` -> claims — what a request
+        made with this key may do; opaque here.
+      * ``api_key_rejection_hook(session, *, key, reason, client_ip,
+        user_agent)`` -> None — records a refused key; written in the lookup's
+        own transaction, best-effort.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -259,6 +276,9 @@ class LocalIdentityService:
         avatar_fetcher: Optional[
             Callable[..., Awaitable[tuple[bytes, str]]]
         ] = None,
+        api_key_repo=None,
+        api_key_claims_resolver: Optional[Callable[..., Awaitable[Any]]] = None,
+        api_key_rejection_hook: Optional[Callable[..., Awaitable[None]]] = None,
     ):
         self._session_factory = session_factory
         self._user_repo = user_repo
@@ -306,6 +326,13 @@ class LocalIdentityService:
         self._auth_config_provider: AuthConfigProvider = (
             auth_config_provider or StaticAuthConfigProvider()
         )
+        # API keys. Injected for the same isolation reason as the hooks
+        # above. Key traffic stamps the key's own "last used", gated like
+        # "last seen" — and never "last seen", which means a person was here.
+        self._api_key_repo = api_key_repo
+        self._api_key_claims_resolver = api_key_claims_resolver
+        self._api_key_rejection_hook = api_key_rejection_hook
+        self._key_use_gate = ActivityGate()
 
     # ── Service protocol ──────────────────────────────────────────────
 
@@ -379,6 +406,210 @@ class LocalIdentityService:
                 )
         except Exception as exc:  # noqa: BLE001 — best-effort by design
             logger.warning("Could not record last-seen for %s: %s", user_id, exc)
+
+    async def validate_api_key(
+        self,
+        token: str,
+        *,
+        client_ip: Optional[str],
+        user_agent: Optional[str],
+        policy: ApiKeyPolicy,
+        allow_inactive: bool = False,
+    ) -> ApiKeyIdentity:
+        """See ``IdentityService.validate_api_key``.
+
+        One read per request — the key, its owner and the owner's identity
+        facts together — so revocation, expiry, suspension and the SSO pause
+        take effect on the very next request, as they do for a session.
+        Whether a password still counts as a way in comes from the platform
+        posture, cached, so switching Passwords off takes effect within the
+        cache's lifetime (30 s). A malformed token is refused before any
+        lookup.
+        """
+        if self._api_key_repo is None or not api_keys.looks_valid(token):
+            raise ApiKeyRejected("malformed")
+        token_hash = api_keys.hash_token(token)
+        now = datetime.now(timezone.utc)
+        passwords_allowed = (await self._auth_config_provider.get()).allow_local_login
+        refusal: Optional[ApiKeyRejected] = None
+        identity: Optional[ApiKeyIdentity] = None
+        try:
+            async with self._session_factory() as session:
+                row = await self._api_key_repo.find_for_auth(session, token_hash)
+                if row is None:
+                    raise ApiKeyRejected("unknown")
+                reason = _api_key_refusal(
+                    row, now=now, client_ip=client_ip, policy=policy,
+                    passwords_allowed=passwords_allowed,
+                )
+                if reason is not None:
+                    # Recorded even where the key is let through to describe
+                    # or revoke itself: a key presented from outside its
+                    # networks is a key in someone else's hands, whatever
+                    # they ask it.
+                    await self._record_api_key_rejection(
+                        session, row.key, reason,
+                        client_ip=client_ip, user_agent=user_agent,
+                    )
+                if reason is not None and not (
+                    allow_inactive and reason in _SELF_SERVICE_REASONS
+                ):
+                    refusal = ApiKeyRejected(reason, key_id=row.key.id)
+                else:
+                    roles = await self._user_repo.get_user_roles(session, row.owner.id)
+                    claims = None
+                    if reason is None and self._api_key_claims_resolver is not None:
+                        claims = await self._api_key_claims_resolver(session, row.key)
+                    identity = ApiKeyIdentity(
+                        key_id=row.key.id,
+                        kind=row.key.kind,
+                        user=_orm_to_user(row.owner, role=_primary_role(roles)),
+                        claims=claims,
+                        expires_at=_api_key_expiry(row.key, policy),
+                        status=reason or "active",
+                    )
+        except ApiKeyRejected:
+            raise
+        except (SQLAlchemyError, OSError) as exc:
+            logger.warning("API key lookup unavailable: %s", exc)
+            raise ApiKeyLookupUnavailable() from exc
+        if refusal is not None:
+            raise refusal
+        assert identity is not None
+        if identity.status == "active":
+            await self._note_api_key_used(
+                identity.key_id, client_ip=client_ip, user_agent=user_agent,
+            )
+        return identity
+
+    async def step_up_target(
+        self, user_id: str, *, next_path: str, provider_id: Optional[str] = None,
+    ) -> StepUpTarget:
+        """Where to send someone to prove it is them again — the provider
+        their session signed in through (``provider_id``), or for a session
+        that does not say, the one they signed in with most recently — asked
+        for a fresh authentication rather than the warm session it may still
+        hold; and how that provider can confirm it (``STEP_UP_CONFIRMS``).
+
+        OIDC (``prompt=login`` with ``max_age``) and SAML (``ForceAuthn``)
+        report when the person authenticated. A gateway cannot be made to,
+        but can be asked: when the company session reaches this server
+        (server exchange with an ambient token source), now; when only the
+        browser holds it, by signing in through it. A portal can do neither.
+
+        While the prober has that provider confirmed down, the target says so
+        (``unreachable``)."""
+        async with self._session_factory() as session:
+            provider = None
+            if provider_id and self._user_identity_repo is not None:
+                provider = next((
+                    i.provider
+                    for i in await self._user_identity_repo.list_for_user(session, user_id)
+                    if i.provider_id == provider_id
+                ), None)
+            provider = provider or await self._latest_identity_provider(session, user_id)
+        kind = getattr(provider, "kind", None)
+        if kind in _PROVES_FRESH_SIGN_IN:
+            confirms = "proven"
+        elif kind == "backchannel":
+            gateway = await self._gateway(provider.id)
+            confirms = (
+                "gateway_live" if gateway is not None and _ambient_source(gateway.settings)
+                else "gateway_sign_in"
+            )
+        else:
+            confirms = "none"
+        slug = getattr(provider, "slug", None)
+        url = _build_reauth_url(slug, next_path=next_path, force=True)
+        down = sso_outage_slugs(await self._auth_config_provider.get())
+        return StepUpTarget(
+            login_url=url, confirms=confirms, unreachable=bool(slug) and slug in down,
+            slug=slug,
+        )
+
+    async def confirm_live_session(
+        self, provider_id: str, *, ambient_cookies: dict, ambient_headers: dict,
+    ) -> str:
+        """Ask the gateway whether the company session on this request is
+        live, for a step-up — the renewal check's question, without its grace
+        window: an unanswered question confirms nothing here, so
+        ``unreachable`` is the caller's to refuse on. Asked whatever the
+        connection's ``liveness_on_refresh``: that trades a call per renewal
+        against how soon a session ends, and a step-up is one call."""
+        gateway = await self._gateway(provider_id)
+        raw = _ambient_token(
+            gateway.settings, cookies=ambient_cookies, headers=ambient_headers,
+        ) if gateway is not None and _ambient_source(gateway.settings) else None
+        if not raw:
+            return "absent"
+
+        from .providers.backchannel import SessionRevokedUpstream
+        try:
+            await asyncio.wait_for(
+                gateway.confirm_still_authenticated(raw), _LIVENESS_DEADLINE_SECONDS,
+            )
+        except SessionRevokedUpstream:
+            return "rejected"
+        except Exception as exc:  # noqa: BLE001 — no answer, whatever the reason
+            logger.warning(
+                "Gateway %s did not confirm a step-up's company session: %s",
+                provider_id, exc,
+            )
+            return "unreachable"
+        return "confirmed"
+
+    async def _gateway(self, provider_id: Optional[str]):
+        """The back-channel provider ``provider_id`` names, or ``None``."""
+        from .providers.backchannel import BackchannelProvider
+        from .providers.registry import ProviderNotFound, get_registry
+
+        if not provider_id:
+            return None
+        try:
+            provider = await get_registry().get(provider_id)
+        except (ProviderNotFound, RuntimeError):
+            return None
+        return provider if isinstance(provider, BackchannelProvider) else None
+
+    async def _record_api_key_rejection(
+        self, session, key, reason: str, *,
+        client_ip: Optional[str], user_agent: Optional[str],
+    ) -> None:
+        """Hand a refused key to the audit hook, inside the lookup's own
+        transaction. Best-effort: a failure to record never changes the
+        answer the caller gets."""
+        hook = self._api_key_rejection_hook
+        if hook is None:
+            return
+        try:
+            await hook(
+                session, key=key, reason=reason,
+                client_ip=client_ip, user_agent=user_agent,
+            )
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record API key refusal (%s): %s", key.id, exc)
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _note_api_key_used(
+        self, key_id: str, *, client_ip: Optional[str], user_agent: Optional[str],
+    ) -> None:
+        """Stamp the key's "last used" — gated and in its own session, like
+        ``_note_seen``, so a failed stamp never costs the request."""
+        touch = getattr(self._api_key_repo, "touch_last_used", None)
+        if touch is None or not self._key_use_gate.opens(key_id):
+            return
+        try:
+            async with self._session_factory() as session:
+                await touch(
+                    session, key_id, ip=client_ip, user_agent=user_agent,
+                    resolution_seconds=ACTIVITY_RESOLUTION_SECONDS,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record API key use for %s: %s", key_id, exc)
 
     async def auth_config(self) -> AuthConfigSnapshot:
         """Expose the current platform posture to the routing layer.
@@ -719,6 +950,7 @@ class LocalIdentityService:
             user_id=claims.sub,
             family_id=claims.family_id,
             auth_time=claims.auth_time,
+            auth_time_proven=claims.auth_time_proven,
             # Family-invariant, like auth_time: the upstream credential's
             # expiry does not move because we rotated, and dropping it
             # here would make rotation a way to shed the ceiling.
@@ -808,6 +1040,7 @@ class LocalIdentityService:
                     user_id=claims.sub,
                     family_id=claims.family_id,
                     auth_time=auth_time,
+                    auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
                     idp_exp=claims.idp_exp,
                     pwfb=claims.pwfb,
                     jti=outcome.successor.successor_jti,
@@ -1149,7 +1382,15 @@ class LocalIdentityService:
             signin=SIGNIN_SSO if (session_provider_id or auth_time) else SIGNIN_PASSWORD,
             claims_extra=claims_extra,
             auth_time=auth_time,
+            # Proven only for the instant the token vouched for: if the
+            # server's record says otherwise, its instant was not the one
+            # the provider asserted.
+            auth_time_proven=claims.auth_time_proven and auth_time == claims.auth_time,
             refresh_token=successor_token,
+            idp_provider_id=session_provider_id,
+            idp_vouched_at=(
+                outcome.record.idp_checked_at if outcome.record is not None else None
+            ),
         )
         return user, tokens, pending_liveness
 
@@ -1328,6 +1569,17 @@ class LocalIdentityService:
                 SSO_SESSION_MAX_AGE_SECONDS / 3600,
             )
             auth_time = now
+        # Whether ``auth_time`` is the provider's own word for a recent
+        # authentication — what step-up for an API key insists on. Only
+        # OIDC and SAML can be made to authenticate afresh and say when: a
+        # portal reads its time from a payload (by default its ``iat``,
+        # minted on every request), and a gateway reports the company
+        # portal's own login. Neither shows a credential was just presented,
+        # however recent the time it gives.
+        auth_time_proven = (
+            auth_time_asserted and not auth_time_anchored
+            and identity.provider in _PROVES_FRESH_SIGN_IN
+        )
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -1701,6 +1953,7 @@ class LocalIdentityService:
             # session against a gateway it never came from.
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=auth_time,
+                auth_time_proven=auth_time_proven,
                 idp_provider_id=provider_id,
                 idp_exp=getattr(identity, "upstream_expires_at", None),
             )
@@ -1712,7 +1965,12 @@ class LocalIdentityService:
             signin=SIGNIN_SSO,
             claims_extra=claims_extra,
             auth_time=auth_time,
+            auth_time_proven=auth_time_proven,
             refresh_token=refresh_token,
+            # A sign-in is the provider vouching for the session, now — as
+            # the session's record says (``idp_checked_at``).
+            idp_provider_id=provider_id,
+            idp_vouched_at=now,
         )
         return user, tokens
 
@@ -2045,20 +2303,7 @@ class LocalIdentityService:
             return
 
         settings = provider.settings
-        if settings.token_source == "header":
-            # Header names are case-insensitive on the wire, and the dict
-            # the refresh route hands us has been through Starlette, which
-            # lower-cases them. The operator's spelling (``X-Corp-Session``)
-            # must keep matching, or every refresh reads "absent" and
-            # revokes a healthy family.
-            wanted = settings.token_source_key.lower()
-            raw = next(
-                (v for k, v in ambient_headers.items()
-                 if k.lower() == wanted),
-                None,
-            )
-        else:
-            raw = ambient_cookies.get(settings.token_source_key)
+        raw = _ambient_token(settings, cookies=ambient_cookies, headers=ambient_headers)
 
         if not raw:
             await self._end_session_upstream(
@@ -2325,6 +2570,12 @@ class LocalIdentityService:
     async def _latest_identity_slug(
         self, session, user_id: str,
     ) -> Optional[str]:
+        provider = await self._latest_identity_provider(session, user_id)
+        return getattr(provider, "slug", None) if provider is not None else None
+
+    async def _latest_identity_provider(self, session, user_id: str):
+        """The provider of the identity the person signed in with most
+        recently, or ``None``."""
         if self._user_identity_repo is None:
             return None
         identities = await self._user_identity_repo.list_for_user(session, user_id)
@@ -2335,8 +2586,7 @@ class LocalIdentityService:
         )
         if not identities:
             return None
-        provider = getattr(identities[0], "provider", None)
-        return getattr(provider, "slug", None) if provider is not None else None
+        return getattr(identities[0], "provider", None)
 
     async def _latest_identity_provider_id(
         self, session, user_id: str,
@@ -2358,6 +2608,7 @@ class LocalIdentityService:
         user_id: str,
         family_id: Optional[str],
         auth_time: Optional[int],
+        auth_time_proven: bool = False,
         idp_provider_id: Optional[str] = None,
         idp_exp: Optional[int] = None,
         pwfb: Optional[int] = None,
@@ -2377,7 +2628,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
-            idp_exp=idp_exp, pwfb=pwfb,
+            auth_time_proven=auth_time_proven, idp_exp=idp_exp, pwfb=pwfb,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(
@@ -2425,7 +2676,10 @@ class LocalIdentityService:
         signin: str,
         claims_extra: Optional[dict] = None,
         auth_time: Optional[int] = None,
+        auth_time_proven: bool = False,
         refresh_token: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_vouched_at: Optional[int] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
 
@@ -2438,16 +2692,30 @@ class LocalIdentityService:
         instant for SSO sessions; it is embedded in the refresh JWT
         and propagated through every rotation. The 24h SSO re-auth
         check reads it on the next refresh. ``None`` for local
-        password sessions.
+        password sessions. The access token carries it too, for step-up.
 
         ``refresh_token`` supplies an already-minted refresh JWT. The
         rotation path mints its successor before consuming the presented
         token — the successor's identity has to be recorded atomically
         with that consumption — so it passes the token it committed to
         rather than letting a second one be generated here.
+
+        ``idp_provider_id`` and ``idp_vouched_at`` are an SSO session's
+        provider and when it last vouched for the session, from the server's
+        record (``SIGNIN_PROVIDER_CLAIM``) — what step-up asks.
         """
         extra = dict(claims_extra or {})
+        for signed_here in (AUTH_TIME_PROVEN_CLAIM, SIGNIN_PROVIDER_CLAIM, IDP_VOUCHED_AT_CLAIM):
+            extra.pop(signed_here, None)
         extra[SIGNIN_CLAIM] = signin
+        if auth_time is not None:
+            extra[AUTH_TIME_CLAIM] = auth_time
+            if auth_time_proven:
+                extra[AUTH_TIME_PROVEN_CLAIM] = True
+        if signin == SIGNIN_SSO and idp_provider_id:
+            extra[SIGNIN_PROVIDER_CLAIM] = idp_provider_id
+            if idp_vouched_at is not None:
+                extra[IDP_VOUCHED_AT_CLAIM] = int(idp_vouched_at)
         if user.must_change_password and signin == SIGNIN_PASSWORD:
             # Carried as a claim rather than looked up per request:
             # ``get_current_user`` already decodes this token to read
@@ -2473,6 +2741,7 @@ class LocalIdentityService:
         )
         refresh = refresh_token or create_refresh_token(
             user_id=user.id, family_id=family_id, auth_time=auth_time,
+            auth_time_proven=auth_time_proven,
         )[0]
         return SessionTokens(
             access_token=access,
@@ -2539,6 +2808,63 @@ def _has_password(orm) -> bool:
     disabled-sentinel detection."""
     from .core.password import is_password_set
     return is_password_set(getattr(orm, "password_hash", None) or "")
+
+
+#: Why a key may still describe or revoke itself. Whoever holds a leaked key
+#: can always end it; only a key already revoked (or never ours) is refused.
+#: Provider kinds that can be made to prove a fresh authentication — see
+#: ``step_up_target``.
+_PROVES_FRESH_SIGN_IN = frozenset({"oidc", "saml2"})
+
+
+def _ambient_source(settings) -> bool:
+    """Whether a gateway's company session reaches this server on a request:
+    server exchange, from a named cookie or header. In browser mode only the
+    browser ever holds it."""
+    return settings.exchange_mode != "browser" and bool(settings.token_source_key)
+
+
+def _ambient_token(settings, *, cookies: dict, headers: dict) -> Optional[str]:
+    """The company session token a gateway reads from a request, or None."""
+    if settings.token_source == "header":
+        # Header names are case-insensitive on the wire, and the dict
+        # the refresh route hands us has been through Starlette, which
+        # lower-cases them. The operator's spelling (``X-Corp-Session``)
+        # must keep matching, or every refresh reads "absent" and
+        # revokes a healthy family.
+        wanted = settings.token_source_key.lower()
+        return next((v for k, v in headers.items() if k.lower() == wanted), None)
+    return cookies.get(settings.token_source_key)
+
+_SELF_SERVICE_REASONS = frozenset({
+    "expired", "owner_inactive", "owner_reauth_required", "ip_not_allowed",
+})
+
+
+def _api_key_expiry(key, policy: ApiKeyPolicy) -> Optional[str]:
+    expiry = api_keys.effective_expiry(key, max_lifetime_days=policy.max_lifetime_days)
+    return expiry.isoformat() if expiry is not None else None
+
+
+def _api_key_refusal(
+    row, *, now: datetime, client_ip: Optional[str], policy: ApiKeyPolicy,
+    passwords_allowed: bool,
+) -> Optional[str]:
+    """Why this key may not act now, or ``None`` if it may: the lifecycle
+    rules shared with every page that shows a key's status, then the
+    network the request came from."""
+    reason = api_keys.lifecycle_refusal(
+        row.key, row.owner,
+        identity_count=row.identity_count,
+        idp_last_login_at=row.idp_last_login_at,
+        now=now,
+        sso_signin_window_days=policy.sso_signin_window_days,
+        max_lifetime_days=policy.max_lifetime_days,
+        passwords_allowed=passwords_allowed,
+    )
+    if reason is None and not api_keys.address_allowed(client_ip, row.key.allowed_cidrs):
+        return "ip_not_allowed"
+    return reason
 
 
 def _session_refused(claims, error: Exception) -> tuple[str, dict]:

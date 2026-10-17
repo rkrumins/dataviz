@@ -254,6 +254,16 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Forgot-password requests allowed per account.",
         None,
     ),
+    "RATELIMIT_API_KEY": (
+        "Requests allowed per API key. Counted per key, so one busy integration never holds "
+        "back another behind the same address.",
+        None,
+    ),
+    "RATELIMIT_API_KEY_FAILURES_PER_IP": (
+        "Refused API keys allowed per client address before further key requests from it are "
+        "turned away without a database lookup.",
+        None,
+    ),
     "ADMIN_EMAIL": (
         "Email address of the first administrator account. The account is created at startup "
         "only when the database has no users.",
@@ -410,6 +420,8 @@ NOT_SECRET = frozenset({
     "DEEP_SEARCH_DISCOVER_KEY_CAP",
     "JOB_REDIS_KEY_PREFIX",
     "RATELIMIT_PASSWORD_RESET_PER_ACCOUNT",
+    "RATELIMIT_API_KEY",
+    "RATELIMIT_API_KEY_FAILURES_PER_IP",
 })
 
 SECRET_NAME = re.compile(r"PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL|PRIVATE")

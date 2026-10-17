@@ -30,3 +30,18 @@ async def claim_this_pass(session: AsyncSession, name: str) -> bool:
         {"name": name},
     )).scalar()
     return bool(got)
+
+
+async def hold_for_transaction(session: AsyncSession, name: str) -> None:
+    """Wait for, and hold until ``session``'s transaction ends, the lock
+    called ``name`` — for a short critical section that two requests must
+    not interleave (say, counting someone's API keys and minting one). Off
+    Postgres there is only ever one writer, so there is nothing to wait for.
+    """
+    dialect = getattr(getattr(session, "bind", None), "dialect", None)
+    if getattr(dialect, "name", None) != "postgresql":
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:name, 0))"),
+        {"name": name},
+    )

@@ -567,6 +567,16 @@ RATELIMIT_LOGIN_PER_ACCOUNT: str = os.getenv(
 RATELIMIT_PASSWORD_RESET_PER_ACCOUNT: str = os.getenv(
     "RATELIMIT_PASSWORD_RESET_PER_ACCOUNT", "3/hour"
 )
+# Per API key, counted on every request it makes. Keyed on the key, not the
+# address, so one busy integration cannot starve another behind the same
+# egress — and a leaked key cannot be driven harder than this.
+RATELIMIT_API_KEY: str = os.getenv("RATELIMIT_API_KEY", "1200/minute")
+# Refused keys per client address, checked before the lookup so a client
+# replaying a bad key — or guessing — stops costing a database read.
+# Generous: everyone behind one NAT shares it.
+RATELIMIT_API_KEY_FAILURES_PER_IP: str = os.getenv(
+    "RATELIMIT_API_KEY_FAILURES_PER_IP", "120/minute"
+)
 
 
 # ── Custom Identity Provider (Phase 2.B; dev/demo only) ──────────────

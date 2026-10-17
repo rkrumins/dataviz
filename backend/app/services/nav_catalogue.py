@@ -108,6 +108,9 @@ _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "permissions":   ("Permissions",     NavSpecPerm(perm="system:admin")),
     "sso":           ("SSO",             NavSpecPerm(perm="system:admin")),
     "audit":         ("Activity",        NavSpecPerm(perm="system:audit:read")),
+    # Auditors see every key; revoking one also needs system:users:manage,
+    # which the page asks for at the button, as the server does.
+    "api-keys":      ("API keys",        NavSpecPerm(perm="system:audit:read")),
 }
 
 

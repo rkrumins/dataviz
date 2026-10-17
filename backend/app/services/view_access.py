@@ -42,6 +42,11 @@ Implementation notes:
     endpoints filter in the database (correct pagination, no
     post-filtering); ``test_view_access_matrix`` holds the two
     renderings together.
+  * Under an API key (``claims.key_scope``) every rule above still has to
+    pass, AND the key must admit the view at the matching level: the
+    identity paths — creator, explicit grant, enterprise tier — would
+    otherwise reach views outside the key's selection or exercise a level
+    the key was never given. Keys never manage grants.
 """
 from __future__ import annotations
 
@@ -132,6 +137,20 @@ class ViewerContext:
 
 # ── Internal predicates ──────────────────────────────────────────────
 
+def _key_admits_view(ctx: ViewerContext, view: ViewORM, permission: str) -> bool:
+    """Whether the request's API key, if any, reaches this view at this level.
+
+    True for a browser session. For a key, the profile must include
+    ``permission`` and the selection must cover the view (all resources,
+    its workspace, or the view itself). Checked BEFORE every other rule,
+    because the identity paths below grant without consulting permissions.
+    """
+    scope = ctx.claims.key_scope
+    if scope is None:
+        return True
+    return scope.admits_view(view.id, view.workspace_id, permission)
+
+
 def _is_workspace_member(ctx: ViewerContext, view: ViewORM) -> bool:
     """True if the user holds ``workspace:view:read`` in the view's
     workspace (direct, via wildcard, or via an org-level short-circuit)."""
@@ -166,6 +185,8 @@ async def can_read_view(
 ) -> bool:
     if ctx.is_anonymous:
         return False
+    if not _key_admits_view(ctx, view, "workspace:view:read"):
+        return False
     if has_permission(ctx.claims, "system:admin"):
         return True
     visibility = view.visibility or "private"
@@ -189,6 +210,8 @@ async def can_edit_view(
     view: ViewORM,
 ) -> bool:
     """Creator, workspace editor, or explicit ``editor`` grant."""
+    if not _key_admits_view(ctx, view, "workspace:view:edit"):
+        return False
     if has_permission(ctx.claims, "system:admin"):
         return True
     if not ctx.is_anonymous and view.created_by == ctx.user_id:
@@ -207,6 +230,8 @@ def can_delete_view(ctx: ViewerContext, view: ViewORM) -> bool:
     action matrix. Hard-delete (``permanent=true``) requires
     ``workspace:admin`` and is gated by ``can_hard_delete_view``.
     """
+    if not _key_admits_view(ctx, view, "workspace:view:delete"):
+        return False
     if has_permission(ctx.claims, "system:admin"):
         return True
     if not ctx.is_anonymous and view.created_by == ctx.user_id:
@@ -226,13 +251,26 @@ def can_hard_delete_view(ctx: ViewerContext, view: ViewORM) -> bool:
     )
 
 
-def can_change_visibility(ctx: ViewerContext, view: ViewORM) -> bool:
+def can_change_visibility(
+    ctx: ViewerContext, view: ViewORM, to: Optional[str] = None,
+) -> bool:
     """Creator or workspace admin can change the visibility tier.
 
     This is the base rule (private ↔ workspace). Any transition to or
     from ``enterprise`` must ALSO pass ``can_publish`` — enforced at
     the endpoint, which knows both sides of the transition.
+
+    Through an API key, the workspace tier takes the key's view write, as
+    creating a view there does (``authorize_view_create``); anything to do
+    with ``enterprise`` takes its own ``publish``: under an open workspace
+    policy this predicate is what lets a creator publish, and a key minted
+    to edit views was not minted to share them with everyone. ``to``
+    unknown is read as the enterprise tier.
     """
+    platform_wide = to in (None, "enterprise") or view.visibility == "enterprise"
+    needed = "workspace:view:publish" if platform_wide else "workspace:view:edit"
+    if not _key_admits_view(ctx, view, needed):
+        return False
     if has_permission(ctx.claims, "system:admin"):
         return True
     if not ctx.is_anonymous and view.created_by == ctx.user_id:
@@ -248,6 +286,8 @@ def can_publish(ctx: ViewerContext, view: ViewORM) -> bool:
     Publishing exposes the view — and read-only access to its data
     source — to every signed-in user, so it rides on a dedicated
     permission rather than creatorship."""
+    if not _key_admits_view(ctx, view, "workspace:view:publish"):
+        return False
     return has_permission(
         ctx.claims, "workspace:view:publish", workspace_id=view.workspace_id,
     )
@@ -433,9 +473,21 @@ def can_answer_publish_request(ctx: ViewerContext, view: ViewORM) -> bool:
     return can_publish(ctx, view)
 
 
+def can_withdraw_publish_request(ctx: ViewerContext, view: ViewORM) -> bool:
+    """May this caller take a pending request back? Whoever made it, or
+    anyone who could have answered it. Through an API key, only one that
+    could have made it: withdrawing is the same sharing decision."""
+    if not _key_admits_view(ctx, view, "workspace:view:publish"):
+        return False
+    return view.publish_requested_by == ctx.user_id or can_answer_publish_request(ctx, view)
+
+
 def can_manage_grants(ctx: ViewerContext, view: ViewORM) -> bool:
     """Creator or workspace admin manage explicit shares. An ``editor``
-    grant lets you edit the view, never re-share it."""
+    grant lets you edit the view, never re-share it. Never through an API
+    key: sharing hands access to other people, which no key is for."""
+    if ctx.claims.key_scope is not None:
+        return False
     if has_permission(ctx.claims, "system:admin"):
         return True
     if not ctx.is_anonymous and view.created_by == ctx.user_id:
@@ -548,6 +600,13 @@ class ViewReadScope:
     member_ws_ids: tuple[str, ...]
     admin_ws_ids: tuple[str, ...]
     granted_view_ids: tuple[str, ...]
+    #: Under an API key limited to particular resources, the views it may
+    #: list are those in ``key_workspace_ids`` or named in ``key_view_ids``,
+    #: on top of everything above. ``None`` = no such limit.
+    key_workspace_ids: Optional[tuple[str, ...]] = None
+    key_view_ids: Optional[tuple[str, ...]] = None
+    #: An API key whose profile reads no views at all.
+    key_blind: bool = False
 
 
 async def build_read_scope(
@@ -560,11 +619,23 @@ async def build_read_scope(
             granted_view_ids=(),
         )
     claims = ctx.claims
+    key = claims.key_scope
+    if key is not None and not key.allows("workspace:view:read"):
+        return ViewReadScope(
+            authenticated=True, unrestricted=False, org_viewer=False,
+            user_id=ctx.user_id, member_ws_ids=(), admin_ws_ids=(),
+            granted_view_ids=(), key_blind=True,
+        )
     unrestricted = (
         "system:admin" in claims.global_perms
         or "system:org-admin" in claims.global_perms
     )
-    org_viewer = "system:org-viewer" in claims.global_perms
+    # A key over everything, owned by an organisation-wide operator, reads the
+    # workspace tier everywhere — the org-viewer reach, never more: its
+    # claims carry no global permission, so private views stay private.
+    org_viewer = "system:org-viewer" in claims.global_perms or bool(
+        key is not None and key.org_wide
+    )
     member_ws = tuple(
         ws for ws in claims.ws_perms
         if has_permission(claims, "workspace:view:read", workspace_id=ws)
@@ -574,6 +645,13 @@ async def build_read_scope(
         if has_permission(claims, "workspace:admin", workspace_id=ws)
     )
     granted = tuple((await ctx.grant_index(session)).keys())
+    key_ws: Optional[tuple[str, ...]] = None
+    key_views: Optional[tuple[str, ...]] = None
+    if key is not None and not key.all_resources:
+        key_ws = tuple(sorted(key.workspaces))
+        key_views = tuple(sorted(
+            v for v in key.view_ids if v in key.view_workspaces
+        ))
     return ViewReadScope(
         authenticated=True,
         unrestricted=unrestricted,
@@ -582,6 +660,8 @@ async def build_read_scope(
         member_ws_ids=member_ws,
         admin_ws_ids=admin_ws,
         granted_view_ids=granted,
+        key_workspace_ids=key_ws,
+        key_view_ids=key_views,
     )
 
 
@@ -591,23 +671,30 @@ def readable_views_clause(scope: ViewReadScope) -> ColumnElement[bool]:
     Composable with any other WHERE on ``ViewORM``. Empty ``.in_(())``
     renders as a static false, so empty scopes are safe.
     """
-    if not scope.authenticated:
+    if not scope.authenticated or scope.key_blind:
         return sa.false()
     if scope.unrestricted:
-        return sa.true()
-    workspace_tier: ColumnElement[bool] = ViewORM.visibility == "workspace"
-    if not scope.org_viewer:
-        workspace_tier = and_(
+        clause: ColumnElement[bool] = sa.true()
+    else:
+        workspace_tier: ColumnElement[bool] = ViewORM.visibility == "workspace"
+        if not scope.org_viewer:
+            workspace_tier = and_(
+                workspace_tier,
+                ViewORM.workspace_id.in_(scope.member_ws_ids),
+            )
+        clause = or_(
+            ViewORM.visibility == "enterprise",
             workspace_tier,
-            ViewORM.workspace_id.in_(scope.member_ws_ids),
+            ViewORM.created_by == scope.user_id,
+            ViewORM.workspace_id.in_(scope.admin_ws_ids),
+            ViewORM.id.in_(scope.granted_view_ids),
         )
-    return or_(
-        ViewORM.visibility == "enterprise",
-        workspace_tier,
-        ViewORM.created_by == scope.user_id,
-        ViewORM.workspace_id.in_(scope.admin_ws_ids),
-        ViewORM.id.in_(scope.granted_view_ids),
-    )
+    if scope.key_workspace_ids is not None:
+        clause = and_(clause, or_(
+            ViewORM.workspace_id.in_(scope.key_workspace_ids),
+            ViewORM.id.in_(scope.key_view_ids or ()),
+        ))
+    return clause
 
 
 __all__ = [

@@ -40,6 +40,7 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
+from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
@@ -416,25 +417,31 @@ async def _promote_view_layout_overlay(branch_id: Optional[str], actor: str) -> 
 async def graph_in_workspace(
     ws_id: str,
     graph_id: str,
+    request: Request,
     svc: GraphVersioningService = Depends(get_versioning_service),
 ) -> dict:
     """Resolve a graph and assert it lives in ``ws_id`` — 404 (not 403) on a
-    cross-tenant miss so graph existence doesn't leak across workspaces."""
+    cross-tenant miss so graph existence doesn't leak across workspaces.
+
+    An API key must also cover the data source behind the graph."""
     meta = await svc.get_graph(graph_id)
     if meta is None or meta["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="graph not found in workspace")
+    await api_key_auth.hold_to_data_source(request, meta.get("data_source_id"), ws_id)
     return meta
 
 
 async def pr_in_workspace(
     ws_id: str,
     pr_id: str,
+    request: Request,
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ) -> dict:
     """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
     base owner's workspace) AND that the caller may see it — its author, an assigned reviewer, or a
-    manager. A non-participant gets 404 (don't leak that the PR exists)."""
+    manager. A non-participant gets 404 (don't leak that the PR exists). An API key must also
+    cover the base graph's data source."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
@@ -444,21 +451,25 @@ async def pr_in_workspace(
     if not (viewer.can_manage or pr.get("actor") == viewer.actor
             or viewer.actor in (pr.get("reviewers") or [])):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
+    await api_key_auth.hold_to_data_source(request, base.get("data_source_id"), ws_id)
     return pr
 
 
 async def view_in_workspace(
     ws_id: str,
     view_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Resolve a view (management DB) and assert it lives in ``ws_id`` — 404 on a cross-tenant
     miss. Views live in the management store, not the versioning store, so this is a separate
-    lookup (no cross-store join); it returns the view's ``data_source_id`` for PR scoping."""
+    lookup (no cross-store join); it returns the view's ``data_source_id`` for PR scoping. An API
+    key must also cover that data source: the PRs listed are the source's."""
     from backend.app.db.models import ViewORM
     v = await session.get(ViewORM, view_id)
     if v is None or v.workspace_id != ws_id:
         raise HTTPException(status_code=404, detail="view not found in workspace")
+    await api_key_auth.hold_to_data_source(request, v.data_source_id, ws_id)
     return {"view_id": v.id, "data_source_id": v.data_source_id, "workspace_id": v.workspace_id}
 
 
@@ -1524,8 +1535,12 @@ async def merge_preview(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    # The draft must be this graph's, and the caller's to read: a preview
+    # shows what it would change.
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         return await svc.preview_merge(graph_id=graph_id, branch_id=branch_id)
 
@@ -1536,6 +1551,8 @@ async def branch_view_changes(
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """What this draft changes in views, beside its graph changes: the views it creates (imports
@@ -1547,6 +1564,7 @@ async def branch_view_changes(
     from backend.app.db.models import ViewORM
     from backend.app.services import draft_views, view_access
 
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
     changes = [c for c in await draft_views.changes_on(session, branch_id) if c["workspaceId"] == ws_id]
     visible = changes
     if rbac_flag("RBAC_ENFORCE_VIEWS") and changes:
@@ -2504,6 +2522,28 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     return {"added": len(new_entries)}
 
 
+async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, claims) -> None:
+    """An import that names a view places the entities it creates in that view's layout
+    (``_write_view_import_assignments``) — a write to the view. So the view must be one of this
+    workspace's, not deleted, and editable by the caller. The name alone used to be enough: the
+    worker rewrote the layout of whatever view it was given, on the strength of
+    ``datasource:manage`` in the import's own workspace."""
+    if not view_id:
+        return
+    from backend.app.api.v1.endpoints.views import _viewer_context
+    from backend.app.auth.dependencies import rbac_flag
+    from backend.app.db.models import ViewORM
+    from backend.app.services import view_access
+
+    view = await session.get(ViewORM, view_id)
+    if view is None or view.deleted_at is not None or view.workspace_id != ws_id:
+        raise HTTPException(status_code=404, detail="view not found in workspace")
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_edit_view(session, ctx, view):
+            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+
+
 class CreateImportResponse(_ApiModel):
     jobId: str
     branchId: str
@@ -2521,8 +2561,10 @@ async def create_import(
     view_id: Optional[str] = Query(None, alias="viewId"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Create a bulk import: open/append the user's working **draft**, stream the uploaded file to
     the object store, and dispatch the worker. The file is the raw request body (ndjson/csv/…);
@@ -2534,6 +2576,7 @@ async def create_import(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    await _check_import_view(session, ws_id, view_id, user, claims)
     with _domain_errors():
         created = await ie.create_import_job(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
@@ -2635,13 +2678,16 @@ async def complete_import_upload(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Import the uploaded file, once every part is in: as ``POST /imports`` does with a request
     body. Asking again answers with the import already started."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    await _check_import_view(session, ws_id, view_id, user, claims)
     if record.get("jobId"):
         job = await ie.get_job(record["jobId"]) or {}
         return {"jobId": record["jobId"], "branchId": record.get("branchId"),
@@ -3054,11 +3100,20 @@ async def fork_graph(
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
 async def open_pull_request(
     ws_id: str, graph_id: str,
+    request: Request,
     body: Optional[OpenPrRequest] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),       # read can propose
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    # A fork's pull request lands in its parent: an API key must cover the
+    # parent's data source too, not only the fork's.
+    parent_id = _meta.get("fork_parent_graph_id")
+    if parent_id:
+        parent = await svc.get_graph(parent_id) or {}
+        await api_key_auth.hold_to_data_source(
+            request, parent.get("data_source_id"), parent.get("workspace_id"),
+        )
     with _domain_errors():
         pr_id = await svc.open_pr(
             source_graph_id=graph_id, actor=user.id,

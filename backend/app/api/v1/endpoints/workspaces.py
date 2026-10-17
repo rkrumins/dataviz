@@ -34,6 +34,7 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services import workspace_visibility
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
@@ -71,13 +72,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reaches_every_workspace(claims: PermissionClaims) -> bool:
+    """Global admin — or an API key over everything whose owner's
+    organisation-wide role gives it permissions in every workspace
+    (``KeyScope.org_perms``), which its claims do not list one by one."""
+    key = claims.key_scope
+    return has_permission(claims, "system:admin") or bool(key is not None and key.org_perms)
+
+
 def _can_read_workspace(claims: PermissionClaims, ws_id: str) -> bool:
     """A user can read a workspace if they hold any binding into it
-    (any non-empty permission entry under that ws_id) OR are global
-    admin. Used for list filtering and the GET-by-id check."""
-    if has_permission(claims, "system:admin"):
+    (any non-empty permission entry under that ws_id) OR reach every
+    workspace. Used for list filtering and the GET-by-id check."""
+    if _reaches_every_workspace(claims):
         return True
     return bool(claims.ws_perms.get(ws_id))
+
+
+async def _as_seen_by(session: AsyncSession, claims: PermissionClaims, workspaces):
+    """``workspaces`` with only the data sources the caller covers: all of
+    them, except for an API key on part of a workspace."""
+    covered = await workspace_visibility.key_data_source_ids(session, claims)
+    if covered is None:
+        return workspaces
+    return [
+        ws.model_copy(update={"data_sources": [d for d in ws.data_sources if d.id in covered]})
+        for ws in workspaces
+    ]
 
 
 def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
@@ -114,13 +135,13 @@ async def list_workspaces(
     the whole estate just to show ten rows.
     """
     enforce = rbac_flag("RBAC_ENFORCE_WORKSPACES")
-    unrestricted = not enforce or has_permission(claims, "system:admin")
+    unrestricted = not enforce or _reaches_every_workspace(claims)
 
     if limit is None:
         workspaces = await workspace_repo.list_workspaces(session)
-        if unrestricted:
-            return workspaces
-        return [w for w in workspaces if claims.ws_perms.get(w.id)]
+        if not unrestricted:
+            workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
+        return await _as_seen_by(session, claims, workspaces)
 
     permitted_ids = None if unrestricted else list(claims.ws_perms.keys())
     page, total = await workspace_repo.list_workspaces_page(
@@ -131,7 +152,7 @@ async def list_workspaces(
         permitted_ids=permitted_ids,
     )
     response.headers["X-Total-Count"] = str(total)
-    return page
+    return await _as_seen_by(session, claims, page)
 
 
 @router.post("", response_model=WorkspaceResponse, status_code=201)
@@ -192,7 +213,7 @@ async def get_workspace(
     ws = await workspace_repo.get_workspace(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    return ws
+    return (await _as_seen_by(session, claims, [ws]))[0]
 
 
 @router.put("/{workspace_id}", response_model=WorkspaceResponse)

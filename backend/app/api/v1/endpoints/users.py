@@ -499,13 +499,18 @@ _ACCOUNT_ACTIVITY_TYPES = (
     "user.role_changed",
     "user.suspended",
     "user.reactivated",
+    "identity.api_key.created",
+    "identity.api_key.rotated",
+    "identity.api_key.updated",
+    "identity.api_key.revoked",
+    "identity.api_key.misuse",
 )
 
 
 #: The payload key each of those events names its actor under.
 _ACTIVITY_ACTOR_KEYS = (
     "updated_by", "reset_by", "changed_by", "generated_by",
-    "suspended_by", "reactivated_by",
+    "suspended_by", "reactivated_by", "created_by", "revoked_by",
 )
 
 

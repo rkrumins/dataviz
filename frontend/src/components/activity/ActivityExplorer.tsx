@@ -58,6 +58,7 @@ export function ActivityExplorer({ scope }: { scope: ActivityScope }) {
             put(e.dataSourceId, e.dataSourceName)
             put(e.target?.id, e.target?.label)
             put(e.actor?.id, e.actor?.name || e.actor?.email)
+            put(e.apiKeyId, e.apiKeyName)
         }
         for (const s of summary.data?.handsOnSources ?? []) {
             put(s.dataSourceId, s.name)

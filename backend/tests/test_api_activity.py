@@ -35,7 +35,13 @@ from sqlalchemy import event, func, select
 
 from backend.app.auth.dependencies import get_permission_claims
 from backend.app.common.bulkhead import Bulkhead
-from backend.app.db.models import AuthAuditLogORM, OutboxEventORM, UserORM, WorkspaceORM
+from backend.app.db.models import (
+    ApiKeyORM,
+    AuthAuditLogORM,
+    OutboxEventORM,
+    UserORM,
+    WorkspaceORM,
+)
 from backend.app.services import analytics_cache
 from backend.app.services.outbox_relay import drain_once
 from backend.app.services.permission_service import PermissionClaims
@@ -712,6 +718,77 @@ async def test_an_export_is_capped_safe_to_open_and_recorded(
     payload = json.loads(recorded.payload)
     assert payload["actor_id"] == "usr_test000000"
     assert payload["details"]["format"] == "csv"
+
+
+async def test_what_one_api_key_did_and_what_happened_to_it_is_one_filter(
+    test_client: AsyncClient, db_session,
+):
+    """"What did this key do?" — the changes made with it and its own
+    lifecycle, refusals included, under one filter. A change names the key
+    it was made with, by its name, on the page and in the export."""
+    await _person(db_session, "usr_ada", "Ada", "Lovelace")
+    db_session.add(ApiKeyORM(
+        id="apk_ci", user_id="usr_ada", name="Nightly sync", token_prefix="nxpat_ab12",
+        token_hash="h", permissions="{}", resources='"all"',
+    ))
+    await _emit(db_session, "identity.api_key.created", {
+        "user_id": "usr_ada", "key_id": "apk_ci", "key_name": "Nightly sync",
+        "token_prefix": "nxpat_ab12", "created_by": "usr_ada",
+    }, minutes_ago=9)
+    await _emit(db_session, "aggregation.job.triggered", {
+        "actor_id": "usr_ada", "workspace_id": "ws_1", "data_source_id": "ds_1",
+        "target_type": "data_source", "target_id": "ds_1", "target_label": "Ledger",
+        "api_key_id": "apk_ci", "details": {"triggerSource": "api"},
+    }, version=2, minutes_ago=8)
+    await _emit(db_session, "identity.api_key.misuse", {
+        "user_id": "usr_ada", "key_id": "apk_ci", "key_name": "Nightly sync",
+        "token_prefix": "nxpat_ab12", "reason": "ip_not_allowed", "client_ip": "203.0.113.9",
+    }, minutes_ago=7)
+    # Neither made with the key nor about it.
+    await _emit(db_session, "aggregation.job.triggered", {
+        "actor_id": "usr_ada", "workspace_id": "ws_1", "data_source_id": "ds_1",
+        "target_type": "data_source", "target_id": "ds_1",
+    }, version=2, minutes_ago=6)
+    await _emit(db_session, "identity.api_key.created", {
+        "user_id": "usr_ada", "key_id": "apk_other", "created_by": "usr_ada",
+    }, minutes_ago=5)
+    await _relay(db_session)
+
+    res = await test_client.get(f"{API}/events", params={"apiKeyId": "apk_ci"})
+    assert res.status_code == 200, res.text
+    events = res.json()["events"]
+    assert [e["eventType"] for e in events] == [
+        "identity.api_key.misuse", "aggregation.job.triggered", "identity.api_key.created",
+    ]
+    misuse, triggered, created = events
+    assert (triggered["apiKeyId"], triggered["apiKeyName"]) == ("apk_ci", "Nightly sync")
+    assert triggered["actor"]["id"] == "usr_ada"
+    assert created["target"] == {"type": "api_key", "id": "apk_ci", "label": "Nightly sync"}
+    assert created["category"] == "identity" and created["apiKeyId"] is None
+    # Whoever presented a misused key did not prove who they are.
+    assert (misuse["actorKind"], misuse["outcome"], misuse["severity"]) == (
+        "anonymous", "failure", "critical",
+    )
+    assert misuse["subject"]["id"] == "usr_ada"
+
+    exported = await test_client.get(f"{API}/export.csv", params={"apiKeyId": "apk_ci"})
+    rows = list(csv.DictReader(io.StringIO(exported.text)))
+    assert [r["apiKeyId"] for r in rows] == ["", "apk_ci", ""]
+
+
+async def test_a_routine_key_refusal_is_noise_and_misuse_is_not(test_client: AsyncClient, db_session):
+    """A script calling with an expired key is refused once an hour until
+    someone notices: left out of Everything, like refused requests, while a
+    key in the wrong hands stays in view."""
+    for event_type in ("identity.api_key.rejected", "identity.api_key.misuse"):
+        await _emit(db_session, event_type, {
+            "user_id": "usr_ada", "key_id": "apk_ci", "reason": "expired",
+        })
+    await _relay(db_session)
+    assert await _types(test_client, f"{API}/events") == ["identity.api_key.misuse"]
+    assert sorted(await _types(test_client, f"{API}/events?includeNoise=true")) == [
+        "identity.api_key.misuse", "identity.api_key.rejected",
+    ]
 
 
 # ── Under load ──────────────────────────────────────────────────────

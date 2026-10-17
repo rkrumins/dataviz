@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network, History, Palette, Database, LineChart, HardDrive,
+    UserCog, Users2, KeyRound, KeySquare, Network, History, Palette, Database, LineChart, HardDrive,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission, usePermissionsReady } from '@/store/auth'
@@ -58,6 +58,7 @@ const adminGroups = [
             { path: 'groups', label: 'Groups', icon: Users2, description: 'Bundle members for bulk role grants' },
             { path: 'permissions', label: 'Permissions', icon: KeyRound, description: 'Roles, permissions, and who has access where' },
             { path: 'sso', label: 'SSO', icon: Network, description: 'IdP providers + IdP group mappings' },
+            { path: 'api-keys', label: 'API keys', icon: KeySquare, description: 'Every key, who it acts as, and when it was last used' },
         ]
     }
 ]
@@ -92,6 +93,7 @@ export function AdminPage() {
     const permissionsVisible   = useNavPermission(useAdminSectionSpec('permissions'))
     const ssoVisible           = useNavPermission(useAdminSectionSpec('sso'))
     const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
+    const apiKeysVisible       = useNavPermission(useAdminSectionSpec('api-keys'))
 
     const itemVisibility: Record<string, boolean> = {
         overview:       overviewVisible,
@@ -107,6 +109,7 @@ export function AdminPage() {
         permissions:   permissionsVisible,
         sso:           ssoVisible,
         audit:         auditVisible,
+        'api-keys':    apiKeysVisible,
     }
 
     // Filter items out of each group; drop groups that end up empty.

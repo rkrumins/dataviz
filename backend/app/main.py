@@ -1125,6 +1125,12 @@ async def lifespan(_app: FastAPI):
             verify=verify,
         )
 
+    # API keys: the per-request lookup, what a key may do (the owner's
+    # authority narrowed to the key, cached briefly and dropped whenever the
+    # owner's sessions are ended), and the record of keys refused.
+    from backend.app.db.repositories import api_key_repo as _api_key_repo
+    from backend.app.services import api_key_service as _api_key_service
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -1142,6 +1148,9 @@ async def lifespan(_app: FastAPI):
         super_admin_checker=_is_super_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
+        api_key_repo=_api_key_repo,
+        api_key_claims_resolver=_api_key_service.claims_for_key,
+        api_key_rejection_hook=_api_key_service.record_rejection,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a
@@ -1622,6 +1631,20 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # API key expiry reminders: a week ahead, once per key. Same owner role,
+    # and a lock per pass, so replicas never send the same reminder twice.
+    _app.state._api_key_housekeeping_shutdown = asyncio.Event()
+    _app.state._api_key_housekeeping_task = None
+    if runs_scheduler():
+        from .services.api_key_housekeeping import run_sweeper as _run_api_key_housekeeping
+        _app.state._api_key_housekeeping_task = asyncio.create_task(
+            _run_api_key_housekeeping(
+                get_jobs_session,
+                _app.state._api_key_housekeeping_shutdown,
+            ),
+            name="api-key-housekeeping",
+        )
+
     # Product-event retention sweep. ``product_events`` now takes a row per
     # view open, lineage trace and graph search, so it grows with usage and
     # needs a horizon. Same owner role, same reason.
@@ -1701,6 +1724,16 @@ async def lifespan(_app: FastAPI):
             _app.state.idp_health_cache,
         ),
         name="idp-health",
+    )
+
+    # API key usage: counted in this process's memory on every key request
+    # and added to ``api_key_usage`` every half minute. Every process that
+    # serves the API counts, so every one flushes — not gated on a role.
+    from .services import api_key_usage as _api_key_usage
+    _app.state._api_key_usage_shutdown = asyncio.Event()
+    _app.state._api_key_usage_task = asyncio.create_task(
+        _api_key_usage.run_flusher(_app.state._api_key_usage_shutdown),
+        name="api-key-usage",
     )
 
     # Everything startup built lives as long as the process: take it out of
@@ -1791,6 +1824,21 @@ async def lifespan(_app: FastAPI):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # Stop the API key reminders before DB pool teardown, same shape.
+    _key_hk_shutdown = getattr(_app.state, "_api_key_housekeeping_shutdown", None)
+    _key_hk_task = getattr(_app.state, "_api_key_housekeeping_task", None)
+    if _key_hk_shutdown is not None:
+        _key_hk_shutdown.set()
+    if _key_hk_task is not None and not _key_hk_task.done():
+        try:
+            await asyncio.wait_for(_key_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _key_hk_task.cancel()
+            try:
+                await _key_hk_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: shutting down regardless
+
     # Stop the product-event sweeper before DB pool teardown, same shape.
     _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
     _pe_gc_task = getattr(_app.state, "_product_event_gc_task", None)
@@ -1867,6 +1915,27 @@ async def lifespan(_app: FastAPI):
                 await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Stop the API key usage flusher, then write what is still counted:
+    # before the pool goes, or the last half minute of usage is lost.
+    _usage_shutdown = getattr(_app.state, "_api_key_usage_shutdown", None)
+    _usage_task = getattr(_app.state, "_api_key_usage_task", None)
+    if _usage_shutdown is not None:
+        _usage_shutdown.set()
+    if _usage_task is not None and not _usage_task.done():
+        try:
+            await asyncio.wait_for(_usage_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _usage_task.cancel()
+            try:
+                await _usage_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: the final flush follows
+    try:
+        from .services.api_key_usage import recorder as _usage_recorder
+        await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — shutting down either way
+        logger.warning("Final API key usage flush failed: %s", exc)
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the
@@ -2695,6 +2764,9 @@ class _TimeoutMiddleware:
         # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
         # short keyset read per chunk, two at a time per process (activity._EXPORTS).
         re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
+        # The API key inventory as CSV: at most 10,000 keys, a short read per page of 500, two
+        # at a time per process (api_keys._EXPORTS).
+        re.compile(r"^/api/v1/admin/api-keys/export\.csv$"),
     )
 
     def __init__(self, app):
@@ -3003,6 +3075,18 @@ app.add_middleware(_TimeoutMiddleware)
 # ------------------------------------------------------------------ #
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+def _openapi_with_api_keys() -> dict:
+    """The generated schema, marking the operations an API key may call."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from backend.app.auth import api_key_surface
+
+    return api_key_surface.document(FastAPI.openapi(app), app)
+
+
+app.openapi = _openapi_with_api_keys
 
 # Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.

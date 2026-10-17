@@ -207,7 +207,14 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen, step }: {
                                         <dt className={SECTION}>Who</dt>
                                         <dd className="mt-1.5">
                                             {event.actor
-                                                ? <PersonChip id={event.actor.id} person={event.actor} size="md" showEmail />
+                                                ? (
+                                                    <PersonChip
+                                                        id={event.actor.id} person={event.actor} size="md" showEmail
+                                                        caption={event.apiKeyId
+                                                            ? `with the API key ${event.apiKeyName ? `“${event.apiKeyName}”` : event.apiKeyId}`
+                                                            : undefined}
+                                                    />
+                                                )
                                                 : <span className="text-sm text-ink-secondary">{actorName(event) ?? '—'}</span>}
                                         </dd>
                                     </div>
@@ -305,6 +312,7 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen, step }: {
                                         <IdField label="Workspace id" value={event.workspaceId} />
                                         <IdField label="Data source id" value={event.dataSourceId} />
                                         <IdField label="Request id" value={event.correlationId} />
+                                        <IdField label="API key id" value={event.apiKeyId} />
                                     </dl>
                                 </section>
 

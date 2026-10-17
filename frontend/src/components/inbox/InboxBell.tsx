@@ -21,6 +21,8 @@ import {
     Bell,
     CheckCheck,
     CheckCircle2,
+    Clock,
+    KeySquare,
     Megaphone,
     Share2,
     ShieldAlert,
@@ -68,6 +70,21 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: ShieldAlert,
         icon: 'text-amber-500',
         tile: 'bg-amber-500/10',
+    },
+    api_key_expiring: {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    api_key_misuse: {
+        Icon: ShieldAlert,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    api_key_revoked_by_admin: {
+        Icon: KeySquare,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
     },
 }
 

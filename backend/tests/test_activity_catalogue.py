@@ -150,6 +150,15 @@ def test_a_moved_source_is_filed_under_where_it_went():
     ("visualization.view.created", {"workspaceId": "ws_1", "actor": "usr_1"}, "usr_1", "user", None),
     ("rbac.group.member_added", {"group_id": "grp_1", "user_id": "usr_2", "actor_id": "script"},
      "script", "service", "usr_2"),
+    # A key's owner edits it; an admin revokes it; the sweep reminds of it;
+    # whoever presented a refused one proved nothing.
+    ("identity.api_key.updated", {"user_id": "usr_1", "key_id": "apk_1", "updated_by": "usr_1"},
+     "usr_1", "user", "usr_1"),
+    ("identity.api_key.revoked", {"user_id": "usr_1", "key_id": "apk_1", "revoked_by": "usr_admin"},
+     "usr_admin", "user", "usr_1"),
+    ("identity.api_key.expiring", {"user_id": "usr_1", "key_id": "apk_1"}, None, "system", "usr_1"),
+    ("identity.api_key.rejected", {"user_id": "usr_1", "key_id": "apk_1", "reason": "expired"},
+     None, "anonymous", "usr_1"),
 ])
 def test_who_acted_and_who_it_happened_to(event_type, payload, actor, kind, subject):
     out = catalogue.project(event_type=event_type, payload=payload)

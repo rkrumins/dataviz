@@ -216,6 +216,7 @@ their series are complete: alert on those.
 | `provider_breaker_events{event}` | gauge, rises from boot | every process that serves metrics | Circuit-breaker decisions: `breaker_opens`, `breaker_pretrips`, `network_failures_counted`, and the slow or busy replies deliberately not counted (`deadline_timeouts_not_counted`, `queue_full_not_counted`, `pool_exhaustion_not_counted`, `query_errors_not_counted`). Under load the healthy shape is the `*_not_counted` events rising while `breaker_opens` stays flat |
 | `provider_manager_events{event}` | gauge, rises from boot | every process that serves metrics | Admission and preflight decisions: `graph_shed_process_full`, `graph_shed_over_share`, `slots_shed_queue_full`, `slots_shed_wait_timeout`, `fleet_slots_shed`, `fleet_slots_fail_open`, the `preflight_*` events, `graph_inflight_peak`, `provider_close_timeouts` |
 | `graph_cache_reads_total{endpoint,outcome}` | counter | API | Graph cache outcomes: `hit`, `miss`, `stale` (served last-known data), `bypass`, `too_large` |
+| `api_key_requests_total{outcome}` | counter | API | Every request made with an [API key](/guide/api-keys), once: `accepted`, or the code it was refused with — `invalid_api_key` (a token nobody issued), `api_key_revoked`, `api_key_expired`, `owner_reauth_required` (paused until its owner signs in), `api_key_owner_inactive`, `api_key_ip_not_allowed`, `rate_limited`, `api_key_not_allowed`, `api_key_read_only`, `api_key_out_of_scope`, `not_found`, `api_keys_disabled`, `api_keys_unavailable` or `other`. Never per key: **Administration → API keys** shows each key's use |
 | `aggregation_read_pressure_signals_total{outcome}` | counter | API | The API telling rebuilds that interactive reads are starving: `signals_sent`, `signals_coalesced`, `signals_unkeyed`, `signal_errors` |
 | `aggregation_slot_waits_total{kind,node}` | counter | worker | A rebuild waited for a write or scan slot on a graph-store node, then got one |
 | `aggregation_slot_fail_open_total{kind,node,reason}` | counter | worker | A rebuild went ahead without a slot: `reason="deadline"` means the per-node cap isn't capping; `reason="bus_error"` means the job-bus Redis is unreachable |
@@ -299,6 +300,9 @@ A starter set, built from what the platform exports. Tune the windows to your tr
 | Readers starving | `sum(rate(aggregation_read_pressure_yields_total[10m]))` | Above 0 for 30 minutes | Rebuilds keep yielding to interactive reads — capacity or tuning |
 | Job events failing | `sum(increase(job_events_emit_errors_total[15m]))` | Above 0 | Job progress isn't being recorded |
 | Unbounded label | `metrics_series_dropped_total` | Above 0 | A metric is losing series — tell engineering |
+| API keys can't be checked | `sum(increase(api_key_requests_total{outcome="api_keys_unavailable"}[5m]))` | Above 0 | The database or the feature switches can't be read, so every request with a key gets `503` |
+| Keys being guessed | `sum(increase(api_key_requests_total{outcome="invalid_api_key"}[15m]))` | Well above your usual | Tokens nobody issued are being tried. Each address is already limited; a steady climb means many addresses |
+| Integrations paused | `sum(increase(api_key_requests_total{outcome="owner_reauth_required"}[1h]))` | Above 0, rising | Keys stopped because their owners haven't signed in through single sign-on recently, or password sign-in was switched off. Owners resume them by signing in |
 | Restarts | Container restart count | Any, sustained | Crash loops hide behind healthy averages |
 
 Postgres, Redis and the graph store's own memory aren't exported by the platform; use your
@@ -313,6 +317,7 @@ platform's monitoring or exporters for them. The thresholds in
 | Host check and its health exemption | `backend/app/main.py` — `_TrustedHostMiddleware` |
 | Scrape endpoint and its token check | `backend/app/api/v1/endpoints/metrics.py` — `scrape`, `metrics_authorized` |
 | Metrics registry | `backend/app/jobs/metrics_prometheus.py` — `PrometheusBackend`, `install` |
+| API key request outcomes | `backend/app/auth/api_key_auth.py` — `authenticate`, `_count` |
 | Worker health and scrape servers | `backend/app/common/health_server.py`; `backend/app/services/aggregation/__main__.py` — `_serve_metrics` |
 | Log format and request IDs | `backend/app/middleware/logging.py` — `configure_json_logging`, `StructuredLoggingMiddleware`; `backend/app/middleware/request_id.py` |
 | Infrastructure page data | `backend/app/services/system_status/` |

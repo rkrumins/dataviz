@@ -368,8 +368,8 @@ Each row has the actions for that account's state:
 | **Change organization access** | Set their organization-wide role (see [Roles](#roles)). |
 | **Mark as system account** | Make it a break-glass account (see below). |
 | **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly; a password you set is one they replace the next time they sign in. |
-| **End sessions** | Sign them out everywhere, now. They can sign straight back in. |
-| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. |
+| **End sessions** | Sign them out everywhere, now. They can sign straight back in. Their API keys keep working — revoke those under **Administration → API keys**. |
+| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. |
 
 Clicking a row opens that person's access drawer, which leads with an
 **Activity** block:
@@ -430,6 +430,11 @@ be removed from the last ready break-glass account, nor from an active Super
 Admin who has no linked SSO identity — it is the only thing keeping them able
 to sign in.
 
+A system account holds no [API keys](/guide/api-keys): it can't create any,
+and keys it made before it was marked stop working while it is one, and work
+again if the mark is removed. Nothing should run as the account you keep for
+emergencies, so make keys from your own account instead.
+
 ### Locked out
 
 If the only administrator forgets their password there is no way in through the
@@ -463,7 +468,7 @@ administrator:
 | **Profile** | **First name**, **Last name** (optional — a single name like *Prince* saves fine), and an optional **Display name** if you'd rather be shown as something else. Leave the display name blank to go back to *First Last*. |
 | **Avatar** | Stored on the account, so it follows you to a new browser. When your SSO connection supplies a picture, that image is what everyone sees and the picker says so — it is re-applied at every sign-in, and it clears if the identity is unlinked, after which your own pick (or initials) returns. |
 | **Password** | Asks for your current one. Changing it **signs you out everywhere, including the device you're on** — so a password change is also how you end a session you think somebody else has. |
-| **Signed-in devices** | **Sign out everywhere** — the same sign-out without changing your password. |
+| **Signed-in devices** | **Sign out everywhere** — the same sign-out without changing your password. Neither touches your [API keys](/guide/api-keys): revoke a key you no longer trust. |
 | **Recent activity** | Password changes, resets, and session sign-outs on your account, marked **BY AN ADMIN** when an administrator did them. History starts when your deployment was upgraded, so it will not show anything older than that. |
 
 Your **email is not editable here** — it identifies you to your identity
@@ -529,3 +534,5 @@ questions on its own. What people see when they ask for access is covered in
   company's identity provider.
 - [Troubleshooting](/guide/troubleshooting#a-new-user-cant-log-in) — when
   someone can't sign in or has the wrong access.
+- [API Keys](/guide/api-keys) — when someone wants a script or a service to
+  act as them, or you need to see and revoke the keys people hold.

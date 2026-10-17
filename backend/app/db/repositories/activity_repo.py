@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Iterator, Optional, Protocol
 
-from sqlalchemy import false, func, or_, select, text, tuple_, union_all
+from sqlalchemy import and_, false, func, or_, select, text, tuple_, union_all
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +30,13 @@ from backend.app.db.repositories.analytics_repo import Window
 
 #: Per-request noise the default lens leaves out: a refused request is logged
 #: on every 403, so at any real volume it would bury what people did.
-NOISE_TYPES = frozenset({"user.access_denied"})
+NOISE_TYPES = frozenset({
+    "user.access_denied",
+    # A key refused for being out of date — expired, or its owner paused or
+    # suspended — once per key an hour while a script keeps calling. The
+    # suspicious refusals are ``identity.api_key.misuse``, which stay.
+    "identity.api_key.rejected",
+})
 
 #: Kinds of change a person can give a reason for. Sign-ins and views do not
 #: ask for one, so they are left out of the reason-coverage figure rather
@@ -101,6 +107,8 @@ class ActivityFilter:
     target_id: Optional[str] = None
     outcome: Optional[str] = None
     has_reason: Optional[bool] = None
+    #: Everything one API key did, and everything that happened to it.
+    api_key_id: Optional[str] = None
     include_noise: bool = False
     text: Optional[str] = None
     #: Forced to ``workspace`` for a workspace admin's read.
@@ -152,6 +160,11 @@ def predicates(f: ActivityFilter, *, window: bool = True) -> list[Any]:
         out.append(L.stated_reason.is_not(None))
     elif f.has_reason is False:
         out.append(L.stated_reason.is_(None))
+    if f.api_key_id:
+        out.append(or_(
+            L.api_key_id == f.api_key_id,
+            and_(L.target_type == "api_key", L.target_id == f.api_key_id),
+        ))
     if not f.include_noise:
         out.append(L.event_type.notin_(sorted(NOISE_TYPES)))
     if f.text:

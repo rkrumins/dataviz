@@ -63,6 +63,7 @@ _AUDIT_PREFIXES = (
     "auth.",             # config.updated
     "idp.",              # provider.created / updated / deleted
     "sso.",              # backchannel_host_allowed / backchannel_host_withdrawn
+    "identity.api_key.",  # created / rotated / updated / revoked / expiring / rejected / misuse
 )
 
 
@@ -101,6 +102,9 @@ _SECURITY_HIDE = frozenset({
     # Access request lifecycle — only the approve / deny step is
     # interesting at security volume.
     "rbac.access_request.created",
+    # A key refused for being out of date — expired, its owner paused or
+    # suspended. Routine; the suspicious refusals are ``misuse``.
+    "identity.api_key.rejected",
 })
 
 # ``activity`` keeps the page useful for support work — adds back
