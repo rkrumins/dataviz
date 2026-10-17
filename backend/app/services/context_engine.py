@@ -130,6 +130,15 @@ class ContextEngine:
         from ..ontology.service import LocalOntologyService
 
         try:
+            # Name the primary when the caller did not, so the versioned routing and write wrap
+            # below see the same data source the provider serves (else a versioned primary gets
+            # a raw FalkorDB writer).
+            if not data_source_id:
+                from ..db.repositories import data_source_repo
+                primary = await data_source_repo.get_primary_data_source(session, workspace_id)
+                if primary is None:
+                    raise KeyError(f"No data source for workspace: {workspace_id}")
+                data_source_id = primary.id
             provider = await registry.get_provider_for_workspace(
                 workspace_id, session, data_source_id
             )

@@ -8,6 +8,9 @@
 * Two writers patching one edge each get back the edge as Postgres holds it after their own
   commit; FalkorDB is never written.
 * An edge Postgres does not hold is not found, and nothing commits.
+* A request that omits dataSourceId gets the workspace's primary data source; when it is
+  versioned, the engine still commits the write to Postgres (main, or the draft named by
+  branchId) and never writes FalkorDB.
 
 The inner provider stands in for FalkorDB and records every write; the projector is the only
 FalkorDB writer. Unit coverage: ``tests/test_versioning_single_writer.py``.
@@ -155,5 +158,81 @@ def test_an_edge_postgres_does_not_hold_is_not_found(e2e):
         assert await prov.update_edge("ghost", {"w": 1}) is None
         assert await prov.delete_edge("ghost") is False
         assert await _commits(svc, gid) == before
+        assert inner.calls == []
+    e2e(body)
+
+
+class _Registry:
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def get_provider_for_workspace(self, workspace_id, session, data_source_id):
+        return self.inner
+
+
+@pytest.fixture
+def primary(monkeypatch):
+    """The workspace's primary data source is ``ds``; the projection is fresh, no ontology."""
+    from types import SimpleNamespace
+
+    from backend.app.db.repositories import data_source_repo
+    from backend.app.services.context_engine import ContextEngine
+    picked = {}
+
+    async def _primary(session, workspace_id):
+        return SimpleNamespace(id=picked["ds"])
+
+    async def _no_ds(session, ds_id):
+        return None
+
+    async def _noop(self):
+        return None
+
+    async def _fresh(self, graph_id):
+        return {"fresh": True, "committed": 1, "projected": 1}
+    monkeypatch.setattr(data_source_repo, "get_primary_data_source", _primary)
+    monkeypatch.setattr(data_source_repo, "get_data_source_orm", _no_ds)
+    monkeypatch.setattr(ContextEngine, "_resolve_ontology", _noop)
+    monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
+
+    async def engine(ds, inner, branch_id=None):
+        picked["ds"] = ds
+        async with db.graphver_session() as session:
+            return await ContextEngine.for_workspace("ws1", _Registry(inner), session,
+                                                     branch_id=branch_id)
+    return engine
+
+
+def _seed_edge():
+    return [_node("N"), _node("M"),
+            {"op": "create", "entity_kind": "edge", "entity_id": "e1",
+             "payload": {"sourceEntityId": "N", "targetEntityId": "M", "edgeType": "FLOWS_TO"}}]
+
+
+def test_a_write_without_a_data_source_id_commits_to_the_primary_versioned_graph(e2e, primary):
+    # A request that omits dataSourceId is served the workspace's primary data source; when that
+    # one is versioned, the write commits to Postgres and FalkorDB is left to the projector.
+    from types import SimpleNamespace
+
+    async def body(svc, ds, gid):
+        await svc.apply_ops(graph_id=gid, actor="u", message="seed", ops=_seed_edge())
+        inner = _Falkor("N", "M")
+        eng = await primary(ds, inner)
+        res = await eng.update_edge("e1", SimpleNamespace(properties={"w": 1}))
+        assert res.success, res.error
+        assert (await svc.entity_value(graph_id=gid, entity_id="e1"))["properties"] == {"w": 1}
+        assert inner.calls == []
+    e2e(body)
+
+
+def test_a_draft_write_without_a_data_source_id_lands_on_the_draft(e2e, primary):
+    async def body(svc, ds, gid):
+        await svc.apply_ops(graph_id=gid, actor="u", message="seed", ops=_seed_edge())
+        draft = await svc.open_draft(graph_id=gid, owner="u")
+        inner = _Falkor("N", "M")
+        eng = await primary(ds, inner, branch_id=draft)
+        assert await eng.delete_edge("e1") is True
+        assert await svc.entity_value(graph_id=gid, entity_id="e1", branch_id=draft) is None
+        assert await svc.entity_value(graph_id=gid, entity_id="e1") is not None   # main untouched
         assert inner.calls == []
     e2e(body)
