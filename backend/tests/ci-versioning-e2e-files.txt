@@ -8,6 +8,8 @@
 #
 # Regenerate the body with:
 #   grep -l GRAPHVER_E2E tests/integration/test_*.py | grep -v test_system_status.py | sort
+# then append tests/test_data_source_move.py, whose graphver cases sit beside its
+# unit cases.
 tests/integration/test_api_graph_draft_journey.py
 tests/integration/test_apply_ops_batch_composition.py
 tests/integration/test_authoring_reference_model.py
@@ -137,3 +139,4 @@ tests/integration/test_view_branch_scope_live.py
 tests/integration/test_view_package_roundtrip.py
 tests/integration/test_watermark_revisions.py
 tests/integration/test_written_state_ontology_gate.py
+tests/test_data_source_move.py

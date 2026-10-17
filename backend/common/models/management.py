@@ -1566,6 +1566,7 @@ class VersioningImpact(BaseModel):
     commits: int = 0
     openDrafts: List[DraftImpact] = []         # WHO has work in flight — the forgotten casualty
     openReviews: int = 0
+    forks: int = 0                             # live forks; they move with the graph
     curatedEntities: int = 0                   # entities a HUMAN edited: the irreplaceable part
     storageBytes: int = 0
 

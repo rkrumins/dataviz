@@ -43,8 +43,8 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit, LockBusy,
-                     MainWriteForbidden, MassDeleteBlocked)
+from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit, JobActive,
+                     LockBusy, MainWriteForbidden, MassDeleteBlocked)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -4599,6 +4599,38 @@ class GraphVersioningService:
                                        GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
+
+    async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str) -> List[str]:
+        """Re-home a data source's versioned graph, and every fork of it, into
+        ``new_workspace_id`` — the graphver half of moving the data source. Returns the moved
+        graph ids; ``[]`` when the source is not versioned.
+
+        Each graph is locked before its forks are read: a fork is created under its parent's
+        lock, so none appears unseen. Nothing moves while any of them has a pending or running
+        job (:class:`JobActive`), because a job runs in the workspace it was queued in; the
+        finished ones move with their graph, so lookups scoped by workspace still find them."""
+        async with self._session() as s:
+            root = await s.scalar(
+                select(GraphORM.id).where(GraphORM.data_source_id == data_source_id))
+            if root is None:
+                return []
+            ids, todo = [], [root]
+            while todo:
+                gid = todo.pop(0)
+                await self._lock_graph(s, gid)
+                ids.append(gid)
+                todo += sorted((await s.execute(select(GraphORM.id).where(
+                    GraphORM.fork_parent_graph_id == gid))).scalars().all())
+            active = await s.scalar(select(JobORM.id).where(
+                JobORM.graph_id.in_(ids), JobORM.status.in_(("pending", "running"))).limit(1))
+            if active is not None:
+                raise JobActive(active, f"job {active} is still running on this graph or one of "
+                                        "its forks; move it once that job finishes")
+            await s.execute(update(GraphORM).where(GraphORM.id.in_(ids))
+                            .values(workspace_id=new_workspace_id))
+            await s.execute(update(JobORM).where(JobORM.graph_id.in_(ids))
+                            .values(workspace_id=new_workspace_id))
+            return ids
 
     async def projection_placements(self, graph_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
         """Where each live graph projects, for the placement routes: its workspace (their gate),

@@ -905,28 +905,56 @@ async def move_data_source(
 
     source_ws_name = (await workspace_repo.get_workspace_orm(session, workspace_id)).name
 
-    # The row keeps its id, so stats, polling config and aggregation state follow it
-    # for free. Only its owner changes.
-    ds.workspace_id = target_id
-    ds.is_primary = False  # primacy is per-workspace; it isn't inherited
-    await session.flush()
+    # The versioned graph and its forks move FIRST, so a refusal (a job still running: 409
+    # job_active) or an unreachable store changes nothing. The other order would leave the
+    # source in B with its history readable only through A.
+    from backend.app.services.versioning.errors import HTTP_MAPPED
+    from backend.app.services.versioning.service import GraphVersioningService
+    svc = GraphVersioningService()
+    try:
+        await svc.move_graph_workspace(ds_id, target_id)
+    except HTTP_MAPPED:
+        raise
+    except Exception:
+        logger.exception("could not move the versioned graph of %s", ds_id)
+        raise HTTPException(
+            status_code=503,
+            detail="The version store is unavailable, so this can't be moved right now. "
+                   "Nothing has been changed. Try again shortly.")
 
-    # Both workspaces' cached provider handles now describe the wrong shape.
-    await provider_registry.evict_workspace(workspace_id, session)
-    await provider_registry.evict_workspace(target_id, session)
+    try:
+        # The row keeps its id, so stats, polling config and aggregation state follow it
+        # for free. Only its owner changes.
+        ds.workspace_id = target_id
+        ds.is_primary = False  # primacy is per-workspace; it isn't inherited
+        await session.flush()
 
-    await user_repo.create_outbox_event(
-        session,
-        event_type="workspace.datasource.moved",
-        payload={
-            "data_source_id": ds_id,
-            "from_workspace_id": workspace_id,
-            "from_workspace_name": source_ws_name,
-            "to_workspace_id": target_id,
-            "to_workspace_name": target.name,
-            "actor_id": user.id,
-        },
-    )
+        # Both workspaces' cached provider handles now describe the wrong shape.
+        await provider_registry.evict_workspace(workspace_id, session)
+        await provider_registry.evict_workspace(target_id, session)
+
+        await user_repo.create_outbox_event(
+            session,
+            event_type="workspace.datasource.moved",
+            payload={
+                "data_source_id": ds_id,
+                "from_workspace_id": workspace_id,
+                "from_workspace_name": source_ws_name,
+                "to_workspace_id": target_id,
+                "to_workspace_name": target.name,
+                "actor_id": user.id,
+            },
+        )
+        # Committed here, not at request end, so a failure can still put the graph back.
+        await session.commit()
+    except Exception:
+        # No two-phase commit across the stores: move the graph back, best effort.
+        try:
+            await svc.move_graph_workspace(ds_id, workspace_id)
+        except Exception:
+            logger.exception("data source %s stayed in %s but its versioned graph could not be "
+                             "moved back from %s", ds_id, workspace_id, target_id)
+        raise
 
     return await data_source_repo.get_data_source(session, ds_id)
 

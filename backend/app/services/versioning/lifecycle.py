@@ -103,6 +103,11 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
 
         ps = await s.get(ProjectionStateORM, gid)
 
+        # Forks live in the same workspace and move with the graph.
+        forks = await s.scalar(
+            select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None))) or 0
+
     return {
         "versioned": True,
         "commits": int(commits),
@@ -116,6 +121,7 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
             for d in drafts
         ],
         "openReviews": int(reviews),
+        "forks": int(forks),
         "curatedEntities": int(curated),
         "storageBytes": int(rows) * _BYTES_PER_VERSION_ROW,
         # THE REASSURANCE. `owns_falkor_graph` is a recorded fact, set at creation — we own the
