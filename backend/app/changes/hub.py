@@ -7,15 +7,15 @@ deliberate departure from the job-events SSE next door.
 **Why not one Redis reader per client.** The job stream gives each client
 its own blocking ``XREAD``, so a connection is parked for the client's
 whole lifetime. The bus pool is built with ``max_connections=20`` per
-process and is shared with everything else that talks to Redis in that
-process — session revocation checks, permission claims, rate-limit
-counters — and it *raises* on exhaustion rather than waiting. That is
-survivable for a handful of people watching job rows. It is not
-survivable for a channel every open tab holds: at the documented target
-of ~300 concurrent users the arithmetic says roughly 150 streams per
-process, and long before that the process stops being able to
-authenticate anybody. Here Redis connections are O(processes) — one —
-regardless of how many clients are attached.
+process and is shared with the other bus users in that process — the
+graph cache, job dispatch, provider invalidation — and once it is
+exhausted each of them waits up to ``pool_timeout`` (2s) for a
+connection, then fails. That is survivable for a handful of people
+watching job rows. It is not survivable for a channel every open tab
+holds: at the documented target of ~300 concurrent users the arithmetic
+says roughly 150 streams per process, and long before that every cache
+read and job dispatch in the process is stalling. Here Redis connections
+are O(processes) — one — regardless of how many clients are attached.
 
 **Why a dirty-set instead of a queue.** Each subscriber holds
 ``{topic: version}`` plus an ``asyncio.Event``. Publishing is

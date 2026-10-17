@@ -4,9 +4,9 @@ The hub exists so that Redis work is O(processes) instead of O(clients).
 The job-events stream next door does the opposite — one blocking
 ``XREAD`` per connected client — and that is survivable only because
 almost nobody watches job rows. A channel every open tab holds would
-exhaust the shared bus pool (``max_connections=20``, and it raises rather
-than waits on exhaustion) and start failing session revocation checks and
-permission claims for everyone on the replica.
+exhaust the shared bus pool (``max_connections=20``) and leave the graph
+cache, job dispatch and provider invalidation waiting on it for everyone
+on the replica.
 
 So the properties worth pinning are the ones that keep it cheap and the
 ones that keep it honest: publishing never blocks or drops, a subscriber

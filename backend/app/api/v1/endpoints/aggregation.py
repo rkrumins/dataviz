@@ -935,12 +935,11 @@ register_sse_path(
 # Each stream parks a Redis connection for its whole lifetime: the
 # consumer live-tails with a blocking XREAD. That connection comes from
 # the shared bus pool, which is built with ``max_connections=20``
-# (``services/aggregation/redis_client.py``) and is the same pool every
-# other Redis user in the process draws from — session revocation
-# checks, permission claims, rate-limit counters. The pool is
-# non-blocking: on exhaustion it RAISES rather than waiting, so twenty
-# people watching job rows does not degrade the streams, it starts
-# failing authentication for everyone on the replica.
+# (``services/aggregation/redis_client.py``) and which the graph cache,
+# job dispatch and provider invalidation draw from too. Once it is
+# exhausted, each of them waits up to ``pool_timeout`` (2s) for a
+# connection and then fails, so twenty people watching job rows would
+# stall every other Redis user on the replica.
 #
 # Five leaves the bulk of the pool for request-path work. A refused
 # stream is a non-event: the job table renders from its polled query and
@@ -948,8 +947,8 @@ register_sse_path(
 # lively progress bar and nothing else.
 #
 # This is a bound, not a fix. The real repair is to stop using one Redis
-# connection per client and fan out per-process from a single tail —
-# tracked as the change-feed hub work.
+# connection per client and fan out per-process from a single tail, as
+# ``changes/hub.py`` does for the change feed.
 _MAX_CONCURRENT_JOB_STREAMS = int(
     os.getenv("AGGREGATION_JOB_SSE_MAX_CONCURRENT", "5")
 )
