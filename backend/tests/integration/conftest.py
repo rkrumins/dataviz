@@ -78,6 +78,18 @@ def _fresh_graphver_engine():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _keep_revocation_service():
+    """Some harnesses stub ``get_revocation_service`` in place (no Redis here) and never put it
+    back. Restore it after each test, so a later test in the same run that authenticates for real
+    still gets a revocation check it can await."""
+    from backend.app.auth import dependencies as deps
+
+    original = deps.get_revocation_service
+    yield
+    deps.get_revocation_service = original
+
+
 @pytest.fixture
 def data_sources(monkeypatch):
     """POST /graphs resolves its data source in the management DB and pins the new graph to that
