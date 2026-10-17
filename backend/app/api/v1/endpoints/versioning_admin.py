@@ -4,13 +4,16 @@
 Every route needs ``system:admin``. None is on the API-key surface (``auth/api_key_surface``), so
 an API key is refused.
 """
-from fastapi import APIRouter, Depends
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.services.activity import recorder
+from backend.app.services.system_status import probes
 from backend.auth_service.interface import User
 
 from .versioning import get_versioning_service
@@ -42,3 +45,26 @@ async def reset_watermarks(
         best_effort=True,   # the watermarks are already reset
     )
     return {"provider": body.provider, "graphsReset": len(ids)}
+
+
+@router.get("/graphs",
+            summary="Every versioned graph with its FalkorDB provider, key and projection state")
+async def list_graphs(
+    provider: Optional[str] = Query(
+        None, min_length=1, description="FalkorDB provider id; 'default' for the env instance"),
+    status: Optional[Literal["fresh", "lagging", "projecting", "rebuilding", "evicted",
+                             "failed"]] = None,
+    workspace_id: Optional[str] = Query(None, alias="workspaceId", min_length=1),
+    kind: Optional[Literal["main", "fork", "orphan"]] = None,
+    q: Optional[str] = Query(None, min_length=1, max_length=200),
+    cursor: Optional[str] = Query(None, max_length=200,
+                                  description="The previous page's nextCursor"),
+    limit: int = Query(50, ge=1, le=200),
+    _user: User = Depends(requires("system:admin")),
+) -> dict:
+    """The fleet inventory: one page of every versioned graph, by graph id, including the forks
+    and orphans the Infrastructure projection rollup leaves out — so the ninth failing graph, a
+    fork's key or a graph whose data source was deleted can be found and acted on."""
+    return await probes.list_versioned_graphs(
+        provider=provider, status=status, workspace_id=workspace_id, kind=kind, q=q,
+        cursor=cursor, limit=limit)

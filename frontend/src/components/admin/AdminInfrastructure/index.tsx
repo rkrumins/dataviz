@@ -23,6 +23,7 @@ import { GraphStoreLimitsDialog } from './GraphStoreLimitsDialog'
 import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
+import { VersionedGraphsPanel } from './VersionedGraphsPanel'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -148,6 +149,18 @@ export function AdminInfrastructure() {
         setSearchParams(prev => {
             const p = new URLSearchParams(prev)
             p.delete('limits')
+            return p
+        }, { replace: true })
+    }, [setSearchParams])
+
+    // The fleet inventory opens from the projection panel and is keyed by the
+    // URL (``?graphs``) too, so a link to it lands with the list open.
+    const showGraphs = isSystemAdmin && searchParams.has('graphs')
+    const setShowGraphs = useCallback((open: boolean) => {
+        setSearchParams(prev => {
+            const p = new URLSearchParams(prev)
+            if (open) p.set('graphs', '')
+            else p.delete('graphs')
             return p
         }, { replace: true })
     }, [setSearchParams])
@@ -287,7 +300,14 @@ export function AdminInfrastructure() {
                     <DiagnosticsPanel snapshot={data} />
 
                     <BootstrapJobsPanel jobs={data.bootstrapJobs} />
-                    <ProjectionPanel projection={data.projection} providers={data.graphProviders} />
+                    <ProjectionPanel
+                        projection={data.projection}
+                        providers={data.graphProviders}
+                        onShowAll={isSystemAdmin ? () => setShowGraphs(true) : undefined}
+                    />
+                    {showGraphs && (
+                        <VersionedGraphsPanel providers={data.graphProviders} onClose={() => setShowGraphs(false)} />
+                    )}
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>
             ) : null}

@@ -121,6 +121,29 @@ export interface ProjectionWorstRow {
     updatedAt: string | null
 }
 
+/** One row of the fleet inventory (``GET /api/v1/admin/versioning/graphs``):
+ *  a projection row, plus whether the platform owns the key and whether the
+ *  graph is a fork or an orphan (not a fork, and its data source is gone). */
+export interface VersionedGraphRow extends ProjectionWorstRow {
+    owned: boolean
+    forkParentGraphId: string | null
+    orphan: boolean
+}
+
+export type ProjectionBucket = 'fresh' | 'lagging' | 'projecting' | 'rebuilding' | 'evicted' | 'failed'
+
+export interface VersionedGraphsFilter {
+    provider?: string
+    status?: ProjectionBucket
+    kind?: 'main' | 'fork' | 'orphan'
+    q?: string
+}
+
+export interface VersionedGraphsPage {
+    graphs: VersionedGraphRow[]
+    nextCursor: string | null
+}
+
 export interface ProjectionSection {
     totalGraphs: number
     fresh: number
@@ -234,4 +257,11 @@ export interface SystemStatusSnapshot {
 export const systemStatusService = {
     get: (): Promise<SystemStatusSnapshot> =>
         authFetch<SystemStatusSnapshot>('/api/v1/admin/system/status'),
+    /** One keyset page of the fleet inventory; pass the previous page's ``nextCursor``. */
+    versionedGraphs: (filter: VersionedGraphsFilter, cursor?: string | null): Promise<VersionedGraphsPage> => {
+        const params = new URLSearchParams()
+        for (const [k, v] of Object.entries(filter)) if (v) params.set(k, v)
+        if (cursor) params.set('cursor', cursor)
+        return authFetch<VersionedGraphsPage>(`/api/v1/admin/versioning/graphs?${params}`)
+    },
 }

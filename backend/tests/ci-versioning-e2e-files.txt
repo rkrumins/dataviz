@@ -51,6 +51,7 @@ tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
+tests/integration/test_versioning_admin_graphs_live.py
 tests/integration/test_versioning_api.py
 tests/integration/test_versioning_apply_ops.py
 tests/integration/test_versioning_asof_reads.py

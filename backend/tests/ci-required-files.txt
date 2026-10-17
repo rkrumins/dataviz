@@ -157,6 +157,7 @@ tests/test_permission_service.py
 tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
+tests/test_probe_projection_lag.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -226,6 +227,7 @@ tests/test_versioned_branch_aggregated_edges.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioned_branch_trace_closure.py
 tests/test_versioned_sources_lookup.py
+tests/test_versioning_admin_graphs_route.py
 tests/test_versioning_admin_watermarks_route.py
 tests/test_versioning_concurrency.py
 tests/test_versioning_core.py

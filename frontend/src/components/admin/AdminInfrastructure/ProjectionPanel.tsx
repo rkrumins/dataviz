@@ -3,6 +3,7 @@
  * Rollup chips + a worst-lag table that names each graph (data-source label
  * + workspace), shows how far behind it is, which provider hosts its cache,
  * and any error. Rows deep-link to the workspace where a rebuild lives.
+ * ``onShowAll`` (system admins) opens the full inventory, VersionedGraphsPanel.
  */
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, GitBranch } from 'lucide-react'
@@ -37,9 +38,10 @@ const PROVIDER_LABEL: Record<string, string> = {
 interface Props {
     projection: ProjectionSection | null
     providers: GraphProvider[] | null
+    onShowAll?: () => void
 }
 
-export function ProjectionPanel({ projection, providers }: Props) {
+export function ProjectionPanel({ projection, providers, onShowAll }: Props) {
     const navigate = useNavigate()
     const providerById = new Map((providers ?? []).map(p => [p.id, p]))
 
@@ -53,11 +55,18 @@ export function ProjectionPanel({ projection, providers }: Props) {
                         <p className="text-[11px] text-ink-muted">Postgres is the source of truth; each graph is projected into a read cache the app queries.</p>
                     </div>
                 </div>
-                {projection && (
-                    <span className="text-[11px] text-ink-muted shrink-0">
-                        {compactNum(projection.totalGraphs)} graphs · max lag {projection.maxLag} commit{projection.maxLag === 1 ? '' : 's'}
-                    </span>
-                )}
+                <div className="flex items-center gap-3 shrink-0">
+                    {projection && (
+                        <span className="text-[11px] text-ink-muted">
+                            {compactNum(projection.totalGraphs)} graphs · max lag {projection.maxLag} commit{projection.maxLag === 1 ? '' : 's'}
+                        </span>
+                    )}
+                    {onShowAll && (
+                        <button onClick={onShowAll} className="text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline">
+                            All versioned graphs
+                        </button>
+                    )}
+                </div>
             </div>
 
             {!projection ? (

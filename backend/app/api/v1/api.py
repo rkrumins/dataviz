@@ -113,7 +113,8 @@ api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
     dependencies=[Depends(requires("system:admin"))],
 )
-# Disaster recovery for the versioned graphs' FalkorDB projections; each route needs system:admin.
+# Disaster recovery and the fleet inventory of the versioned graphs' FalkorDB projections; each
+# route needs system:admin.
 api_router.include_router(
     versioning_admin.router, prefix="/admin/versioning", tags=["admin:versioning"],
 )

@@ -1031,25 +1031,27 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-async def _present_data_source_ids() -> list[str]:
+async def _present_data_source_ids(label_contains: Optional[str] = None) -> list[str]:
     """The ids of data sources that are LIVE in the management DB.
 
     Versioned-graph metrics are scoped to these so the numbers reflect live
     entities — the graphver store has no GC, so graphs for deleted sources
     (and dev/test seed graphs) accumulate and would otherwise dominate every
     count and the projection list. A soft-deleted source is exactly such an
-    orphaned graph, so tombstones are excluded.
+    orphaned graph, so tombstones are excluded. ``label_contains`` narrows
+    them to the sources whose label holds it (the fleet inventory's search).
     """
     from sqlalchemy import select
 
     from backend.app.db.engine import PoolRole, get_session_factory
     from backend.app.db.models import WorkspaceDataSourceORM
 
+    stmt = select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    if label_contains:
+        stmt = stmt.where(WorkspaceDataSourceORM.label.icontains(label_contains, autoescape=True))
     async with asyncio.timeout(_BUDGET_DB):
         async with get_session_factory(PoolRole.READONLY)() as s:
-            return list((await s.execute(
-                select(WorkspaceDataSourceORM.id)
-                .where(WorkspaceDataSourceORM.deleted_at.is_(None)))).scalars().all())
+            return list((await s.execute(stmt)).scalars().all())
 
 
 # ── Data-plane sections ──────────────────────────────────────────────
@@ -1268,16 +1270,83 @@ async def probe_graph_providers(app_state) -> Optional[list]:
     return out or None
 
 
+def _projection_rows():
+    """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
+    is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
+    probe and the fleet inventory, so a graph reads the same in both."""
+    from sqlalchemy import and_, func, select
+
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    lag = GraphORM.main_head_commit_seq - func.coalesce(
+        ProjectionStateORM.projected_commit_seq, 0)
+    status = func.coalesce(ProjectionStateORM.status, "idle")
+
+    err = ProjectionStateORM.last_error.isnot(None)
+    buckets = {
+        # in sync = caught up AND no projection error (mutually exclusive
+        # with failed, so the chips read consistently).
+        "fresh": and_(lag <= 0, ~err),
+        "lagging": and_(lag > 0, status == "idle", ~err),
+        "projecting": status == "projecting",
+        "rebuilding": status == "rebuilding",
+        "evicted": status == "evicted",
+        "failed": err,
+    }
+    rows = (
+        select(
+            GraphORM.id, GraphORM.workspace_id, GraphORM.data_source_id,
+            GraphORM.kind, GraphORM.main_head_commit_seq, GraphORM.fork_parent_graph_id,
+            ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
+            ProjectionStateORM.owns_falkor_graph,
+            ProjectionStateORM.projected_commit_seq, ProjectionStateORM.target_commit_seq,
+            lag.label("lag"), status.label("status"),
+            ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
+            ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
+            ProjectionStateORM.updated_at,
+        )
+        .select_from(GraphORM)
+        .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+    )
+    return rows, lag, buckets
+
+
+def _projection_row(r, info: dict) -> dict:
+    """One projection row, named from the data-source directory entry ``info``."""
+    return {
+        "graphId": r.id,
+        "workspaceId": r.workspace_id,
+        "workspaceName": info.get("workspaceName"),
+        "dataSourceId": r.data_source_id,
+        "dataSourceLabel": info.get("label"),
+        "providerName": info.get("providerName"),
+        "providerType": info.get("providerType"),
+        "kind": r.kind,
+        "falkorGraphName": r.falkor_graph_name,
+        "falkorProvider": r.falkor_provider,
+        "committed": r.main_head_commit_seq,
+        "projected": r.projected_commit_seq,
+        "target": r.target_commit_seq,
+        "lag": r.lag,
+        "status": r.status,
+        "lastError": r.last_error,
+        "lastProjectedAt": r.last_projected_at,
+        "progressDone": r.progress_done,
+        "progressTotal": r.progress_total,
+        "updatedAt": r.updated_at,
+    }
+
+
 async def probe_projection_lag() -> Optional[dict]:
     """Global Postgres→FalkorDB projection watermark rollup (all graphs).
 
     Aggregate + top-5 worst only — never all rows (scale-safe). Runs on
     the dedicated graphver engine, not the management pools.
     """
-    from sqlalchemy import and_, func, or_, select
+    from sqlalchemy import func, or_
 
     from backend.app.services.versioning.db import graphver_session
-    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+    from backend.app.services.versioning.models import GraphORM
 
     # Scope to graphs backed by a data source that still exists — orphaned /
     # seed graphs would otherwise flood both the counts and the worst list.
@@ -1288,44 +1357,16 @@ async def probe_projection_lag() -> Optional[dict]:
         return None
     present = GraphORM.data_source_id.in_(present_ids)
 
-    lag = GraphORM.main_head_commit_seq - func.coalesce(
-        ProjectionStateORM.projected_commit_seq, 0)
-    status = func.coalesce(ProjectionStateORM.status, "idle")
-
-    err = ProjectionStateORM.last_error.isnot(None)
-    agg_stmt = (
-        select(
-            func.count().label("total"),
-            # in sync = caught up AND no projection error (mutually exclusive
-            # with failed, so the chips read consistently).
-            func.count().filter(and_(lag <= 0, ~err)).label("fresh"),
-            func.count().filter(and_(lag > 0, status == "idle", ~err)).label("lagging"),
-            func.count().filter(status == "projecting").label("projecting"),
-            func.count().filter(status == "rebuilding").label("rebuilding"),
-            func.count().filter(status == "evicted").label("evicted"),
-            func.count().filter(err).label("failed"),
-            func.coalesce(func.max(lag), 0).label("max_lag"),
-        )
-        .select_from(GraphORM)
-        .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
-        .where(present)
-    )
+    rows, lag, buckets = _projection_rows()
+    agg_stmt = rows.with_only_columns(
+        func.count().label("total"),
+        *(func.count().filter(cond).label(name) for name, cond in buckets.items()),
+        func.coalesce(func.max(lag), 0).label("max_lag"),
+    ).where(present)
     worst_stmt = (
-        select(
-            GraphORM.id, GraphORM.workspace_id, GraphORM.data_source_id,
-            GraphORM.kind, GraphORM.main_head_commit_seq,
-            ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
-            ProjectionStateORM.projected_commit_seq, ProjectionStateORM.target_commit_seq,
-            lag.label("lag"), status.label("status"),
-            ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
-            ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
-            ProjectionStateORM.updated_at,
-        )
-        .select_from(GraphORM)
-        .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+        rows
         .where(present)
-        .where(or_(lag > 0, ProjectionStateORM.last_error.isnot(None),
-                   ProjectionStateORM.status.in_(("projecting", "rebuilding"))))
+        .where(or_(lag > 0, buckets["failed"], buckets["projecting"], buckets["rebuilding"]))
         .order_by(lag.desc())
         .limit(8)
     )
@@ -1345,31 +1386,6 @@ async def probe_projection_lag() -> Optional[dict]:
     directory = await _resolve_data_sources(
         [r.data_source_id for r in worst_rows if r.data_source_id])
 
-    def _row(r) -> dict:
-        info = directory.get(r.data_source_id) or {}
-        return {
-            "graphId": r.id,
-            "workspaceId": r.workspace_id,
-            "workspaceName": info.get("workspaceName"),
-            "dataSourceId": r.data_source_id,
-            "dataSourceLabel": info.get("label"),
-            "providerName": info.get("providerName"),
-            "providerType": info.get("providerType"),
-            "kind": r.kind,
-            "falkorGraphName": r.falkor_graph_name,
-            "falkorProvider": r.falkor_provider,
-            "committed": r.main_head_commit_seq,
-            "projected": r.projected_commit_seq,
-            "target": r.target_commit_seq,
-            "lag": r.lag,
-            "status": r.status,
-            "lastError": r.last_error,
-            "lastProjectedAt": r.last_projected_at,
-            "progressDone": r.progress_done,
-            "progressTotal": r.progress_total,
-            "updatedAt": r.updated_at,
-        }
-
     return {
         "totalGraphs": agg.total,
         "fresh": agg.fresh,
@@ -1379,7 +1395,71 @@ async def probe_projection_lag() -> Optional[dict]:
         "evicted": agg.evicted,
         "failed": agg.failed,
         "maxLag": agg.max_lag,
-        "worst": [_row(r) for r in worst_rows],
+        "worst": [_projection_row(r, directory.get(r.data_source_id) or {}) for r in worst_rows],
+    }
+
+
+async def list_versioned_graphs(
+    *, provider: Optional[str], status: Optional[str], workspace_id: Optional[str],
+    kind: Optional[str], q: Optional[str], cursor: Optional[str], limit: int,
+) -> dict:
+    """One page of the fleet inventory (``GET /admin/versioning/graphs``): every live versioned
+    graph with its FalkorDB provider, key, ownership and projection state, by graph id.
+
+    Unlike the probe it keeps forks (whose ``dsfork_`` data source is no management row) and
+    orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
+    ``fork`` or ``orphan``; ``status`` a rollup bucket; ``q`` matches the graph id, data source
+    id, FalkorDB key or data-source label. Unlike a probe it raises rather than degrading."""
+    from sqlalchemy import func, or_
+
+    from backend.app.services.versioning import config as vconfig
+    from backend.app.services.versioning.db import graphver_session
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    present_ids = await _present_data_source_ids()
+    present = GraphORM.data_source_id.in_(present_ids)
+    is_fork = GraphORM.fork_parent_graph_id.isnot(None)
+
+    rows, _lag, buckets = _projection_rows()
+    stmt = rows.where(GraphORM.deleted_at.is_(None))
+    if provider:
+        stmt = stmt.where(func.coalesce(func.nullif(ProjectionStateORM.falkor_provider, ""),
+                                        vconfig.DEFAULT_FALKOR_PROVIDER) == provider)
+    if status:
+        stmt = stmt.where(buckets[status])
+    if workspace_id:
+        stmt = stmt.where(GraphORM.workspace_id == workspace_id)
+    if kind == "main":
+        stmt = stmt.where(~is_fork, present)
+    elif kind == "fork":
+        stmt = stmt.where(is_fork)
+    elif kind == "orphan":
+        stmt = stmt.where(~is_fork, ~present)
+    if q:
+        stmt = stmt.where(or_(
+            GraphORM.id.icontains(q, autoescape=True),
+            GraphORM.data_source_id.icontains(q, autoescape=True),
+            ProjectionStateORM.falkor_graph_name.icontains(q, autoescape=True),
+            GraphORM.data_source_id.in_(await _present_data_source_ids(label_contains=q)),
+        ))
+    if cursor:
+        stmt = stmt.where(GraphORM.id > cursor)
+
+    async with graphver_session() as session:
+        page = (await session.execute(stmt.order_by(GraphORM.id).limit(limit + 1))).all()
+    more = len(page) > limit
+    page = page[:limit]
+
+    live = set(present_ids)
+    directory = await _resolve_data_sources([r.data_source_id for r in page])
+    return {
+        "graphs": [{
+            **_projection_row(r, directory.get(r.data_source_id) or {}),
+            "owned": bool(r.owns_falkor_graph),
+            "forkParentGraphId": r.fork_parent_graph_id,
+            "orphan": r.fork_parent_graph_id is None and r.data_source_id not in live,
+        } for r in page],
+        "nextCursor": page[-1].id if more else None,
     }
 
 
