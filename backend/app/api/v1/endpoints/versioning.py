@@ -40,6 +40,7 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
+from backend.app.api.v1.versioning_gate import SyncOverrides, sync_override_gate
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
@@ -2359,6 +2360,7 @@ class SyncResponse(_ApiModel):
     applied: int = 0
     rejected: List[dict] = []
     idempotent_replay: bool = False
+    overrides: List[str] = []
 
 
 @router.post("/graphs/{graph_id}/bulk-ingest", response_model=BulkIngestResponse)
@@ -2403,6 +2405,7 @@ async def sync_ingest(
     strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
     source: str = Query("external"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    overrides: SyncOverrides = Depends(sync_override_gate),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -2411,7 +2414,9 @@ async def sync_ingest(
     ``main`` as a single ``sync`` commit via 3-way merge: user edits to untouched fields
     survive; a field both sides changed conflicts (409) under ``strategy=merge`` or takes
     the external value under ``strategy=external_wins``. A node the snapshot drops cascades
-    to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``."""
+    to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``. 409
+    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
+    ``allowMassDelete``."""
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -2427,6 +2432,7 @@ async def sync_ingest(
         report = await svc.sync_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, source=source,
             idempotency_key=idempotency_key, strategy=strategy, containment_edge_types=cset,
+            allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)

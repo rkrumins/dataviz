@@ -9,6 +9,44 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning Stage 1: a re-sync can no longer quietly undo people's work
+
+### Changed
+
+**A re-sync refuses to undo curation.** A sync's merge base is `main` as it stood at the last import
+or sync, so edits people published before that sync read, on the next one, as the source's old
+values: the sync reverted them and deleted what people had created, without a conflict. Until the
+source's own snapshot becomes the base, `POST …/versioning/graphs/{graphId}/sync` and
+`POST /{ws}/graph/resync` answer **409 `curation_at_risk`** in that case, naming the newest such
+commit in `lastHumanCommit`. A sync right after people's edits is still allowed, since those edits
+are not yet in the base; the refusal starts with the sync after it.
+
+**A re-sync refuses to delete most of a graph.** A sync deletes whatever its snapshot leaves out, so
+a snapshot missing rows deletes them. A sync that would delete more than 500 entities and more than
+5% of the graph answers **409 `mass_delete_blocked`** `{deletes, live, limit}` and changes nothing.
+
+**Only a workspace admin can override.** `?force=true` passes the curation check and
+`?allowMassDelete=true` the delete limit; each overrides only its own. The override is named in the
+commit message, in the answer's `overrides` and, for `/graph/resync`, in the activity record.
+Anyone else gets **403 `needs_admin`**.
+
+### Upgrading
+
+- A script that re-syncs a curated graph on a schedule now gets 409 from its second run on. API keys
+  cannot hold `workspace:admin`, so a key cannot override: a workspace admin has to run that sync.
+- The delete limit is set by `GRAPHVER_SYNC_DELETE_MAX_ABS` (default `500`) and
+  `GRAPHVER_SYNC_DELETE_MAX_FRACTION` (default `0.05`, a fraction, not a percent).
+
+### Known limitations
+
+- Once one sync has landed after any edit on `main`, every later sync of that graph needs a
+  workspace admin's `force`, until the source snapshot becomes the merge base.
+- On graphs under about 10,000 entities the 500-entity floor decides, so a truncated snapshot that
+  deletes fewer than 500 entities still lands. A real removal of a large subtree needs
+  `allowMassDelete`.
+
+---
+
 ## [Unreleased] — API keys: scripts and services that act as you, limited to what you choose
 
 ### Added

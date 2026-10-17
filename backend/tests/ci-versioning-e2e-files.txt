@@ -49,6 +49,7 @@ tests/integration/test_property_delete_every_path.py
 tests/integration/test_publish_narrow_squash.py
 tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
+tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
 tests/integration/test_versioning_api.py
 tests/integration/test_versioning_apply_ops.py

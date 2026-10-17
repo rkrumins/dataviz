@@ -122,6 +122,8 @@ Other refusals you will meet on these routers:
 | **422** | `ontology_required` | A blank (ontology-governed) graph whose data source has no ontology assigned |
 | **503** | `ontology_unavailable` | A blank graph's ontology can't be resolved right now; writes wait for it |
 | **422** | `graph_too_large_to_sync` | A sync or re-sync on a graph above the size guard ([§2.9](#29-bulk-ingest--authoritative-sync)) |
+| **409** | `curation_at_risk` | A sync or re-sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
+| **409** | `mass_delete_blocked` | A sync or re-sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
 
 > **Invariant.** A conflict or violation is **atomic**: the service raises before any partial write,
@@ -232,7 +234,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST …/bulk-ingest` | `_MANAGE` | An NDJSON body (one node or edge per line) → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected`, not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
-| `POST …/sync` | `_MANAGE` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
+| `POST …/sync` | `_MANAGE` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; API keys cannot hold `workspace:admin`, so they get **403 `needs_admin`**). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
 
 ### 2.10 Imports & exports
 
@@ -450,7 +452,11 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
 - `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + **Version control**)
   re-syncs a versioned graph from its provider's current state with the service's 3-way merge;
   **404** when the data source isn't versioned. It refuses above `GRAPHVER_RESYNC_MAX_ENTITIES`
-  (250,000) with **422 `graph_too_large_to_sync`**. See
+  (250,000) with **422 `graph_too_large_to_sync`**, and with **409 `curation_at_risk`** or
+  **409 `mass_delete_blocked`** as `POST …/sync` does ([§2.9](#29-bulk-ingest--authoritative-sync)),
+  before it reads the provider when it can. A workspace admin may pass `force=true` or
+  `allowMassDelete=true` (anyone else, API keys included, gets **403 `needs_admin`**); the
+  activity record lists the overrides used. See
   [10 · Authoritative Sources](/docs/versioning-authoritative-sources) and
   [Re-sync at Any Scale](/docs/versioning-resync-at-any-scale).
 

@@ -43,7 +43,8 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import BranchNotOpen, ContentionExhausted, LockBusy, MainWriteForbidden
+from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, LockBusy,
+                     MainWriteForbidden, MassDeleteBlocked)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -394,6 +395,10 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # It is also the definition of "live" for the one-live-PR-per-branch invariant (PullRequestExists,
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
+
+# Commit kinds a machine writes; every other kind on main is a person's work. The same split
+# lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
+_MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
 
 # The "nothing came in" answer for a pull that was already up to date (see _incoming_from_main).
 # Same shape as a real one, so a client never has to special-case the no-op.
@@ -5410,6 +5415,7 @@ class GraphVersioningService:
         self, *, graph_id: str, provider, actor: str, source: str = "provider",
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None, batch: int = 2000,
+        allow_curation_risk: bool = False, allow_mass_delete: bool = False,
     ) -> Dict[str, object]:
         """Re-synchronize a versioned graph from its provider's CURRENT state, on demand —
         runnable at any time for any versioned graph (requirement: on-demand sync). Pages
@@ -5425,12 +5431,22 @@ class GraphVersioningService:
         # transaction. (sync_ingest checks too: it is O(graph) for its OWN callers regardless
         # of how many rows they hand it.)
         await self._assert_syncable(graph_id)
+        # A sync refused for curation at risk is refused whatever the provider holds, so ask
+        # first. sync_ingest asks again under the lock.
+        if not allow_curation_risk:
+            async with self._session() as s:
+                main_id = await self._main_branch_id(s, graph_id)
+                human = await self._human_commit_in_sync_base(
+                    s, graph_id, main_id, await self._last_sync_seq(s, graph_id, main_id))
+            if human is not None:
+                raise _curation_at_risk(human)
         from backend.app.providers.versioned_bootstrap import collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
-            containment_edge_types=containment_edge_types, message="resync from provider")
+            containment_edge_types=containment_edge_types, message="resync from provider",
+            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete)
 
     async def _assert_syncable(self, graph_id: str) -> None:
         """Refuse a sync the machine cannot survive, with the number that proves it.
@@ -5443,17 +5459,42 @@ class GraphVersioningService:
             return                                      # explicitly disabled by an operator
         async with self._session() as s:
             main_id = await self._main_branch_id(s, graph_id)
-            entities = await s.scalar(
-                select(func.count()).select_from(EntityHeadORM).where(
-                    EntityHeadORM.graph_id == graph_id,
-                    EntityHeadORM.branch_id == main_id,
-                    EntityHeadORM.is_tombstone.is_(False),
-                )) or 0
+            entities = await self._main_live_count(s, graph_id, main_id)
         if entities > limit:
             logger.warning(
                 "refusing sync for graph %s: %d entities exceeds the %d limit (~%.1f GB)",
                 graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
             raise GraphTooLargeToSync(entities, limit)
+
+    async def _main_live_count(self, s, graph_id: str, main_id: str) -> int:
+        return await s.scalar(
+            select(func.count()).select_from(EntityHeadORM).where(
+                EntityHeadORM.graph_id == graph_id,
+                EntityHeadORM.branch_id == main_id,
+                EntityHeadORM.is_tombstone.is_(False),
+            )) or 0
+
+    async def _last_sync_seq(self, s, graph_id: str, main_id: str) -> int:
+        """Main's newest import or sync commit: the seq a sync's merge base is read at."""
+        return await s.scalar(select(CommitORM.commit_seq).where(
+            CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+            CommitORM.kind.in_(("import", "sync")),
+        ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+
+    async def _human_commit_in_sync_base(self, s, graph_id: str, main_id: str, last_seq: int):
+        """The newest human commit on main OLDER than the last import or sync, or None.
+
+        Not "any human commit since the last sync": those are outside the merge base, so the
+        3-way merge keeps them as ours. The ones before it are IN the base, so a sync reads
+        them as the source's old values and reverts them, and deletes what people created
+        (AUTOVSHUMAN-01). Stop-gap until INGEST S1's source shadow becomes the base."""
+        return (await s.execute(
+            select(CommitORM.id, CommitORM.commit_seq, CommitORM.kind, CommitORM.actor,
+                   CommitORM.created_at).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq < last_seq,
+                CommitORM.kind.notin_(_MACHINE_COMMIT_KINDS),
+            ).order_by(CommitORM.commit_seq.desc()).limit(1))).first()
 
     async def edge_payload_health(
         self, graph_id: str, *, sample_limit: int = 20
@@ -5506,6 +5547,7 @@ class GraphVersioningService:
         idempotency_key: Optional[str] = None, message: str = "external sync",
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
+        allow_curation_risk: bool = False, allow_mass_delete: bool = False,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -5519,7 +5561,14 @@ class GraphVersioningService:
         merged, plus the urn/edge match indexes), so it is O(graph) for EVERY caller — no
         matter how few rows they pass. Pushing a SINGLE row into a 7.7M-entity graph asks for
         ~30 GB just as surely as a full re-sync does. That is why the guard lives here and not
-        only on the resync path. See :class:`GraphTooLargeToSync`."""
+        only on the resync path. See :class:`GraphTooLargeToSync`.
+
+        Two stop-gap refusals, each with an admin override that is named in the commit message
+        and in the report's ``overrides``: :class:`CurationAtRisk` when main holds a human commit
+        older than the last import or sync (``allow_curation_risk``), and
+        :class:`MassDeleteBlocked` when the sync would delete more than
+        max(``SYNC_DELETE_MAX_ABS``, ``SYNC_DELETE_MAX_FRACTION`` x live) entities
+        (``allow_mass_delete``)."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         return await self._retry_seq(
@@ -5527,13 +5576,15 @@ class GraphVersioningService:
             lambda: self._sync_ingest_once(
                 graph_id=graph_id, rows=rows, actor=actor, source=source,
                 idempotency_key=idempotency_key, message=message, strategy=strategy,
-                resolutions=resolutions, containment_edge_types=containment_edge_types))
+                resolutions=resolutions, containment_edge_types=containment_edge_types,
+                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete))
 
     async def _sync_ingest_once(
         self, *, graph_id: str, rows, actor: str, source: str,
         idempotency_key: Optional[str], message: str, strategy: str,
         resolutions: Optional[Mapping[str, Optional[dict]]],
         containment_edge_types: Optional[Sequence[str]],
+        allow_curation_risk: bool, allow_mass_delete: bool,
     ) -> Dict[str, object]:
         """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
         last sync and main's head are all read with main held still."""
@@ -5556,10 +5607,14 @@ class GraphVersioningService:
                             "applied": st.get("nodes", 0) + st.get("edges", 0),
                             "rejected": [], "idempotent_replay": True}
 
-            last_seq = await s.scalar(select(CommitORM.commit_seq).where(
-                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
-                CommitORM.kind.in_(("import", "sync")),
-            ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+            last_seq = await self._last_sync_seq(s, graph_id, main_id)
+            # After the replay, so a retried key still answers; before any O(graph) work.
+            overrides: List[str] = []
+            human = await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq)
+            if human is not None:
+                if not allow_curation_risk:
+                    raise _curation_at_risk(human)
+                overrides.append("curation_at_risk")
 
             # BOUNDED. This used to be two full `_state_as_of` replays plus an `_external_state`
             # that indexed the whole of `ours` — six whole-graph structures resident at once, and
@@ -5637,7 +5692,26 @@ class GraphVersioningService:
                         "applied": 0, "rejected": rejected, "idempotent_replay": False,
                         # WHICH user edits the source overruled. Overwriting a
                         # person's work is allowed; doing it silently is not.
-                        "overridden": overridden[:200]}
+                        "overridden": overridden[:200], "overrides": overrides}
+
+            # Counts the cascaded deletes too: that is what lands.
+            deletes = sum(1 for d in deltas if d.op == "delete")
+            if deletes > config.SYNC_DELETE_MAX_ABS:
+                live = await self._main_live_count(s, graph_id, main_id)
+                limit = max(config.SYNC_DELETE_MAX_ABS, int(config.SYNC_DELETE_MAX_FRACTION * live))
+                if deletes > limit:
+                    if not allow_mass_delete:
+                        raise MassDeleteBlocked(
+                            deletes, limit,
+                            f"this sync would delete {deletes:,} of {live:,} entities (limit "
+                            f"{limit:,}). A snapshot that is missing rows reads as 'the source "
+                            "deleted them'. A workspace admin can re-run with allowMassDelete.",
+                            live=live)
+                    overrides.append("mass_delete")
+            if overrides:
+                message = f"{message} (admin override: {', '.join(overrides)})"
+                logger.warning("sync on graph %s by %s proceeded under admin override: %s",
+                               graph_id, actor, overrides)
 
             kind_by_entity = {eid: ("edge" if _is_edge_payload(p) else "node")
                               for eid, p in ours.items() if p is not None}
@@ -5666,7 +5740,7 @@ class GraphVersioningService:
                     "applied": len(deltas), "rejected": rejected, "idempotent_replay": False,
                         # WHICH user edits the source overruled. Overwriting a
                         # person's work is allowed; doing it silently is not.
-                        "overridden": overridden[:200]}
+                        "overridden": overridden[:200], "overrides": overrides}
 
     async def _external_state_bounded(self, s, graph_id: str, main_id: str, rows):
         """`_external_state`, without holding the graph.
@@ -7213,6 +7287,16 @@ def _is_edge_payload(payload: Mapping) -> bool:
     has_src = "sourceEntityId" in payload or "source_entity_id" in payload
     has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
     return has_src and has_tgt
+
+
+def _curation_at_risk(human) -> CurationAtRisk:
+    """The refusal for :meth:`GraphVersioningService._human_commit_in_sync_base`'s row."""
+    commit_id, seq, kind, actor, created_at = human
+    return CurationAtRisk(
+        f"main has human changes from before the last sync (latest: {kind} commit {commit_id} "
+        f"by {actor}); a sync would treat them as source data and could silently revert or "
+        "delete them. A workspace admin can re-run with force to proceed.",
+        {"id": commit_id, "seq": seq, "kind": kind, "actor": actor, "createdAt": created_at})
 
 
 def _collapse_empty_payloads(state: Dict[str, Optional[dict]]) -> Dict[str, Optional[dict]]:

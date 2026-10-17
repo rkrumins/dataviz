@@ -212,6 +212,7 @@ tests/test_squash_plan_unit.py
 tests/test_sso_membership_events.py
 tests/test_store_governor.py
 tests/test_sync_size_guard.py
+tests/test_sync_stopgap_guards.py
 tests/test_thread_count_assumption.py
 tests/test_timeout_ladder.py
 tests/test_timeout_middleware.py

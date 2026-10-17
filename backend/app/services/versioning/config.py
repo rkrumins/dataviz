@@ -420,6 +420,14 @@ INGEST_HEARTBEAT_SECS: int = int(os.getenv(
 # makes re-sync bounded and moves it onto the worker, after which no limit is needed.
 RESYNC_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_RESYNC_MAX_ENTITIES", "250000"))
 
+# A sync deletes by ABSENCE, so a snapshot that is missing rows (a truncated provider page,
+# BOOTSTRAP-3) reads as the source deleting them. A sync that would delete more than
+# max(SYNC_DELETE_MAX_ABS, SYNC_DELETE_MAX_FRACTION x live entities on main) is refused unless
+# a workspace admin passes allowMassDelete. The fraction is a FRACTION (0.05 = 5%), not a
+# percent. Stop-gap: INGEST S1's per-source delete breaker replaces it.
+SYNC_DELETE_MAX_ABS: int = int(os.getenv("GRAPHVER_SYNC_DELETE_MAX_ABS", "500"))
+SYNC_DELETE_MAX_FRACTION: float = float(os.getenv("GRAPHVER_SYNC_DELETE_MAX_FRACTION", "0.05"))
+
 BOOTSTRAP_RETRY_BUDGET_SECS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS", "600"))
 BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(
     os.getenv("GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS", "30"))

@@ -16,16 +16,24 @@ Two flavours:
   of the view's own graph that the caller can read (404), and a write needs an open
   draft (409 branch_closed) the caller can edit (403); main is never written (409).
 
+``sync_override_gate`` is unrelated to the flag: it lets only a workspace admin pass the
+sync safety overrides (``force``, ``allowMassDelete``) on both sync routes.
+
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
 **enabled** so a missing definition can never lock users out.
 """
 import logging
-from typing import Optional
+from typing import NamedTuple, Optional
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import (
+    assert_session_alive_or_503,
+    get_current_user,
+    get_permission_claims,
+)
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.services.feature_flags import feature_flags
@@ -98,3 +106,40 @@ async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch
         viewer = Viewer(actor=actor, can_manage=has_permission(
             claims, "workspace:datasource:manage", workspace_id=view.workspace_id))
         await svc.check_view_branch(data_source_id=ds_id, branch_id=branch_id, viewer=viewer, write=write)
+
+
+class SyncOverrides(NamedTuple):
+    force: bool
+    allow_mass_delete: bool
+
+
+async def sync_override_gate(
+    request: Request,
+    force: bool = Query(False, description="Workspace admin: sync even though people's edits "
+                                           "on main are at risk (curation_at_risk)."),
+    allowMassDelete: bool = Query(False, description="Workspace admin: sync even though it "
+                                                     "deletes more than the limit "
+                                                     "(mass_delete_blocked)."),
+    user=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> SyncOverrides:
+    """Only a workspace admin may override a sync safety check. ``workspace:admin`` is a
+    fail-closed permission, so the session is probed first, and a denial decided against a
+    workspace map nothing could supply is a 503, as in ``requires()``. API keys never hold
+    ``workspace:admin``, so a key gets the 403."""
+    overrides = SyncOverrides(force, allowMassDelete)
+    if not (force or allowMassDelete):
+        return overrides
+    perm, ws_id = "workspace:admin", request.path_params["ws_id"]
+    await assert_session_alive_or_503(claims, permission=perm, user_id=user.id)
+    if has_permission(claims, perm, workspace_id=ws_id):
+        return overrides
+    if not claims.ws_available:
+        raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")
+    raise HTTPException(status_code=403, detail={
+        "type": "access_denied", "code": "needs_admin", "required": perm,
+        "error": "missing_permission", "permission": perm,
+        "scope": {"type": "workspace", "id": ws_id},
+        "message": f"Missing permission: {perm} — only a workspace admin can override a sync "
+                   "safety check.",
+    })

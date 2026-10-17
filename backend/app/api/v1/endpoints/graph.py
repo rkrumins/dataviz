@@ -43,7 +43,8 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import require_versioning_enabled
+from backend.app.api.v1.versioning_gate import (SyncOverrides, require_versioning_enabled,
+                                                sync_override_gate)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -528,13 +529,17 @@ async def resync_versioned_graph_endpoint(
     # access — which is precisely the access that should never have worked.
     _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
+    # Before `engine`: dependencies resolve in order, so a refused override never builds a provider.
+    overrides: SyncOverrides = Depends(sync_override_gate),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
 ):
     """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
     any time for any versioned graph. 3-way merge preserves user edits (a field both the
     source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
-    source). 404 if the data source isn't versioned yet (enable it first)."""
+    source). 404 if the data source isn't versioned yet (enable it first). 409
+    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
+    ``allowMassDelete``."""
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
@@ -545,15 +550,16 @@ async def resync_versioned_graph_endpoint(
     from backend.app.services.versioning.service import ConcurrencyError, MergeConflict
     try:
         result = await svc.resync_from_provider(
-            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy,
+            allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete)
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
-    await _record_versioning(
-        session, "workspace.versioning.resynced", dataSourceId,
-        {"strategy": strategy, "commitId": (result or {}).get("commit_id")},
-    )
+    details = {"strategy": strategy, "commitId": (result or {}).get("commit_id")}
+    if (result or {}).get("overrides"):
+        details["overrides"] = result["overrides"]       # an admin overrode a sync safety check
+    await _record_versioning(session, "workspace.versioning.resynced", dataSourceId, details)
     return result
 
 

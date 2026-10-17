@@ -71,16 +71,18 @@ class JobActive(_HttpMapped, RuntimeError):
 class CurationAtRisk(_HttpMapped, RuntimeError):
     """A re-sync would treat people's edits on main as drift and undo them."""
 
-    def __init__(self, message: str):
-        super().__init__(message, {"type": "curation_at_risk"})
+    def __init__(self, message: str, last_human_commit: Optional[Dict[str, Any]] = None):
+        super().__init__(message, {"type": "curation_at_risk",
+                                   "lastHumanCommit": last_human_commit})
 
 
 class MassDeleteBlocked(_HttpMapped, RuntimeError):
     """A re-sync would delete more of the graph than the configured limit."""
 
-    def __init__(self, deletes: int, limit: int, message: str):
+    def __init__(self, deletes: int, limit: int, message: str, live: Optional[int] = None):
         self.deletes, self.limit = deletes, limit
-        super().__init__(message, {"type": "mass_delete_blocked", "deletes": deletes, "limit": limit})
+        super().__init__(message, {"type": "mass_delete_blocked", "deletes": deletes,
+                                   "live": live, "limit": limit})
 
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, LockBusy, JobActive,

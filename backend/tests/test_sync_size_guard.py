@@ -100,6 +100,7 @@ async def test_the_resync_route_answers_a_refused_sync(monkeypatch, exc, status,
     from fastapi import HTTPException
 
     from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.api.v1.versioning_gate import SyncOverrides
     from backend.app.services.versioning import service as svc_mod
 
     class _Svc:
@@ -114,5 +115,6 @@ async def test_the_resync_route_answers_a_refused_sync(monkeypatch, exc, status,
     with pytest.raises(HTTPException) as refused:
         await graph_ep.resync_versioned_graph_endpoint(
             ws_id="ws1", dataSourceId="ds1", strategy="merge", _gate=None, _perm=None, user=None,
+            overrides=SyncOverrides(False, False),
             engine=type("_E", (), {"provider": None})(), session=None)
     assert refused.value.status_code == status and refused.value.detail["type"] == kind

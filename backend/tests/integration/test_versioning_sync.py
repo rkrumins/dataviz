@@ -67,11 +67,15 @@ async def _run() -> None:
     # ── user re-edits A.displayName; external also changes it → conflict ──
     await _user_set(svc, gid, eidA, {**st["nodes"][eidA], "displayName": "A-user2"})
     clash = [_node("u:A", displayName="A-ext", owner="team2"), _node("u:B", displayName="B"), _EDGE]
+    # The first user edit is now older than sync 1, so this sync is refused as curation_at_risk
+    # unless an admin overrides it (the documented stop-gap until INGEST S1).
     with pytest.raises(MergeConflict):
-        await svc.sync_ingest(graph_id=gid, rows=clash, actor="ext", strategy="merge")
+        await svc.sync_ingest(graph_id=gid, rows=clash, actor="ext", strategy="merge",
+                              allow_curation_risk=True)
     # external_wins resolves the clash in the external source's favour
     r2 = await svc.sync_ingest(graph_id=gid, rows=clash, actor="ext",
-                               idempotency_key="sync2", strategy="external_wins")
+                               idempotency_key="sync2", strategy="external_wins",
+                               allow_curation_risk=True)
     assert r2["commit_id"]
     assert (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"][eidA]["displayName"] == "A-ext"
 
