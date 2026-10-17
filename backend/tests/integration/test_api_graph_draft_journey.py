@@ -220,6 +220,14 @@ async def _run() -> None:
                 r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": bid}, json=late)
                 assert r.status_code == 409, r.text
                 assert r.json()["detail"]["type"] == "main_write_forbidden", r.text
+
+            # 12. a save to a branch id this graph does not have, or another graph's draft, is a 404
+            r = await c.post(f"{V1}/graphs", json={"dataSourceId": ds + "_other", "workspaceId": "ws1"})
+            assert r.status_code == 201, r.text
+            foreign = (await c.post(f"{V1}/graphs/{r.json()['graphId']}/branches", json={})).json()["branchId"]
+            for bid in ("br_does_not_exist", foreign):
+                r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": bid}, json=late)
+                assert r.status_code == 404, (bid, r.status_code, r.text)
     finally:
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
         await db.dispose_engine()

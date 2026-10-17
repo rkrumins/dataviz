@@ -157,7 +157,7 @@ Status key: **W** = fixed on s1/W, not on HEAD. **=** = unchanged by Stage 1 and
 | N12 | Orphaned versioned graphs: list and clean up | low |
 | N13 | Branch GC for merged and abandoned branches | medium |
 | N14 | Workspace-wide drafts view and presence | medium |
-| N15 | s1/W: `ValueError("unknown branch")` on `/graph/changes` returns 500 | medium (fix before W merges) |
+| N15 | s1/W: `ValueError("unknown branch")` on `/graph/changes` returns 500. Does not reproduce: the route's `get_context_engine` dependency answers 404 for an unknown or foreign branch first. Pinned by step 12 of `test_api_graph_draft_journey` | closed |
 | N16 | BranchManager and BranchSwitcher hide `publishing` drafts | low-medium |
 | N17 | Private-draft owner enforcement has no owning work item: X3 (plan:104) and plan:885 contradict each other | high |
 | N18 | Eviction budget form field and residency count | low |
@@ -169,7 +169,7 @@ Status key: **W** = fixed on s1/W, not on HEAD. **=** = unchanged by Stage 1 and
 ## 4. Recommended Stage 2
 
 **Prerequisite (end of Stage 1, not Stage 2):**
-- Fix N15 (graph.py `/graph/changes` except list: map `ValueError`/unknown branch to 404; add an HTTP test).
+- ~~Fix N15~~: does not reproduce (see N15); an HTTP test pins the 404.
 - Merge s1/W.
 - Land C34–C37.
 - Promote versioning-e2e to required (C99).
