@@ -541,7 +541,7 @@
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel` | workspace:datasource:read (ws:ws_id) | enforced | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/download` | workspace:datasource:read (ws:ws_id) | n/a | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/forks` | workspace:datasource:read (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/forks` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/graph/neighbors` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports` | workspace:datasource:manage (ws:ws_id) | enforced | resource |

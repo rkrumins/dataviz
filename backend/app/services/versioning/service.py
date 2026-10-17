@@ -43,7 +43,7 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, LockBusy,
+from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked)
 from .ids import prefixed_id
 from .merge import three_way_merge
@@ -1975,21 +1975,28 @@ class GraphVersioningService:
         parent_graph_id: str,
         workspace_id: str,
         actor: str,
-        data_source_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """Copy-on-write fork: a new graph whose ``main`` inherits the parent's
         state at its current head **without copying any rows**.  Divergence accrues
         only as the fork's own commits; reads compose parent@fork_base + own (plan
-        §8 cross-team flow)."""
+        §8 cross-team flow).
+
+        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`);
+        the parent's graph lock makes the count and the insert one step."""
         async with self._session() as s:
+            await self._lock_graph(s, parent_graph_id)
             parent = await s.get(GraphORM, parent_graph_id)
             if parent is None:
                 raise ValueError(f"unknown parent graph {parent_graph_id}")
+            live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
+            if live_forks >= config.MAX_FORKS_PER_GRAPH:
+                raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
             base_seq = parent.main_head_commit_seq
             parent_main = await self._main_branch_id(s, parent_graph_id)
             fork = GraphORM(
-                data_source_id=data_source_id or prefixed_id("dsfork"),
+                data_source_id=prefixed_id("dsfork"),
                 workspace_id=workspace_id,
                 tenant_id=tenant_id,
                 kind=parent.kind,

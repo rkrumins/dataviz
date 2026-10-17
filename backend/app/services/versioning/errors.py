@@ -85,5 +85,14 @@ class MassDeleteBlocked(_HttpMapped, RuntimeError):
                                    "live": live, "limit": limit})
 
 
+class ForkLimit(_HttpMapped, RuntimeError):
+    """The graph already has as many live forks as the configured limit."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        super().__init__(f"this graph already has {limit} forks; delete one to fork it again",
+                         {"type": "fork_limit", "limit": limit})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, LockBusy, JobActive,
-               CurationAtRisk, MassDeleteBlocked)
+               CurationAtRisk, MassDeleteBlocked, ForkLimit)

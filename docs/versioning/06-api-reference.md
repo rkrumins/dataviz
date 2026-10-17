@@ -60,13 +60,14 @@ Two permission strings gate the whole surface (`_READ` and `_MANAGE` in
 
 | Constant | Value | Applies to |
 |---|---|---|
-| `_READ` | `workspace:datasource:read` | All reads; **fork**; **open a fork PR**; PR and commit inspection; exports |
-| `_MANAGE` | `workspace:datasource:manage` | All writes; **merge** and **publish**; projection rebuild and reconcile; branch admin; upload and publish-job status |
+| `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
+| `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**; **merge** and **publish**; projection rebuild and reconcile; branch admin; upload and publish-job status |
 
-> **Decision — governance by permission asymmetry.** Anyone who can *see* a graph may propose
-> changes: **forking** (`POST /graphs/{gid}/forks`) and **opening a PR** (`POST /graphs/{gid}/pulls`)
-> need only `_READ`. Landing changes on a shared `main` — **merge** and **publish** — needs
-> `_MANAGE`. That single asymmetry is the review gate; there is no separate ACL system.
+> **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
+> changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
+> (`POST /graphs/{gid}/forks`) creates a graph, so it needs `_MANAGE`. Landing changes on a shared
+> `main` — **merge** and **publish** — needs `_MANAGE`. That asymmetry is the review gate; there is
+> no separate ACL system.
 
 `system:admin` implies both everywhere, `system:org-admin` in every workspace, and `workspace:admin`
 in its own workspace. Which roles hold which permission is in [RBAC](/docs/rbac). One read accepts
@@ -124,6 +125,7 @@ Other refusals you will meet on these routers:
 | **422** | `graph_too_large_to_sync` | A sync or re-sync on a graph above the size guard ([§2.9](#29-bulk-ingest--authoritative-sync)) |
 | **409** | `curation_at_risk` | A sync or re-sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
 | **409** | `mass_delete_blocked` | A sync or re-sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
+| **409** | `fork_limit` | A fork of a graph that already has `limit` live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`, default 10); `{limit}` |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
 
 > **Invariant.** A conflict or violation is **atomic**: the service raises before any partial write,
@@ -271,7 +273,7 @@ scripted run. The endpoints:
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/forks` | **`_READ`** | Copy-on-write fork: a new graph whose `main` starts from this graph's head without copying rows. `{dataSourceId?}` → **201** `{graphId, mainBranchId, forkBaseCommitSeq}` |
+| `POST …/forks` | **`_MANAGE`** | Copy-on-write fork: a new graph whose `main` starts from this graph's head without copying rows. No body → **201** `{graphId, mainBranchId, forkBaseCommitSeq}`. A graph has at most 10 live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`; a deleted fork does not count): one more is **409 `fork_limit`** `{limit}` |
 
 ### 2.12 Pull requests (fork → base)
 

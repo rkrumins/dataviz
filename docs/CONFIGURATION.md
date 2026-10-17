@@ -626,6 +626,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_JOBS_PER_WORKSPACE` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOB_WEDGE_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LEASE_TTL` | `60` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ONTOLOGY_ENFORCEMENT` | `strict` | `backend/app/services/versioning/config.py` |

@@ -117,6 +117,89 @@ def test_versioning_fork_e2e():
     asyncio.run(_run())
 
 
+# ── the fork route: MANAGE, no caller-chosen data source, a live-fork cap ──
+R = "workspace:datasource:read"
+M = "workspace:datasource:manage"
+
+
+def _client(perms: tuple):
+    """The versioning router over in-process ASGI, the caller holding ``perms`` in ws1."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.api.v1.endpoints import versioning as V
+    from backend.app.auth.dependencies import get_current_user, get_permission_claims
+    from backend.app.services.permission_service import PermissionClaims
+
+    async def _user():
+        return SimpleNamespace(id="u_fork", email="f@example.com")
+
+    async def _claims():
+        return PermissionClaims(sid="", global_perms=(), ws_perms={"ws1": perms})
+
+    app = FastAPI()
+    app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
+    app.dependency_overrides[get_current_user] = _user
+    app.dependency_overrides[get_permission_claims] = _claims
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _parent(svc) -> str:
+    await models.create_schema_and_partitions()
+    P = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    return P["graph_id"]
+
+
+async def _fork(c, gid, body=None):
+    return await c.post(f"/api/v1/ws1/versioning/graphs/{gid}/forks", json=body or {})
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        async with _client((R,)) as c:
+            r = await _fork(c, gid)
+            assert r.status_code == 403, r.text                      # a member without manage
+        taken = "ds_" + os.urandom(4).hex()
+        async with _client((R, M)) as c:
+            r = await _fork(c, gid, {"dataSourceId": taken})
+            assert r.status_code == 201, r.text
+        fork = await svc.get_graph(r.json()["graphId"])
+        assert fork["data_source_id"] != taken                       # the caller can't pick the key
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_fork_cap_counts_live_forks_only_e2e(monkeypatch):
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.purge_worker import tombstone_graphs_for_data_source
+
+    monkeypatch.setattr(config, "MAX_FORKS_PER_GRAPH", 2)
+
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        async with _client((R, M)) as c:
+            forks = [(await _fork(c, gid)).json()["graphId"] for _ in range(2)]
+            r = await _fork(c, gid)
+            assert r.status_code == 409, r.text                      # cap reached
+            assert r.json()["detail"]["type"] == "fork_limit"
+            assert r.json()["detail"]["limit"] == 2
+            # A tombstoned fork no longer counts: one slot comes back, and only one.
+            gone = await svc.get_graph(forks[0])
+            assert await tombstone_graphs_for_data_source(
+                data_source_id=gone["data_source_id"], workspace_id="ws1", actor="alice") == 1
+            assert (await _fork(c, gid)).status_code == 201
+            assert (await _fork(c, gid)).status_code == 409
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("versioning fork/PR e2e: OK")

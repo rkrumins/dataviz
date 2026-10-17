@@ -156,8 +156,9 @@ async def _run(data_sources: dict) -> None:
         assert "C" in (await c.get(f"{ws1}/graphs/{gid}/branches/{rb}/state", headers=h)).json()["nodes"]
 
         # ── fork/PR governance ───────────────────────────────────────────
-        # read-only caller may fork and open a PR …
-        fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).json()
+        # forking needs manage; a read-only caller may open a PR …
+        assert (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).status_code == 403
+        fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()
         fgid = fork["graphId"]
         # diverge on the fork (needs manage on the fork)
         fb = (await c.post(f"{ws1}/graphs/{fgid}/branches", json={}, headers=h)).json()["branchId"]
@@ -177,7 +178,7 @@ async def _run(data_sources: dict) -> None:
         assert base_state["nodes"]["A"]["displayName"] == "Alpha2"
 
         # ── conflict → 409 → resolve → 200 (via the API) ─────────────────
-        f2 = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).json()["graphId"]
+        f2 = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()["graphId"]
         f2b = (await c.post(f"{ws1}/graphs/{f2}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{f2}/branches/{f2b}/changes", headers=h, json={"ops": [{"op": "update", "entityKind": "node", "entityId": "A", "payload": {"displayName": "FromFork"}}]})
         await c.post(f"{ws1}/graphs/{f2}/branches/{f2b}/commit", json={}, headers=h)

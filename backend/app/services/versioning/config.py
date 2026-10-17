@@ -243,6 +243,10 @@ SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES
 # of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
 # merge. Temporary: removed one release after the narrow squash ships.
 NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
+# Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. Each
+# fork gets its own FalkorDB key on the parent's instance, so this bounds that until FalkorDB
+# capacity management (E7) brings a real quota.
+MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

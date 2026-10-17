@@ -150,7 +150,7 @@ curl -b cookies.txt -s "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BID/st
 | `GET  /graphs/{gid}/branches/{bid}/state` | live node/edge state | `…:read` |
 | `GET  /graphs/{gid}/entities/{eid}/history` | entity revision timeline | `…:read` |
 | `GET  /graphs/{gid}/branches/{bid}/diff?fromSeq=&toSeq=` | field-level diff | `…:read` |
-| `POST /graphs/{gid}/forks` | copy-on-write fork | `…:read` |
+| `POST /graphs/{gid}/forks` | copy-on-write fork (409 `fork_limit` past `GRAPHVER_MAX_FORKS_PER_GRAPH` live forks) | `…:manage` |
 | `POST /graphs/{gid}/pulls` | open a PR (fork → base) | `…:read` |
 | `GET  /graphs/{gid}/pulls` | list PRs targeting this graph | `…:read` |
 | `GET  /pulls/{pr}` | PR metadata | `…:read` |

@@ -127,6 +127,7 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 - Jobs: job_active, lifecycle_job_running, replay_in_progress.
 - Lifecycle: projection_not_adopted, capacity_insufficient, conversion_in_progress, release_not_eligible, reverify_required, catchup_required, source_stale.
 - Ingest: retention_gap, routing_overlap, dryrun_required, policy_unapproved, source_state.
+- Quota: fork_limit `{limit}` (live forks per graph, GRAPHVER_MAX_FORKS_PER_GRAPH).
 
 **410**
 - history_compacted `{fromSeq, toSeq, checkpointCommitId}` on every as-of, diff, revert, restore and export path.

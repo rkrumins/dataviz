@@ -13,9 +13,9 @@ Boundary policy
   operations reuse the existing data-source permissions:
     - reads  → ``workspace:datasource:read``
     - writes → ``workspace:datasource:manage``
-  Forking + opening a PR need only ``read`` (anyone who can see a graph may fork
-  it and propose changes); **merging** a PR into the base needs ``manage`` on the
-  base's workspace — the governance gate (plan §12.5).
+  Forking needs ``manage``; opening a PR needs only ``read`` (anyone who can see a
+  fork may propose its changes); **merging** a PR into the base needs ``manage`` on
+  the base's workspace — the governance gate (plan §12.5).
 * **Typed contract.** camelCase request/response models; domain errors map to
   HTTP (merge conflict / integrity → 409 with the conflict set; unknown id → 404).
 """
@@ -709,10 +709,6 @@ class RestorePreviewResponse(_ApiModel):
 
 class RebaseRequest(_ApiModel):
     resolutions: Optional[Dict[str, Optional[dict]]] = None
-
-
-class ForkRequest(_ApiModel):
-    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
 
 
 class MergePrRequest(_ApiModel):
@@ -3153,15 +3149,15 @@ async def cancel_export(
 # --------------------------------------------------------------------------- #
 @router.post("/graphs/{graph_id}/forks", response_model=ForkResponse, status_code=201)
 async def fork_graph(
-    ws_id: str, graph_id: str, body: ForkRequest,
-    user: User = Depends(requires(_READ, workspace="ws_id")),       # read can fork
+    ws_id: str, graph_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
         return await svc.fork_graph(
             parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
-            data_source_id=body.data_source_id, tenant_id=meta.get("tenant_id"),
+            tenant_id=meta.get("tenant_id"),
         )
 
 
