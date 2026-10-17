@@ -86,6 +86,7 @@ const EMPTY_CLAIMS: PermissionClaims = { sid: '', global: [], ws: {} }
  *   * ``org_admin``       — global, every workspace power w/o user/SSO admin
  *   * ``workspace_admin`` — workspace, auto-implies every workspace:*
  *   * ``workspace_member``— workspace, manage views + data sources
+ *   * ``workspace_publisher``— workspace, member + publish data sources
  *   * ``workspace_viewer``— workspace, read-only
  */
 export type SystemRole = RoleName
@@ -98,6 +99,7 @@ export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
     [ROLE_NAMES.WORKSPACE_ADMIN]: 'Workspace Admin',
     [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Data Engineer',
     [ROLE_NAMES.WORKSPACE_MEMBER]: 'Member',
+    [ROLE_NAMES.WORKSPACE_PUBLISHER]: 'Publisher',
     [ROLE_NAMES.WORKSPACE_VIEWER]: 'Viewer',
 }
 

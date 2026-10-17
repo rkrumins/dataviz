@@ -20,7 +20,7 @@
  *   1. Extend the RoleVisual interface.
  *   2. Add the value to every entry below (or make it optional).
  */
-import { Shield, UserCog, Eye, Database, ScrollText, Sparkles, type LucideIcon } from 'lucide-react'
+import { Shield, UserCog, Eye, Database, ScrollText, Sparkles, Upload, type LucideIcon } from 'lucide-react'
 
 export interface RoleVisual {
     /** Display label for the role (e.g. "Super admin"). For custom
@@ -98,6 +98,15 @@ export const ROLE_VISUAL: Record<string, RoleVisual> = {
         badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
         gradient: 'from-violet-500/20 to-violet-500/0',
         iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
+    },
+    // ── ACCESS R0 ─────────────────────────────────────────────────
+    workspace_publisher: {
+        label: 'Publisher',
+        icon: Upload,
+        accent: 'teal',
+        badge: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
+        gradient: 'from-teal-500/20 to-teal-500/0',
+        iconBg: 'bg-teal-500/10 text-teal-500 border-teal-500/20',
     },
     // ── Pre-uplift legacy names ───────────────────────────────────
     // Kept so any old data (audit logs, in-flight migration windows,
