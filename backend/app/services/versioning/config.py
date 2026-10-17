@@ -133,6 +133,12 @@ PROJECTION_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CONCURRENCY", "
 # A publish (its nudge) and project_now retry at once regardless.
 PROJECTION_RETRY_BASE_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_BASE_SECS", "5"))
 PROJECTION_RETRY_MAX_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_MAX_SECS", "900"))
+# A publishing pass writes its _GVProjMeta marker last and, with WAIT_REPLICAS > 0, WAITs on that
+# write's own connection: fewer replicas acknowledging within WAIT_MS hold the watermark
+# (replica_unconfirmed) and back off. 0 sends no WAIT (dev, CI, an instance without replicas).
+# Read by the web pods too: project_now and rebuild_now run passes in-process.
+PROJECTION_WAIT_REPLICAS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_REPLICAS", "0"))
+PROJECTION_WAIT_MS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_MS", "2000"))
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the

@@ -44,6 +44,7 @@ class FakeGraph:
         self._ids: dict = {}    # urn -> internal node id (FalkorDB's id(n)), never reused
         self._property_keys: set = set()   # db.propertyKeys() — registered, never freed
         self._next_id = 0
+        self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -213,6 +214,10 @@ class FakeGraph:
                 if n is not None and n.get("entityId") == p["eid"]:
                     self._drop_node(p["urn"])
             return None
+        # The pass marker every publishing pass writes last (``projection._write_marker``).
+        if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
+            self.proj_meta = dict(params)
+            return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
     def _id_of(self, urn: str) -> int:
@@ -233,6 +238,7 @@ class FakeGraph:
         self.nodes.clear()
         self.edges.clear()
         self._ids.clear()
+        self.proj_meta = {}
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}

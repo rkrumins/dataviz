@@ -46,7 +46,7 @@ async def _count(factory, name: str) -> int:
     graph = factory(name)
     if asyncio.iscoroutine(graph):                       # the factory resolves topology async
         graph = await graph
-    res = await graph.query("MATCH (n) RETURN count(n)")
+    res = await graph.query("MATCH (n) WHERE NOT n:_GVProjMeta RETURN count(n)")
     rows = res.result_set or []
     return int(rows[0][0]) if rows else 0
 

@@ -104,6 +104,7 @@ tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py
 tests/test_falkordb_store_outage.py
+tests/test_falkordb_write_and_wait_unit.py
 tests/test_fold_batch_ops.py
 tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py

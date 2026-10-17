@@ -180,6 +180,35 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
         return await _send(False)
 
 
+#: The pass marker, the last FalkorDB write of every publishing pass (``_write_marker``). Its
+#: label is derived, so no count, scan or search sees it. ``epoch`` changes with every claim, so
+#: the SET always mutates and a WAIT always has a fresh write to wait for.
+_MARKER_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch"
+
+
+async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
+    """Write a publishing pass's marker. With ``PROJECTION_WAIT_REPLICAS`` set, WAIT for it on
+    the owning node: returns why the pass must not publish when fewer replicas confirmed it (or
+    that cannot be told), else None."""
+    want = config.PROJECTION_WAIT_REPLICAS
+    write_and_wait = getattr(client, "write_and_wait", None) if want > 0 else None
+    if write_and_wait is None:                  # WAIT off, or a client without it (a test fake)
+        await _q(client, _MARKER_WRITE, {"seq": seq, "epoch": epoch})
+        return None
+    from backend.app.providers.falkordb_provider import clamp_write_budget
+
+    budget_ms = int(1000 * clamp_write_budget(_WRITE_TIMEOUT_MS / 1000.0))
+    acked = await asyncio.wait_for(
+        write_and_wait(f"CYPHER seq={int(seq)} epoch={int(epoch)} {_MARKER_WRITE}",
+                       timeout_ms=budget_ms, min_replicas=want,
+                       wait_ms=config.PROJECTION_WAIT_MS),
+        timeout=(budget_ms + config.PROJECTION_WAIT_MS) / 1000 + 10)
+    if acked is None or acked < want:
+        return (f"replica_unconfirmed: {'unknown' if acked is None else acked}/{want} "
+                f"replica(s) acknowledged seq {seq}")
+    return None
+
+
 #: Names the read path checks natively for a node's label before it merges
 #: the blob back. The projector keys every node by ``urn`` itself, so the
 #: source's identity property needs no place here.
@@ -708,6 +737,11 @@ class FalkorProjector:
             # to Postgres (the SoR) instead of flipping onto a corrupt cache, and the poll retries
             # it after a backoff.
             published = verify_error is None
+            if published:
+                # The marker is the pass's LAST FalkorDB write, after the verify and before the
+                # watermark: a replica that confirmed it holds everything the pass wrote.
+                verify_error = await _write_marker(client, to_seq, mine)
+                published = verify_error is None
             if not await self._finish(graph_id, mine, published=published, to_seq=to_seq,
                                       error=verify_error, attempts=attempts):
                 # Something reset the watermark while this pass wrote (an evict, a rebuild, a
@@ -716,7 +750,7 @@ class FalkorProjector:
                 superseded, published = True, False
                 await self._yield_superseded(graph_id, from_seq)
             elif not published:
-                logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
+                logger.error("projection for %s held back at seq %d; holding watermark "
                              "at %d so reads stay on Postgres; retry after backoff — %s", graph_id,
                              to_seq, from_seq, verify_error)
         except (Exception, asyncio.CancelledError) as exc:

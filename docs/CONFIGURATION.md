@@ -641,6 +641,8 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_VERIFY` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_WAIT_MS` | `2000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_WAIT_REPLICAS` | `0` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_WINDOW` | `25000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_READ_MAX_LAG` | `0` | `backend/app/services/versioning/config.py` |

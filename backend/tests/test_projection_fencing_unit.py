@@ -7,6 +7,9 @@
   rebuild, repin, a second writer) wins: the pass lowers the watermark to where it started, fires
   no publish hooks and nudges the worker.
 * A failed pass leaves ``target`` alone and backs off through ``failed_attempts``/``next_retry_at``.
+* A publishing pass writes the ``_GVProjMeta`` marker (seq, epoch) last, after the verify and
+  before the watermark; with ``GRAPHVER_PROJECTION_WAIT_REPLICAS`` set, a marker the replicas did
+  not confirm holds the watermark as ``replica_unconfirmed``.
 * The bootstrap head flip bumps the epoch in the transaction its lease fences.
 * An explicit rebuild that finds a pass in flight, or loses its fence, nudges the worker.
 
@@ -72,9 +75,11 @@ class _Session:
 class _Client:
     def __init__(self):
         self.touched = False
+        self.queries = []
 
-    async def query(self, *a, **k):
+    async def query(self, cypher, params=None, **k):
         self.touched = True
+        self.queries.append((cypher, params))
         return SimpleNamespace(result_set=[])
 
 
@@ -222,6 +227,75 @@ def test_the_retry_delay_doubles_up_to_the_cap(monkeypatch):
         return round((at - datetime.now(timezone.utc)) / timedelta(seconds=1))
 
     assert [delay(n) for n in (1, 2, 3, 5, 30)] == [5, 10, 20, 60, 60]
+
+
+# ── the marker ──────────────────────────────────────────────────────────
+
+def test_the_marker_is_written_last_between_the_verify_and_the_watermark(monkeypatch):
+    proj, _ps, client, seen = _projector(monkeypatch, claim=(7, 2))
+    order = []
+    verify, finish = proj._verify_and_heal, proj._finish
+
+    async def ordered_verify(*a, **k):
+        order.append("verify")
+        return await verify(*a, **k)
+
+    async def ordered_finish(*a, **k):
+        order.append("finish")
+        return await finish(*a, **k)
+
+    async def ordered_query(cypher, params=None, **k):
+        order.append(("query", cypher, params))
+    monkeypatch.setattr(proj, "_verify_and_heal", ordered_verify)
+    monkeypatch.setattr(proj, "_finish", ordered_finish)
+    monkeypatch.setattr(client, "query", ordered_query)
+
+    r = asyncio.run(proj.project_graph("g1"))
+    assert [o if isinstance(o, str) else o[0] for o in order] == ["verify", "query", "finish"]
+    _q, cypher, params = order[1]
+    assert "MERGE (m:_GVProjMeta {id: 'meta'})" in cypher, cypher
+    assert params == {"seq": 5, "epoch": 7}, "the published seq and this pass's epoch"
+    assert seen["finish"][0][2]["published"] is True and r["projected"] == 5, r
+
+
+def test_a_held_back_pass_writes_no_marker(monkeypatch):
+    proj, _ps, client, _seen = _projector(monkeypatch, verify_error="count mismatch")
+    asyncio.run(proj.project_graph("g1"))
+    assert client.queries == []
+
+
+def test_a_marker_the_replicas_did_not_confirm_holds_the_watermark(monkeypatch):
+    monkeypatch.setattr(config, "PROJECTION_WAIT_REPLICAS", 1)
+    monkeypatch.setattr(config, "PROJECTION_WAIT_MS", 200)
+    for acked in (0, None):
+        proj, _ps, client, seen = _projector(monkeypatch, claim=(7, 2))
+        calls = []
+
+        async def write_and_wait(query, **kw):
+            calls.append((query, kw))
+            return acked
+        client.write_and_wait = write_and_wait
+
+        r = asyncio.run(proj.project_graph("g1"))
+        [(query, kw)] = calls
+        assert "_GVProjMeta" in query and "seq=5" in query and "epoch=7" in query, query
+        assert kw["min_replicas"] == 1 and kw["wait_ms"] == 200, kw
+        assert client.queries == [], "the marker went out with its WAIT, not as a plain query"
+        _gid, mine, fkw = seen["finish"][0]
+        assert fkw["published"] is False and fkw["attempts"] == 2, fkw
+        assert fkw["error"].startswith("replica_unconfirmed"), fkw
+        assert seen["hooks"] == [] and r["projected"] == 3, (acked, r)
+
+
+def test_a_marker_the_replicas_confirmed_publishes(monkeypatch):
+    monkeypatch.setattr(config, "PROJECTION_WAIT_REPLICAS", 1)
+    proj, _ps, client, seen = _projector(monkeypatch)
+
+    async def write_and_wait(query, **kw):
+        return 1
+    client.write_and_wait = write_and_wait
+    r = asyncio.run(proj.project_graph("g1"))
+    assert seen["finish"][0][2]["published"] is True and r["projected"] == 5, r
 
 
 # ── rebuild_now ─────────────────────────────────────────────────────────

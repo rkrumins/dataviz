@@ -8,6 +8,8 @@
   that publishes after a stale one claimed leaves the stale one superseded, the watermark lowered
   to where it started, and the worker nudged.
 * Evict and rebuild bump the epoch; a rebuild clears the backoff.
+* A publishing pass leaves its ``_GVProjMeta`` marker (the published seq, its epoch) as its last
+  write; a held-back pass leaves the previous one.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -236,3 +238,27 @@ async def _run_evict_and_rebuild_bump_the_epoch() -> None:
 
 def test_evict_and_rebuild_bump_the_epoch():
     asyncio.run(_run_evict_and_rebuild_bump_the_epoch())
+
+
+async def _run_the_marker_follows_what_was_published() -> None:
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    gid, proj = await _seed(svc, fake)
+    seeded = await _row(gid)
+    graph = fake.graphs[seeded["name"]]
+    assert graph.proj_meta == {"seq": 2, "epoch": seeded["epoch"]}, graph.proj_meta
+
+    proj._falkor_counts = _short_counts(proj)
+    await proj.project_graph(gid)                         # held back: the marker stays at 2
+    assert graph.proj_meta == {"seq": 2, "epoch": seeded["epoch"]}, graph.proj_meta
+
+    del proj._falkor_counts
+    await proj.project_graph(gid)                         # a direct pass is not held by backoff
+    row = await _row(gid)
+    assert row["projected"] == 3 and graph.proj_meta == {"seq": 3, "epoch": row["epoch"]}, (
+        row, graph.proj_meta)
+    await db.dispose_engine()
+
+
+def test_the_marker_follows_what_was_published():
+    asyncio.run(_run_the_marker_follows_what_was_published())
