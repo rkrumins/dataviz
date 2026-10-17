@@ -3,7 +3,8 @@
  * just the projection panel's worst eight. It names each graph and its key,
  * marks forks, orphans and platform-owned keys, pages by cursor, filters on
  * the server, and lets an administrator rebuild a graph's cache, check it
- * against Postgres, or open its data source. The projection panel links to it.
+ * against Postgres, open its data source, or move a fork to the trash. The
+ * projection panel links to it.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -11,17 +12,18 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { versionedGraphs, rebuildProjection, reconcileProjection } = vi.hoisted(() => ({
+const { versionedGraphs, rebuildProjection, reconcileProjection, deleteFork } = vi.hoisted(() => ({
     versionedGraphs: vi.fn(),
     rebuildProjection: vi.fn(),
     reconcileProjection: vi.fn(),
+    deleteFork: vi.fn(),
 }))
 
 vi.mock('@/services/systemStatusService', async () => {
     const actual = await vi.importActual<typeof import('@/services/systemStatusService')>('@/services/systemStatusService')
     return { ...actual, systemStatusService: { ...actual.systemStatusService, versionedGraphs } }
 })
-vi.mock('@/services/versioningApiService', () => ({ rebuildProjection, reconcileProjection }))
+vi.mock('@/services/versioningApiService', () => ({ rebuildProjection, reconcileProjection, deleteFork }))
 
 import { VersionedGraphsPanel } from './VersionedGraphsPanel'
 import { ProjectionPanel } from './ProjectionPanel'
@@ -75,6 +77,8 @@ beforeEach(() => {
     versionedGraphs.mockReset()
     rebuildProjection.mockReset()
     reconcileProjection.mockReset()
+    deleteFork.mockReset()
+    vi.restoreAllMocks()
 })
 
 describe('VersionedGraphsPanel', () => {
@@ -165,6 +169,38 @@ describe('VersionedGraphsPanel', () => {
         expect(open.map(b => (b as HTMLButtonElement).disabled)).toEqual([false, true, true])
         await userEvent.click(open[0])
         expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=ds1&dstab=versioning')
+    })
+
+    it('moves a fork to the trash from its row on confirm, and offers it on forks only', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, FORK, ORPHAN], nextCursor: null })
+        deleteFork.mockResolvedValue(undefined)
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+        renderPanel()
+        await screen.findByText('Customer 360')
+
+        const del = screen.getAllByRole('button', { name: 'Delete' })
+        expect(del).toHaveLength(1)
+        expect(within(del[0].closest('tr')!).getByText('dsfork_1')).toBeInTheDocument()
+
+        await userEvent.click(del[0])
+        expect(confirm).toHaveBeenCalledTimes(1)
+        expect(deleteFork).not.toHaveBeenCalled()
+
+        await userEvent.click(del[0])
+        expect(deleteFork).toHaveBeenCalledWith('ws1', 'graph_b')
+        expect(await screen.findByText('Moved to the trash; restorable for 30 days')).toBeInTheDocument()
+        await waitFor(() => expect(versionedGraphs).toHaveBeenCalledTimes(2))
+    })
+
+    it('shows a refused delete as given', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
+        deleteFork.mockRejectedValue(new Error('Forks were made from this fork. Delete its forks first.'))
+        vi.spyOn(window, 'confirm').mockReturnValue(true)
+        renderPanel()
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+        expect(await screen.findByText('Forks were made from this fork. Delete its forks first.')).toBeInTheDocument()
+        expect(versionedGraphs).toHaveBeenCalledTimes(1)
     })
 })
 

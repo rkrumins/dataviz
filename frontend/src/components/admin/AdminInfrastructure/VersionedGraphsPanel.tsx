@@ -6,7 +6,8 @@
  * time — forks and orphans (whose data source is gone) included — with the
  * FalkorDB provider and key it projects into and whether the platform owns
  * that key. Filters run on the server. Each row can rebuild the graph's
- * cache, check it against Postgres, or open its data source.
+ * cache, check it against Postgres, or open its data source; a fork's row
+ * can also move the fork to the trash.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -19,7 +20,7 @@ import {
     type VersionedGraphRow,
     type VersionedGraphsFilter,
 } from '@/services/systemStatusService'
-import { rebuildProjection, reconcileProjection } from '@/services/versioningApiService'
+import { deleteFork, rebuildProjection, reconcileProjection } from '@/services/versioningApiService'
 import { formatSince } from './meta'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
@@ -85,7 +86,8 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
             return next
         })
 
-    const act = async (row: VersionedGraphRow, action: 'rebuild' | 'check') => {
+    const act = async (row: VersionedGraphRow, action: 'rebuild' | 'check' | 'delete') => {
+        if (action === 'delete' && !window.confirm('Move this fork to the trash? It can be restored for 30 days.')) return
         setBusy(`${row.graphId}:${action}`)
         let note: RowNote
         try {
@@ -94,6 +96,10 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                 note = res.alreadyRunning
                     ? { tone: 'warn', text: 'A rebuild is already running' }
                     : { tone: 'ok', text: 'Rebuild started' }
+            } else if (action === 'delete') {
+                await deleteFork(row.workspaceId, row.graphId)
+                note = { tone: 'ok', text: 'Moved to the trash; restorable for 30 days' }
+                void query.refetch()   // the inventory lists live graphs only, so the row drops out
             } else {
                 const r = await reconcileProjection(row.workspaceId, row.graphId)
                 if (r.skippedReason) note = { tone: 'warn', text: `Not checked: ${r.skippedReason}` }
@@ -222,6 +228,9 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 >
                                                     Open source
                                                 </button>
+                                                {row.forkParentGraphId && (
+                                                    <button className={ACTION_CLS} disabled={busy !== null} onClick={() => act(row, 'delete')}>Delete</button>
+                                                )}
                                             </div>
                                             {busy?.startsWith(`${row.graphId}:`) && <Loader2 className="mt-1 w-3 h-3 animate-spin text-ink-muted" />}
                                             {note && <p className={cn('mt-1 text-[11px]', NOTE_CLS[note.tone])}>{note.text}</p>}
