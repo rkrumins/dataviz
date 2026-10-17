@@ -47,7 +47,7 @@ async def _run() -> None:
         vals = await orig(s, graph_id, bid, ids)          # B reads (still pre-A)
         if "A" not in race and "A" in list(ids):
             race["A"] = asyncio.create_task(svc.apply_ops(  # A tries to commit
-                graph_id=gid, branch_id=draft, actor="alice", message="A",
+                graph_id=gid, branch_id=draft, actor="u", message="A",
                 ops=[_upd("A", description="ALICE")]))
             await asyncio.sleep(0.2)
             assert not race["A"].done(), "A did not wait for B's draft lock"
@@ -55,7 +55,7 @@ async def _run() -> None:
 
     svc._current_values = racing
     try:
-        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="bob", message="B",
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="u", message="B",
                             ops=[_upd("A", displayName="BOB")])
     finally:
         svc._current_values = orig

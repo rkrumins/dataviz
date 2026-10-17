@@ -101,7 +101,8 @@ def test_apply_ops_main_takes_graph_lock(monkeypatch):
 def test_apply_ops_draft_takes_branch_lock(monkeypatch):
     """A draft write takes the draft's row lock, not the graph lock."""
     rows = {(GraphORM, "g1"): _Obj(id="g1"),
-            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="open")}
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="open",
+                                          owner="u", is_shared=False)}
     svc, lock_calls = _svc_with_spy(rows, monkeypatch)
 
     with pytest.raises(_StopAfterLock):

@@ -32,7 +32,7 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { BranchClosedError, IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { BranchClosedError, IntegrityError, MergeConflictError, NotDraftOwnerError, OntologyViolationError, type Branch } from '@/services/versioningApiService'
 import { markConflicts } from '@/features/versioning/model/mapConflicts'
 import { copyStagedToNewDraft } from '@/features/versioning/model/copyStagedToNewDraft'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
@@ -6386,10 +6386,19 @@ export function ContextViewCanvas({
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
               } else if (e instanceof IntegrityError) {
                 notify('error', `Nothing was saved. ${e.message}`)
-              } else if (e instanceof BranchClosedError) {
-                // The draft closed under the save. Keep the staged edits; they can go to a new draft.
+              } else if (e instanceof BranchClosedError || e instanceof NotDraftOwnerError) {
+                // The draft closed under the save, or is someone else's private draft. Keep the
+                // staged edits; they can go to a new draft.
                 const fromBranchId = bs.currentBranchId
-                notify('error', `Nothing was saved. ${e.message} Your changes are still here.`, {
+                const ownerName = e instanceof NotDraftOwnerError && e.owner
+                  ? queryClient.getQueriesData<Branch[]>({ queryKey: [...VERSIONING_KEYS.all, 'branches'] })
+                      .flatMap(([, branches]) => branches ?? [])
+                      .find(b => b.branchId === fromBranchId)?.userNames?.[e.owner]
+                  : undefined
+                const why = e instanceof NotDraftOwnerError
+                  ? `This draft belongs to ${ownerName ?? 'someone else'} — copy your edits to a new draft.`
+                  : e.message
+                notify('error', `Nothing was saved. ${why} Your changes are still here.`, {
                   label: 'Copy to a new draft',
                   onClick: () => {
                     void copyStagedToNewDraft(fromBranchId, activeView?.id ?? null)

@@ -107,6 +107,7 @@ that backs `dataSourceId`.
 | `MergeConflict` | **409** | `{type: "merge_conflict", conflicts: […]}` |
 | `OntologyViolation` | **422** | `{type: "ontology_violation", violations: [{entity_id, kind, reason, rule}]}` |
 | `AccessDenied` | **403** | `{type: "access_denied", message}` |
+| `NotDraftOwner` | **403** | `{type: "access_denied", code: "not_draft_owner", branchId, owner, message}` — a write to someone else's private draft; only its owner writes it |
 | `ApprovalRequired` | **409** | `{type: "approval_required", pending: […]}` |
 | `NotUpToDate` | **409** | `{type: "not_up_to_date", branchId, behindBy, message}` — pull `main` in with `…/rebase`, then retry |
 | `PullRequestExists` | **409** | `{type: "pull_request_exists", prId, branchId, title, message}` — the branch already has a live request ([03](/docs/versioning-branching-and-merge)); `prId` is the one that exists, so send the user *to* it |

@@ -9,6 +9,23 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning Stage 2: people stop overwriting each other
+
+### Changed
+
+**A private draft is written only by its owner.** Workspace managers can still open and read
+someone else's private draft, but a save, stage, checkpoint, pull, import, publish or merge request
+on it answers **403 `access_denied`** with code `not_draft_owner` `{branchId, owner}`, and discarding
+it answers 403 too. A shared draft keeps its members' roles. Merging a review someone raised from
+their draft is unchanged. The canvas offers to copy the refused edits to a new draft of your own.
+
+### Upgrading
+
+- A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
+  the draft and add the caller as an editor, or write into a draft the caller owns.
+
+---
+
 ## [Unreleased] — Versioning Stage 1: a re-sync can no longer quietly undo people's work
 
 ### Changed

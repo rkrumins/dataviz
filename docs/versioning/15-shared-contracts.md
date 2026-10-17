@@ -112,7 +112,7 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 
 ### 6. Exceptions → HTTP (versioning/errors.py; one `_domain_errors` table reused by every router)
 **403**
-- 403 `{type:'access_denied', code}` with code ∈ {not_owner_or_member, needs_publish_permission, needs_admin, self_review, contributor_cannot_approve, not_eligible_reviewer, bypass_not_allowed, service_principal_forbidden, self_approval_forbidden}, plus `required`.
+- 403 `{type:'access_denied', code}` with code ∈ {not_owner_or_member, not_draft_owner, needs_publish_permission, needs_admin, self_review, contributor_cannot_approve, not_eligible_reviewer, bypass_not_allowed, service_principal_forbidden, self_approval_forbidden}, plus `required`.
 - 403 `feature_disabled`.
 
 **404**

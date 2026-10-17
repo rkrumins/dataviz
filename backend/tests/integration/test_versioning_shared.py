@@ -3,7 +3,7 @@
 A shared draft field-merges concurrent edits from different collaborators:
 disjoint fields union, a same-field clash raises MergeConflict (settled via
 `resolutions`). A single actor's sequential edits keep last-writer-wins, and a
-private draft is unaffected.
+private draft is written only by its owner.
 """
 import asyncio
 import os
@@ -96,14 +96,16 @@ async def _run() -> None:
     assert (await _x(svc, gid, d))["x"] == 33
     assert await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="ship")  # owner/maintainer
 
-    # ── private draft is unaffected (clobber, no conflict) ───────────────
+    # ── private draft: only its owner writes it; her own edits stay last-writer-wins ─
     p = await svc.open_draft(graph_id=gid, owner="alice", shared=False)
     await _seed(svc, gid, p, x=0, y=0)
     await svc.stage_changes(graph_id=gid, branch_id=p, actor="alice", ops=[_upd("E", "alice", x=1, y=0)])
-    await svc.stage_changes(graph_id=gid, branch_id=p, actor="bob",   ops=[_upd("E", "bob",   x=0, y=2)])
+    with pytest.raises(AccessDenied):                                  # bob is not its owner
+        await svc.stage_changes(graph_id=gid, branch_id=p, actor="bob", ops=[_upd("E", "bob", x=0, y=2)])
+    await svc.stage_changes(graph_id=gid, branch_id=p, actor="alice", ops=[_upd("E", "alice", x=0, y=2)])
     await svc.checkpoint(graph_id=gid, branch_id=p, actor="alice")     # no raise
     clob = await _x(svc, gid, p)
-    assert (clob["x"], clob["y"]) == (0, 2), clob                      # bob (last) clobbered
+    assert (clob["x"], clob["y"]) == (0, 2), clob                      # her last edit wins
 
     await db.dispose_engine()
 

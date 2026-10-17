@@ -42,6 +42,23 @@ class MainWriteForbidden(_HttpMapped, ValueError):
         super().__init__(message, {"type": "main_write_forbidden"})
 
 
+class AccessDenied(RuntimeError):
+    """Actor lacks the branch role required for an operation on a draft."""
+
+
+class NotDraftOwner(_HttpMapped, AccessDenied):
+    """A write reached someone else's private draft. Only its owner writes it;
+    workspace managers may read it, but not write it."""
+
+    status_code = 403
+
+    def __init__(self, branch_id: str, owner: Optional[str]):
+        self.branch_id, self.owner = branch_id, owner
+        super().__init__(f"draft {branch_id} belongs to {owner}",
+                         {"type": "access_denied", "code": "not_draft_owner",
+                          "branchId": branch_id, "owner": owner})
+
+
 class LockBusy(_HttpMapped, RuntimeError):
     """A graph or draft lock was not granted within the lock timeout."""
 
@@ -94,5 +111,5 @@ class ForkLimit(_HttpMapped, RuntimeError):
                          {"type": "fork_limit", "limit": limit})
 
 
-HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, LockBusy, JobActive,
+HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, LockBusy, JobActive,
                CurationAtRisk, MassDeleteBlocked, ForkLimit)

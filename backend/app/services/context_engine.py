@@ -17,7 +17,7 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
-from .versioning.errors import LockBusy
+from .versioning.errors import HTTP_MAPPED
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
     TRACE_ENGINE_HEADROOM_SECS,
@@ -2288,8 +2288,8 @@ class ContextEngine:
         except NotImplementedError:
             # Provider doesn't support creation - return the node anyway for optimistic UI
             logger.warning("Provider does not support node creation - returning optimistic result")
-        except LockBusy:
-            raise                              # a busy graph: 503 + Retry-After, not a failure
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as e:
             return CreateNodeResult(
                 node=None,
@@ -2356,8 +2356,8 @@ class ContextEngine:
             await self.provider.create_edge(edge)
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
-        except LockBusy:
-            raise                              # a busy graph: 503 + Retry-After, not a failure
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as exc:
             from backend.app.services.versioning.service import OntologyViolation
             if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
@@ -2382,8 +2382,8 @@ class ContextEngine:
             return EdgeMutationResult(edge=edge, success=True)
         except (NotImplementedError, AttributeError):
             return EdgeMutationResult(success=False, error="Provider does not support edge updates")
-        except LockBusy:
-            raise                              # a busy graph: 503 + Retry-After, not a failure
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
 

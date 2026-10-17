@@ -22,8 +22,9 @@ from backend.app.services.versioning.errors import (
     LockBusy,
     MainWriteForbidden,
     MassDeleteBlocked,
+    NotDraftOwner,
 )
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 
 
 def _raised(exc: Exception) -> HTTPException:
@@ -67,6 +68,25 @@ def test_sync_guards_are_409():
     assert _raised(CurationAtRisk("x")).detail["type"] == "curation_at_risk"
     err = _raised(MassDeleteBlocked(900, 500, "x"))
     assert (err.status_code, err.detail["deletes"], err.detail["limit"]) == (409, 900, 500)
+
+
+def test_not_draft_owner_is_403_access_denied():
+    err = _raised(NotDraftOwner("br_4", "alice"))
+    assert err.status_code == 403
+    assert err.detail["type"] == "access_denied" and err.detail["code"] == "not_draft_owner"
+    assert (err.detail["branchId"], err.detail["owner"]) == ("br_4", "alice")
+
+
+@pytest.mark.asyncio
+async def test_a_private_draft_is_written_only_by_its_owner():
+    svc = GraphVersioningService.__new__(GraphVersioningService)
+    draft = SimpleNamespace(id="br_5", kind="draft", owner="alice", is_shared=False)
+    await svc._require_edit(None, draft, "alice", ())
+    with pytest.raises(AccessDenied) as info:        # a manager reads it, but does not write it
+        await svc._require_edit(None, draft, "bob", ())
+    assert isinstance(info.value, NotDraftOwner)
+    await svc._require_edit(None, SimpleNamespace(id="br_m", kind="main", owner=None, is_shared=False),
+                            "bob", ())
 
 
 @pytest.mark.parametrize("status", ["merged", "abandoned", "publishing"])

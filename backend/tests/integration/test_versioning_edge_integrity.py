@@ -43,8 +43,8 @@ def _del(eid, kind="edge"):
     return {"op": "delete", "entity_kind": kind, "entity_id": eid, "payload": None}
 
 
-async def _apply(svc, gid, bid, ops):
-    return await svc.apply_ops(graph_id=gid, branch_id=bid, actor="bot", ops=ops, containment_edge_types=CET)
+async def _apply(svc, gid, bid, ops, actor="bot"):
+    return await svc.apply_ops(graph_id=gid, branch_id=bid, actor=actor, ops=ops, containment_edge_types=CET)
 
 
 async def _expect_violation(coro):
@@ -133,13 +133,13 @@ async def _run() -> None:
     Q1 = f"urn:li:dataset:eiQ1_{sfx}"
     Q2 = f"urn:li:dataset:eiQ2_{sfx}"
     d0 = await svc.open_draft(graph_id=gid, owner="seed")
-    await _apply(svc, gid, d0, [_node(N), _node(Q1), _node(Q2)])
+    await _apply(svc, gid, d0, [_node(N), _node(Q1), _node(Q2)], actor="seed")
     await svc.publish(graph_id=gid, branch_id=d0, actor="seed", message="seed",
                       containment_edge_types=CET)
     dA = await svc.open_draft(graph_id=gid, owner="alice")
     dB = await svc.open_draft(graph_id=gid, owner="bob")
-    await _apply(svc, gid, dA, [_edge(f"epA_{sfx}", Q1, N)])
-    await _apply(svc, gid, dB, [_edge(f"epB_{sfx}", Q2, N)])
+    await _apply(svc, gid, dA, [_edge(f"epA_{sfx}", Q1, N)], actor="alice")
+    await _apply(svc, gid, dB, [_edge(f"epB_{sfx}", Q2, N)], actor="bob")
     await svc.publish(graph_id=gid, branch_id=dA, actor="alice", message="parent Q1",
                       containment_edge_types=CET)
     # dB is now behind → the later arrival is HARD-GATED and must PULL first. The pull is clean

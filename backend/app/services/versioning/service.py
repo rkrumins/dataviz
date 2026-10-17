@@ -43,8 +43,8 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import (BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit, JobActive,
-                     LockBusy, MainWriteForbidden, MassDeleteBlocked)
+from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit,
+                     JobActive, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotDraftOwner)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -285,10 +285,6 @@ class OntologyViolation(RuntimeError):
     def __init__(self, violations):
         super().__init__(f"{len(violations)} ontology violation(s)")
         self.violations = violations
-
-
-class AccessDenied(RuntimeError):
-    """Actor lacks the branch role required for an operation on a shared draft."""
 
 
 class ApprovalRequired(RuntimeError):
@@ -1082,6 +1078,8 @@ class GraphVersioningService:
                     raise _StaleHead()
                 if draft.is_shared:                       # publishing a shared draft → maintainer
                     await self._require_manage(s, draft, actor, actor_groups)
+                else:
+                    await self._require_edit(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
                 # Require-up-to-date gate (Git "update branch before merging"): a draft that is BEHIND
                 # main must explicitly pull latest (rebase_draft) before it can publish, so the user
@@ -1444,6 +1442,7 @@ class GraphVersioningService:
             self._require_open(draft)
             if draft.kind == "main":
                 raise ValueError("main has no base to rebase")
+            await self._require_edit(s, draft, actor, ())
             graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             from_seq = draft.base_commit_seq or 0
@@ -1607,8 +1606,8 @@ class GraphVersioningService:
     ) -> dict:
         """Mark an open draft ``abandoned`` (plan §17 #8): it becomes inert — no
         further stage/checkpoint/publish. Re-abandoning is idempotent; ``main`` and
-        already-merged drafts cannot be abandoned. A shared draft needs a maintainer.
-        Staged rows are left in place for audit (the branch is simply unreachable)."""
+        already-merged drafts cannot be abandoned. The owner abandons it, or a maintainer of
+        a shared draft. Staged rows are left in place for audit (the branch is simply unreachable)."""
         async with self._session() as s:
             branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
@@ -1616,8 +1615,7 @@ class GraphVersioningService:
             if branch.status == "abandoned":
                 return self._branch_meta(branch)          # idempotent
             self._require_open(branch)                    # merged/publishing → reject
-            if branch.is_shared:
-                await self._require_manage(s, branch, actor, actor_groups)
+            await self._require_manage(s, branch, actor, actor_groups)
             branch.status = "abandoned"
             branch.updated_at = _now()
             return self._branch_meta(branch)
@@ -2357,6 +2355,7 @@ class GraphVersioningService:
             if draft.kind == "main":
                 raise ValueError("cannot open a merge request for main")
             self._require_open(draft)
+            await self._require_edit(s, draft, actor, ())
             await self._assert_no_live_pr(s, branch_id)
             main_id = await self._main_branch_id(s, graph_id)
             _merged, conflicts, _theirs = await self._compute_merge(
@@ -4961,7 +4960,9 @@ class GraphVersioningService:
             raise BranchNotOpen(branch.id, branch.status)
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
-        if not branch.is_shared:                          # private draft → workspace RBAC governs
+        if not branch.is_shared:                          # a private draft is its owner's alone (D4)
+            if branch.kind != "main" and branch.owner != actor:
+                raise NotDraftOwner(branch.id, branch.owner)
             return
         role = await self._branch_role(s, branch, actor, groups)
         if role is None or ROLE_RANK[role] < ROLE_RANK["editor"]:
@@ -6139,7 +6140,8 @@ class GraphVersioningService:
 
         A ``branch_id`` that names main (its id or ``'main'``) raises :class:`MainWriteForbidden`
         unless ``allow_main``: a caller that writes drafts must never be handed main. A draft that
-        is not open raises :class:`BranchNotOpen`.
+        is not open raises :class:`BranchNotOpen`, and someone else's private draft
+        :class:`NotDraftOwner`.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
@@ -6224,6 +6226,7 @@ class GraphVersioningService:
                          if v is not None and not _is_edge_payload(v)})
             if bid != main_id:
                 self._require_open(branch)
+                await self._require_edit(s, branch, actor, ())
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 

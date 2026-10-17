@@ -516,6 +516,19 @@ export class BranchClosedError extends Error {
   }
 }
 
+/** The draft is someone else's private draft: only its owner saves to it. Nothing was written; the
+ *  staged edits can be copied to a new draft of the caller's own. */
+export class NotDraftOwnerError extends Error {
+  owner?: string
+  branchId?: string
+  constructor(detail: { owner?: string; branchId?: string }) {
+    super('This draft belongs to someone else, so only they can save to it.')
+    this.name = 'NotDraftOwnerError'
+    this.owner = detail.owner
+    this.branchId = detail.branchId
+  }
+}
+
 /** The save named Published itself; edits reach it only through a draft. */
 export class MainWriteForbiddenError extends Error {
   constructor() {
@@ -567,6 +580,9 @@ type RefusalDetail = string | {
   branchId?: string
   /** A closed draft's status (`branch_closed`). */
   status?: string
+  /** Which refusal an `access_denied` is, e.g. `not_draft_owner`. */
+  code?: string
+  owner?: string
   behindBy?: number
   prId?: string
   title?: string | null
@@ -591,6 +607,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'branch_closed') {
     return new BranchClosedError(d)
+  }
+  if (status === 403 && d?.type === 'access_denied' && d.code === 'not_draft_owner') {
+    return new NotDraftOwnerError(d)
   }
   if (status === 409 && d?.type === 'main_write_forbidden') {
     return new MainWriteForbiddenError()

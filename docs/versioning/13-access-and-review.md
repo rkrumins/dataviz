@@ -426,7 +426,7 @@ These are constant defaults, so the adds are metadata-only. Mirror them in Graph
 ### Shared conventions
 Every route depends on `principal_ctx`. Errors come from `versioning/errors.py`, mapped by the single `_domain_errors` (versioning.py:458), which ingest.py and versioning_lifecycle.py reuse. Subclass mappings are placed before the `ConcurrencyError` catch at L480. The codes are exactly those in shared §6.
 
-- **403** `{type:'access_denied', code, required}` with code ∈ {not_owner_or_member, needs_publish_permission, needs_admin, self_review, contributor_cannot_approve, not_eligible_reviewer, bypass_not_allowed, service_principal_forbidden, self_approval_forbidden}.
+- **403** `{type:'access_denied', code, required}` with code ∈ {not_owner_or_member, not_draft_owner, needs_publish_permission, needs_admin, self_review, contributor_cannot_approve, not_eligible_reviewer, bypass_not_allowed, service_principal_forbidden, self_approval_forbidden}.
 - **404** for any draft, PR, graph or job the caller cannot read, indistinguishable from not found.
 - **409** codes:
   - graph_not_writable `{state, reason, retryable}` (Retry-After only for cutover_settling);

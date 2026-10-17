@@ -112,7 +112,8 @@ class ImportExportService:
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
         imports per branch, like successive manual edits); omitted -> open a fresh import draft.
         A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
-        a closed draft :class:`BranchNotOpen`, any other branch ``ValueError``.
+        a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
+        any other branch ``ValueError``.
 
         One import at a time per draft (``uq_jobs_ingest_active``): while one is pending or running
         it is :class:`JobActive`. A job nothing will run does not count — the transfer lane's
@@ -132,6 +133,7 @@ class ImportExportService:
                 if branch.kind == "main":
                     raise MainWriteForbidden()
                 self._svc._require_open(branch)
+                await self._svc._require_edit(s, branch, actor, ())
                 job = JobORM(
                     job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
                     data_source_id=data_source_id, provider_id=provider_id,
@@ -474,8 +476,9 @@ class ImportExportService:
 
         The draft is taken in the same transaction: under its row lock it must be open (main is
         :class:`MainWriteForbidden`, a closed draft :class:`BranchNotOpen`), and it becomes
-        ``publishing``, closed to every write but the job's publish until the job ends. The job is
-        stored already queued: it has no input to wait for."""
+        ``publishing``, closed to every write but the job's publish until the job ends. A publish of
+        someone else's private draft is :class:`NotDraftOwner`. The job is stored already queued: it
+        has no input to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
@@ -486,6 +489,8 @@ class ImportExportService:
             if branch.kind == "main":
                 raise MainWriteForbidden()
             self._svc._require_open(branch)
+            if not merge_request_id:                     # a review's merger need not own the draft
+                await self._svc._require_edit(s, branch, actor, ())
             branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,
