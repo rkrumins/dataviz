@@ -1,19 +1,25 @@
 /**
  * DataSourceVersioningTab — the data source's versioning hub shows where its versioned graph lives
  * (ProjectionHealthCard) once version control is on, with Rebuild and Check sync for managers only.
+ * It counts only drafts still in play, and a failed lookup is an error, not "version control is off".
  * The data hooks are stubbed; the card itself has its own spec.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let canManage = true
 let resolved: Record<string, unknown> | undefined
+let resolveError: Error | null
+let branches: Array<Record<string, unknown>>
+const refetch = vi.fn()
 
 vi.mock('@/store/auth', () => ({ usePermission: () => canManage }))
 vi.mock('../../hooks/useVersioning', () => ({
-  useResolveGraph: () => ({ data: resolved, isLoading: false }),
-  useBranches: () => ({ data: [], isLoading: false }),
+  useResolveGraph: () => ({
+    data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
+  }),
+  useBranches: () => ({ data: branches, isLoading: false }),
   useCommitLog: () => ({ data: { commits: [] } }),
   useMergeRequests: () => ({ data: [], isLoading: false }),
 }))
@@ -41,6 +47,9 @@ const renderTab = () =>
 beforeEach(() => {
   canManage = true
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
+  resolveError = null
+  branches = []
+  refetch.mockReset()
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -62,5 +71,43 @@ describe('DataSourceVersioningTab — projection health', () => {
     renderTab()
     expect(screen.getByText('Version control is off')).toBeInTheDocument()
     expect(screen.queryByTestId('projection-health-card')).not.toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — status header', () => {
+  const branch = (id: string, kind: string, status: string) =>
+    ({ branchId: id, kind, status, createdAt: '', updatedAt: '' })
+
+  it('counts open and publishing drafts, not merged or abandoned ones', () => {
+    branches = [
+      branch('b_main', 'main', 'open'),
+      branch('d1', 'draft', 'open'),
+      branch('d2', 'draft', 'publishing'),
+      branch('d3', 'draft', 'merged'),
+      branch('d4', 'draft', 'abandoned'),
+    ]
+    renderTab()
+    expect(screen.getByText(/main at commit #5 · 2 open drafts/)).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — resolve errors', () => {
+  it('shows a failed lookup as an error with Retry, not as "version control is off"', () => {
+    resolved = undefined
+    resolveError = new Error('Internal Server Error')
+    renderTab()
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not check version control')
+    expect(screen.queryByText('Version control is off')).not.toBeInTheDocument()
+    expect(screen.queryByText('Enable version control')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+    expect(refetch).toHaveBeenCalled()
+  })
+
+  it('still offers Enable when the lookup says there is no versioned graph (404)', () => {
+    resolved = undefined
+    resolveError = new Error('no versioned graph for data source')
+    renderTab()
+    expect(screen.getByText('Version control is off')).toBeInTheDocument()
+    expect(screen.getByText('Enable version control')).toBeInTheDocument()
   })
 })

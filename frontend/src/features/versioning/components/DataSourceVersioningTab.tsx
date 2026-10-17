@@ -6,7 +6,7 @@
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
@@ -35,6 +35,10 @@ function timeAgo(iso?: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+// The resolve 404 ("no versioned graph for data source") is the only failure that means version
+// control is off; anything else (a 5xx, a timeout, a refused request) says nothing either way.
+const NOT_VERSIONED = /404|not found|no versioned graph/i
+
 export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   wsId: string
   dataSourceId: string
@@ -59,6 +63,19 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
     return (
       <div className="flex items-center gap-2 text-sm text-ink-muted py-10 justify-center">
         <Loader2 className="w-4 h-4 animate-spin" /> Checking version control…
+      </div>
+    )
+  }
+
+  if (!resolve.data && resolve.isError && !NOT_VERSIONED.test(String(resolve.error?.message))) {
+    return (
+      <div className="rounded-xl border border-glass-border px-4 py-6 text-center" role="alert">
+        <p className="text-sm text-ink">Could not check version control.</p>
+        <p className="text-[11px] text-ink-muted mt-1">{resolve.error?.message}</p>
+        <button type="button" onClick={() => { void resolve.refetch() }}
+          className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-accent-lineage hover:underline">
+          <RefreshCw className="w-3 h-3" /> Retry
+        </button>
       </div>
     )
   }
@@ -132,7 +149,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   }
 
   const branches = branchesQ.data ?? []
-  const drafts = branches.filter((b) => b.kind !== 'main')
+  // Merged and abandoned drafts are still listed; only those not yet closed count as open.
+  const drafts = branches.filter((b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
   const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
 
   return (
