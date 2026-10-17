@@ -18,32 +18,53 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _LIST = Path(__file__).parent / "ci-required-files.txt"
+_E2E_LIST = Path(__file__).parent / "ci-versioning-e2e-files.txt"
 _WORKFLOW = _REPO / ".github" / "workflows" / "backend-tests.yml"
 
 
-def _entries() -> list[str]:
+def _entries(path: Path = _LIST) -> list[str]:
     return [
         line.strip()
-        for line in _LIST.read_text().splitlines()
+        for line in path.read_text().splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
 
-def test_every_listed_file_exists() -> None:
+# GRAPHVER_E2E files the versioning-e2e job does not run, and why.
+_E2E_NOT_RUN: dict[str, str] = {
+    "tests/integration/test_system_status.py": (
+        "probes every dev-stack service (aggregation control plane and worker, "
+        "stats, graph service); the job starts only Postgres, FalkorDB and Redis"
+    ),
+}
+
+
+def _graphver_e2e_files() -> set[str]:
+    integration = _REPO / "backend" / "tests" / "integration"
+    return {
+        str(p.relative_to(_REPO / "backend"))
+        for p in integration.glob("test_*.py")
+        if "GRAPHVER_E2E" in p.read_text()
+    }
+
+
+@pytest.mark.parametrize("path", [_LIST, _E2E_LIST], ids=lambda p: p.name)
+def test_every_listed_file_exists(path: Path) -> None:
     """A path that no longer resolves is handed to pytest and quietly does
     nothing — the file was renamed or deleted and its subject stopped being
     gated, with a green build the whole way."""
-    missing = [e for e in _entries() if not (_REPO / "backend" / e).is_file()]
+    missing = [e for e in _entries(path) if not (_REPO / "backend" / e).is_file()]
     assert missing == [], (
-        f"{_LIST.name} names files that do not exist: {missing}. Rename the "
+        f"{path.name} names files that do not exist: {missing}. Rename the "
         f"entry, or delete it if the subject is genuinely gone."
     )
 
 
-def test_the_list_is_sorted_and_has_no_duplicates() -> None:
+@pytest.mark.parametrize("path", [_LIST, _E2E_LIST], ids=lambda p: p.name)
+def test_the_list_is_sorted_and_has_no_duplicates(path: Path) -> None:
     """So a reviewer can see at a glance what a diff to it adds, and so the
     same file cannot be gated twice while another is missed."""
-    entries = _entries()
+    entries = _entries(path)
     assert entries == sorted(set(entries)), (
         "Keep the list sorted with no duplicates: "
         "`sort -u` the non-comment lines."
@@ -127,7 +148,52 @@ def test_the_placement_contract_is_gated() -> None:
         assert must in entries, f"{must} is not gated by the required job"
 
 
-@pytest.mark.parametrize("entry", _entries())
+def test_the_versioned_graph_is_gated() -> None:
+    """The versioned graph's own invariants: the three-way merge, the main
+    write lock, the bootstrap windows, projection single-flight, purge's
+    ownership guard, the ontology gate and the job leases. A user feels any
+    of them failing as lost, overwritten or destroyed data."""
+    entries = set(_entries())
+    for must in (
+        "tests/test_versioning_core.py",
+        "tests/test_versioning_concurrency.py",
+        "tests/test_bootstrap_worker_unit.py",
+        "tests/test_projection_single_flight.py",
+        "tests/test_purge_ownership_guard.py",
+        "tests/test_versioning_ontology_rules.py",
+        "tests/test_typed_patch_merge.py",
+        "tests/test_fold_batch_ops.py",
+        "tests/test_job_lease.py",
+    ):
+        assert must in entries, f"{must} is not gated by the required job"
+
+
+def test_every_graphver_e2e_file_runs_or_is_excused() -> None:
+    """A new GRAPHVER_E2E file that is in neither the job's list nor the
+    excuses is skipped by every job, which is how the suite went unrun."""
+    listed = set(_entries(_E2E_LIST))
+    found = _graphver_e2e_files()
+    unrun = sorted(found - listed - set(_E2E_NOT_RUN))
+    assert unrun == [], (
+        f"GRAPHVER_E2E files no job runs: {unrun}. Add them to {_E2E_LIST.name}, "
+        f"or excuse them in _E2E_NOT_RUN with a reason."
+    )
+    assert not listed & set(_E2E_NOT_RUN), "A file is both listed and excused."
+
+
+def test_the_versioning_e2e_job_reads_its_list() -> None:
+    """The list gates nothing unless the job reads it with the E2E gates on."""
+    import yaml
+
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"].get("versioning-e2e")
+    assert job is not None, f"{_WORKFLOW.name} has no `versioning-e2e` job."
+    assert _E2E_LIST.name in yaml.safe_dump(job.get("steps", []))
+    env = job.get("env", {})
+    assert env.get("GRAPHVER_E2E") == "1", "Without GRAPHVER_E2E every file skips."
+    assert env.get("RUN_FALKOR_LIVE") == "1", "Without RUN_FALKOR_LIVE the live files skip."
+
+
+@pytest.mark.parametrize("entry", _entries() + _entries(_E2E_LIST))
 def test_each_entry_is_a_file_pytest_collects(entry: str) -> None:
     """A directory or a helper module in the list is not a no-op — pytest
     walks a directory and would silently widen the gate, and a non-`test_`
