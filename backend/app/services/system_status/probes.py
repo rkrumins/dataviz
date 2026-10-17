@@ -1228,12 +1228,15 @@ async def probe_graph_providers(app_state) -> Optional[list]:
     behind ``/admin/providers/status`` and the blank-model gate), so this
     covers FalkorDB, Neo4j, Spanner, DataHub and any future type with zero
     per-type code and zero request-path I/O — it reads only the in-memory
-    circuit-breaker state and the background warmup cache.
+    circuit-breaker state and the background warmup cache. A FalkorDB
+    provider's versioned graphs and their size come from the graph store
+    reading already in hand, never a sweep, and are absent before one.
     """
     from backend.app.db.engine import PoolRole, get_session_factory
     from backend.app.db.repositories import provider_repo
     from backend.app.providers.manager import provider_manager
     from backend.app.providers.reachability import resolve_provider_status
+    from backend.app.services.graph_store.topology import cached_snapshot
 
     try:
         async with asyncio.timeout(_BUDGET_DB):
@@ -1252,6 +1255,9 @@ async def probe_graph_providers(app_state) -> Optional[list]:
 
     # readiness → the dashboard's shared status vocabulary.
     _MAP = {"ready": "healthy", "unavailable": "down", "unknown": "unknown"}
+    snapshot = cached_snapshot()
+    hosted = {ref.id: ref for inst in (snapshot.instances if snapshot else [])
+              for ref in inst.providers}
     out = []
     for p in providers:
         status, error = resolve_provider_status(
@@ -1266,6 +1272,9 @@ async def probe_graph_providers(app_state) -> Optional[list]:
             "error": error,
             "isActive": p.is_active,
         })
+        if p.id in hosted:
+            out[-1]["versionedGraphs"] = hosted[p.id].versioned_graphs
+            out[-1]["versionedBytes"] = hosted[p.id].versioned_bytes
     out.sort(key=lambda d: (d["status"] != "down", d["type"], d["name"] or ""))
     return out or None
 

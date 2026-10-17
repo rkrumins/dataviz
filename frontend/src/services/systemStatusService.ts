@@ -95,6 +95,10 @@ export interface GraphProvider {
     status: ServiceStatus
     error: string | null
     isActive: boolean
+    /** FalkorDB only, once the graph store has been read: versioned graphs
+     *  projecting here and the size of their keys (null when none is known). */
+    versionedGraphs?: number
+    versionedBytes?: number | null
 }
 
 export interface ProjectionWorstRow {

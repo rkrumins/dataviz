@@ -186,8 +186,9 @@ class _FakeNode:
 
 def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
           cluster_nodes=None, cluster_nodes_refused=False, tuning=None,
-          cluster_info=None):
-    """Stub the two collaborators: the nodes and the database."""
+          cluster_info=None, versioned=None):
+    """Stub the collaborators: the nodes, the database and the versioning
+    store (``versioned``: ``(provider_id, key)`` → the graph projecting there)."""
     state = {
         "nodes": nodes,
         "cluster_nodes": cluster_nodes if cluster_nodes is not None else CLUSTER_NODES_3x2,
@@ -232,6 +233,11 @@ def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
             return False
 
     monkeypatch.setattr(topology, "_session_factory", lambda: (lambda: _Session()))
+
+    async def _versioned_graphs(provider_ids):
+        return {k: v for k, v in (versioned or {}).items() if k[0] in provider_ids}
+
+    monkeypatch.setattr(topology, "_versioned_graphs", _versioned_graphs)
     topology._cache = None
     topology._prev_nodes = {}
     topology._last_error = None
@@ -780,6 +786,72 @@ def test_a_dedicated_projection_is_placed_on_its_own_slot(monkeypatch):
     assert keys["src"].slot == topology.key_slot("src")
     assert keys["src_proj"].slot == topology.key_slot("src_proj")
     assert topology.placement_keys_for(ds) == [("source", "src"), ("projection", "src_proj")]
+
+
+def _versioned(graph_id, *, kind="main", owned=False, status="idle", lag=0):
+    return {"graphId": graph_id, "kind": kind, "owned": owned, "status": status, "lag": lag}
+
+
+def test_a_fork_key_is_attributed_to_its_versioned_graph_not_unregistered(monkeypatch):
+    """Every key a versioned graph projects into is that graph's: a fork's
+    key, which no data source names, read as "unregistered" — a leftover to
+    clean up — on a store that is serving it. The data source's own key says
+    which versioned graph writes into it and whether the platform owns it,
+    and an evicted fork's key is expected even though the node dropped it."""
+    main, fork, evicted = "g1", "g1__fork_gf1", "g1__fork_gf2"
+    nodes = _cluster_nodes({})
+    for master in MASTERS:
+        nodes[master]["graphs"] = [k for k in (main, fork, "stray")
+                                   if MASTERS[topology.key_slot(k) // 5461] == master]
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=main), "Workspace One")],
+          versioned={("p1", main): _versioned("gm"),
+                     ("p1", fork): _versioned("gf1", kind="fork", owned=True, lag=3),
+                     ("p1", evicted): _versioned("gf2", kind="fork", owned=True,
+                                                 status="evicted"),
+                     ("p_other", "elsewhere"): _versioned("gx")})
+
+    snap = _run(topology.get_topology_snapshot())
+    instance = snap.instances[0]
+    rows = {g.key: g for s in instance.shards for g in s.graphs}
+    assert set(rows) == {main, fork, evicted, "stray"}
+
+    assert rows[main].role == "source" and [d.id for d in rows[main].data_sources] == ["ds1"]
+    assert rows[main].versioned.model_dump(by_alias=True) == _versioned("gm")
+
+    assert rows[fork].role == "versioned" and rows[fork].data_sources == []
+    assert rows[fork].present
+    assert rows[fork].versioned.model_dump(by_alias=True) == _versioned(
+        "gf1", kind="fork", owned=True, lag=3)
+    assert not rows[evicted].present and rows[evicted].role == "versioned"
+    assert rows[evicted].versioned.status == "evicted"
+
+    assert rows["stray"].role == "unregistered" and rows["stray"].versioned is None
+    assert instance.totals.unregistered_graphs == 1 == snap.summary.unregistered_graphs
+
+
+def test_each_provider_counts_its_versioned_graphs_and_their_size(monkeypatch):
+    """The figures the Infrastructure page shows per provider: how many
+    versioned graphs it hosts and how much they take. A fork has no data
+    source to estimate it from, so its key is measured like any other."""
+    main, fork, evicted = "g1", "g1__fork_gf1", "g1__fork_gf2"
+    nodes = _cluster_nodes({})
+    for master in MASTERS:
+        nodes[master]["graphs"] = [k for k in (main, fork, "stray")
+                                   if MASTERS[topology.key_slot(k) // 5461] == master]
+    _wire(monkeypatch, nodes=nodes,
+          providers=[_provider("p1", "Falkor A"),
+                     _provider("p2", "Falkor B", seeds=("10.0.0.2:6379",), host="10.0.0.2")],
+          data_sources=[(_ds("ds1", graph=main), "Workspace One")],
+          versioned={("p1", main): _versioned("gm"),
+                     ("p1", fork): _versioned("gf1", kind="fork", owned=True),
+                     ("p1", evicted): _versioned("gf2", kind="fork", status="evicted")})
+
+    snap = _run(topology.get_topology_snapshot())
+    providers = {p.id: p for p in snap.instances[0].providers}
+    measured = int(12.5 * 1024 ** 2)              # what the fake node answers per graph
+    assert (providers["p1"].versioned_graphs, providers["p1"].versioned_bytes) == (3, 2 * measured)
+    assert (providers["p2"].versioned_graphs, providers["p2"].versioned_bytes) == (0, None)
 
 
 def test_graph_sizes_are_measured_when_the_server_has_the_command(monkeypatch):

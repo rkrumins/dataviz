@@ -55,6 +55,14 @@ function ProviderCard({ p }: { p: GraphProvider }) {
             {p.error && (
                 <p className="mt-1.5 text-[10px] font-mono text-red-600 dark:text-red-400 break-all">{p.error}</p>
             )}
+            {p.versionedGraphs != null && (
+                <p className="mt-1.5 text-[11px] text-ink-muted tabular-nums">
+                    {p.versionedGraphs === 0
+                        ? 'No versioned graphs'
+                        : `${p.versionedGraphs} versioned graph${p.versionedGraphs === 1 ? '' : 's'}`
+                            + (p.versionedBytes != null ? ` \u00b7 ${formatBytes(p.versionedBytes)}` : '')}
+                </p>
+            )}
         </div>
     )
 }

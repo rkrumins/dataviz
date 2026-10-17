@@ -157,6 +157,7 @@ tests/test_permission_service.py
 tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
+tests/test_probe_graph_providers.py
 tests/test_probe_projection_lag.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
