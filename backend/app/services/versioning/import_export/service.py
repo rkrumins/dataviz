@@ -107,12 +107,20 @@ class ImportExportService:
         from the traceable ``{ws}/{ds}/{graph}/{job}/source.<fmt>`` layout (the caller then streams
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
         imports per branch, like successive manual edits); omitted -> open a fresh import draft.
+        A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
+        a closed draft :class:`BranchNotOpen`, any other branch ``ValueError``.
         """
         if branch_id is None:
             branch_id = await self._svc.open_draft(
                 graph_id=graph_id, owner=actor, name=name or "Import")
+        elif branch_id == "main":
+            raise MainWriteForbidden()
 
         async with db.graphver_session() as s:
+            branch = await self._svc._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._svc._require_open(branch)
             job = JobORM(
                 job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,
