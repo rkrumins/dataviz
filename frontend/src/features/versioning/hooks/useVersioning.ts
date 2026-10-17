@@ -40,6 +40,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
+  forks: (ws?: string, gid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'forks', ws, gid] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
   prDiff: (ws?: string, prId?: string | null) =>
@@ -251,6 +253,17 @@ export function useMergeRequests(wsId?: string, graphId?: string | null) {
     queryFn: () => api.listMergeRequests(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
+  })
+}
+
+/** A graph's forks, those in the trash included. Not retried: an old backend answers 404. */
+export function useForks(wsId?: string, graphId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.forks(wsId, graphId),
+    queryFn: () => api.listForks(wsId!, graphId!),
+    enabled: !!wsId && !!graphId,
+    staleTime: 15_000,
+    retry: false,
   })
 }
 

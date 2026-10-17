@@ -78,7 +78,8 @@ its parent is in the trash (**409** `fork_not_restorable`). `GET …/versioning/
 lists a graph's forks, those in the trash included, with when each one's undo window ends
 (`GRAPHVER_PURGE_GRACE_DAYS`, 30 days). Once that window ends the reaper purges the fork, dropping
 its own FalkorDB key and never its parent's. A data source's own graph is still deleted with its
-data source (**409** `not_a_fork`).
+data source (**409** `not_a_fork`). A data source's Versioning tab lists its graph's forks, with
+Delete and Restore for those who may manage it.
 
 ### Changed
 

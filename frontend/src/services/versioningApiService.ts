@@ -89,6 +89,15 @@ export interface Graph {
   userNames?: Record<string, string>
 }
 
+/** One of a graph's forks, live or in the trash (`deletedAt` set). `purging`: its purge is queued,
+ *  so it can no longer be restored; `purgeAfter`: the end of its undo window. */
+export interface ForkSummary extends Graph {
+  deletedAt?: string | null
+  deletedBy?: string | null
+  purging: boolean
+  purgeAfter?: string | null
+}
+
 /** One normalized op for the staging buffer — `entityKind`/`entityId` mirror the wire. */
 export interface StageOp {
   op: 'create' | 'update' | 'delete'
@@ -501,6 +510,26 @@ export class PullRequestExistsError extends Error {
   }
 }
 
+/** The server would not delete or restore a fork. The message says what to do instead. */
+export class ForkRefusedError extends Error {
+  readonly type: string
+  constructor(detail: { type: string; reason?: string; limit?: number; message?: string }) {
+    super(detail.type === 'live_forks'
+      ? 'Forks were made from this fork. Delete its forks first.'
+      : detail.type === 'not_a_fork'
+      ? 'This graph belongs to a data source and goes with its data source.'
+      : detail.type === 'fork_limit'
+      ? `This graph already has ${detail.limit} forks. Delete one first.`
+      : detail.reason === 'purging'
+      ? 'This fork is being deleted and can no longer be restored.'
+      : detail.reason === 'parent_deleted'
+      ? 'The graph it was forked from is in the trash. Restore that first.'
+      : detail.message || 'This fork cannot be restored.')
+    this.name = 'ForkRefusedError'
+    this.type = detail.type
+  }
+}
+
 /** The draft closed under the save — published, being published, or discarded — so it takes no
  *  more changes. Nothing was written; the staged edits can be copied to a new draft. */
 export class BranchClosedError extends Error {
@@ -589,6 +618,10 @@ type RefusalDetail = string | {
   prId?: string
   title?: string | null
   suggestion?: string | null
+  /** Why a fork cannot be restored (`fork_not_restorable`). */
+  reason?: string
+  /** The fork cap (`fork_limit`). */
+  limit?: number
 } | null | undefined
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
@@ -618,6 +651,10 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
+  }
+  if (status === 409 && (d?.type === 'live_forks' || d?.type === 'not_a_fork'
+    || d?.type === 'fork_limit' || d?.type === 'fork_not_restorable')) {
+    return new ForkRefusedError({ ...d, type: d.type })
   }
   if (status === 422 && d?.type === 'graph_name_unavailable') {
     return new GraphNameUnavailableError(
@@ -995,6 +1032,23 @@ export interface BranchFreshness {
  *  teammate published RIGHT AWAY (not at merge). */
 export function getBranchFreshness(wsId: string, graphId: string, branchId: string): Promise<BranchFreshness> {
   return vfetch<BranchFreshness>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/freshness`)
+}
+
+/** A graph's direct forks, newest first, those in the trash included. */
+export function listForks(wsId: string, graphId: string): Promise<ForkSummary[]> {
+  return vfetch<ForkSummary[]>(`${base(wsId)}/graphs/${graphId}/forks`)
+}
+
+/** Move a fork to the trash, restorable until its purge is queued. 409 {@link ForkRefusedError}
+ *  while it has forks of its own, or {@link PullRequestExistsError} while its PR is open. */
+export function deleteFork(wsId: string, graphId: string, opts?: ActivityOpts): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/graphs/${graphId}`, withReason({ method: 'DELETE' }, opts?.reason))
+}
+
+/** Bring a trashed fork back; a live one is left as it is. 409 {@link ForkRefusedError} once its
+ *  purge is queued, while its parent is in the trash, or at the parent's fork cap. */
+export function restoreFork(wsId: string, graphId: string, opts?: ActivityOpts): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/graphs/${graphId}/restore`, withReason({ method: 'POST' }, opts?.reason))
 }
 
 /** Rebuild the fast read layer from the source of truth (full background replay). 409 when the graph

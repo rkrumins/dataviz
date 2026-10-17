@@ -1,18 +1,20 @@
 /**
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
- * it, and surfaces the branch list + recent commit history. Read-only overview; the
- * editing loop lives on the canvas.
+ * it, and surfaces the branch list, the graph's forks + recent commit history. Read-only overview
+ * apart from deleting and restoring a fork; the editing loop lives on the canvas.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
+import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useBranches, useCommitLog, useDataSourcePullRequests, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import type { Branch } from '@/services/versioningApiService'
+import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
@@ -54,6 +56,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   // The data source's open PRs (the inbox's read), so newer merged or closed PRs can't push an
   // older one awaiting review off the page.
   const mrsQ = useDataSourcePullRequests(wsId, dataSourceId, 'open', !!graphId)
+  const forksQ = useForks(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
   // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
@@ -161,6 +164,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   // Merged and abandoned drafts are still listed; only those not yet closed count as open.
   const drafts = branches.filter((b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
   const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
+  const forks = forksQ.data ?? []
 
   return (
     <div className="space-y-6">
@@ -192,6 +196,21 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           {branchesQ.isLoading && <RowSkeleton />}
         </div>
       </section>
+
+      {/* Forks — only when there are any; a failed read (or an older server's 404) hides it */}
+      {forks.length > 0 && (
+        <section>
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
+            <GitFork className="w-3.5 h-3.5" /> Forks
+          </h4>
+          <div className="space-y-1.5">
+            {forks.map((f) => (
+              <ForkRow key={f.graphId} wsId={wsId} fork={f} canManage={canManage}
+                onChanged={() => { void forksQ.refetch() }} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Merge requests */}
       <section>
@@ -297,6 +316,64 @@ function BranchRow({ branch }: { branch: Branch }) {
       >
         {isMain ? 'published' : branch.status}
       </span>
+    </div>
+  )
+}
+
+/** A live fork, or one in the trash until its undo window ends. Managers delete a live fork and
+ *  restore a trashed one; once its purge is queued it can no longer come back. */
+function ForkRow({ wsId, fork, canManage, onChanged }: {
+  wsId: string
+  fork: ForkSummary
+  canManage: boolean
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const trashed = !!fork.deletedAt
+
+  const act = async (call: () => Promise<void>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await call()
+      onChanged()
+    } catch (e) {
+      setError(e instanceof PullRequestExistsError ? 'Close its open pull request first.' : (e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const remove = () => {
+    if (!window.confirm('Move this fork to the trash? It can be restored for 30 days.')) return
+    void act(() => deleteFork(wsId, fork.graphId))
+  }
+
+  return (
+    <div className="rounded-lg border border-glass-border bg-canvas-elevated/40 px-3 py-2">
+      <div className="flex items-center gap-2.5">
+        <GitFork className={cn('w-4 h-4 shrink-0', trashed ? 'text-ink-muted' : 'text-indigo-500')} />
+        <div className="flex-1 min-w-0">
+          <p className={cn('text-sm font-mono truncate', trashed ? 'text-ink-muted' : 'text-ink')}>{fork.graphId}</p>
+          <p className="text-[11px] text-ink-muted truncate">
+            {!trashed
+              ? `by ${actorLabel(fork.createdBy, fork.userNames)} · from #${fork.forkBaseCommitSeq ?? 0} · main #${fork.mainHeadCommitSeq}`
+              : fork.purging
+              ? 'Being deleted'
+              : <>Deleted by {actorLabel(fork.deletedBy, fork.userNames)} · restorable until <DateTime at={fork.purgeAfter} variant="calendar" /></>}
+          </p>
+        </div>
+        {canManage && !trashed && (
+          <Button size="sm" variant="ghost" leftIcon={Trash2} loading={busy} onClick={remove}>Delete</Button>
+        )}
+        {canManage && trashed && !fork.purging && (
+          <Button size="sm" variant="secondary" leftIcon={RotateCcw} loading={busy}
+            onClick={() => { void act(() => restoreFork(wsId, fork.graphId)) }}>
+            Restore
+          </Button>
+        )}
+      </div>
+      {error && <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-400" role="alert">{error}</p>}
     </div>
   )
 }

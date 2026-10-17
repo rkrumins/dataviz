@@ -6,9 +6,11 @@
  * version history (FalkorDB): the server refuses the rest with 422 `provider_unsupported`.
  * Its Merge requests section reads the data source's open PRs, the inbox's read, so an older open PR
  * is not hidden behind newer merged or closed ones.
+ * Its Forks section lists the graph's forks, those in the trash included, with Delete and Restore for
+ * managers; a fork whose purge is queued can no longer be restored.
  * The data hooks are stubbed; the card itself has its own spec.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -18,7 +20,11 @@ let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
 let providerType: string | undefined
 let openPrs: Array<Record<string, unknown>>
+let forks: Array<Record<string, unknown>>
 const refetch = vi.fn()
+const refetchForks = vi.fn()
+const deleteFork = vi.fn()
+const restoreFork = vi.fn()
 const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
 
 vi.mock('@/store/auth', () => ({ usePermission: () => canManage }))
@@ -34,6 +40,12 @@ vi.mock('../../hooks/useVersioning', () => ({
   useBranches: () => ({ data: branches, isLoading: false }),
   useCommitLog: () => ({ data: { commits: [] } }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
+  useForks: () => ({ data: forks, refetch: refetchForks }),
+}))
+vi.mock('@/services/versioningApiService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/versioningApiService')>(),
+  deleteFork: (...args: unknown[]) => deleteFork(...args),
+  restoreFork: (...args: unknown[]) => restoreFork(...args),
 }))
 vi.mock('../../model/useBootstrapWatch', () => ({
   useBootstrapWatch: () => ({ showReport: false, showProgress: false, job: null, dismissReport: () => {} }),
@@ -50,6 +62,7 @@ vi.mock('../ProjectionHealthCard', () => ({
 }))
 
 import { DataSourceVersioningTab } from '../DataSourceVersioningTab'
+import { PullRequestExistsError } from '@/services/versioningApiService'
 
 const renderTab = () =>
   render(
@@ -65,7 +78,11 @@ beforeEach(() => {
   branches = []
   providerType = undefined
   openPrs = []
+  forks = []
   refetch.mockReset()
+  refetchForks.mockReset()
+  deleteFork.mockReset().mockResolvedValue(undefined)
+  restoreFork.mockReset().mockResolvedValue(undefined)
   useDataSourcePullRequests.mockClear()
 })
 
@@ -158,5 +175,71 @@ describe('DataSourceVersioningTab — Enable', () => {
     renderTab()
     expect(screen.queryByRole('button', { name: /enable version control/i })).toBeNull()
     expect(screen.getByText(/only FalkorDB data sources can be versioned/i)).toBeTruthy()
+  })
+})
+
+describe('DataSourceVersioningTab — forks', () => {
+  const fork = (id: string, extra: Record<string, unknown> = {}) => ({
+    graphId: id, workspaceId: 'ws1', kind: 'fork', forkParentGraphId: 'g1', forkBaseCommitSeq: 3,
+    mainHeadCommitSeq: 4, createdBy: 'u1', createdAt: '2026-10-01T00:00:00Z', purging: false,
+    userNames: { u1: 'Ada', u2: 'Bo' }, ...extra,
+  })
+  const trashed = (id: string, extra: Record<string, unknown> = {}) => fork(id, {
+    deletedAt: '2026-10-10T00:00:00Z', deletedBy: 'u2', purgeAfter: '2026-11-09T00:00:00Z', ...extra,
+  })
+
+  it('shows a manager live and trashed forks, and moves a live one to the trash on confirm', async () => {
+    forks = [fork('f1'), trashed('f2')]
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderTab()
+    expect(screen.getByText('Forks')).toBeInTheDocument()
+    expect(screen.getByText(/by Ada · from #3 · main #4/)).toBeInTheDocument()
+    expect(screen.getByText(/Deleted by Bo · restorable until/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(window.confirm).toHaveBeenCalled()
+    await waitFor(() => expect(refetchForks).toHaveBeenCalled())
+    expect(deleteFork).toHaveBeenCalledWith('ws1', 'f1')
+  })
+
+  it('deletes nothing when the manager cancels', () => {
+    forks = [fork('f1')]
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(deleteFork).not.toHaveBeenCalled()
+  })
+
+  it('restores a trashed fork, and offers nothing for one whose purge is queued', async () => {
+    forks = [trashed('f2'), trashed('f3', { purging: true })]
+    renderTab()
+    expect(screen.getByText('Being deleted')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Restore' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await waitFor(() => expect(refetchForks).toHaveBeenCalled())
+    expect(restoreFork).toHaveBeenCalledWith('ws1', 'f2')
+  })
+
+  it('shows everyone else the forks without Delete or Restore', () => {
+    canManage = false
+    forks = [fork('f1'), trashed('f2')]
+    renderTab()
+    expect(screen.getByText(/by Ada/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Restore' })).toBeNull()
+  })
+
+  it('has no Forks section when the graph has no forks', () => {
+    renderTab()
+    expect(screen.queryByText('Forks')).toBeNull()
+  })
+
+  it('says why a delete was refused, in the row', async () => {
+    forks = [fork('f1')]
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    deleteFork.mockRejectedValue(new PullRequestExistsError({ prId: 'pr1', message: 'branch b already has an open pull request' }))
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(await screen.findByText('Close its open pull request first.')).toBeInTheDocument()
+    expect(refetchForks).not.toHaveBeenCalled()
   })
 })
