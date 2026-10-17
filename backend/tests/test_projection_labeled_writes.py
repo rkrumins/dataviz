@@ -207,3 +207,21 @@ def test_seed_resolves_edge_labels_from_window_nodes():
     eid, su, tu, payload, slb, tlb = edges[0]
     assert (su, tu) == ("urn:a", "urn:b")
     assert (slb, tlb) == ("Table", "Dataset")
+
+
+def test_urnless_node_resolves_to_the_label_it_was_merged_under():
+    """A node published without a urn is merged as ``(:<entityType> {urn: 'gv:<id>'})``; its
+    delete and its edges' ends must anchor on that label, not ``:Entity``, or they miss it and
+    a deleted node stays in FalkorDB."""
+    p = _projector()
+
+    class _Session:
+        async def execute(self, stmt):
+            sql = str(stmt)
+            # Only B's create row exists, and it carries no urn.
+            row = None if "urn IS NOT NULL" in sql else ("Dataset",)
+            return SimpleNamespace(first=lambda: row)
+
+    graph = SimpleNamespace(id="g1", fork_parent_graph_id=None)
+    assert _run(p._urn_label_for(_Session(), graph, "main", "B")) == ("gv:B", "Dataset")
+    assert _run(p._endpoint(_Session(), graph, "main", "B", {}, {})) == ("gv:B", "Dataset")

@@ -1716,8 +1716,9 @@ class FalkorProjector:
         self, s, graph: GraphORM, main_id: str, entity_id: str,
     ) -> Tuple[str, str]:
         """Latest committed (urn, entityType) for an entity on `main`
-        (fork-aware); ``(gv:<eid>, "Entity")`` when nothing resolves. The
-        entityType is exactly what the node merge labeled the cache node
+        (fork-aware); ``(gv:<eid>, <its latest entityType>)`` for a node that
+        never had a urn, and ``(gv:<eid>, "Entity")`` when nothing resolves.
+        The entityType is exactly what the node merge labeled the cache node
         with, so labeled anchors built from it always hit."""
         row = (await s.execute(
             select(NodeVersionORM.urn, NodeVersionORM.payload).where(
@@ -1728,6 +1729,15 @@ class FalkorProjector:
         if row and row[0]:
             label = ((row[1] or {}).get("entityType")) or "Entity"
             return str(row[0]), str(label)
+        # No urn on any row: the merge keyed it gv:<eid> under its entityType.
+        row = (await s.execute(
+            select(NodeVersionORM.entity_type).where(
+                NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
+                NodeVersionORM.entity_id == entity_id, NodeVersionORM.op != "delete",
+            ).order_by(NodeVersionORM.commit_seq.desc()).limit(1)
+        )).first()
+        if row:
+            return f"gv:{entity_id}", str(row[0] or "Entity")
         if graph.fork_parent_graph_id:
             parent = await s.get(GraphORM, graph.fork_parent_graph_id)
             if parent is not None:
