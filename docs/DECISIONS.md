@@ -707,7 +707,7 @@ Full design: [Versioning: Overview & Architecture](/docs/versioning-overview).
 
 ## ADR-024: Cookie sessions with CSRF double-submit, not bearer tokens
 
-**Status:** Accepted
+**Status:** Accepted — amended by [ADR-027](#adr-027-personal-api-keys-scoped-per-resource): a script may now authenticate with an API key instead of a cookie session.
 **Date:** 2026 Q2 — in place by June 2026 (the exact switch date is not recorded); hardened in July 2026 by a refresh-rotation grace window (migration dated 2026-07-28) and allow-by-record refresh tokens (migration dated 2026-07-30). Recorded 2026-10-10.
 **Context:** The single-page app used to keep its JWT, and an "is signed in" flag, in `localStorage`. A token in web storage can be read by any script that runs on the page, and a client-side flag cannot be trusted to guard a route. The app also had to support single sign-on, where the identity provider hands the session back through a browser redirect.
 
@@ -801,6 +801,46 @@ Full design record: [Property storage](/docs/property-storage).
 
 ---
 
+## ADR-027: Personal API keys scoped per resource
+
+**Status:** Accepted — amends [ADR-024](#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens) for clients that are not a browser.
+**Date:** 2026-10-12
+**Context:** A script could only sign in with a password and keep a cookie session (ADR-024). Most people sign in through an identity provider and have no password, so they could not automate at all; those who could handed a script their whole account, revocable only by changing the password. Access is also not only per workspace: a workspace viewer can be an editor of one view through a grant, so a token scoped by workspace role alone would either grant too much or shut that person out of the view they edit.
+
+**Decision:**
+- **Personal API keys that act as their owner.** The token is `nxpat_`, 32 random base62 characters and a CRC32 checksum (`nxsat_` is reserved for service accounts). Only its SHA-256 is stored; it is shown once and accepted only in `Authorization: Bearer`.
+- **A permission profile applied to a resource selection**, the shape of GitHub's fine-grained tokens: views none, read or read & write (plus publish), data none, read or read & write; over everything the owner can reach, or chosen workspaces, views and data sources. On any resource the key may do what its owner may do there now, narrowed by both. Claims are built per workspace with no global permission (`resolve_for_api_key`), and the selection rides on the claims (`KeyScope`), so the view evaluator's identity paths — creator, grant, enterprise tier — are honoured and narrowed alike.
+- **A deny-by-default surface**, keyed by endpoint rather than path (`api_key_surface.SURFACE`): the data plane only, a resource level for every route, and a reviewed snapshot. A request naming a workspace, view or data source outside the selection is refused at the boundary, and again where the platform resolves each reference — the capability gate and the versioning graph and request lookups.
+- **Checked with its owner on every request.** Revocation, expiry and suspension take effect at once. The keys of an owner who signs in through an identity provider pause when that person has not signed in there within a window (30 days by default), so a leaver's keys stop without provisioning. So do those of an owner with no way to sign in: no identity, and no password — or password sign-in switched off, since an emergency window closes (read from the cached sign-in posture, within 30 seconds). A break-glass (system) account's keys stop while it is one, and it makes none. Claims are cached per key for 30 seconds, with one resolution in flight per key; a role the owner loses reaches their keys within that window.
+- **No cookies beside a key.** The CSRF middleware removes cookies from a request that carries a key, and keeps only the Origin check.
+- **Minting needs a fresh sign-in:** the password, or the identity provider the session came from (a signed `idp` claim) vouching for the person now. A provider that signs someone back in silently from a session it still holds proves nothing about who is at the keyboard, so OIDC and SAML must have dated a sign-in in the last 15 minutes (`auth_time_proven`, signed into both session tokens and carried through rotation; a portal's mapped `auth_time` never counts). An Enterprise gateway is asked, on the request, whether the company session behind it is live, and mints nothing if it does not answer; one only the browser reaches vouches by a sign-in through it in the last 15 minutes. Portal connections, which can do neither, are refused unless an administrator accepts a round trip instead (`apiKeySsoRoundTripStepUp`, off by default). Each mint records how it was confirmed.
+- **A whole lifecycle, one status.** Keys can be previewed before they exist (validated exactly as creating one is), renamed, rotated once (a key in its grace period cannot be rotated again), renewed after they expire (no grace, and counted against the limit like a new key) and revoked by their owner, an administrator with a note, or whoever holds them. The status a key shows is computed once in SQL (`api_key_repo.status_expr`) in the order a request is refused, so the administrators' filters and counts agree with every badge.
+- **Usage counted without a write per request.** Each process counts its keys' requests in memory and adds them to `api_key_usage` (key, day) every 30 seconds with an incrementing upsert, and once more at shutdown.
+- **Principal-agnostic machinery.** A key belongs to a principal (`api_keys.user_id`) and records its `kind` and `created_by`; scope, fence, claims, audit, inventory and the self endpoints never assume the principal is a person. A service account will be a non-human principal with ordinary role bindings, whose keys stay valid while it is enabled and has an active manager.
+
+**Reasoning:** A key narrower than its owner and re-evaluated against the owner's live access is the least privilege that still lets anyone automate, people who only sign in through an identity provider included. Re-evaluating on every request, rather than freezing permissions when the key is made, means access taken from a person is taken from every key they hold, with no bookkeeping on the key. Keying the surface on endpoints survives FastAPI's lazy router inclusion, and failing closed on unregistered routes means no new route becomes callable with a key by accident.
+
+**Trade-offs:**
+- (+) People who sign in through an identity provider can automate, and integrations no longer hold passwords.
+- (+) One revocable, expiring, audited credential per integration; every change it makes is recorded as its owner and marked with the key.
+- (+) Service accounts become a new kind of principal with its own lifecycle rule, not a new authorization model.
+- (-) A key stops when its owner leaves, by design; an integration that must outlive a person waits for service accounts.
+- (-) A database read for the key and its owner on every request, and up to 30 seconds for a role change to reach a cached key.
+- (-) People who sign in through a portal connection cannot make keys until an administrator accepts the weaker round trip; a gateway that cannot be reached stops people making keys through it until it answers.
+- (-) Usage counts are best-effort: a process that dies loses at most its last half minute.
+- (-) Every route keys should call needs a registry entry and a reviewed snapshot change.
+- (-) Data sources have no grants of their own yet, so a key's data access follows workspace roles, or reads through a view.
+
+**Alternatives considered:**
+- Freezing the owner's permissions into the key when it is made — keeps access the owner has since lost.
+- Scoping by workspace role only — cannot express "the one view I was granted".
+- OAuth 2.0 client credentials with short-lived tokens — needs a token endpoint and a client registry before anyone can automate, and per-resource scope all the same; the bearer format leaves room for it later.
+- Service accounts first — needs an ownership and management model for non-human principals before anyone could automate; they are built on this instead.
+
+Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-overview#api-keys) and [RBAC](/docs/rbac#api-keys).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -828,9 +868,10 @@ Full design record: [Property storage](/docs/property-storage).
 | 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |
 | 022 | Central role-keyed Redis config (cache/streams independent) | Accepted | Low |
 | 023 | PostgreSQL version store, FalkorDB rebuildable read cache | Accepted | Medium (two stores) |
-| 024 | Cookie sessions with CSRF double-submit | Accepted | Low |
+| 024 | Cookie sessions with CSRF double-submit | Accepted (amended by ADR-027) | Low |
 | 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
 | 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
+| 027 | Personal API keys scoped per resource | Accepted | Medium (surface registry upkeep) |
 
 ---
 
@@ -839,7 +880,7 @@ Full design record: [Property storage](/docs/property-storage).
 - [Architecture](/docs/architecture) — where these decisions show up in the running system
 - [Data Architecture](/docs/data-architecture) — the stores, schemas and Redis roles behind ADR-017 to ADR-022 and ADR-025
 - [Versioning: Overview & Architecture](/docs/versioning-overview) — the full design behind ADR-023
-- [Security Overview](/docs/security-overview) — the controls ADR-024 is part of
+- [Security Overview](/docs/security-overview) — the controls ADR-024 and ADR-027 are part of
 - [Property storage](/docs/property-storage) — the design record behind ADR-026
 - [Migrations](/docs/migrations) — how the upgrade job in ADR-025 builds and changes the schema
 - [Services Overview](/docs/services-overview) — the process roles referenced by ADR-017 and ADR-019

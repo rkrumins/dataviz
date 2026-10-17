@@ -90,21 +90,90 @@ describe('health', () => {
 })
 
 describe('assurance', () => {
+    const UNSIGNED = 'Trust unsigned is on: the browser hands over the '
+        + "gateway's answer and nothing checks a signature on it."
+
     it('interrupts for a live connection nothing has vouched for', () => {
         // Live AND unverified is the combination worth a warning: it is
         // serving real sign-ins on forgeable claims.
         render(<IdpProviderCard {...noop}
-            provider={provider({ lifecycle: 'live', assurance: 'unverified' })} />)
-        expect(screen.getByText(/anyone who can write its payload/i))
+            provider={provider({
+                lifecycle: 'live', assurance: 'unverified', assuranceReason: UNSIGNED,
+            })} />)
+        expect(screen.getByText(/live and unverified/i)).toBeInTheDocument()
+    })
+
+    it('says which setting is to blame, and opens it', async () => {
+        // The server names this row's cause and its fix; the generic
+        // "anyone can be anyone" left the operator guessing which switch.
+        const onEdit = vi.fn()
+        render(<IdpProviderCard {...noop} onEdit={onEdit}
+            provider={provider({
+                lifecycle: 'live', assurance: 'unverified', assuranceReason: UNSIGNED,
+            })} />)
+        expect(screen.getByText(/Trust unsigned is on/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /open its settings/i }))
+        expect(onEdit).toHaveBeenCalledTimes(1)
+    })
+
+    it('folds away once read, remembered per connection and cause', async () => {
+        // An admin who has read it can put it away; a different cause —
+        // TLS switched off after Trust unsigned was accepted — opens it
+        // again, because that is a different risk.
+        window.localStorage.clear()
+        const live = (assuranceReason: string) => provider({
+            lifecycle: 'live', assurance: 'unverified', assuranceReason,
+        })
+        const first = render(<IdpProviderCard {...noop} provider={live(UNSIGNED)} />)
+        await userEvent.click(screen.getByRole('button', { name: /^hide$/i }))
+        expect(screen.queryByText(/Trust unsigned is on/)).not.toBeInTheDocument()
+        expect(screen.getByText(/warning hidden/i)).toBeInTheDocument()
+        first.unmount()
+
+        const again = render(<IdpProviderCard {...noop} provider={live(UNSIGNED)} />)
+        expect(screen.getByText(/warning hidden/i)).toBeInTheDocument()
+        again.unmount()
+
+        render(<IdpProviderCard {...noop}
+            provider={live('TLS verification is off for this connection.')} />)
+        expect(screen.getByText(/TLS verification is off/)).toBeInTheDocument()
+    })
+
+    it('opens again on request', async () => {
+        window.localStorage.clear()
+        render(<IdpProviderCard {...noop}
+            provider={provider({
+                lifecycle: 'live', assurance: 'unverified', assuranceReason: UNSIGNED,
+            })} />)
+        await userEvent.click(screen.getByRole('button', { name: /^hide$/i }))
+        await userEvent.click(screen.getByRole('button', { name: /show the warning/i }))
+        expect(screen.getByText(/Trust unsigned is on/)).toBeInTheDocument()
+    })
+
+    it('says when the connection links administrators too, and reopens for it', async () => {
+        window.localStorage.clear()
+        const live = (settings: Record<string, unknown>) => provider({
+            lifecycle: 'live', assurance: 'unverified', assuranceReason: UNSIGNED, settings,
+        })
+        const before = render(<IdpProviderCard {...noop} provider={live({})} />)
+        expect(screen.getByText(/link itself to a Super Admin's or break-glass account/i))
+            .toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /^hide$/i }))
+        before.unmount()
+
+        // Turning the opt-in on is a new risk: the folded warning opens again.
+        render(<IdpProviderCard {...noop} provider={live({ link_admin_accounts: true })} />)
+        expect(screen.getByText(/set to link Super Admin and break-glass accounts too/i))
             .toBeInTheDocument()
     })
 
     it('stays quiet about an unverified DRAFT', () => {
         // Still being set up, still invisible — nothing to warn about yet.
         render(<IdpProviderCard {...noop}
-            provider={provider({ lifecycle: 'draft', assurance: 'unverified' })} />)
-        expect(screen.queryByText(/anyone who can write its payload/i))
-            .not.toBeInTheDocument()
+            provider={provider({
+                lifecycle: 'draft', assurance: 'unverified', assuranceReason: UNSIGNED,
+            })} />)
+        expect(screen.queryByText(/live and unverified/i)).not.toBeInTheDocument()
     })
 })
 
@@ -124,6 +193,15 @@ describe('actions', () => {
         render(<IdpProviderCard {...noop}
             provider={provider({ emailDomains: ['corp.example', 'sub.corp.example'] })} />)
         expect(screen.getByText(/corp\.example, sub\.corp\.example/)).toBeInTheDocument()
+    })
+
+    it('marks the connection the sign-in page leads with, and only that one', () => {
+        const { rerender } = render(
+            <IdpProviderCard provider={provider()} primary {...noop} />)
+        expect(screen.getByText('Primary')).toBeInTheDocument()
+
+        rerender(<IdpProviderCard provider={provider()} {...noop} />)
+        expect(screen.queryByText('Primary')).not.toBeInTheDocument()
     })
 })
 

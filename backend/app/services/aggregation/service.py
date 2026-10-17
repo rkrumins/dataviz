@@ -53,8 +53,10 @@ from .holds import (  # noqa: F401  (HeldError re-exported for callers)
     AUTOMATION_ORIGINS, FLEET_KEY, HELD_TRIGGER_SOURCES, HeldError, Hold,
     read_scope_holds, resolve_hold, resolve_scope_hold, set_scope_hold,
 )
+from backend.app.common.activity_context import Provenance
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
+from backend.app.services.activity import recorder
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +424,57 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
+async def record_operation(
+    session: AsyncSession,
+    event_type: str,
+    provenance: Optional[Provenance],
+    ds_id: Optional[str] = None,
+    *,
+    workspace_id: Optional[str] = None,
+    label: Optional[str] = None,
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    details: Optional[dict] = None,
+    best_effort: bool = False,
+) -> bool:
+    """Record one operation a person performed in the activity ledger, in
+    ``session``'s transaction: the caller's commit makes it durable,
+    atomically with the change it records. ``best_effort`` is for a change
+    that has already happened elsewhere — in Redis, the graph, a background
+    task or an earlier commit — which failing now would not undo (see
+    ``recorder.record_activity``).
+
+    ``None`` provenance — automation, or a caller that is not a person —
+    records nothing, and so does a provenance with recording off: the
+    ledger holds what PEOPLE did, once each; what automation did is in the
+    job tables and ``refresh_events``. A source operation is filed under the
+    source and its workspace, named as it is now; ``workspace_id``/``label``
+    stand in when the source's row is gone. Returns whether it recorded.
+    """
+    if provenance is None or not provenance.record:
+        return False
+    if ds_id:
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        if ds is not None:
+            workspace_id = ds.workspace_id or workspace_id
+            label = ds.label or ds.graph_name or label
+    await recorder.record_activity(
+        session,
+        event_type=event_type,
+        provenance=provenance,
+        workspace_id=workspace_id,
+        data_source_id=ds_id,
+        target_type=target_type or ("data_source" if ds_id else None),
+        target_id=target_id or ds_id,
+        target_label=label,
+        details=details,
+        best_effort=best_effort,
+    )
+    return True
+
+
 def _liveness_is_stale(job) -> bool:
     """True when nothing has been heard from this run's worker for longer than
     the stuck-job reconciler's own threshold.
@@ -663,6 +716,7 @@ class AggregationService:
         request: AggregationTriggerRequest,
         trigger_source: str,
         session: AsyncSession,
+        provenance: Optional[Provenance] = None,
     ) -> AggregationJobResponse:
         """Create and dispatch an aggregation job.
 
@@ -673,6 +727,11 @@ class AggregationService:
         3. CREATE: AggregationJobORM with frozen edge types
         4. DISPATCH: dispatcher.dispatch(job_id)
         5. RETURN: AggregationJobResponse
+
+        ``provenance`` is the person who asked for the run, if one did: the
+        job row carries who and why, and the activity ledger records the
+        trigger in the job's own transaction. An idempotent replay returns
+        the earlier job and records nothing — no new run was started.
         """
         from .models import API_TRIGGER_SOURCES, AggregationDataSourceStateORM
 
@@ -688,6 +747,10 @@ class AggregationService:
                 f"invalid trigger_source {trigger_source!r}; expected one of "
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
+        # A run started with an API key is a script's, not a person's click,
+        # whatever the request left the source at.
+        if trigger_source == "manual" and provenance is not None and provenance.api_key_id:
+            trigger_source = "api"
 
         # ── Operator hold ──────────────────────────────────────────────
         # Every path that can queue a job funnels through here, so this is
@@ -779,6 +842,7 @@ class AggregationService:
         try:
             job, lineage_types = await self._trigger_insert(
                 ds_id, request, trigger_source, session, idem_key, cutoff_iso,
+                provenance,
             )
         except IntegrityError:
             # Unique-index race on (data_source_id, idempotency_key): a
@@ -823,6 +887,7 @@ class AggregationService:
         session: AsyncSession,
         idem_key: Optional[str],
         cutoff_iso: str,
+        provenance: Optional[Provenance] = None,
     ):
         """The claim + resolve + INSERT transaction body of ``trigger``."""
         async with session.begin():
@@ -928,11 +993,19 @@ class AggregationService:
             # column default (3) is honoured for backwards-compat callers.
             if request.max_retries is not None:
                 job_kwargs["max_retries"] = request.max_retries
+            if provenance is not None:
+                job_kwargs["triggered_by"] = provenance.actor_id
+                job_kwargs["stated_reason"] = provenance.stated_reason
             job = AggregationJobORM(**job_kwargs)
             session.add(job)
 
             # Update aggregation-owned state table
             await self._upsert_ds_state(session, ds_id, aggregation_status="pending")
+            await record_operation(
+                session, "aggregation.job.triggered", provenance, ds_id,
+                workspace_id=job.workspace_id, label=job.data_source_label,
+                details={"jobId": job.id, "triggerSource": trigger_source},
+            )
             # session.begin() commits on context exit
 
         return job, lineage_types
@@ -944,6 +1017,7 @@ class AggregationService:
         ds_id: str,
         request: AggregationSkipRequest,
         session: AsyncSession,
+        provenance: Optional[Provenance] = None,
     ) -> DataSourceReadinessResponse:
         """Mark data source as 'skipped' — views can be created but without aggregated edges."""
         if not request.confirmed:
@@ -958,6 +1032,10 @@ class AggregationService:
             raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
         state.aggregation_status = "skipped"
+        await record_operation(
+            session, "aggregation.source.skipped", provenance, ds_id,
+            workspace_id=state.workspace_id,
+        )
         await session.commit()
 
         logger.info("Aggregation skipped for data source %s", ds_id)
@@ -1243,6 +1321,7 @@ class AggregationService:
         search: Optional[str] = None,
         limit: int = 25,
         offset: int = 0,
+        triggered_by: Optional[str] = None,
     ) -> PaginatedJobsResponse:
         """List aggregation jobs across all data sources and workspaces.
 
@@ -1264,6 +1343,8 @@ class AggregationService:
             base = base.where(AggregationJobORM.projection_mode == projection_mode)
         if trigger_source:
             base = base.where(AggregationJobORM.trigger_source == trigger_source)
+        if triggered_by:
+            base = base.where(AggregationJobORM.triggered_by == triggered_by)
         if date_from:
             base = base.where(AggregationJobORM.created_at >= date_from)
         if date_to:
@@ -1378,6 +1459,8 @@ class AggregationService:
             worker_id=getattr(job, "worker_id", None),
             failure_category=classify_failure(getattr(job, "error_message", None)),
             live_overrides=AggregationService._job_live_overrides_dict(job),
+            triggered_by=getattr(job, "triggered_by", None),
+            stated_reason=getattr(job, "stated_reason", None),
         )
 
 
@@ -1484,6 +1567,7 @@ class AggregationService:
         tuning: Optional[AggregationTuning] = None,
         updated_by: Optional[str] = None,
         cadence: Optional[AggregationCadence] = None,
+        provenance: Optional[Provenance] = None,
     ) -> AggregationSettingsResponse:
         """Persist the global aggregation defaults. ``tuning`` and ``cadence``
         are independent columns on the single settings row: each is written
@@ -1545,7 +1629,16 @@ class AggregationService:
                     merged[alias] = value
             row.cadence_json = json.dumps(merged)
         row.updated_at = _now()
-        row.updated_by = updated_by
+        row.updated_by = updated_by or (provenance.actor_id if provenance else None)
+        # What was sent, as sent: a value of ``null`` is a reset to default.
+        changed = {
+            name: model.model_dump(mode="json", by_alias=True, exclude_unset=True)
+            for name, model in (("tuning", tuning), ("cadence", cadence))
+            if model is not None
+        }
+        await record_operation(
+            session, "aggregation.settings.updated", provenance, details=changed,
+        )
         await session.commit()
         # Echo the stored state (re-parse the columns rather than only the
         # request, so a tuning-only PUT still returns the persisted cadence).
@@ -1559,6 +1652,7 @@ class AggregationService:
         job_id: str,
         session: AsyncSession,
         overrides: Optional[ResumeOverrides] = None,
+        provenance: Optional[Provenance] = None,
     ) -> AggregationJobResponse:
         """Resume a failed aggregation job from its last checkpoint.
 
@@ -1625,6 +1719,15 @@ class AggregationService:
         archive_attempt(job, category=classify_failure(job.error_message))
         job.retry_count = 0
         job.error_message = None
+        sent = (
+            overrides.model_dump(mode="json", by_alias=True, exclude_none=True)
+            if overrides is not None else {}
+        )
+        await record_operation(
+            session, "aggregation.job.resumed", provenance, ds_id,
+            workspace_id=job.workspace_id, label=job.data_source_label,
+            details={"jobId": job_id, **({"overrides": sent} if sent else {})},
+        )
         await session.commit()
         try:
             from .redis_client import cancel_flag_key, get_redis, redispatch_key
@@ -1650,6 +1753,7 @@ class AggregationService:
 
     async def set_job_limits(
         self, ds_id: str, job_id: str, session: AsyncSession, patch: "JobLimitsPatch",
+        provenance: Optional[Provenance] = None,
     ) -> AggregationJobResponse:
         """Change a PENDING or RUNNING job's limits without cancelling it:
         the stall window (``timeout_secs``), the wall clock, the two
@@ -1711,6 +1815,16 @@ class AggregationService:
         doc["history"] = history[-20:]
         job.live_overrides = json.dumps(doc)
         job.updated_at = now
+        await record_operation(
+            session, "aggregation.job.limits_changed", provenance, ds_id,
+            workspace_id=job.workspace_id, label=job.data_source_label,
+            details={
+                "jobId": job_id,
+                "changes": [
+                    {k: entry[k] for k in ("field", "from", "to")} for entry in changes
+                ],
+            },
+        )
         await session.commit()
         for entry in changes:
             logger.info(
@@ -1723,7 +1837,8 @@ class AggregationService:
     # ── Cancel ────────────────────────────────────────────────────────
 
     async def cancel(
-        self, ds_id: str, job_id: str, session: AsyncSession
+        self, ds_id: str, job_id: str, session: AsyncSession,
+        provenance: Optional[Provenance] = None,
     ) -> AggregationJobResponse:
         """Cancel a pending or running aggregation job.
 
@@ -1753,6 +1868,13 @@ class AggregationService:
 
         if job.status not in ("pending", "running"):
             raise ValueError(f"Job {job_id} cannot be cancelled (status: {job.status})")
+
+        # Committed by whichever path below ends the request.
+        await record_operation(
+            session, "aggregation.job.cancelled", provenance, ds_id,
+            workspace_id=job.workspace_id, label=job.data_source_label,
+            details={"jobId": job_id, "status": job.status},
+        )
 
         # Cooperative cancel — fire on TWO paths in parallel:
         #
@@ -1800,6 +1922,7 @@ class AggregationService:
                     "+ broadcast; worker will transition at next safe boundary",
                     job_id,
                 )
+                await session.commit()
                 await session.refresh(job)
                 return self._to_response(job)
             # No local hit — the worker is in another process. The
@@ -1844,7 +1967,10 @@ class AggregationService:
 
     # ── Delete job record ───────────────────────────────────────────
 
-    async def delete_job(self, job_id: str, session: AsyncSession) -> None:
+    async def delete_job(
+        self, job_id: str, session: AsyncSession,
+        provenance: Optional[Provenance] = None,
+    ) -> None:
         """Delete a terminal aggregation job record from history."""
         job = await session.get(AggregationJobORM, job_id)
         if not job:
@@ -1855,6 +1981,15 @@ class AggregationService:
                 f"Cannot delete job {job_id} while it is {job.status}. Cancel it first."
             )
 
+        # The ledger outlives the row: say what the run was.
+        await record_operation(
+            session, "aggregation.job.deleted", provenance, job.data_source_id,
+            workspace_id=job.workspace_id, label=job.data_source_label,
+            details={
+                "jobId": job_id, "status": job.status,
+                "triggerSource": job.trigger_source, "createdAt": job.created_at,
+            },
+        )
         await session.delete(job)
         await session.commit()
         logger.info("Aggregation job %s deleted from history", job_id)
@@ -1878,6 +2013,7 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession,
         *, skip_reaggregate: bool = False,
         reaggregate: Optional[Dict[str, Any]] = None,
+        provenance: Optional[Provenance] = None,
     ) -> AggregationJobORM:
         """Reserve a ``pending`` purge slot in ``aggregation_jobs``.
 
@@ -1976,10 +2112,17 @@ class AggregationService:
                 })
                 if (skip_reaggregate or reaggregate) else None
             ),
+            triggered_by=provenance.actor_id if provenance else None,
+            stated_reason=provenance.stated_reason if provenance else None,
             created_at=now,
             updated_at=now,
         )
         session.add(purge_job)
+        await record_operation(
+            session, "aggregation.source.purged", provenance, ds_id,
+            workspace_id=state.workspace_id,
+            details={"jobId": purge_job.id, "reaggregate": not skip_reaggregate},
+        )
         await session.commit()
         await session.refresh(purge_job)
 
@@ -1992,7 +2135,8 @@ class AggregationService:
     # ── Schedule ──────────────────────────────────────────────────────
 
     async def set_schedule(
-        self, ds_id: str, cron: Optional[str], session: AsyncSession
+        self, ds_id: str, cron: Optional[str], session: AsyncSession,
+        provenance: Optional[Provenance] = None,
     ) -> None:
         """Set or clear the aggregation schedule for a data source."""
         from .models import AggregationDataSourceStateORM
@@ -2001,6 +2145,11 @@ class AggregationService:
         if not state:
             raise NotFoundError(f"Data source {ds_id} not found in aggregation state")
 
+        await record_operation(
+            session, "aggregation.source.schedule_changed", provenance, ds_id,
+            workspace_id=state.workspace_id,
+            details={"from": state.aggregation_schedule, "to": cron},
+        )
         state.aggregation_schedule = cron
         await session.commit()
 
@@ -2282,6 +2431,7 @@ class AggregationService:
         evidence: Optional[dict] = None,
         trigger_source: str = "api",
         run_id: Optional[str] = None,
+        provenance: Optional[Provenance] = None,
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -2314,6 +2464,10 @@ class AggregationService:
         to record WHY it acted and the counts behind it. They change no
         behaviour here; the one-row-per-signal contract that
         ``refresh_source(scope="auto")`` depends on is preserved.
+
+        ``provenance`` attributes a rebuild queued here to the person whose
+        refresh asked for it; the caller records that refresh, so it is
+        passed on with recording off.
         """
         from .models import AggregationDataSourceStateORM
 
@@ -2551,6 +2705,7 @@ class AggregationService:
                         # its rebuilds are identifiable in Job History.
                         trigger_source,
                         session,
+                        **({"provenance": provenance} if provenance else {}),
                     )
                     job_id = job.id
                     trigger_outcome = "accepted"
@@ -2697,6 +2852,7 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession, *,
         scope: str = "auto", force: bool = False, reason: Optional[str] = None,
         actor: str = "internal", origin: str = "api", wait: str = "none",
+        provenance: Optional[Provenance] = None,
     ) -> RefreshResponse:
         """One operator-facing refresh verb over the convergence primitives.
 
@@ -2723,6 +2879,11 @@ class AggregationService:
         ``NotFoundError`` BEFORE any side effect. Best-effort throughout: once
         invalidation has begun nothing raises back to the caller — a rebuild
         conflict or resolution failure is recorded, not propagated.
+
+        A person's refresh (``provenance``) is also ONE activity-ledger
+        event, whatever it did; a rebuild it queued is attributed to them on
+        the job row but not recorded a second time. Recorded before any
+        ``wait`` — the ledger records the request, not the poll.
         """
         from .models import AggregationDataSourceStateORM
         from backend.app.db.models import WorkspaceDataSourceORM
@@ -2750,6 +2911,11 @@ class AggregationService:
             held_kind=hold.kind if hold else None,
             held_until=hold.until if hold else None,
         )
+        # A rebuild this queues is the person's, but this call is their one
+        # ledger event — passed on only when someone is acting.
+        attribution = (
+            {"provenance": provenance.without_recording()} if provenance else {}
+        )
 
         # 1. auto — delegate to the signal, which owns the change gate and
         # emits its own event; reuse that event id, never emit a second.
@@ -2757,6 +2923,7 @@ class AggregationService:
             signal = await self.signal_source_changed(
                 ds_id, session, force=force, origin=origin, actor=actor,
                 **({"reason": reason} if reason else {}),
+                **attribution,
             )
             gate = "forced" if force else (
                 "changed" if signal.changed else "unchanged"
@@ -2770,6 +2937,10 @@ class AggregationService:
                 actions.append("invalidated")
             if hold is not None and signal.job_id:
                 actions.append("override")
+            await self._record_refresh(
+                session, provenance, ds_id, workspace_id, scope=scope,
+                force=force, job_id=signal.job_id, outcome=gate,
+            )
             if wait == "complete" and signal.job_id:
                 actions.append(
                     await self._wait_for_job(ds_id, signal.job_id, session)
@@ -2877,6 +3048,7 @@ class AggregationService:
                     ),
                     "api",
                     session,
+                    **attribution,
                 )
                 job_id = job.id
                 actions.append("rebuild_queued")
@@ -2915,6 +3087,10 @@ class AggregationService:
 
         if hold is not None and job_id:
             actions.append("override")
+        await self._record_refresh(
+            session, provenance, ds_id, workspace_id, scope=scope,
+            force=force, job_id=job_id, outcome=outcome,
+        )
 
         # 4. Optional synchronous wait for a queued rebuild.
         if wait == "complete" and job_id:
@@ -2925,6 +3101,26 @@ class AggregationService:
             job_id=job_id, deferred=False, event_id=event_id,
             **hold_fields,
         )
+
+    async def _record_refresh(
+        self, session: AsyncSession, provenance: Optional[Provenance],
+        ds_id: str, workspace_id: Optional[str], *, scope: str, force: bool,
+        job_id: Optional[str], outcome: str,
+    ) -> None:
+        """The one ledger event for a person's refresh, committed now: this
+        verb writes nothing else to ``session`` for it to ride along with.
+        Best-effort, like the rest of the verb — what it records has already
+        happened in the caches, the graph and the job table."""
+        details = {"scope": scope, "outcome": outcome}
+        if force:
+            details["force"] = True
+        if job_id:
+            details["jobId"] = job_id
+        if await record_operation(
+            session, "aggregation.source.refresh_requested", provenance, ds_id,
+            workspace_id=workspace_id, details=details, best_effort=True,
+        ):
+            await session.commit()
 
     async def _wait_for_job(
         self, ds_id: str, job_id: str, session: AsyncSession,
@@ -3692,6 +3888,8 @@ class AggregationService:
             worker_id=getattr(job, "worker_id", None),
             failure_category=classify_failure(getattr(job, "error_message", None)),
             live_overrides=AggregationService._job_live_overrides_dict(job),
+            triggered_by=getattr(job, "triggered_by", None),
+            stated_reason=getattr(job, "stated_reason", None),
         )
 
 
@@ -4991,6 +5189,7 @@ async def assemble_reconcile_activity(
 
 async def save_reconcile_policy(
     session: AsyncSession, body, *, sent: set, actor: Optional[str] = None,
+    provenance: Optional[Provenance] = None,
 ) -> "ReconcilePolicyResponse":
     """Merge the sent fields into ``aggregation_settings.cadence_json``.
 
@@ -5071,6 +5270,10 @@ async def save_reconcile_policy(
 
     row.cadence_json = json.dumps(current)
     row.updated_at = _now()
+    await record_operation(
+        session, "aggregation.policy.updated", provenance,
+        details=body.model_dump(mode="json", by_alias=True, include=set(sent)),
+    )
     await session.commit()
     return _policy_response(AggregationCadence(**current), fleet_hold)
 

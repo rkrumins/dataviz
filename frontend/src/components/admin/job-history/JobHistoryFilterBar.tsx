@@ -1,10 +1,15 @@
-import { memo } from 'react'
+import { memo, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-    Search, X, Users, Database, Zap, Settings,
+    Search, X, Users, Database, Zap, Settings, UserRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { JobHistoryFilters } from '@/services/aggregationService'
+import { searchDirectory } from '@/services/userDirectoryService'
+import { usePerson } from '@/hooks/usePerson'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { useAuthStore } from '@/store/auth'
 import {
     STATUS_CONFIG, ALL_STATUSES, TRIGGER_SOURCES, MODE_OPTIONS,
     SearchableDropdown, DateRangePicker, type DropdownOption,
@@ -23,6 +28,36 @@ interface JobHistoryFilterBarProps {
     removeChip: (key: string) => void
 }
 
+/**
+ * Who to offer under "Started by": the person already chosen, the reader
+ * themselves, then whoever the directory finds for what they type. Nobody is
+ * listed until a search is typed — the directory is searched, never dumped.
+ */
+function usePersonOptions(query: string, selectedId: string | undefined): DropdownOption[] {
+    const me = useAuthStore(s => s.user)
+    const term = useDebouncedValue(query.trim(), 250)
+    const { data } = useQuery({
+        queryKey: ['directory', 'search', 'user', term],
+        queryFn: () => searchDirectory(term, { types: ['user'], limit: 20 }),
+        enabled: term.length > 0,
+        staleTime: 60_000,
+    })
+    const selected = usePerson(selectedId)
+    return useMemo(() => {
+        const options: DropdownOption[] = []
+        const seen = new Set<string>()
+        const add = (o: DropdownOption) => {
+            if (seen.has(o.id)) return
+            seen.add(o.id)
+            options.push(o)
+        }
+        if (selectedId) add({ id: selectedId, label: selected?.displayName ?? selectedId, sublabel: selected?.email ?? undefined })
+        if (me) add({ id: me.id, label: 'Me', sublabel: me.email })
+        for (const u of data?.users ?? []) add({ id: u.id, label: u.displayName, sublabel: u.email })
+        return options
+    }, [selectedId, selected, me, data])
+}
+
 export const JobHistoryFilterBar = memo(function JobHistoryFilterBar({
     filters,
     searchInput,
@@ -35,6 +70,8 @@ export const JobHistoryFilterBar = memo(function JobHistoryFilterBar({
     activeChips,
     removeChip,
 }: JobHistoryFilterBarProps) {
+    const [personQuery, setPersonQuery] = useState('')
+    const personOptions = usePersonOptions(personQuery, filters.triggeredBy)
     return (
         <>
             {/* Search Box */}
@@ -105,6 +142,16 @@ export const JobHistoryFilterBar = memo(function JobHistoryFilterBar({
                         selected={filters.triggerSource ? [filters.triggerSource] : []}
                         onSelect={ids => updateFilter({ triggerSource: ids[0] ?? undefined })}
                         activeColor="bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                    />
+
+                    <SearchableDropdown
+                        icon={UserRound}
+                        label="Started by"
+                        options={personOptions}
+                        selected={filters.triggeredBy ? [filters.triggeredBy] : []}
+                        onSelect={ids => updateFilter({ triggeredBy: ids[0] ?? undefined })}
+                        onQueryChange={setPersonQuery}
+                        activeColor="bg-sky-500/10 text-sky-600 dark:text-sky-400"
                     />
 
                     <SearchableDropdown

@@ -17,7 +17,7 @@ import type { ViewVersionPage, ViewVersionSummary } from '@/services/viewVersion
 import type { ExportPreview } from '@/services/viewTransferApiService'
 
 vi.mock('@/services/viewTransferApiService', () => ({
-  exportViews: vi.fn(), previewExport: vi.fn(), rememberedViewPackage: () => null,
+  exportViews: vi.fn(), previewExport: vi.fn(),
 }))
 vi.mock('@/services/viewVersionsApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/viewVersionsApiService')>(),

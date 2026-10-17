@@ -72,6 +72,25 @@ _HEARTBEAT_SECONDS = float(os.getenv("CHANGES_SSE_HEARTBEAT_SECONDS", "25"))
 # balancer's own ceiling something predictable to sit above.
 _MAX_STREAM_SECONDS = float(os.getenv("CHANGES_SSE_MAX_SECONDS", "900"))
 
+# Shorter ceiling when the caller authenticated with an API key rather
+# than a session cookie.
+#
+# The reasoning above is about a cookie: a rotated token is invisible to a
+# stream already open, so the stream ends and the client reconnects. An API
+# key is the same shape of problem with a sharper edge — it is checked when
+# the stream opens and never again, so a key REVOKED mid-stream keeps
+# receiving events for the rest of the lifetime. Fifteen minutes of that is
+# too long, and it is not this file's number to pick: the job stream next
+# door already set it at 300s for exactly this reason
+# (``aggregation.py``: "a revoked key stops listening"). Matching it keeps
+# one answer rather than two.
+#
+# API keys did not exist when this stream was written; they arrived on main
+# while this branch was away, and ``get_current_user`` accepts one
+# (``auth/dependencies.py`` — it returns ``key.user``), so this endpoint
+# inherited them without noticing.
+_MAX_KEY_STREAM_SECONDS = float(os.getenv("CHANGES_SSE_MAX_KEY_SECONDS", "300"))
+
 # Concurrent streams per process. Unlike the job stream next door this
 # costs no Redis connection — the hub is the only reader — so the bound
 # is memory and event-loop fairness rather than a pool. Generous, and
@@ -204,7 +223,12 @@ async def stream_changes(
 
     topics = change_topics.topics_for_user(str(user.id))
     subscriber = hub.subscribe(topics)
-    deadline = time.monotonic() + _MAX_STREAM_SECONDS
+    # min(), not a branch: whichever ceiling is lower wins, so lowering
+    # CHANGES_SSE_MAX_SECONDS below the key ceiling still binds a key.
+    lifetime = _MAX_STREAM_SECONDS
+    if getattr(request.state, "auth_method", None) == "api_key":
+        lifetime = min(lifetime, _MAX_KEY_STREAM_SECONDS)
+    deadline = time.monotonic() + lifetime
     retry_ms = _RETRY_BASE_MS + random.randint(0, _RETRY_BASE_MS)
 
     async def _frames():

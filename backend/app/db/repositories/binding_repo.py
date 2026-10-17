@@ -18,7 +18,8 @@ from typing import Optional
 from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import RoleBindingORM
+from backend.app.db.models import GroupMemberORM, RoleBindingORM
+from backend.common.roles import PLATFORM_ADMIN_ROLES, RoleName
 
 
 def _is_expired(expires_at: Optional[str], *, now: datetime) -> bool:
@@ -273,3 +274,54 @@ async def delete_scope_bindings(
         )
     )
     return result.rowcount or 0
+
+
+async def super_admin_user_ids(session: AsyncSession) -> set[str]:
+    """User ids that effectively hold ``super_admin`` (the role carrying
+    ``system:admin``): non-expired global bindings, direct or through group
+    membership.
+
+    One definition, read by the SSO lockout guard, the break-glass
+    readiness check and — through ``main.py`` — the automatic password
+    fallback during an IdP outage, so the three cannot disagree about who
+    the administrators are. Read-only.
+    """
+    return await _global_role_holder_ids(session, {RoleName.SUPER_ADMIN.value})
+
+
+async def platform_admin_user_ids(session: AsyncSession) -> set[str]:
+    """User ids that hold any platform-admin role (``PLATFORM_ADMIN_ROLES``)
+    globally, the same way. Read by SSO linking: a connection below
+    ``verified`` never links itself to one of these accounts. Read-only."""
+    return await _global_role_holder_ids(session, PLATFORM_ADMIN_ROLES)
+
+
+async def _global_role_holder_ids(
+    session: AsyncSession, role_names: set[str] | frozenset[str],
+) -> set[str]:
+    now = datetime.now(timezone.utc)
+    bindings = await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.role_name.in_(sorted(role_names)),
+            RoleBindingORM.scope_type == "global",
+        )
+    )
+    direct_user_ids: set[str] = set()
+    group_ids: set[str] = set()
+    for b in bindings.scalars().all():
+        if _is_expired(b.expires_at, now=now):
+            continue
+        if b.subject_type == "user":
+            direct_user_ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            group_ids.add(b.subject_id)
+
+    user_ids = set(direct_user_ids)
+    if group_ids:
+        members = await session.execute(
+            select(GroupMemberORM.user_id).where(
+                GroupMemberORM.group_id.in_(group_ids)
+            )
+        )
+        user_ids.update(members.scalars().all())
+    return user_ids

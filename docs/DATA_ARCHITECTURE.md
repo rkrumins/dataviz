@@ -25,17 +25,17 @@ The management database is accessed through the SQLAlchemy 2.0 async ORM, and it
 
 ## Where every table belongs
 
-The ORM maps 88 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+The ORM maps 92 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
 
 | Area | Schema | Tables | Examples |
 |---|---|---|---|
-| Identity and sessions | `public` | 9 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites` |
+| Identity and sessions | `public` | 11 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites`, `api_keys`, `api_key_usage` |
 | Access control | `public` | 8 | `roles`, `permissions`, `role_bindings`, `groups`, `resource_grants`, `access_requests` |
-| Single sign-on | `public` | 4 | `idp_providers`, `idp_group_role_mappings`, `sso_backchannel_hosts`, `app_auth_config` |
+| Single sign-on | `public` | 5 | `idp_providers`, `idp_group_role_mappings`, `sso_backchannel_hosts`, `app_auth_config`, `idp_provider_reachability` |
 | Workspaces and data sources | `public` | 3 | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` |
 | Providers and catalog | `public` | 5 | `providers`, `catalog_items`, `provider_admission_config`, `asset_discovery_cache` |
 | Semantic layer | `public` | 3 | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` |
-| Views | `public` | 10 | `views`, `view_versions`, `view_favourites`, `context_models`, `object_store_objects` |
+| Views | `public` | 11 | `views`, `view_versions`, `view_favourites`, `saved_view_filters`, `context_models`, `object_store_objects` |
 | Stats and profiling | `public` | 4 | `data_source_stats`, `data_source_count_snapshots`, `data_source_count_rollups`, `data_source_count_alerts` |
 | Aggregation and freshness | `public` | 2 | `data_source_polling_configs`, `refresh_events` |
 | Platform settings | `public` | 11 | `feature_flags`, `feature_definitions`, `platform_settings`, `application_branding`, `announcements` |
@@ -72,6 +72,7 @@ erDiagram
     users ||--o{ user_roles : "has roles"
     users ||--o{ user_approvals : "approval trail"
     users ||--o{ view_favourites : "favourites"
+    users ||--o{ saved_view_filters : "saves"
     users ||--o{ outbox_events : "triggers"
 
     providers {
@@ -182,6 +183,14 @@ erDiagram
         text id PK
         text view_id FK
         text user_id
+    }
+
+    saved_view_filters {
+        text id PK "svf_*"
+        text user_id "no FK"
+        text name
+        text query "Explorer address query"
+        int position
     }
 
     context_models {
@@ -831,6 +840,7 @@ The legacy `graph_connections` table uses unprefixed UUIDs.
 | `users.email` | Unique emails |
 | `user_roles(user_id, role_name)` | No duplicate roles |
 | `view_favourites(view_id, user_id)` | One favourite per user per view |
+| `saved_view_filters(user_id, name)` | One saved filter per name per user (names are also compared case-insensitively before writing) |
 | `catalog_items(provider_id, source_identifier)` | One catalog entry per source per provider |
 
 ### Single-Row Table Enforcement

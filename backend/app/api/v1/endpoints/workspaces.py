@@ -34,6 +34,8 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services import workspace_visibility
+from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
     load_node_identity,
@@ -70,13 +72,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reaches_every_workspace(claims: PermissionClaims) -> bool:
+    """Global admin — or an API key over everything whose owner's
+    organisation-wide role gives it permissions in every workspace
+    (``KeyScope.org_perms``), which its claims do not list one by one."""
+    key = claims.key_scope
+    return has_permission(claims, "system:admin") or bool(key is not None and key.org_perms)
+
+
 def _can_read_workspace(claims: PermissionClaims, ws_id: str) -> bool:
     """A user can read a workspace if they hold any binding into it
-    (any non-empty permission entry under that ws_id) OR are global
-    admin. Used for list filtering and the GET-by-id check."""
-    if has_permission(claims, "system:admin"):
+    (any non-empty permission entry under that ws_id) OR reach every
+    workspace. Used for list filtering and the GET-by-id check."""
+    if _reaches_every_workspace(claims):
         return True
     return bool(claims.ws_perms.get(ws_id))
+
+
+async def _as_seen_by(session: AsyncSession, claims: PermissionClaims, workspaces):
+    """``workspaces`` with only the data sources the caller covers: all of
+    them, except for an API key on part of a workspace."""
+    covered = await workspace_visibility.key_data_source_ids(session, claims)
+    if covered is None:
+        return workspaces
+    return [
+        ws.model_copy(update={"data_sources": [d for d in ws.data_sources if d.id in covered]})
+        for ws in workspaces
+    ]
 
 
 def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
@@ -113,13 +135,13 @@ async def list_workspaces(
     the whole estate just to show ten rows.
     """
     enforce = rbac_flag("RBAC_ENFORCE_WORKSPACES")
-    unrestricted = not enforce or has_permission(claims, "system:admin")
+    unrestricted = not enforce or _reaches_every_workspace(claims)
 
     if limit is None:
         workspaces = await workspace_repo.list_workspaces(session)
-        if unrestricted:
-            return workspaces
-        return [w for w in workspaces if claims.ws_perms.get(w.id)]
+        if not unrestricted:
+            workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
+        return await _as_seen_by(session, claims, workspaces)
 
     permitted_ids = None if unrestricted else list(claims.ws_perms.keys())
     page, total = await workspace_repo.list_workspaces_page(
@@ -130,7 +152,7 @@ async def list_workspaces(
         permitted_ids=permitted_ids,
     )
     response.headers["X-Total-Count"] = str(total)
-    return page
+    return await _as_seen_by(session, claims, page)
 
 
 @router.post("", response_model=WorkspaceResponse, status_code=201)
@@ -191,7 +213,7 @@ async def get_workspace(
     ws = await workspace_repo.get_workspace(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    return ws
+    return (await _as_seen_by(session, claims, [ws]))[0]
 
 
 @router.put("/{workspace_id}", response_model=WorkspaceResponse)
@@ -478,7 +500,9 @@ async def add_data_source(
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):
         raise HTTPException(status_code=404, detail=f"Ontology '{req.ontology_id}' not found")
     try:
-        created = await data_source_repo.create_data_source(session, workspace_id, req)
+        created = await data_source_repo.create_data_source(
+            session, workspace_id, req, created_by=_user.id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -525,6 +549,18 @@ async def add_data_source(
                 )
         except Exception:
             pass  # seed is a bonus; the poll below is the real refresh
+
+    # Recorded in the onboarding's own transaction, committed below.
+    await recorder.record_for_request(
+        session, "workspace.data_source.added", **recorder.data_source_target(created),
+        details={
+            key: value for key, value in (
+                ("providerId", created.provider_id),
+                ("graphName", created.graph_name),
+                ("catalogItemId", created.catalog_item_id),
+            ) if value
+        },
+    )
 
     # Commit before enqueueing the stats poll. The stats worker uses an
     # independent session pool (PoolRole.JOBS), so if it pulls the job
@@ -579,6 +615,11 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+    # Which fields were sent, never their values: an extraConfig can be large.
+    await recorder.record_for_request(
+        session, "workspace.data_source.updated", **recorder.data_source_target(ds),
+        details={"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))},
+    )
 
     new_identity = await load_node_identity(session, ds_id)
     mapping_changed = (
@@ -700,6 +741,10 @@ async def remove_data_source(
                 detail="The version store is unavailable, so this cannot be permanently deleted "
                        "right now. Try again shortly.")
         await _evict(ds, workspace_id, session)
+        await recorder.record_for_request(
+            session, "workspace.data_source.removed", **recorder.data_source_target(ds),
+            details={"permanent": True},
+        )
         await data_source_repo.delete_data_source(session, ds_id)
         return
 
@@ -719,6 +764,10 @@ async def remove_data_source(
 
     await _evict(ds, workspace_id, session)
     await data_source_repo.soft_delete_data_source(session, ds_id, actor=_user.id)
+    await recorder.record_for_request(
+        session, "workspace.data_source.removed", **recorder.data_source_target(ds),
+        details={"permanent": False},
+    )
     logger.info("data source %s moved to trash by %s (restorable for %s days)",
                 ds_id, _user.id, gv_config.PURGE_GRACE_DAYS)
 
@@ -749,6 +798,9 @@ async def restore_data_source(
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if ds is not None:
         await _evict(ds, workspace_id, session)   # re-resolve it fresh, not from a stale cache
+    await recorder.record_for_request(
+        session, "workspace.data_source.restored", **recorder.data_source_target(restored),
+    )
     logger.info("data source %s restored by %s", ds_id, _user.id)
     return restored
 
@@ -894,6 +946,9 @@ async def set_primary_data_source(
     if not success:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
     ds = await data_source_repo.get_data_source(session, ds_id)
+    await recorder.record_for_request(
+        session, "workspace.data_source.primary_set", **recorder.data_source_target(ds),
+    )
     return ds
 
 
@@ -934,9 +989,14 @@ async def set_projection_mode(
             detail=f"Cannot change projection mode while aggregation job '{active_job.id}' is active. Cancel or wait for it to complete.",
         )
 
+    before = ds.projection_mode
     ds.projection_mode = mode if mode else None
     from datetime import datetime, timezone
     ds.updated_at = datetime.now(timezone.utc).isoformat()
+    await recorder.record_for_request(
+        session, "workspace.data_source.projection_changed", **recorder.data_source_target(ds),
+        details={"from": before, "to": ds.projection_mode},
+    )
     await session.flush()
     await provider_registry.evict_workspace(workspace_id, session)
     return await data_source_repo.get_data_source(session, ds_id)

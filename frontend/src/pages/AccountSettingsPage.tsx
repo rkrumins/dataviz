@@ -23,7 +23,7 @@
  * page — and signing out everywhere lives in its own card.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
     AlertCircle, Check, ChevronRight, Clock, KeyRound, Lock, LogOut,
     PencilLine, ShieldCheck, X,
@@ -53,6 +53,11 @@ const ACTIVITY_LABELS: Record<string, string> = {
     'user.role_changed': 'Your access level changed',
     'user.suspended': 'Your account was suspended',
     'user.reactivated': 'Your account was reactivated',
+    'identity.api_key.created': 'You created an API key',
+    'identity.api_key.rotated': 'You rotated an API key',
+    'identity.api_key.updated': 'You changed an API key’s name or description',
+    'identity.api_key.revoked': 'An API key was revoked',
+    'identity.api_key.misuse': 'One of your API keys was used where it should not be',
 }
 
 export function AccountSettingsPage() {
@@ -475,7 +480,9 @@ function AccountSettingsContent() {
             >
                 <div className="flex items-center justify-between gap-4 flex-wrap">
                     <p className="text-[13px] text-ink-muted">
-                        Signs out every browser and device — this one included.
+                        Signs out every browser and device — this one included. Your{' '}
+                        <Link to="/me/api-keys" className="underline hover:text-ink">API keys</Link>{' '}
+                        keep working: revoke any you no longer trust.
                     </p>
                     <button
                         type="button"

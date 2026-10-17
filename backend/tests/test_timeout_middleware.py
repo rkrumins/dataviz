@@ -319,6 +319,23 @@ async def _run_slow_stream(path: str) -> tuple[asyncio.Event, "_Sink"]:
     return completed, sink
 
 
+async def test_sse_path_bypasses_timeout():
+    """SSE bypass: an aggregation job's progress feed must not be cancelled.
+
+    Main's test, and it earns its place twice over now. This merge dropped
+    main's ``_SSE_PATHS`` regex in favour of the registry, so this is what
+    proves the registry covers the real path at runtime: delete the
+    ``register_sse_path`` call in ``aggregation.py`` and this fails, where
+    the registry's own unit tests would not notice.
+    """
+    completed, sink = await _run_slow_stream(
+        "/api/v1/admin/data-sources/ds_1/aggregation-jobs/job_1/events",
+    )
+
+    assert completed.is_set(), "SSE stream was cut off by the timeout middleware"
+    assert sink.terminal_chunks == 1
+
+
 async def test_registered_sse_path_bypasses_timeout():
     """SSE bypass: long-lived registered streams must not be cancelled."""
     # Additive and idempotent. Deliberately NOT paired with
@@ -350,6 +367,27 @@ async def test_unregistered_events_path_does_not_bypass():
     assert sink.terminal_chunks == 1
 
 
+@pytest.mark.parametrize("path", [
+    "/api/v1/admin/activity/events",
+    "/api/v1/admin/workspaces/ws_1/activity/events",
+])
+async def test_a_read_whose_path_ends_in_events_keeps_its_deadline(path):
+    """Streams are named one by one. A path ending in ``/events`` used to be
+    taken for one, which left the activity log's event lists — paged reads
+    like any other — without a deadline.
+
+    Main found this instance; the telemetry POST above is the same bug
+    found from the other end. Both are kept: different routes, and either
+    could be re-exempted on its own.
+    """
+    mw = _TimeoutMiddleware(_slow_before_start_app(delay=2.0))
+    assert not mw._is_sse_path(path)
+    sink = _Sink()
+    await mw(_http_scope(path), _Receiver(), sink)
+    assert sink.status == 504
+    assert sink.terminal_chunks == 1
+
+
 async def test_streamed_export_bypasses_timeout():
     """A streamed export, or a stored export's download, runs as long as the file takes: a
     deadline would cut it short, and the clean closing chunk would make the truncated file look
@@ -369,12 +407,22 @@ async def test_streamed_export_bypasses_timeout():
     await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
+    # The activity log's CSV, platform-wide and one workspace's, and the API
+    # key inventory's.
+    for path in (
+        "/api/v1/admin/activity/export.csv", "/api/v1/admin/workspaces/ws_1/activity/export.csv",
+        "/api/v1/admin/api-keys/export.csv",
+    ):
+        await mw(_http_scope(path), _Receiver(), sink := _Sink())
+        assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
     await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1/download"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
     # Only those routes: the export job's status is an ordinary request.
     assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/stream/extra")
     assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1")
+    assert not mw._is_sse_path("/api/v1/admin/api-keys/apk_1")
 
 
 async def test_non_http_scope_passes_through():
@@ -406,6 +454,28 @@ async def test_inner_app_exception_propagates():
     mw = _TimeoutMiddleware(boom_app)
     with pytest.raises(_InnerBoom, match="inner exploded"):
         await mw(_http_scope(), _Receiver(), _Sink())
+
+
+async def test_a_timeout_turned_into_an_error_inside_is_still_a_504():
+    """``BaseHTTPMiddleware`` catches the cancellation the deadline sends and
+    raises ``RuntimeError("No response returned.")`` in its place, so
+    ``asyncio.timeout()`` never sees a cancellation to turn into a
+    ``TimeoutError``. That error used to escape as a 500 — for a request
+    whose only fault was being slow."""
+
+    async def app(scope, receive, send):
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            raise RuntimeError("No response returned.")
+
+    mw = _TimeoutMiddleware(app)
+    sink = _Sink()
+    await mw(_http_scope(), _Receiver(), sink)
+
+    assert sink.status == 504
+    assert sink.terminal_chunks == 1
+    assert "timed out" in sink.total_body.decode().lower()
 
 
 async def test_no_orphan_tasks_after_timeout():

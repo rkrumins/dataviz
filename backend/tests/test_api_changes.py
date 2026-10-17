@@ -177,3 +177,59 @@ async def test_unavailable_claims_are_503_not_an_empty_answer(
         )
 
     assert resp.status_code == 503
+
+
+# ── A stream's lifetime, and the credential that opened it ────────────
+
+
+def _lifetime_for(auth_method: str | None) -> float:
+    """The ceiling the stream handler would pick for this caller.
+
+    Mirrors the two lines in ``stream_changes`` rather than driving a real
+    15-minute stream, which no suite can afford to wait out.
+    """
+    from backend.app.api.v1.endpoints import changes as c
+
+    lifetime = c._MAX_STREAM_SECONDS
+    if auth_method == "api_key":
+        lifetime = min(lifetime, c._MAX_KEY_STREAM_SECONDS)
+    return lifetime
+
+
+def test_an_api_key_stream_ends_sooner_than_a_cookie_one():
+    """A key is checked when the stream opens and never again.
+
+    A cookie stream can afford fifteen minutes: the thing that goes stale
+    is the access token, and a rotated token only means the client should
+    reconnect. A key is different in kind — revoking it is how an operator
+    stops a client, and a stream already running does not notice. So the
+    window in which a REVOKED key keeps receiving events is exactly this
+    ceiling, and the job stream next door already settled on 300s for the
+    same reason ("a revoked key stops listening", aggregation.py).
+
+    API keys landed on main while this branch was away;
+    ``get_current_user`` accepts one and returns ``key.user``, so this
+    endpoint inherited them silently.
+    """
+    from backend.app.api.v1.endpoints import changes as c
+
+    assert _lifetime_for("api_key") == 300.0
+    assert _lifetime_for(None) == c._MAX_STREAM_SECONDS
+    assert _lifetime_for("api_key") < _lifetime_for(None)
+
+
+def test_the_two_stream_ceilings_agree_on_a_key():
+    """One answer, not two. If the job stream's bound moves, this should
+    move with it rather than quietly becoming the looser of the pair."""
+    from backend.app.api.v1.endpoints import aggregation, changes
+
+    assert changes._MAX_KEY_STREAM_SECONDS == float(aggregation._KEY_STREAM_SECONDS)
+
+
+def test_lowering_the_general_ceiling_still_binds_a_key(monkeypatch):
+    """``min()``, not a branch: an operator who shortens every stream must
+    not accidentally lengthen the key one."""
+    from backend.app.api.v1.endpoints import changes as c
+
+    monkeypatch.setattr(c, "_MAX_STREAM_SECONDS", 60.0)
+    assert _lifetime_for("api_key") == 60.0

@@ -22,9 +22,12 @@ from collections.abc import Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import get_current_user, requires
+from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import binding_repo, group_repo, grant_repo, user_repo
+from backend.app.db.repositories import (
+    binding_repo, group_repo, grant_repo, idp_group_mapping_repo, user_repo,
+)
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
@@ -36,6 +39,7 @@ from backend.common.models.rbac import (
     GroupResponse,
     GroupUpdateRequest,
 )
+from backend.common.roles import RoleName
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +107,33 @@ def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
         deleted=bool(identity.get("deleted")),
         avatar_id=identity.get("avatar_id"),
     )
+
+
+async def _require_super_admin_for_super_admin_group(
+    session: AsyncSession, group_id: str, claims: PermissionClaims,
+) -> None:
+    """Refuse a non-Super Admin changing who is in a group that grants
+    Super Admin.
+
+    Org admins hold ``system:groups:manage`` too, and a member inherits
+    every binding the group holds — so adding someone to such a group IS
+    granting Super Admin, and removing them or deleting the group takes it
+    away. You cannot grant what you do not hold.
+    """
+    if has_permission(claims, "system:admin"):
+        return
+    granted = await idp_group_mapping_repo.roles_granted_by_group(session, group_id)
+    if RoleName.SUPER_ADMIN.value in granted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "group_grants_super_admin",
+                "message": (
+                    "This group grants Super Admin, so only a Super Admin can "
+                    "change its members or delete it."
+                ),
+            },
+        )
 
 
 # ── Group CRUD ───────────────────────────────────────────────────────
@@ -191,8 +222,11 @@ async def update_group(
 async def delete_group(
     group_id: str,
     admin: User = Depends(requires("system:groups:manage")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
+    await _require_super_admin_for_super_admin_group(session, group_id, claims)
+
     # Snapshot the membership BEFORE the soft-delete so we can fan
     # out session revocation to every user who was inheriting bindings
     # through this group.
@@ -280,6 +314,7 @@ async def add_member(
     group_id: str,
     body: GroupMemberAddRequest,
     admin: User = Depends(requires("system:groups:manage")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     if await group_repo.get_group_by_id(session, group_id) is None:
@@ -287,6 +322,7 @@ async def add_member(
     user = await user_repo.get_user_by_id(session, body.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    await _require_super_admin_for_super_admin_group(session, group_id, claims)
 
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,
@@ -311,6 +347,8 @@ async def add_member(
             "user_id": body.user_id,
             "actor_id": admin.id,
             "sessions_revoked": revoked,
+            # By a person's hand; the IdP group sync writes ``via: "sso"``.
+            "via": "manual",
         },
     )
     logger.info(
@@ -338,8 +376,11 @@ async def remove_member(
     group_id: str,
     user_id: str,
     admin: User = Depends(requires("system:groups:manage")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
+    await _require_super_admin_for_super_admin_group(session, group_id, claims)
+
     removed = await group_repo.remove_member(session, group_id, user_id)
     if not removed:
         raise HTTPException(
@@ -364,6 +405,7 @@ async def remove_member(
             "user_id": user_id,
             "actor_id": admin.id,
             "sessions_revoked": revoked,
+            "via": "manual",
         },
     )
     logger.info(

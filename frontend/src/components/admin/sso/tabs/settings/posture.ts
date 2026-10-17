@@ -12,6 +12,7 @@
  * rendering anything.
  */
 import type { AuthConfig, IdpProvider } from '@/services/ssoAdminService'
+import { toUtcDate } from '@/lib/timeAgo'
 
 export type PostureTone = 'ok' | 'warn' | 'danger'
 
@@ -35,8 +36,29 @@ function publicProviders(providers: IdpProvider[]): IdpProvider[] {
     return providers.filter(p => p.enabled && p.lifecycle !== 'draft')
 }
 
+/**
+ * The connection the sign-in page leads with, and where a typed address
+ * that matches no email domain goes: the first live one an address can be
+ * routed to. That skips the development ``custom`` kind and a portal whose
+ * payload sits in browser storage. The list arrives in login-page order
+ * (priority, then slug) — the server's own, so the two cannot disagree.
+ */
+export function primaryConnection(providers: IdpProvider[]): IdpProvider | null {
+    return publicProviders(providers).find(p =>
+        p.kind !== 'custom'
+        && !(p.kind === 'custom_profile'
+            && ['local_storage', 'session_storage'].includes(String(p.settings?.source))),
+    ) ?? null
+}
+
+/** Whether the emergency window lets everyone use a password right now. */
+export function fallbackOpen(cfg: AuthConfig, now: number): boolean {
+    const until = toUtcDate(cfg.passwordFallbackUntil)
+    return until !== null && until.getTime() > now
+}
+
 export function describePosture(
-    cfg: AuthConfig | null, providers: IdpProvider[],
+    cfg: AuthConfig | null, providers: IdpProvider[], now = Date.now(),
 ): Posture {
     if (!cfg) return { tone: 'ok', headline: '', notes: [] }
 
@@ -87,7 +109,7 @@ export function describePosture(
     if (!live.length) {
         return {
             tone: 'warn',
-            headline: cfg.allowLocalLogin
+            headline: cfg.allowLocalLogin || fallbackOpen(cfg, now)
                 ? 'Passwords only — single sign-on is on, but no connection is live yet.'
                 : 'Nobody can sign in: passwords are off and no connection is live yet.',
             notes: [
@@ -103,16 +125,33 @@ export function describePosture(
         ? names.join(' and ')
         : `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`
 
+    // Single sign-on leads; a password is a step behind it — for anyone,
+    // or with the switch off, for break-glass accounts only.
     const how = cfg.emailFirstLogin
-        ? 'People are asked for their email address and routed to the right one'
-        : `People choose from ${names.length === 1 ? 'a button' : `${names.length} buttons`}`
+        ? `People are asked for their email address and routed to the right one — ${listed}.`
+        : `People continue with ${listed}, or type their email.`
+    const passwords = cfg.allowLocalLogin
+        ? 'Anyone can fall back to a password.'
+        : fallbackOpen(cfg, now)
+            ? 'Anyone can use a password while emergency access is open.'
+            : 'Passwords are off — break-glass accounts only.'
+    const primary = primaryConnection(live)
+    // Off, the break-glass accounts are the way back in when the IdP is
+    // not. Shown here because no single row can say it once it is off.
+    const exposed = !cfg.allowLocalLogin && cfg.breakGlass?.ready === false
 
     return {
-        tone: 'ok',
-        headline: cfg.allowLocalLogin
-            ? `${how} — ${listed} — or sign in with a password.`
-            : `${how} — ${listed}. Passwords are off.`,
+        tone: exposed ? 'danger' : 'ok',
+        headline: `${how} ${passwords}`,
         notes: [
+            ...(exposed ? [
+                'No break-glass account is ready — an IdP outage could lock ' +
+                'everyone out. Make one under Admin → Users.',
+            ] : []),
+            ...(primary && live.length > 1 ? [
+                'An address that matches no email domain goes to ' +
+                `${primary.displayName || primary.slug}, the primary connection.`,
+            ] : []),
             cfg.allowJitProvisioning
                 ? 'Someone signing in for the first time gets an account automatically.'
                 : 'Accounts must exist before someone can sign in — no account is created automatically.',
@@ -126,8 +165,8 @@ export function describePosture(
  *
  * These are the checks the server also makes, surfaced *before* the click
  * rather than as a 409 afterwards — except the email-domain one, which the
- * server cannot make at all because an unroutable address is a valid
- * configuration, just a useless one.
+ * server cannot make at all because a lopsided routing is a valid
+ * configuration, just an unhelpful one.
  */
 export function riskChecks(
     cfg: AuthConfig | null, providers: IdpProvider[],
@@ -136,41 +175,45 @@ export function riskChecks(
     const out: RiskCheck[] = []
     const live = publicProviders(providers)
 
-    if (cfg.emailFirstLogin || live.length) {
-        const routable = live.filter(p => (p.emailDomains ?? []).length)
-        if (cfg.emailFirstLogin && !routable.length) {
-            out.push({
-                field: 'emailFirstLogin',
-                tone: 'danger',
-                message:
-                    'No live connection has email domains set, so no address can ' +
-                    'route anywhere — everyone falls through to the password form. ' +
-                    'Set domains on each connection first.',
-            })
-        } else if (cfg.emailFirstLogin && routable.length < live.length) {
-            const stranded = live.filter(p => !(p.emailDomains ?? []).length)
-                .map(p => p.displayName || p.slug)
+    // Email-first folds the buttons away, and an address matching no
+    // domain goes to the primary — so a connection that is neither, nobody
+    // reaches by typing.
+    if (cfg.emailFirstLogin) {
+        const primary = primaryConnection(live)
+        const stranded = live
+            .filter(p => p !== primary && !(p.emailDomains ?? []).length)
+            .map(p => p.displayName || p.slug)
+        if (stranded.length) {
             out.push({
                 field: 'emailFirstLogin',
                 tone: 'warn',
                 message:
                     `${stranded.join(', ')} ${stranded.length === 1 ? 'has' : 'have'} ` +
-                    'no email domains, so nobody can reach ' +
-                    `${stranded.length === 1 ? 'it' : 'them'} this way.`,
+                    'no email domains, so typing an address never reaches ' +
+                    `${stranded.length === 1 ? 'it' : 'them'} — only the ` +
+                    '"Other ways to sign in" buttons do.',
             })
         }
     }
 
     if (cfg.allowLocalLogin) {
-        // Turning this off is refused server-side when an admin has no SSO
+        // Turning this off is refused server-side without a ready
+        // break-glass account, and lists Super Admins who have no SSO
         // identity. Saying so up front turns a 409 into an expectation.
-        out.push({
+        out.push(cfg.breakGlass?.ready === false ? {
+            field: 'allowLocalLogin',
+            tone: 'danger',
+            message:
+                'No break-glass account is ready, so turning this off is ' +
+                'refused — first mark an active Super Admin who has a ' +
+                'password as a system account, under Admin → Users.',
+        } : {
             field: 'allowLocalLogin',
             tone: 'warn',
             message:
-                'Turning this off is refused if any active admin has no linked ' +
-                'SSO identity and is not a system account — system accounts ' +
-                'keep password sign-in as the break-glass.',
+                'Turning this off first lists any Super Admin with no SSO ' +
+                'identity who is not a system account — they could not sign ' +
+                'in. System accounts keep password sign-in as the break-glass.',
         })
     }
 

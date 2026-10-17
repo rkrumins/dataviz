@@ -172,6 +172,40 @@ class ViewFavouriteORM(Base):
         return f"<ViewFavourite view={self.view_id!r} user={self.user_id!r}>"
 
 
+class SavedViewFilterORM(Base):
+    """A person's named Explorer filter set, kept on the server so it follows
+    them to any browser.
+
+    ``query`` is the Explorer's own address query in its canonical spelling,
+    stored as given: applying a filter is writing it back to the address, so
+    the server never has to understand it. ``user_id`` has no FK — users are
+    the identity domain's (DOMAIN_OWNERSHIP.md) — and every read and write goes
+    through it (``saved_view_filter_repo``), so one person never reaches
+    another's. Names are stored trimmed; the repository refuses one that
+    differs from another of the same person's only in case.
+    """
+    __tablename__ = "saved_view_filters"
+
+    id = Column(Text, primary_key=True, default=lambda: f"svf_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    query = Column(Text, nullable=False, default="")
+    position = Column(Integer, nullable=False, default=0)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped when the name or query changes — not by a reorder, nor by a
+    # delete closing up the positions behind it, which move whole lists.
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_saved_view_filters_user_name"),
+        # The read is always "this person's filters, in their order".
+        Index("idx_saved_view_filters_user_pos", "user_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SavedViewFilter id={self.id!r} user={self.user_id!r} name={self.name!r}>"
+
+
 # ------------------------------------------------------------------ #
 # management_db_config  (single-row config table)                      #
 # ------------------------------------------------------------------ #
@@ -1999,6 +2033,36 @@ class IdpProviderORM(Base):
         return f"<IdpProvider id={self.id!r} slug={self.slug!r} kind={self.kind!r}>"
 
 
+class IdpProviderReachabilityORM(Base):
+    """Whether each connection's identity provider answers, as the
+    scheduler-role prober last saw it (``services/idp_reachability.py``).
+
+    Its own table rather than columns on ``idp_providers``: it is written
+    every minute by one process and read with the posture snapshot, and
+    neither should touch a provider row's ``updated_at`` or its editors'
+    concurrency. Timestamps are ISO-8601 text like the rest of the SSO
+    tables. Which of these rows add up to a confirmed outage is decided in
+    one place, ``idp_reachability.outage_confirmed``.
+    """
+    __tablename__ = "idp_provider_reachability"
+
+    provider_id = Column(
+        Text, ForeignKey("idp_providers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # Last success. An outage can only be confirmed for a connection this
+    # prober has seen working, so a probe that can never succeed from
+    # where it runs is not mistaken for an identity provider that is down.
+    last_ok_at = Column(Text, nullable=True)
+    # Start of the current run of failures; NULL while healthy.
+    unreachable_since = Column(Text, nullable=True)
+    # Start of the current run of successes inside a confirmed outage —
+    # the outage ends once this is old enough, not at the first success.
+    recovering_since = Column(Text, nullable=True)
+    checked_at = Column(Text, nullable=False, default=_now)
+    detail = Column(Text, nullable=True)
+
+
 # ------------------------------------------------------------------ #
 # sso_backchannel_hosts  (which internal addresses SSO may reach)      #
 # ------------------------------------------------------------------ #
@@ -2118,6 +2182,10 @@ class UserIdentityORM(Base):
             name="uq_user_identities_user_provider",
         ),
         Index("idx_user_identities_user", "user_id"),
+        # A person's latest sign-in through any provider, read from the
+        # index alone: what keeps their API keys from pausing, asked on every
+        # key request and for every owner on the admin inventory.
+        Index("idx_user_identities_user_login", "user_id", "last_login_at"),
     )
 
     def __repr__(self) -> str:
@@ -2216,6 +2284,14 @@ class AppAuthConfigORM(Base):
     # Email-first login (Home Realm Discovery). Off by default: it changes
     # what every user sees, and a wrong domain mapping strands them.
     email_first_login = Column(Boolean, nullable=False, default=False)
+    # Emergency password access for everyone, opened by an admin — or the
+    # host's reset script — while single sign-on is down. A deadline rather
+    # than a switch, so it closes itself; NULL is closed. Not part of the
+    # optimistic ``version``: opening it in an incident must not make the
+    # Settings page's next save fail.
+    password_fallback_until = Column(Text, nullable=True)
+    password_fallback_by = Column(Text, nullable=True)
+    password_fallback_reason = Column(Text, nullable=True)
     version = Column(Integer, nullable=False, default=1)
     updated_at = Column(Text, nullable=False, default=_now)
     updated_by = Column(Text, nullable=True)
@@ -3149,6 +3225,111 @@ class RefreshTokenORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# api_keys  (bearer credentials that act as their principal)           #
+# ------------------------------------------------------------------ #
+#
+# One row per key ever minted. The secret itself is never stored — only
+# its SHA-256 — so the row is useless to whoever reads it, and the token
+# is shown to its owner exactly once. Revoked and expired rows are kept:
+# the admin inventory and the audit trail both point at them.
+#
+# ``user_id`` is the principal the key acts as. Today that is always the
+# person who minted it (``kind = 'personal'``); service accounts will be
+# non-human principals minted by their managers, which is what
+# ``created_by`` is for.
+
+class ApiKeyORM(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Text, primary_key=True, default=lambda: f"apk_{uuid.uuid4().hex[:12]}")
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    kind = Column(Text, nullable=False, default="personal")
+    # Who minted it. Equal to ``user_id`` for a personal key.
+    created_by = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+
+    # ``nxpat_`` plus the first characters of the random part — enough for
+    # the owner to tell keys apart and find one in a config file.
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+
+    # The permission profile, JSON: {"views": none|read|write,
+    # "data": none|read|write, "publish": bool}.
+    permissions = Column(Text, nullable=False)
+    # The resource selection, JSON: "all", or {"workspaces": [...],
+    # "views": [...], "dataSources": [...]}.
+    resources = Column(Text, nullable=False)
+    # JSON list of CIDRs the key may be used from; NULL = anywhere.
+    allowed_cidrs = Column(Text, nullable=True)
+
+    expires_at = Column(Text, nullable=True)            # ISO; NULL = never
+    expiry_reminded_at = Column(Text, nullable=True)
+
+    created_at = Column(Text, nullable=False, default=_now)
+    created_ip = Column(Text, nullable=True)
+    created_user_agent = Column(Text, nullable=True)
+
+    # Stamped at most once per few minutes per key (see ``ActivityGate``),
+    # never on every request.
+    last_used_at = Column(Text, nullable=True)
+    last_used_ip = Column(Text, nullable=True)
+    last_used_user_agent = Column(Text, nullable=True)
+
+    revoked_at = Column(Text, nullable=True)
+    revoked_by = Column(Text, nullable=True)
+    revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self
+    # What an administrator told the owner when revoking it, if anything.
+    revoked_note = Column(Text, nullable=True)
+    # The key this one replaced, when minted by a rotation.
+    rotated_from = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_api_keys_token_hash"),
+        Index("idx_api_keys_user", "user_id"),
+        Index("idx_api_keys_expires_at", "expires_at"),
+        # The admin inventory's order, and its "unused for 90 days" filter.
+        Index("idx_api_keys_created_at", "created_at"),
+        # A key's successor, looked up whenever a key is shown or rotated.
+        # Partial: only rotations have one. (Nothing indexes the "last used"
+        # columns, so the stamp they get every few minutes stays cheap.)
+        Index(
+            "idx_api_keys_rotated_from", "rotated_from",
+            postgresql_where=text("rotated_from IS NOT NULL"),
+            sqlite_where=text("rotated_from IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "kind IN ('personal', 'service')", name="ck_api_keys_kind",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ApiKey id={self.id!r} user={self.user_id!r} prefix={self.token_prefix!r}>"
+
+
+class ApiKeyUsageORM(Base):
+    """Requests made with one API key on one day (UTC) — counted in memory
+    by each API process and added here every half minute, never written per
+    request (``api_key_usage``). No foreign key: a key deleted with its owner
+    must not fail the batch a late count arrives in; the housekeeping sweep
+    drops orphans and anything older than 90 days."""
+    __tablename__ = "api_key_usage"
+
+    key_id = Column(Text, primary_key=True)
+    day = Column(Text, primary_key=True)                # YYYY-MM-DD, UTC
+    requests = Column(Integer, nullable=False, default=0, server_default="0")
+    # Of which: changed something; refused as a key (401, 403 or 429 on the
+    # key's own account); failed otherwise (any other 4xx or 5xx).
+    writes = Column(Integer, nullable=False, default=0, server_default="0")
+    refused = Column(Integer, nullable=False, default=0, server_default="0")
+    errors = Column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (Index("idx_api_key_usage_day", "day"),)
+
+
+# ------------------------------------------------------------------ #
 # outbox_events  (transactional outbox for domain events)              #
 # ------------------------------------------------------------------ #
 
@@ -3243,27 +3424,110 @@ class OutboxEventORM(Base):
 # ------------------------------------------------------------------ #
 
 class AuthAuditLogORM(Base):
-    """Immutable record of every domain event the outbox relay drains.
+    """The platform activity ledger: every domain event the outbox relay drains.
 
-    Append-only: rows are inserted by the relay and never updated or
-    deleted. ``source_event_id`` is the originating outbox event id and
-    is UNIQUE so a relay re-run after a crash cannot double-record.
+    Despite the name (it began as the auth audit trail) this is the read model
+    behind Admin → Activity and each workspace's Activity tab.
+
+    Two kinds of column, and the difference is the contract:
+
+    * The RECORD — ``source_event_id``, ``event_type``, ``event_version``,
+      ``aggregate_*``, ``payload``, ``occurred_at``, ``recorded_at`` — is
+      written once by the relay and never updated; it is deleted only by the
+      retention sweep (``services/activity_retention``), once it happened
+      before ``ACTIVITY_RETENTION_DAYS``. ``source_event_id`` is the
+      originating outbox event id and is UNIQUE, so a relay re-run after a
+      crash cannot double-record.
+    * The PROJECTION — everything from ``category`` down — is an index over
+      the record, derived by ``services.activity.catalogue.project``. It
+      exists so every activity read is a SQL predicate on an indexed column
+      instead of a scan of JSON payloads, and it may be RECOMPUTED: the relay
+      re-projects rows whose ``projection_version`` trails the catalogue's,
+      so a better classification reaches history without a data migration.
     """
     __tablename__ = "auth_audit_log"
 
     id = Column(Text, primary_key=True, default=lambda: f"aud_{uuid.uuid4().hex[:12]}")
     source_event_id = Column(Text, nullable=False)   # OutboxEventORM.id
     event_type = Column(Text, nullable=False)
+    # The payload's schema version, as emitted. NULL on rows recorded before
+    # it was copied across, all of which were version 1.
+    event_version = Column(Integer, nullable=True)
     aggregate_type = Column(Text, nullable=True)
     aggregate_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=False, default="{}")  # JSON (verbatim)
     occurred_at = Column(Text, nullable=False)       # source event created_at
     recorded_at = Column(Text, nullable=False, default=_now)
 
+    # ── Projection (rebuildable; see the class docstring) ──────────────
+    category = Column(Text, nullable=True)        # operations|access|identity|data|content|platform
+    audience = Column(Text, nullable=True)        # platform|workspace — who may read it
+    severity = Column(Text, nullable=True)        # info|warning|critical
+    outcome = Column(Text, nullable=True)         # success|failure|denied
+    actor_id = Column(Text, nullable=True)
+    actor_kind = Column(Text, nullable=True)      # user|service|system|anonymous
+    subject_id = Column(Text, nullable=True)      # the person it happened TO
+    target_type = Column(Text, nullable=True)
+    target_id = Column(Text, nullable=True)
+    target_label = Column(Text, nullable=True)    # the name AT THE TIME
+    workspace_id = Column(Text, nullable=True)
+    data_source_id = Column(Text, nullable=True)
+    stated_reason = Column(Text, nullable=True)   # the "why" a person gave
+    correlation_id = Column(Text, nullable=True)  # the HTTP request it came from
+    api_key_id = Column(Text, nullable=True)      # the API key it was made with
+    projection_version = Column(Integer, nullable=False, default=0, server_default="0")
+
     __table_args__ = (
         UniqueConstraint("source_event_id", name="uq_auth_audit_source_event"),
-        Index("idx_auth_audit_event_type", "event_type"),
         Index("idx_auth_audit_recorded_at", "recorded_at"),
+        # Every activity read is "these rows, newest first": each predicate
+        # the explorer offers gets an index that LEADS with it and ends on
+        # the timeline, so a filter is a range scan that stops at the page.
+        # No more than that — every index is paid for on every event the
+        # relay records. (``audience`` has none: it is only ever read with a
+        # workspace, whose index finds the rows first.)
+        Index("idx_aal_occurred", "occurred_at", "id"),
+        Index("idx_aal_category_occurred", "category", "occurred_at"),
+        Index("idx_aal_actor_occurred", "actor_id", "occurred_at"),
+        Index("idx_aal_subject_occurred", "subject_id", "occurred_at"),
+        Index("idx_aal_workspace_occurred", "workspace_id", "occurred_at"),
+        # The workspace lens: what a workspace admin may read is only the
+        # workspace-audience rows, and a workspace's view and group activity
+        # (platform audience) can far outnumber them. Through the index
+        # above, a page scanned past all of those first — 315 ms on a
+        # workspace of 100k rows. Partial, so it costs a write only for the
+        # rows it answers.
+        Index("idx_aal_workspace_lens", "workspace_id", "occurred_at",
+              postgresql_where=text("audience = 'workspace'"),
+              sqlite_where=text("audience = 'workspace'")),
+        # The workspace pulse: every workspace's rows in a window, by day,
+        # category and who did it. The lens leads with the workspace, so a
+        # window across all of them read that whole index and then each row;
+        # this leads with the time and carries what the pulse groups on, so
+        # it is answered from the index alone.
+        Index("idx_aal_workspace_pulse", "occurred_at",
+              postgresql_include=["workspace_id", "category", "actor_kind"],
+              postgresql_where=text("audience = 'workspace'"),
+              sqlite_where=text("audience = 'workspace'")),
+        # How often each source is operated by hand: the newest manual
+        # operations on a source in a window, as rows. Through the category
+        # index every operation in the window was fetched from the table to
+        # keep the newest; this leads with the time and carries what that read
+        # selects and filters on, so it stops at the cap without the table.
+        Index("idx_aal_cadence", "occurred_at",
+              postgresql_include=["data_source_id", "workspace_id", "actor_id", "event_type", "audience"],
+              postgresql_where=text("category = 'operations' AND data_source_id IS NOT NULL"),
+              sqlite_where=text("category = 'operations' AND data_source_id IS NOT NULL")),
+        Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
+        Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
+        Index("idx_aal_type_occurred", "event_type", "occurred_at"),
+        Index("idx_aal_correlation", "correlation_id"),
+        Index("idx_aal_projection_version", "projection_version"),
+        # What one API key did. Partial: most changes are made in a browser,
+        # so it costs a write only for those made with a key.
+        Index("idx_aal_api_key_occurred", "api_key_id", "occurred_at",
+              postgresql_where=text("api_key_id IS NOT NULL"),
+              sqlite_where=text("api_key_id IS NOT NULL")),
     )
 
     def __repr__(self) -> str:

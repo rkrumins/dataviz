@@ -254,6 +254,16 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Forgot-password requests allowed per account.",
         None,
     ),
+    "RATELIMIT_API_KEY": (
+        "Requests allowed per API key. Counted per key, so one busy integration never holds "
+        "back another behind the same address.",
+        None,
+    ),
+    "RATELIMIT_API_KEY_FAILURES_PER_IP": (
+        "Refused API keys allowed per client address before further key requests from it are "
+        "turned away without a database lookup.",
+        None,
+    ),
     "ADMIN_EMAIL": (
         "Email address of the first administrator account. The account is created at startup "
         "only when the database has no users.",
@@ -335,6 +345,13 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "analytics. Values below 365 count as 365, so a year-long chart always has its data.",
         None,
     ),
+    "ACTIVITY_RETENTION_DAYS": (
+        "Days of activity (who did what, where and why) kept in the activity log and the outbox "
+        "it is copied from. `0` keeps everything; values below 365 count as 365. Set the same "
+        "value on the control plane, which deletes, and the web tier, which tells readers how "
+        "far back the log goes.",
+        None,
+    ),
     "WORKER_CONCURRENCY": (
         "Aggregation jobs one worker runs at the same time. Also sizes the worker's graph store "
         "connection pools.",
@@ -403,6 +420,8 @@ NOT_SECRET = frozenset({
     "DEEP_SEARCH_DISCOVER_KEY_CAP",
     "JOB_REDIS_KEY_PREFIX",
     "RATELIMIT_PASSWORD_RESET_PER_ACCOUNT",
+    "RATELIMIT_API_KEY",
+    "RATELIMIT_API_KEY_FAILURES_PER_IP",
 })
 
 SECRET_NAME = re.compile(r"PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL|PRIVATE")
@@ -474,6 +493,7 @@ RULES = (
     ("backend/insights_service/", "insights"),
     ("backend/app/services/analytics_cache.py", "insights"),
     ("backend/app/services/product_event_gc.py", "insights"),
+    ("backend/app/services/activity_retention.py", "insights"),
     ("backend/app/services/versioning/", "versioning"),
     ("backend/app/services/projection_target.py", "versioning"),
     ("backend/app/config/resilience.py", "resilience"),

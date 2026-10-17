@@ -42,6 +42,8 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "UserApprovalORM": "identity",
     "RevokedRefreshJtiORM": "identity",
     "RefreshTokenORM": "identity",
+    "ApiKeyORM": "identity",
+    "ApiKeyUsageORM": "identity",
     # workspace
     "WorkspaceORM": "workspace",
     "WorkspaceDataSourceORM": "workspace",
@@ -57,6 +59,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "ContextModelORM": "visualization",
     "ViewORM": "visualization",
     "ViewFavouriteORM": "visualization",
+    "SavedViewFilterORM": "visualization",
     "ViewVersionORM": "visualization",
     "ObjectStoreObjectORM": "visualization",
     "ObjectStoreChunkORM": "visualization",
@@ -76,6 +79,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "SchemaMigrationORM": "platform",
     # events
     "OutboxEventORM": "events",
+    "AuthAuditLogORM": "events",
     # legacy (deprecated)
     "GraphConnectionORM": "legacy",
 }

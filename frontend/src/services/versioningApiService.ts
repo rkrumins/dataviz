@@ -18,6 +18,7 @@ import { fetchWithTimeout } from './fetchWithTimeout'
 import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
+import { withReason, type ActivityOpts } from './activityReason'
 
 // ============================================
 // Wire types (match the backend `_ApiModel` aliases — camelCase)
@@ -790,10 +791,10 @@ export class BootstrapDecisionError extends Error {
  * resumable windows (a large graph can't be paged into one request), so callers poll
  * {@link getBootstrapStatus}. An already-versioned source returns `alreadyEnabled`.
  */
-export function bootstrapGraph(wsId: string, dataSourceId: string): Promise<BootstrapResult> {
+export function bootstrapGraph(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<BootstrapResult> {
   return vfetch<BootstrapResult>(
     `/api/v1/${wsId}/graph/bootstrap?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
   )
 }
 
@@ -806,21 +807,21 @@ export function getBootstrapStatus(wsId: string, dataSourceId: string): Promise<
 
 /** `resume` continues from the last completed window; `restart` re-reads the source. */
 export function retryBootstrap(
-  wsId: string, dataSourceId: string, mode: 'resume' | 'restart' = 'resume',
+  wsId: string, dataSourceId: string, mode: 'resume' | 'restart' = 'resume', opts?: ActivityOpts,
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/retry?dataSourceId=${encodeURIComponent(dataSourceId)}&mode=${mode}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
   )
 }
 
 /** Give up: everything the job imported is removed and the source reads as before. */
 export function abandonBootstrap(
-  wsId: string, dataSourceId: string,
+  wsId: string, dataSourceId: string, opts?: ActivityOpts,
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/abandon?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-    { method: 'POST' },
+    withReason({ method: 'POST' }, opts?.reason),
   )
 }
 
@@ -843,11 +844,11 @@ export function bootstrapDuplicatesCsvUrl(wsId: string, dataSourceId: string): s
  *  if the source has changed since, the server refuses ({@link BootstrapDecisionError}) rather than
  *  apply the decision to a list nobody reviewed. Repeating a recorded decision is harmless. */
 export function decideBootstrapDuplicates(
-  wsId: string, dataSourceId: string, { fingerprint }: { fingerprint: string },
+  wsId: string, dataSourceId: string, { fingerprint }: { fingerprint: string }, opts?: ActivityOpts,
 ): Promise<BootstrapJob> {
   return vfetch<BootstrapJob>(
     `/api/v1/${wsId}/graph/bootstrap/decision?dataSourceId=${encodeURIComponent(dataSourceId)}`,
-    jsonBody({ action: 'collapse', fingerprint }),
+    withReason(jsonBody({ action: 'collapse', fingerprint }), opts?.reason),
   )
 }
 

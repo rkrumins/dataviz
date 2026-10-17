@@ -7,17 +7,12 @@
  *     server lacks, or reads the package already checked without sending or checking it again; an
  *     upload about to expire is not resumed, the file goes up afresh;
  *   - a file that is no package to import says why, with the server's code;
- *   - exporting one: the request carries its id, and the package is remembered until its download
- *     starts; a job that failed is forgotten and says so; one this lost touch with (a refusal is
- *     final at once) stays remembered, to be checked on again.
+ *   - exporting one: the request carries its id, and answers with the export job that builds it
+ *     (followed, and downloaded, as any export the server prepares: backgroundExports).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
-vi.mock('../importExportApiService', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../importExportApiService')>(),
-  triggerBrowserDownload: vi.fn(),
-}))
 // The check is followed like every job (pollJob); its waits shortened so the tests don't sit them out.
 vi.mock('@/config/polling', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/config/polling')>(),
@@ -25,9 +20,8 @@ vi.mock('@/config/polling', async (importOriginal) => ({
 }))
 
 import { fetchWithTimeout } from '../fetchWithTimeout'
-import { triggerBrowserDownload } from '../importExportApiService'
 import {
-  followViewPackage, inspectViewPackage, rememberedViewPackage, startViewPackage, ViewTransferError,
+  inspectViewPackage, startViewPackage, ViewTransferError,
   type PackageProgress, type PackageUpload,
 } from '../viewTransferApiService'
 
@@ -67,7 +61,6 @@ const sentParts = () => vi.mocked(fetchWithTimeout).mock.calls
 beforeEach(() => {
   localStorage.clear()
   vi.mocked(fetchWithTimeout).mockReset()
-  vi.mocked(triggerBrowserDownload).mockReset()
 })
 
 describe('inspectViewPackage', () => {
@@ -166,44 +159,14 @@ describe('exporting a view package', () => {
     jobId: 'exp_1', graphId: 'g1', workspaceId: 'ws1', fileName: 'finance.v3.view-package.zip', status: 'pending' as const,
     views: [{ viewId: 'view_1', version: 3 }], requestId: 'req-1',
   }
-  const EXPORT = '/api/v1/ws1/versioning/graphs/g1/exports/exp_1'
 
-  it('is remembered until its download starts', async () => {
-    serve({
-      'POST /api/v1/views/transfer/packages': () => json(STARTED, 202),
-      [`GET ${EXPORT}`]: () => json({
-        jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'completed', kept: true,
-        summary: { nodes: 120, edges: 80, bytes: 4096, package: { bytes: 4096, bundleHash: 'sha256:bundle' } },
-      }),
-    })
+  it('asks the server to build the package, and answers with the export job that builds it', async () => {
+    serve({ 'POST /api/v1/views/transfer/packages': () => json(STARTED, 202) })
 
-    const started = await startViewPackage([{ viewId: 'view_1' }], { scope: 'view', dataVersion: 'published', requestId: 'req-1' })
+    await expect(startViewPackage([{ viewId: 'view_1' }], { scope: 'view', dataVersion: 'published', requestId: 'req-1' }))
+      .resolves.toEqual(STARTED)
     expect(JSON.parse(String(vi.mocked(fetchWithTimeout).mock.calls[0][1]?.body))).toEqual({
       views: [{ viewId: 'view_1' }], scope: 'view', dataVersion: 'published', message: null, requestId: 'req-1',
     })
-    expect(rememberedViewPackage(['view_1'])).toEqual(STARTED)
-
-    await expect(followViewPackage(started)).resolves.toMatchObject({ nodes: 120, edges: 80, bytes: 4096, bundleHash: 'sha256:bundle' })
-    expect(triggerBrowserDownload).toHaveBeenCalledWith(`${EXPORT}/download`, STARTED.fileName)
-    expect(rememberedViewPackage(['view_1'])).toBeNull()
-  })
-
-  it('forgets a package whose job failed, and says so', async () => {
-    localStorage.setItem('view-package:view_1', JSON.stringify(STARTED))
-    serve({ [`GET ${EXPORT}`]: () => json({ jobId: 'exp_1', jobType: 'export', graphId: 'g1', status: 'failed', errorMessage: 'boom' }) })
-
-    await expect(followViewPackage(STARTED)).rejects.toMatchObject({ message: 'boom', type: 'package_failed' })
-    expect(rememberedViewPackage(['view_1'])).toBeNull()
-    expect(triggerBrowserDownload).not.toHaveBeenCalled()
-  })
-
-  it('keeps remembering a package it lost touch with, giving up at once on a refusal', async () => {
-    localStorage.setItem('view-package:view_1', JSON.stringify(STARTED))
-    serve({ [`GET ${EXPORT}`]: () => json({ detail: 'Not found' }, 404) })
-
-    const err = await followViewPackage(STARTED).catch((e: unknown) => e)
-    expect(err).toMatchObject({ message: 'Not found', status: 404 })
-    expect(calls()).toEqual([`GET ${EXPORT}`])
-    expect(rememberedViewPackage(['view_1'])).toEqual(STARTED)
   })
 })

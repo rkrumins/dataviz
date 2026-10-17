@@ -395,6 +395,42 @@ def test_the_context_is_cached_per_path(monkeypatch):
     assert resolve_outbound_verify() is resolve_outbound_verify()
 
 
+def test_a_corporate_bundle_is_added_to_the_public_roots(monkeypatch, tmp_path):
+    """The bundle holds the corporate chain only — the documented way to
+    use it. Trusting it INSTEAD of the public roots cost every public IdP
+    (Entra, Okta) its sign-ins the moment an internal gateway was added."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Corp Root CA")])
+    now = datetime.now(timezone.utc)
+    ca = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    bundle = tmp_path / "corp-ca.pem"
+    bundle.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", str(bundle))
+
+    ctx = resolve_outbound_verify()
+    names = {
+        value
+        for cert in ctx.get_ca_certs()
+        for rdn in cert["subject"] for key_, value in rdn if key_ == "commonName"
+    }
+    assert "Corp Root CA" in names
+    assert "ISRG Root X1" in names, "the public roots must still be trusted"
+
+
 @pytest.mark.asyncio
 async def test_the_client_is_constructed_with_the_resolved_verify(monkeypatch):
     captured: dict = {}

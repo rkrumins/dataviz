@@ -27,6 +27,7 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import feature_flags_repo, feature_registry_repo
 from backend.app.db.repositories.feature_flags_repo import ConcurrencyConflictError
 from backend.app.services import feature_impact
+from backend.app.services.activity import recorder
 from backend.app.services.feature_flags import feature_flags as _flag_service
 
 router = APIRouter()
@@ -253,6 +254,15 @@ async def patch_features(
         actor_id=getattr(user, "id", None),
         actor_name=actor_name,
     )
+    # And in the activity ledger, one event per flag that moved — beside
+    # everything else people changed, with the reason they gave.
+    for key, value in merged.items():
+        if before.get(key) != value:
+            await recorder.record_for_request(
+                session, "platform.feature_flag.changed",
+                target_type="feature_flag", target_id=key, target_label=key,
+                details={"key": key, "from": before.get(key), "value": value},
+            )
 
     # Bust cached flag values so subsequent reads see the new state immediately.
     # ``invalidate()`` only clears THIS process's copy, and production runs

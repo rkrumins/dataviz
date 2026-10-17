@@ -24,7 +24,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
-    AlertCircle, ChevronRight, Fingerprint, KeyRound, Link2, Mail,
+    AlertCircle, ChevronRight, Fingerprint, KeyRound, KeySquare, Link2, Mail,
     PencilLine, ShieldCheck, UserCog,
 } from 'lucide-react'
 
@@ -59,6 +59,7 @@ export function useAccountIdentity(): AccountIdentityState {
 const NAV = [
     { to: '/me/account', label: 'Profile & password', icon: UserCog, end: true },
     { to: '/me/identities', label: 'Connected identities', icon: Link2, end: true },
+    { to: '/me/api-keys', label: 'API keys', icon: KeySquare, end: true },
     { to: '/my/access', label: 'My access', icon: ShieldCheck, end: true },
 ]
 

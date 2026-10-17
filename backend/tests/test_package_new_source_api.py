@@ -197,6 +197,36 @@ async def test_a_new_source_is_provisioned_and_its_seed_queued(
     assert hint["dataSourceId"] == ds.id and hint["requestId"] == _RID
 
 
+async def test_a_new_source_is_recorded_as_a_data_source_added(
+        test_client, db_session, graph, services, small_parts, seeds):
+    """Made from a package or added by hand, a new data source is one activity event — and asking
+    again, which makes nothing, records nothing."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import OutboxEventORM
+
+    _versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    prov = await _provider(db_session)
+    upload = await _ready_upload(test_client, jobs, dev)
+
+    first = await test_client.post(f"{_TRANSFER}/packages/{upload}/new-source", json=_ask(uat, prov))
+    assert first.status_code == 202, first.text
+    again = await test_client.post(f"{_TRANSFER}/packages/{upload}/new-source", json=_ask(uat, prov))
+    assert again.status_code == 200, again.text
+
+    [ds] = await _sources(db_session, uat)
+    added = [json.loads(e.payload) for e in (await db_session.execute(
+        select(OutboxEventORM).where(OutboxEventORM.event_type == "workspace.data_source.added")
+    )).scalars().all()]
+    [event] = [e for e in added if e.get("data_source_id") == ds.id]
+    assert event["actor_id"] and event["workspace_id"] == uat
+    assert (event["target_type"], event["target_id"], event["target_label"]) == \
+        ("data_source", ds.id, "Finance copy")
+    assert event["details"] == {"providerId": prov, "graphName": "finance_copy",
+                                "origin": "viewPackage", "uploadId": upload}
+
+
 async def test_asking_again_answers_with_what_the_first_made(
         test_client, db_session, graph, services, small_parts, seeds):
     _versioning, jobs = services

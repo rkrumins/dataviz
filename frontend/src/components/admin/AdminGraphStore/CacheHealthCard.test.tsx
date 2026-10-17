@@ -4,7 +4,7 @@
  * decision: a fallback counted as a hit, a disabled cache reading as a broken
  * one, and a destructive control that is easy to press by accident.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -28,6 +28,7 @@ const stats = (over = {}) => ({
 })
 
 beforeEach(() => {
+    vi.clearAllMocks()
     vi.mocked(graphStoreService.getCacheStats).mockResolvedValue(stats() as never)
     vi.mocked(graphStoreService.refreshCache).mockResolvedValue({
         workspaceId: 'ws1', dataSourceId: 'ds1', invalidated: true,
@@ -118,17 +119,34 @@ describe('CacheHealthCard', () => {
         expect(screen.queryByRole('button', { name: /rebuild/i })).not.toBeInTheDocument()
     })
 
-    it('rebuilds the source and says who pays for it', async () => {
-        render(<CacheHealthCard workspaceId="ws1" dataSourceId="ds1" canRefresh />)
+    it('asks first — and why — then rebuilds the source and says who pays for it', async () => {
+        render(<CacheHealthCard workspaceId="ws1" dataSourceId="ds1" dataSourceName="Ledger" canRefresh />)
         await screen.findByText('80%')
         await userEvent.click(screen.getByRole('button', { name: /rebuild/i }))
 
+        // Nothing happens on the first click: it is a prompt, not the rebuild.
+        const prompt = await screen.findByRole('dialog')
+        expect(prompt).toHaveTextContent('Every cached view of Ledger is marked out of date')
+        expect(graphStoreService.refreshCache).not.toHaveBeenCalled()
+        await userEvent.click(within(prompt).getByRole('button', { name: 'Graph changed outside the app' }))
+        await userEvent.click(within(prompt).getByRole('button', { name: /rebuild cache/i }))
+
         await waitFor(() => {
-            expect(graphStoreService.refreshCache).toHaveBeenCalledWith('ws1', 'ds1')
+            expect(graphStoreService.refreshCache).toHaveBeenCalledWith(
+                'ws1', 'ds1', true, { reason: 'Graph changed outside the app' },
+            )
         })
         // The consequence, not just "done" — the cost lands on the next reader.
         expect(await screen.findByText(/next person to open each view rebuilds it/i))
             .toBeInTheDocument()
+    })
+
+    it('does nothing when the prompt is backed out of', async () => {
+        render(<CacheHealthCard workspaceId="ws1" dataSourceId="ds1" canRefresh />)
+        await screen.findByText('80%')
+        await userEvent.click(screen.getByRole('button', { name: /rebuild/i }))
+        await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /cancel/i }))
+        expect(graphStoreService.refreshCache).not.toHaveBeenCalled()
     })
 
     it('surfaces a failed refresh instead of looking like it worked', async () => {
@@ -136,6 +154,7 @@ describe('CacheHealthCard', () => {
         render(<CacheHealthCard workspaceId="ws1" dataSourceId="ds1" canRefresh />)
         await screen.findByText('80%')
         await userEvent.click(screen.getByRole('button', { name: /rebuild/i }))
+        await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /rebuild cache/i }))
         expect(await screen.findByText('nope')).toBeInTheDocument()
     })
 })

@@ -124,6 +124,39 @@ def test_a_refresh_failure_serves_the_last_good_answer(monkeypatch):
     ) == frozenset({"ds_1"})
 
 
+def test_a_failed_refresh_is_not_retried_by_every_caller(monkeypatch):
+    """The view lists ask on every request. While the store is down, each of
+    them must not wait out its own connection attempt: after one failure the
+    last good answer is served until the back-off passes, then it tries again."""
+    clock = [1000.0]
+    monkeypatch.setattr(vs.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "backend.app.services.versioning.db.get_session_factory",
+        _factory_returning(["ds_1"]),
+    )
+    assert asyncio.run(vs.versioned_data_source_ids()) == frozenset({"ds_1"})
+
+    attempts: list = []
+
+    def _broken():
+        attempts.append(1)
+        raise RuntimeError("graphver unreachable")
+
+    monkeypatch.setattr(
+        "backend.app.services.versioning.db.get_session_factory", _broken,
+    )
+
+    async def _calls(n):
+        return [await vs.versioned_data_source_ids(ttl_secs=0) for _ in range(n)]
+
+    assert asyncio.run(_calls(3)) == [frozenset({"ds_1"})] * 3
+    assert len(attempts) == 1
+
+    clock[0] += vs.FAILURE_BACKOFF_SECS + 1
+    assert asyncio.run(_calls(1)) == [frozenset({"ds_1"})]
+    assert len(attempts) == 2
+
+
 def test_a_cold_failure_raises_so_the_caller_can_defer(monkeypatch):
     def _broken():
         raise RuntimeError("graphver unreachable")

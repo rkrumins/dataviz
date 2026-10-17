@@ -30,7 +30,6 @@ from backend.auth_service.core.password import (
 )
 from backend.auth_service.interface import (
     InvalidCredentials,
-    LocalLoginDisabled,
     SSOAuthError,
 )
 from backend.auth_service.providers.base import ProviderIdentity
@@ -304,17 +303,18 @@ async def test_login_refused_when_local_login_disabled(provider, db_session):
         "allow_local_login": False,
         "allow_jit_provisioning": True,
     })
-    # Seed a local user so we know "no such email" is NOT what's
+    # Seed a local user with a REAL password and type it correctly, so
+    # we know neither "no such email" nor a wrong password is what's
     # tripping the check.
     await user_repo.create_user(
         db_session, email="seed@corp.com",
-        password_hash="argon2", first_name="S", last_name="L",
-        status="active",
+        password_hash=hash_password("s3cret-Pass!42"),
+        first_name="S", last_name="L", status="active",
     )
     await db_session.flush()
 
-    with pytest.raises(LocalLoginDisabled):
-        await svc.login("seed@corp.com", "doesnt-matter")
+    with pytest.raises(InvalidCredentials):
+        await svc.login("seed@corp.com", "s3cret-Pass!42")
 
 
 @pytest.mark.asyncio
@@ -346,7 +346,8 @@ async def test_system_account_keeps_the_password_door(db_session):
 @pytest.mark.asyncio
 async def test_unknown_email_and_ordinary_account_refused_identically(db_session):
     """With passwords off, an unknown email and an unmarked account get
-    the same ``LocalLoginDisabled`` — the carve-out is not an oracle."""
+    the same ``InvalidCredentials`` a wrong password gets — the carve-out
+    is not an oracle, and the correct password is not confirmed."""
     svc, _ = _svc(db_session, posture={
         "sso_enabled": True,
         "allow_local_login": False,
@@ -359,9 +360,9 @@ async def test_unknown_email_and_ordinary_account_refused_identically(db_session
     )
     await db_session.flush()
 
-    with pytest.raises(LocalLoginDisabled):
+    with pytest.raises(InvalidCredentials):
         await svc.login("ordinary@corp.com", "s3cret-Pass!42")
-    with pytest.raises(LocalLoginDisabled):
+    with pytest.raises(InvalidCredentials):
         await svc.login("nobody@corp.com", "s3cret-Pass!42")
 
 

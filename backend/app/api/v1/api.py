@@ -13,7 +13,8 @@ from .endpoints import (
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
-    groups, workspace_members, view_grants, view_versions, view_transfer, role_bindings,
+    groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
+    role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     changes,
     versioning,
@@ -23,6 +24,7 @@ from .endpoints import (
     admin_users_lookup,
     admin_sso_config,
     me_identities,
+    activity,
     audit,
     sso_activity,
     sso_failures,
@@ -30,6 +32,7 @@ from .endpoints import (
     telemetry,
     analytics,
     content_insights,
+    api_keys,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -63,6 +66,20 @@ api_router.include_router(
 # RBAC Phase 1: /me/permissions for FE permission hydration.
 api_router.include_router(
     me.router, prefix="/me", tags=["me"],
+)
+# API keys: a person's own (browser session), a key describing or revoking
+# itself, and the inventory for administrators.
+api_router.include_router(
+    api_keys.router, prefix="/me/api-keys", tags=["me:api-keys"],
+)
+api_router.include_router(
+    api_keys.self_router, prefix="/api-keys", tags=["api-keys"],
+)
+api_router.include_router(
+    api_keys.admin_router, prefix="/admin/api-keys", tags=["admin:api-keys"],
+)
+api_router.include_router(
+    api_keys.admin_users_router, prefix="/admin/users", tags=["admin:api-keys"],
 )
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
@@ -168,6 +185,13 @@ api_router.include_router(
     prefix="/views/transfer",
     tags=["views:transfer"],
 )
+# A person's saved Explorer filters. Before views.router like the routes above:
+# `/views/saved-filters` must never reach a `/{view_id}` route.
+api_router.include_router(
+    view_saved_filters.router,
+    prefix="/views/saved-filters",
+    tags=["views:saved-filters"],
+)
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
     notifications.router,
@@ -231,6 +255,20 @@ api_router.include_router(
     audit.router,
     prefix="/admin/audit",
     tags=["admin:audit"],
+)
+
+# The activity ledger: who did what, where, when and why. The platform-wide
+# lens for auditors, and one workspace's lens for its admins — the same
+# handlers, with the workspace mount's scope forced server-side.
+api_router.include_router(
+    activity.router,
+    prefix="/admin/activity",
+    tags=["admin:activity"],
+)
+api_router.include_router(
+    activity.workspace_router,
+    prefix="/admin/workspaces/{ws_id}/activity",
+    tags=["admin:activity:workspace"],
 )
 
 # Who could not sign in, why, and whether they have since — the audit

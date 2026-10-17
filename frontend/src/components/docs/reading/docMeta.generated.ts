@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-12",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -135,7 +135,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/05-ontology-governance.md"
   },
   "versioning-api-reference": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-12",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-frontend-integration": {
@@ -143,7 +143,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/07-frontend-integration.md"
   },
   "versioning-import-export": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-12",
     "path": "docs/versioning/08-import-export.md"
   },
   "versioning-scale-and-roadmap": {
@@ -319,6 +319,10 @@ export const guideMeta: Record<string, DocMeta> = {
   "semantic-layer": {
     "updated": "2026-10-10",
     "path": "docs/guide/SEMANTIC_LAYER.md"
+  },
+  "api-keys": {
+    "updated": "",
+    "path": "docs/guide/API_KEYS.md"
   },
   "versioning-change-control": {
     "updated": "2026-10-11",

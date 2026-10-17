@@ -84,6 +84,8 @@ Sign-in, session tokens and cookies, single sign-on and the sign-in rate limits.
 | `JWT_SECRET_KEY` | — (secret, set your own) | Key that signs session tokens. Required in every environment: at least 32 characters, and not one of the example values published in this repository, or the API will not start. | `backend/auth_service/core/config.py` |
 | `JWT_SECRET_KEY_PREVIOUS` | — (secret, set your own) | Retired signing keys, comma-separated, newest first. They still verify existing sessions but never sign new ones, so you can rotate `JWT_SECRET_KEY` without signing everyone out. Remove a key once `JWT_REFRESH_EXPIRY_DAYS` have passed. | `backend/auth_service/core/config.py` |
 | `MAX_ACCESS_TTL_MINUTES` | `15` | Upper limit for `JWT_EXPIRY_MINUTES`. Above it, the API will not start when `ENV=production`, and logs a warning otherwise. | `backend/app/main.py` |
+| `RATELIMIT_API_KEY` | `1200/minute` | Requests allowed per API key. Counted per key, so one busy integration never holds back another behind the same address. | `backend/auth_service/core/config.py` |
+| `RATELIMIT_API_KEY_FAILURES_PER_IP` | `120/minute` | Refused API keys allowed per client address before further key requests from it are turned away without a database lookup. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_LOGIN_PER_ACCOUNT` | `10 per 15 minutes` | Failed sign-ins allowed per account. A successful sign-in clears the count, so people who sign in correctly are never throttled. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Requests per client address on the sign-in routes, password and single sign-on. A coarse flood guard: many users can share one address behind a proxy. | `backend/auth_service/core/config.py` |
 | `RATELIMIT_PASSWORD_RESET_PER_ACCOUNT` | `3/hour` | Forgot-password requests allowed per account. | `backend/auth_service/core/config.py` |
@@ -96,7 +98,7 @@ Sign-in, session tokens and cookies, single sign-on and the sign-in rate limits.
 | `REFRESH_ROTATION_GRACE_SECONDS` | `30` | How long a re-presented refresh token is treated as a concurrent refresh (two tabs, a retried POST, a lost Set-Cookie) rather than a stolen chain. | `backend/auth_service/core/config.py` |
 | `SESSION_ABSOLUTE_MAX_HOURS` | `168` | Longest a sign-in can last, in hours, counted from the original sign-in however active the session stays. `0` turns the limit off. | `backend/auth_service/core/config.py` |
 | `SESSION_IDLE_MAX_HOURS` | `12` | Longest a session can go unused, in hours, before it ends. `0` turns the limit off. | `backend/auth_service/core/config.py` |
-| `SSO_OUTBOUND_TLS_CA_CERTS` | (empty) | Trust anchor for every outbound SSO call (gateway legs, OIDC discovery/token/JWKS, SAML metadata, avatar fetches). | `backend/auth_service/providers/outbound.py` |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (empty) | Extra CAs (your corporate chain) trusted, in addition to the public roots, by every outbound SSO call (gateway legs, OIDC discovery/token/JWKS, SAML metadata, avatar fetches, the outage prober). | `backend/auth_service/providers/outbound.py` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | SSO sessions must re-authenticate at the IdP this often, regardless of the refresh cookie's life. | `backend/auth_service/core/config.py` |
 
 ### Internal tuning
@@ -503,6 +505,7 @@ The statistics service, analytics and the counts history.
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
+| `ACTIVITY_RETENTION_DAYS` | `730` | Days of activity (who did what, where and why) kept in the activity log and the outbox it is copied from. `0` keeps everything; values below 365 count as 365. Set the same value on the control plane, which deletes, and the web tier, which tells readers how far back the log goes. | `backend/app/services/activity_retention.py` |
 | `ANALYTICS_WARM_INTERVAL_SECONDS` | `300.0` | How often, in seconds, the analytics documents are recomputed. API processes also align their analytics time windows to it, so give every process the same value. Values below 30 count as 30. | `backend/app/services/analytics_cache.py` |
 | `PRODUCT_EVENT_RETENTION_DAYS` | `400` | Days of product events (view opens, lineage traces and graph searches) kept for analytics. Values below 365 count as 365, so a year-long chart always has its data. | `backend/app/services/product_event_gc.py` |
 | `PROFILING_ALERTS_ENABLED` | `true` | master switch for evaluation | `backend/app/config/resilience.py` |
@@ -810,6 +813,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_FORCE` | (empty) | `backend/scripts/docker_seed.py` |
 | `SEED_SCALE` | `1` | `backend/scripts/docker_seed.py` |
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
+| `SYNODIC_API_KEY` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
@@ -832,6 +836,7 @@ These names are built in code from a fixed part and a variable part. Replace the
 | `REDIS_<ROLE>_MODE` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PASSWORD` | `<ROLE>`: `STREAMS`, `CACHE` | — (secret, set your own) | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PASSWORD_FILE` | `<ROLE>`: `STREAMS`, `CACHE` | — (secret, set your own) | `backend/common/adapters/redis_endpoint.py` |
+| `REDIS_<ROLE>_POOL_TIMEOUT` | `<ROLE>`: `STREAMS`, `CACHE` | `2.0` | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_PORT` | `<ROLE>`: `STREAMS`, `CACHE` | computed | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_RETRY_ON_TIMEOUT` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |
 | `REDIS_<ROLE>_SENTINEL_AUTH_ENABLED` | `<ROLE>`: `STREAMS`, `CACHE` | — | `backend/common/adapters/redis_endpoint.py` |

@@ -16,7 +16,7 @@
  * would make this slow and timing-dependent. The scoring itself is the
  * same code the two shipping auth pages already run.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -276,6 +276,13 @@ describe('AccountSettingsPage', () => {
         expect(await screen.findByText('Current password is incorrect.')).toBeInTheDocument()
         expect(screen.getByLabelText(/Current password/i)).toHaveValue('wrong-one')
         expect(navigateSpy).not.toHaveBeenCalled()
+    })
+
+    it('says signing out everywhere leaves API keys working, and where to revoke them', async () => {
+        renderPage()
+
+        const note = (await screen.findByText(/Signs out every browser and device/)).closest('p')!
+        expect(within(note).getByRole('link', { name: 'API keys' })).toHaveAttribute('href', '/me/api-keys')
     })
 })
 

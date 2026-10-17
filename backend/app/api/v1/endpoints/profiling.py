@@ -42,6 +42,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services import profiling_series
+from backend.app.services.activity import recorder
 from backend.app.services.workspace_visibility import (
     compute_visible_data_source_ids,
     ensure_data_source_visible,
@@ -688,5 +689,8 @@ async def put_policy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await profiling_repo.persist_policy(session, values)
+    await recorder.record_for_request(
+        session, "platform.profiling_policy.updated", details=values,
+    )
     await session.commit()
     return await get_policy(session=session, claims=claims)

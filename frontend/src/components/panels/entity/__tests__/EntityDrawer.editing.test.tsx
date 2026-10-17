@@ -81,7 +81,7 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
 
         await user.click(screen.getByRole('tab', { name: 'JSON' }))
-        expect(screen.getByLabelText('Entity data as JSON').tagName).toBe('PRE')
+        expect(screen.getByRole('group', { name: 'Entity data as JSON' })).toBeInTheDocument()
         expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     })
 

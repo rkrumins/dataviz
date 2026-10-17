@@ -419,6 +419,18 @@ def build_oidc_provider(snap: ProviderConfigSnapshot) -> OidcProvider:
 # ── Admin-time discovery ─────────────────────────────────────────────
 
 
+async def probe_issuer(issuer: str) -> None:
+    """Fetch an issuer's discovery document AND its signing keys, the two
+    things every sign-in through it depends on, raising :class:`OidcError`
+    when either fails. A fresh provider object, so nothing cached answers
+    for the network. Used by the reachability prober
+    (``backend/app/services/idp_reachability.py``)."""
+    normalised = (issuer or "").strip().rstrip("/")
+    if not normalised:
+        raise OidcError("issuer is required")
+    await OidcProvider(OidcSettings(issuer=normalised))._load_jwks(force=True)
+
+
 async def discover_issuer(issuer: str) -> dict:
     """Fetch an issuer's ``.well-known/openid-configuration`` and derive the
     settings an operator would otherwise hand-type.

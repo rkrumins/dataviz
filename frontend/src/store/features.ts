@@ -77,6 +77,10 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     // refuses the redemption if the flag is really off; the client's guess must
     // never be what stops someone.
     inviteLinksEnabled: true,
+    // Fail CLOSED until the served value lands: this only decides whether the
+    // page offers to MINT a key, and offering one the server then refuses is
+    // worse than a Create button that appears a moment late.
+    apiKeysEnabled: false,
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
     placementContractEnabled: false,      // experimental preview — ships OFF

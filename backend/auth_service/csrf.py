@@ -21,6 +21,11 @@ Exempt paths:
   * /api/v1/auth/{slug}/{acs,sls,browser-profile,mock} — the IdP-callback
     surface; see ``_EXEMPT_PATTERNS`` for why each one has to be, and what
     authenticates it instead.
+
+A request carrying an API key (``Authorization: Bearer nxpat_…``) is not a
+browser session, and is never allowed to act as one: its cookies are removed
+before anything downstream can read them, so the double-submit has nothing
+to protect and is skipped. The Origin check still applies.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ from starlette.responses import JSONResponse
 
 from .cookies import ACCESS_COOKIE_NAME, CSRF_COOKIE_NAME
 from .core import config
+from .core.api_keys import bearer_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +204,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return any(p.fullmatch(path) for p in self._exempt_patterns)
 
     async def dispatch(self, request: Request, call_next):
+        if bearer_api_key(request.headers) is not None:
+            return await self._dispatch_api_key(request, call_next)
+
         if request.method in _SAFE_METHODS:
             return await call_next(request)
 
@@ -269,6 +278,35 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             # it still matches.
             return self._refuse(cookie_present=bool(cookie))
 
+        return await call_next(request)
+
+    async def _dispatch_api_key(self, request: Request, call_next):
+        """A request that presents an API key authenticates with that key and
+        nothing else.
+
+        Its cookies are dropped from the request before anything downstream
+        sees it — every method, not just writes. Ambient credentials are what
+        CSRF exploits, and a key request has no business carrying a session
+        as well: without this, the routes that read the session cookie
+        directly (``/auth/refresh``, ``/auth/me``) would act on a browser
+        session alongside the key. With no cookie left, the double-submit has
+        nothing to defend.
+
+        Origin is still checked on writes. A script sends none, and a browser
+        cannot attach an ``Authorization`` header cross-origin without a CORS
+        preflight — so a foreign Origin here is a page trying to drive a key
+        it should never have held.
+        """
+        request.scope["headers"] = [
+            (name, value) for name, value in request.scope["headers"]
+            if name.lower() != b"cookie"
+        ]
+        if request.method not in _SAFE_METHODS and not self._origin_is_allowed(request):
+            logger.warning(
+                "Cross-origin API key write refused for %s %s (origin=%r)",
+                request.method, request.url.path, request.headers.get("origin"),
+            )
+            return self._refuse(cookie_present=False)
         return await call_next(request)
 
     @staticmethod

@@ -36,6 +36,8 @@ import {
   BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase, type BootstrapReport,
 } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useDecideBootstrapDuplicates, useRetryBootstrap } from '../hooks/useVersioning'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 /** A package seed's phases beyond a graph's: it builds its own graph from the copy. */
 type JobPhase = BootstrapPhase | 'index' | 'project'
@@ -144,7 +146,15 @@ export function BootstrapProgress({
   const decide = useDecideBootstrapDuplicates(wsId, dataSourceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
   const [showDetails, setShowDetails] = useState(false)
-  const [confirming, setConfirming] = useState<null | 'restart' | 'abandon' | 'collapse'>(null)
+  const [confirming, setConfirmingState] = useState<null | 'restart' | 'abandon' | 'collapse'>(null)
+  const reason = useReasonDraft('versioning')
+  const collapseReason = useReasonDraft('duplicates')
+  // Each confirmation starts with an empty reason.
+  const setConfirming = (next: null | 'restart' | 'abandon' | 'collapse') => {
+    reason.reset()
+    collapseReason.reset()
+    setConfirmingState(next)
+  }
   // The decision was refused because the list changed under it: say so beside the (refetched) list.
   const [listChanged, setListChanged] = useState(false)
 
@@ -185,15 +195,15 @@ export function BootstrapProgress({
     URL.revokeObjectURL(url)
   }
 
-  const runRetry = (mode: 'resume' | 'restart') =>
-    retry.mutate(mode, {
+  const runRetry = (mode: 'resume' | 'restart', why?: string) =>
+    retry.mutate({ mode, reason: why }, {
       onSuccess: () => notify('success', mode === 'resume' ? 'Picking up where it left off…'
         : needsDecision ? 'Checking the source again…' : 'Starting over…'),
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not retry.'),
     })
 
-  const runAbandon = () =>
-    abandon.mutate(undefined, {
+  const runAbandon = (why?: string) =>
+    abandon.mutate({ reason: why }, {
       onSuccess: () => {
         notify('success', fromPackage
           ? 'Cancelled — the new data source was removed.'
@@ -207,9 +217,9 @@ export function BootstrapProgress({
 
   // Sent with the fingerprint of the list the manager was shown, so it can never apply to a list
   // that changed since: the server refuses (`stale_decision`), and the hook refetches the new one.
-  const runCollapse = (fingerprint: string) => {
+  const runCollapse = (fingerprint: string, why?: string) => {
     setListChanged(false)
-    decide.mutate(fingerprint, {
+    decide.mutate({ fingerprint, reason: why }, {
       onSuccess: () => notify('success', 'Collapsing the duplicates — the copy carries on.'),
       onError: (e) => {
         if (e instanceof BootstrapDecisionError && e.type === 'stale_decision') setListChanged(true)
@@ -219,6 +229,7 @@ export function BootstrapProgress({
   }
 
   // ── the two-step confirm every destructive action goes through ─────────────
+  const draft = confirming === 'collapse' ? collapseReason : reason
   const confirmBox = confirming && (
     <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
       <p className="text-[12px] text-ink leading-relaxed">
@@ -266,14 +277,16 @@ export function BootstrapProgress({
           </>
         )}
       </p>
+      <ReasonField draft={draft} audience="workspace" className="mt-2.5" />
       <div className="mt-2.5 flex items-center gap-2">
         <button
           onClick={() => {
             const what = confirming
+            const why = draft.take()
             setConfirming(null)
-            if (what === 'restart') runRetry('restart')
-            else if (what === 'collapse') { if (dup) runCollapse(dup.fingerprint) }
-            else runAbandon()
+            if (what === 'restart') runRetry('restart', why)
+            else if (what === 'collapse') { if (dup) runCollapse(dup.fingerprint, why) }
+            else runAbandon(why)
           }}
           className={cn(
             'px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white shadow-sm transition-colors',

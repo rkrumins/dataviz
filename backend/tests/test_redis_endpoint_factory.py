@@ -372,3 +372,79 @@ def test_sentinel_master_change_is_followed_at_runtime(monkeypatch):
     assert client.current_master() == ("old-master", 6379)
     state["master"] = ("promoted-replica", 6379)      # failover
     assert client.current_master() == ("promoted-replica", 6379)
+
+
+# ── A burst waits for a connection instead of failing at once ───────
+
+
+def test_standalone_waits_for_a_free_connection_with_auth_and_tls_intact():
+    """The pool that queues is built from the client's own, so nothing the
+    connection needs — credentials, db, TLS — is lost in the swap."""
+    import redis.asyncio as aioredis
+    from redis.asyncio.connection import SSLConnection
+
+    client = build_redis_client(RedisEndpointConfig(
+        role=RedisRole.CACHE, host="cache.internal", port=6380, db=2,
+        username="cache-user", password="cache-pw", max_connections=7, pool_timeout=1.5,
+        tls=TLSSettings.from_fields(enabled=True, ca_certs="/certs/cache/ca.crt"),
+    ))
+    pool = client.connection_pool
+    assert isinstance(pool, aioredis.BlockingConnectionPool)
+    assert (pool.max_connections, pool.timeout) == (7, 1.5)
+    assert pool.connection_class is SSLConnection
+    assert pool.connection_kwargs["host"] == "cache.internal"
+    assert pool.connection_kwargs["db"] == 2
+    assert pool.connection_kwargs["username"] == "cache-user"
+    assert pool.connection_kwargs["password"] == "cache-pw"
+    assert pool.connection_kwargs["ssl_ca_certs"] == "/certs/cache/ca.crt"
+
+
+def test_sentinel_follows_the_master_and_waits_for_a_free_connection():
+    from redis.asyncio.connection import BlockingConnectionPool
+    from redis.asyncio.sentinel import SentinelConnectionPool
+
+    client = build_redis_client(RedisEndpointConfig(
+        role=RedisRole.STREAMS, mode="sentinel", sentinel_master="mymaster",
+        sentinel_nodes=(("s1", 26379),), max_connections=9, pool_timeout=3.0,
+    ))
+    pool = client.connection_pool
+    assert isinstance(pool, SentinelConnectionPool)
+    assert isinstance(pool, BlockingConnectionPool)
+    assert (pool.max_connections, pool.timeout) == (9, 3.0)
+    assert pool.service_name == "mymaster"
+
+
+def test_the_wait_is_configurable_per_role(monkeypatch):
+    from backend.common.adapters.redis_endpoint import resolve_redis_config
+
+    monkeypatch.setenv("REDIS_CACHE_POOL_TIMEOUT", "0.5")
+    cfg = resolve_redis_config(RedisRole.CACHE)
+    assert cfg.pool_timeout == 0.5
+    assert cfg.source["pool_timeout"] == "REDIS_CACHE_POOL_TIMEOUT"
+
+
+def _redis_is_up() -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 6379), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _redis_is_up(), reason="needs a local Redis")
+async def test_a_burst_past_the_cap_is_served_rather_than_refused():
+    import asyncio
+
+    client = build_redis_client(RedisEndpointConfig(
+        role=RedisRole.CACHE, host="127.0.0.1", port=6379, max_connections=2, pool_timeout=5.0,
+    ))
+    try:
+        # Six blocking reads on two connections: three waves, every one served.
+        results = await asyncio.gather(*(
+            client.blpop([f"redis-pool-burst-{i}"], timeout=0.2) for i in range(6)
+        ))
+        assert results == [None] * 6
+    finally:
+        await client.aclose()

@@ -80,7 +80,13 @@ from backend.app.services.stats_cache import (
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
-from backend.app.auth.dependencies import get_optional_user
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_optional_user,
+    get_permission_claims,
+)
+from backend.app.services.permission_service import PermissionClaims
+from backend.auth_service.interface import User
 from backend.app.services.top_level_cache import try_serve_top_level
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
@@ -242,6 +248,10 @@ async def bootstrap_versioned_graph_endpoint(
     if res.get("already_enabled"):
         response.status_code = 200
         return {"graphId": res["graph_id"], "alreadyEnabled": True}
+    await _record_versioning(
+        session, "workspace.versioning.enabled", dataSourceId,
+        {"jobId": res["job_id"], "graphId": res["graph_id"]},
+    )
     return {"jobId": res["job_id"], "graphId": res["graph_id"], "status": res["status"],
             "failure": res.get("failure")}
 
@@ -344,6 +354,15 @@ async def bootstrap_decision_endpoint(
     if res["already"]:
         response.status_code = 200
     status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if not res["already"]:
+        # Removing copies from a source graph is a person's decision about their data:
+        # recorded once, with how much it removes. Repeating it records nothing more.
+        dup = (status or {}).get("duplicates") or {}
+        await _record_versioning(
+            session, "workspace.versioning.duplicates_collapsed", dataSourceId,
+            {"jobId": res["jobId"], "identifiers": dup.get("identifiers"),
+             "extraCopies": dup.get("extraCopies")},
+        )
     if status and status.get("duplicates"):
         status["duplicates"].update(await shared_with(session, ds))
     return status
@@ -370,12 +389,16 @@ async def bootstrap_retry_endpoint(
         raise HTTPException(status_code=422, detail="mode must be resume or restart")
     await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
-                                     workspace_id=ws_id)
+        result = await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
+                                       workspace_id=ws_id)
     except BootstrapConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    await _record_versioning(
+        session, "workspace.versioning.retried", dataSourceId, {"mode": mode},
+    )
+    return result
 
 
 @router.post("/bootstrap/abandon")
@@ -404,9 +427,29 @@ async def bootstrap_abandon_endpoint(
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    # Before a package's data source goes below: the record names it, and the
+    # drop's commit carries the record with it.
+    await _record_versioning(session, "workspace.versioning.abandoned", dataSourceId)
     if res.get("origin") == "package":
         res["dataSourceRemoved"] = await drop_managed_data_source(session, dataSourceId)
     return res
+
+
+async def _record_versioning(
+    session: AsyncSession, event_type: str, data_source_id: str,
+    details: Optional[dict] = None,
+) -> None:
+    """A version-control step a person took, recorded best-effort: the step
+    itself happened in the version store, which a failed record cannot undo."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services.activity import recorder
+
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+    if ds is not None:
+        await recorder.record_for_request(
+            session, event_type, **recorder.data_source_target(ds),
+            details=details, best_effort=True,
+        )
 
 
 async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, ws_id: str):
@@ -484,6 +527,7 @@ async def resync_versioned_graph_endpoint(
     _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
     any time for any versioned graph. 3-way merge preserves user edits (a field both the
@@ -496,8 +540,13 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
-    return await svc.resync_from_provider(
+    result = await svc.resync_from_provider(
         graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+    await _record_versioning(
+        session, "workspace.versioning.resynced", dataSourceId,
+        {"strategy": strategy, "commitId": (result or {}).get("commit_id")},
+    )
+    return result
 
 
 @router.get("/vocab-alignment")
@@ -1860,6 +1909,25 @@ def _map_not_implemented(
     )
 
 
+async def _view_reader(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Whether this caller can read a view — what a search's view scope is
+    held to (``ViewScopeResolver``). The gate checked the workspace and the
+    data source; the view a search names in its body, or in ``?viewId=``
+    past a membership, is checked only here."""
+    from backend.app.services import view_access
+
+    viewer = await view_access.ViewerContext.build(session, user=user, claims=claims)
+
+    async def _can_read(view) -> bool:
+        return await view_access.can_read_view(session, viewer, view)
+
+    return _can_read
+
+
 def _guard_capability_scope(
     request: Request, query: Optional[SearchQuery] = None,
 ) -> None:
@@ -1910,6 +1978,7 @@ async def search_advanced(
     # R-H3 bulkhead: held across svc.search() → FalkorDB; isolate from WEB.
     # The ENGINE's session, not a second checkout — see get_engine_session.
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
@@ -1951,6 +2020,7 @@ async def search_advanced(
         workspace_id=ws_id,
         data_source_id=dataSourceId,
         branch_id=branchId,
+        can_read_view=can_read_view,
     )
     try:
         if get_deep_search_settings().engine == "v2":
@@ -2018,6 +2088,7 @@ async def search_explain(
     # R-H3 bulkhead: held across svc.explain() → FalkorDB; isolate from WEB.
     # The ENGINE's session, not a second checkout — see get_engine_session.
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """Compile a SearchQuery without executing it.
 
@@ -2047,6 +2118,7 @@ async def search_explain(
         workspace_id=ws_id,
         data_source_id=dataSourceId,
         branch_id=branchId,
+        can_read_view=can_read_view,
     )
     try:
         return await svc.explain(query)
@@ -2117,6 +2189,7 @@ async def search_values(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """The most common values of one property in a view — the value
     picker's suggestions, counted over every entity of the view's types.
@@ -2146,6 +2219,7 @@ async def search_values(
         workspace_id=ws_id,
         data_source_id=dataSourceId,
         branch_id=branchId,
+        can_read_view=can_read_view,
     )
     try:
         return await _bounded_compute(
@@ -2166,6 +2240,7 @@ async def search_membership(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """Which of the entities on screen (at most 1,000 urns) match which
     rules (at most 32) — what display rules paint, without downloading every
@@ -2175,7 +2250,8 @@ async def search_membership(
     A rule using ``withinHops`` or a path is refused in ``errors``: those
     describe a route, not an entity.
     """
-    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
     from backend.app.services.advanced_search_service import ValidationError
     try:
         return await svc.membership(body, run_context=SearchRunContext(
@@ -2197,6 +2273,7 @@ async def search_counts(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """How many entities in the view match each rule — exactly, however
     many. A count over a large view takes more than one request: send the
@@ -2204,7 +2281,8 @@ async def search_counts(
     until every count reads ``complete``. Each request runs about
     ``waitMs``, sharing it among the counts that have got least far.
     """
-    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
     from backend.app.services.advanced_search_service import ValidationError
     try:
         return await svc.counts(body, run_context=SearchRunContext(
@@ -2226,6 +2304,7 @@ async def search_catalog(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """Every property the view's entities carry — on how many, stored as
     which kinds, with which values — read from every entity in the view's
@@ -2235,7 +2314,8 @@ async def search_catalog(
     the data changes (``stale`` + ``asOf``); ``refresh`` reads the view
     again.
     """
-    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
     try:
         return await svc.catalog(body, run_context=SearchRunContext(
             data_version=await _search_data_version(engine),
@@ -2255,6 +2335,7 @@ async def search_export(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
     user=Depends(get_optional_user),
 ):
     """Every entity in the view matching ``predicate``, written to a CSV or
@@ -2265,7 +2346,8 @@ async def search_export(
     ``GET /search/exports/{sessionId}/download``.
     """
     from backend.app.services.advanced_search_service import ValidationError
-    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
     try:
         return await svc.export(body, principal=_principal(user), run_context=SearchRunContext(
             data_version=await _search_data_version(engine),
@@ -2340,6 +2422,7 @@ async def search_ancestor_counts(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
 ):
     """How many of a search's matches each of these containers (at most
     2,000 urns) holds, below it at any depth — read from the session the
@@ -2347,7 +2430,8 @@ async def search_ancestor_counts(
     exact count, not only the fullest ones the ``ancestor`` facet lists.
     The session must be this view's; ``expired`` when it is gone.
     """
-    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
     try:
         return await svc.ancestor_counts(body)
     except NotImplementedError as exc:
@@ -2355,9 +2439,10 @@ async def search_ancestor_counts(
 
 
 def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
-                  engine: ContextEngine, session: AsyncSession):
+                  engine: ContextEngine, session: AsyncSession, can_read_view):
     """The search service for a rules request, after the checks a search
-    makes: a workspace, and a share link kept inside its own view."""
+    makes: a workspace, a share link kept inside its own view, and a view
+    the caller can read (``_view_reader``)."""
     if not ws_id:
         raise HTTPException(
             status_code=400,
@@ -2371,6 +2456,7 @@ def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
         workspace_id=ws_id,
         data_source_id=data_source_id,
         branch_id=branch_id,
+        can_read_view=can_read_view,
     )
 
 

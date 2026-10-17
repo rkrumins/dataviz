@@ -322,6 +322,57 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Existing users sign in as normal",
         ),
     ),
+    # API keys. SECURITY, all three: each decides whether a credential is
+    # honoured. An unreadable flag refuses the key (503) rather than guessing —
+    # see ``api_key_auth._policy``.
+    "apiKeysEnabled": FeatureWiring(
+        key="apiKeysEnabled",
+        posture="security",
+        server_gates=(
+            "Every request made with an API key — refused while off",
+            "POST /me/api-keys and /me/api-keys/{id}/rotate — refuse to mint a key",
+        ),
+        ui_surfaces=("Create key and Rotate on Account → API keys",),
+        still_allowed=(
+            "Keys are kept, not deleted — turning this back on restores every key still in date",
+            "Signing in with a browser, and everything done that way",
+        ),
+    ),
+    "apiKeyMaxLifetime": FeatureWiring(
+        key="apiKeyMaxLifetime",
+        posture="security",
+        server_gates=(
+            "Every request made with an API key — a key older than the maximum is refused as expired",
+        ),
+        still_allowed=("Keys younger than the maximum keep working until their own expiry",),
+    ),
+    "apiKeySsoSignInWindow": FeatureWiring(
+        key="apiKeySsoSignInWindow",
+        posture="security",
+        server_gates=(
+            "Every request made with an API key — paused while its owner's last identity-provider "
+            "sign-in is older than the window",
+        ),
+        still_allowed=(
+            "A paused key resumes when its owner signs in again; nothing is revoked",
+            "Owners who sign in with a password are not affected",
+        ),
+    ),
+    # Widens who may mint a key: when it cannot be read, assume it is off.
+    "apiKeySsoRoundTripStepUp": FeatureWiring(
+        key="apiKeySsoRoundTripStepUp",
+        posture="security",
+        server_gates=(
+            "POST /me/api-keys and /me/api-keys/{id}/rotate — a session from a portal connection, "
+            "which can neither prove a fresh sign-in nor be asked, is refused "
+            "(step_up_unavailable) while off",
+        ),
+        still_allowed=(
+            "Using, describing and revoking existing keys",
+            "Creating keys after a proven identity-provider sign-in, a gateway's confirmation, "
+            "or with a password",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

@@ -1030,6 +1030,7 @@ async def lifespan(_app: FastAPI):
     async def _load_auth_config() -> AuthConfigSnapshot:
         async with get_async_session() as session:
             snap = await _app_auth_config_repo.get_snapshot(session)
+        outage = await _read_sso_outage(snap.sso_enabled)
         return AuthConfigSnapshot(
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
@@ -1039,11 +1040,33 @@ async def lifespan(_app: FastAPI):
             # (False) silently won at runtime — the admin page showed
             # email-first ON while the login page never led with email.
             email_first_login=snap.email_first_login,
+            password_fallback_until=snap.password_fallback_until,
+            sso_outage_slugs=outage[0],
+            sso_outage_since=outage[1],
             version=snap.version,
             updated_at=snap.updated_at,
         )
 
+    async def _read_sso_outage(sso_enabled: bool):
+        """Confirmed-down connections, read after the posture in a session
+        of its own; a failed read means "no outage" and never fails the
+        posture read, whose failsafe opens passwords."""
+        if not sso_enabled:
+            return (), None
+        from backend.app.services.idp_reachability import read_confirmed_outage
+        return await read_confirmed_outage(get_async_session)
+
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
+    # Asked while passwords are off and an SSO outage is confirmed — Super
+    # Admins may then sign in with a password to support everyone else —
+    # and when a connection below verified would link itself to an existing
+    # account, which is never a Super Admin's. Read-only, on the caller's
+    # session — it runs before anyone has proved who they are, so it must
+    # have no side effects.
+    async def _is_super_admin(session, user_id: str) -> bool:
+        from backend.app.db.repositories import binding_repo
+        return user_id in await binding_repo.super_admin_user_ids(session)
 
     async def _fetch_avatar_image(
         url: str, *, provider_id: str | None = None,
@@ -1104,6 +1127,12 @@ async def lifespan(_app: FastAPI):
             verify=verify,
         )
 
+    # API keys: the per-request lookup, what a key may do (the owner's
+    # authority narrowed to the key, cached briefly and dropped whenever the
+    # owner's sessions are ended), and the record of keys refused.
+    from backend.app.db.repositories import api_key_repo as _api_key_repo
+    from backend.app.services import api_key_service as _api_key_service
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -1118,8 +1147,12 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
         revocation_checker=_is_session_revoked,
+        super_admin_checker=_is_super_admin,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
+        api_key_repo=_api_key_repo,
+        api_key_claims_resolver=_api_key_service.claims_for_key,
+        api_key_rejection_hook=_api_key_service.record_rejection,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a
@@ -1615,6 +1648,20 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # API key expiry reminders: a week ahead, once per key. Same owner role,
+    # and a lock per pass, so replicas never send the same reminder twice.
+    _app.state._api_key_housekeeping_shutdown = asyncio.Event()
+    _app.state._api_key_housekeeping_task = None
+    if runs_scheduler():
+        from .services.api_key_housekeeping import run_sweeper as _run_api_key_housekeeping
+        _app.state._api_key_housekeeping_task = asyncio.create_task(
+            _run_api_key_housekeeping(
+                get_jobs_session,
+                _app.state._api_key_housekeeping_shutdown,
+            ),
+            name="api-key-housekeeping",
+        )
+
     # Product-event retention sweep. ``product_events`` now takes a row per
     # view open, lineage trace and graph search, so it grows with usage and
     # needs a horizon. Same owner role, same reason.
@@ -1628,6 +1675,20 @@ async def lifespan(_app: FastAPI):
                 _app.state._product_event_gc_shutdown,
             ),
             name="product-event-gc",
+        )
+
+    # Activity retention sweep: the ledger and the relayed outbox kept to
+    # ACTIVITY_RETENTION_DAYS. Same owner role, same reason.
+    _app.state._activity_retention_shutdown = asyncio.Event()
+    _app.state._activity_retention_task = None
+    if runs_scheduler():
+        from .services.activity_retention import run_sweeper as _run_activity_retention
+        _app.state._activity_retention_task = asyncio.create_task(
+            _run_activity_retention(
+                get_jobs_session,
+                _app.state._activity_retention_shutdown,
+            ),
+            name="activity-retention",
         )
 
     # Analytics warmer — precomputes the standard windows so no reader ever
@@ -1644,6 +1705,23 @@ async def lifespan(_app: FastAPI):
                 _app.state._analytics_warmer_shutdown,
             ),
             name="analytics-warmer",
+        )
+
+    # IdP reachability → idp_provider_reachability, the evidence the
+    # automatic password fallback and the SSO session ride-through act on
+    # (see ``services/idp_reachability.py``). Same owner role as the relay:
+    # one prober for the deployment, an advisory lock per pass, so each
+    # outage is detected — and audited — once.
+    _app.state._idp_reachability_shutdown = asyncio.Event()
+    _app.state._idp_reachability_task = None
+    if runs_scheduler():
+        from .services.idp_reachability import run_idp_reachability_loop
+        _app.state._idp_reachability_task = asyncio.create_task(
+            run_idp_reachability_loop(
+                get_jobs_session,
+                _app.state._idp_reachability_shutdown,
+            ),
+            name="idp-reachability",
         )
 
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
@@ -1663,6 +1741,16 @@ async def lifespan(_app: FastAPI):
             _app.state.idp_health_cache,
         ),
         name="idp-health",
+    )
+
+    # API key usage: counted in this process's memory on every key request
+    # and added to ``api_key_usage`` every half minute. Every process that
+    # serves the API counts, so every one flushes — not gated on a role.
+    from .services import api_key_usage as _api_key_usage
+    _app.state._api_key_usage_shutdown = asyncio.Event()
+    _app.state._api_key_usage_task = asyncio.create_task(
+        _api_key_usage.run_flusher(_app.state._api_key_usage_shutdown),
+        name="api-key-usage",
     )
 
     # Everything startup built lives as long as the process: take it out of
@@ -1763,6 +1851,21 @@ async def lifespan(_app: FastAPI):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # Stop the API key reminders before DB pool teardown, same shape.
+    _key_hk_shutdown = getattr(_app.state, "_api_key_housekeeping_shutdown", None)
+    _key_hk_task = getattr(_app.state, "_api_key_housekeeping_task", None)
+    if _key_hk_shutdown is not None:
+        _key_hk_shutdown.set()
+    if _key_hk_task is not None and not _key_hk_task.done():
+        try:
+            await asyncio.wait_for(_key_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _key_hk_task.cancel()
+            try:
+                await _key_hk_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: shutting down regardless
+
     # Stop the product-event sweeper before DB pool teardown, same shape.
     _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
     _pe_gc_task = getattr(_app.state, "_product_event_gc_task", None)
@@ -1775,6 +1878,21 @@ async def lifespan(_app: FastAPI):
             _pe_gc_task.cancel()
             try:
                 await _pe_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the activity retention sweep before DB pool teardown, same shape.
+    _ar_shutdown = getattr(_app.state, "_activity_retention_shutdown", None)
+    _ar_task = getattr(_app.state, "_activity_retention_task", None)
+    if _ar_shutdown is not None:
+        _ar_shutdown.set()
+    if _ar_task is not None and not _ar_task.done():
+        try:
+            await asyncio.wait_for(_ar_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _ar_task.cancel()
+            try:
+                await _ar_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1793,6 +1911,21 @@ async def lifespan(_app: FastAPI):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    # Stop the IdP reachability prober before DB pool teardown, same shape.
+    _reach_shutdown = getattr(_app.state, "_idp_reachability_shutdown", None)
+    _reach_task = getattr(_app.state, "_idp_reachability_task", None)
+    if _reach_shutdown is not None:
+        _reach_shutdown.set()
+    if _reach_task is not None and not _reach_task.done():
+        try:
+            await asyncio.wait_for(_reach_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _reach_task.cancel()
+            try:
+                await _reach_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose; shutdown carries on
+
     # Stop the IdP health sweep before DB pool teardown, same shape as the
     # relay above. The loop waits on the shutdown event rather than
     # sleeping, so this returns immediately instead of after its interval.
@@ -1809,6 +1942,27 @@ async def lifespan(_app: FastAPI):
                 await _idp_health_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    # Stop the API key usage flusher, then write what is still counted:
+    # before the pool goes, or the last half minute of usage is lost.
+    _usage_shutdown = getattr(_app.state, "_api_key_usage_shutdown", None)
+    _usage_task = getattr(_app.state, "_api_key_usage_task", None)
+    if _usage_shutdown is not None:
+        _usage_shutdown.set()
+    if _usage_task is not None and not _usage_task.done():
+        try:
+            await asyncio.wait_for(_usage_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _usage_task.cancel()
+            try:
+                await _usage_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: the final flush follows
+    try:
+        from .services.api_key_usage import recorder as _usage_recorder
+        await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — shutting down either way
+        logger.warning("Final API key usage flush failed: %s", exc)
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the
@@ -2125,6 +2279,29 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
                 "code": "PROVIDER_BUSY",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# Every slot of a bulkhead stayed taken while the request waited for one (see
+# common/bulkhead.py): too many slow reads of one kind on this replica at once.
+# 429 + Retry-After, for the same reason as a busy provider — the client backs
+# off and asks again, instead of every request timing out on an empty pool.
+from backend.app.common.bulkhead import Busy as _Busy
+
+
+@app.exception_handler(_Busy)
+async def _busy_handler(request, exc: _Busy):
+    logger.info("Busy on %s: %s", request.url.path, exc.kind)
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "busy",
+                "message": str(exc),
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
@@ -2595,13 +2772,24 @@ class _TimeoutMiddleware:
     # ``backend/app/common/sse_registry.py``. Streaming routes call
     # ``register_sse_path(...)`` beside their own handler.
     #
-    # This used to be ``path.endswith("/events")``. That is a guess about
-    # naming rather than a statement about behaviour, and it guessed
-    # wrong: ``POST /api/v1/telemetry/events`` is an ordinary JSON write
-    # that happens to end in the same word, and it was running with no
-    # timeout and no readiness gate as a result. Both real streams now
-    # register themselves (``changes.py``, ``aggregation.py``), so the
-    # suffix list is gone rather than kept alongside.
+    # Both sides of this merge found the same bug independently: matching
+    # ``path.endswith("/events")`` is a guess about naming rather than a
+    # statement about behaviour, and it exempted ordinary reads from every
+    # deadline — ``POST /api/v1/telemetry/events`` on this side, the
+    # activity log's paged event lists on main's.
+    #
+    # Main's fix was a regex per live feed, kept here in main.py. This one
+    # registers at the handler, which is the same answer one file over, so
+    # main's ``_SSE_PATHS`` is dropped rather than kept beside it — its one
+    # entry, the aggregation job stream, is already registered in
+    # ``aggregation.py`` and the registry compiles it to the identical
+    # match (verified against main's regex on both the parameterised path
+    # and the near-misses). Keeping both would mean two places to edit and
+    # one of them silently optional.
+    #
+    # The registry also covers ``/api/v1/changes/stream``, which main's
+    # list has no entry for — so taking main's verbatim would have put a
+    # deadline back on the change feed.
     #
     # ``_STREAM_PATHS`` below is a SEPARATE concern and is kept as main
     # wrote it: those are not event streams, they are long downloads.
@@ -2616,6 +2804,12 @@ class _TimeoutMiddleware:
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+        # The activity log as CSV, platform-wide or one workspace's: at most 50,000 rows, a
+        # short keyset read per chunk, two at a time per process (activity._EXPORTS).
+        re.compile(r"^/api/v1/admin/(?:workspaces/[^/]+/)?activity/export\.csv$"),
+        # The API key inventory as CSV: at most 10,000 keys, a short read per page of 500, two
+        # at a time per process (api_keys._EXPORTS).
+        re.compile(r"^/api/v1/admin/api-keys/export\.csv$"),
     )
 
     def __init__(self, app):
@@ -2750,13 +2944,21 @@ class _TimeoutMiddleware:
                 state["terminal"] = True
             await original_send(message)
 
+        deadline = asyncio.timeout(timeout)
         try:
-            async with asyncio.timeout(timeout):
+            async with deadline:
                 await self.app(scope, receive, tracked_send)
-        except TimeoutError:
+        except Exception as exc:
             # ``asyncio.timeout()`` converts the inner CancelledError to a
-            # TimeoutError. The inner task is already torn down — no more
+            # TimeoutError — unless something inside caught the cancellation
+            # and raised an error of its own. ``BaseHTTPMiddleware`` does
+            # exactly that ("No response returned"), which used to escape as
+            # a 500 for a request whose only fault was being slow. An error
+            # raised once the deadline has passed is the deadline's. Either
+            # way the inner task is already torn down — no more
             # ``tracked_send`` calls will arrive.
+            if not isinstance(exc, TimeoutError) and not deadline.expired():
+                raise
             if state["terminal"]:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
@@ -2848,7 +3050,12 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
+    # ``X-Activity-Reason`` carries the optional "why" a person gives for a
+    # manual operation into the activity ledger (``common/activity_context``).
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+        "X-Activity-Reason",
+    ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
     #
@@ -2935,6 +3142,18 @@ app.add_middleware(RequestMetricsMiddleware)
 # ------------------------------------------------------------------ #
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+def _openapi_with_api_keys() -> dict:
+    """The generated schema, marking the operations an API key may call."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from backend.app.auth import api_key_surface
+
+    return api_key_surface.document(FastAPI.openapi(app), app)
+
+
+app.openapi = _openapi_with_api_keys
 
 # Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.

@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.common import activity_context
 from backend.app.db.models import OutboxEventORM
 
 
@@ -126,7 +127,9 @@ async def emit(
         event_version=event_version,
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
-        payload=json.dumps(payload or {}),
+        # The request's correlation id and stated reason, where the payload
+        # has not set its own (see ``activity_context.envelope``).
+        payload=json.dumps(activity_context.envelope(dict(payload or {}))),
         processed=False,
     )
     session.add(event)

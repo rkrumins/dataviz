@@ -1,10 +1,12 @@
 /**
  * KeyboardShortcutsDialog — cheat-sheet modal for the Explorer.
  *
- * Surfaces the shortcuts the page already ships with (``/``, ``?``,
+ * Surfaces the shortcuts the page already ships with (``/``, ``⇧F``, ``?``,
  * arrows, ``Enter``, ``f``, ``Esc``) plus a Command Palette slot
  * reserved for the future ⌘K feature. Undiscoverable shortcuts are
  * nearly worthless; this makes them one keystroke away.
+ *
+ * Another page passes its own ``sections`` (the Activity explorer does).
  */
 import { motion } from 'framer-motion'
 import { createPortal } from 'react-dom'
@@ -13,17 +15,30 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useEffect } from 'react'
 
-interface Shortcut {
+export interface Shortcut {
   keys: string[]
   label: string
   /** Subtle hint shown under the label for context. */
   hint?: string
 }
 
+export interface ShortcutGroup {
+  title: string
+  items: Shortcut[]
+}
+
 const NAV_SHORTCUTS: Shortcut[] = [
   { keys: ['/'], label: 'Focus search', hint: 'From anywhere on the page' },
+  { keys: ['⇧', 'F'], label: 'Filter by anything', hint: 'Every filter value in one searchable list' },
   { keys: ['?'], label: 'Show this help' },
   { keys: ['Esc'], label: 'Clear search / close overlay' },
+]
+
+const SEARCH_SHORTCUTS: Shortcut[] = [
+  { keys: ['Space'], label: 'Turn a typed filter into a chip', hint: 'by:me, is:versioned, updated:<7d, tag:pii' },
+  { keys: ['Tab'], label: 'Finish a filter from the suggestions' },
+  { keys: ['Enter'], label: 'Search now' },
+  { keys: ['⌫'], label: 'Remove the last filter', hint: 'In an empty search box' },
 ]
 
 const GRID_SHORTCUTS: Shortcut[] = [
@@ -32,12 +47,19 @@ const GRID_SHORTCUTS: Shortcut[] = [
   { keys: ['f'], label: 'Toggle favorite on the focused view' },
 ]
 
+const EXPLORER_GROUPS: ShortcutGroup[] = [
+  { title: 'Navigation', items: NAV_SHORTCUTS },
+  { title: 'Search', items: SEARCH_SHORTCUTS },
+  { title: 'Grid & cards', items: GRID_SHORTCUTS },
+]
+
 interface KeyboardShortcutsDialogProps {
   isOpen: boolean
   onClose: () => void
+  sections?: ShortcutGroup[]
 }
 
-export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDialogProps) {
+export function KeyboardShortcutsDialog({ isOpen, onClose, sections = EXPLORER_GROUPS }: KeyboardShortcutsDialogProps) {
   // Esc dismissal. Stops at the document listener so it fires
   // regardless of focus position.
   useEffect(() => {
@@ -103,8 +125,9 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
 
               {/* ── Sections ── */}
               <div className="px-5 py-4 grid gap-5 sm:grid-cols-2">
-                <ShortcutSection title="Navigation" items={NAV_SHORTCUTS} />
-                <ShortcutSection title="Grid & cards" items={GRID_SHORTCUTS} />
+                {sections.map(section => (
+                  <ShortcutSection key={section.title} title={section.title} items={section.items} />
+                ))}
               </div>
             </motion.div>
           )}

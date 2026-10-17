@@ -18,7 +18,7 @@ live OpenAPI explorer — see [Find the endpoint you need](/docs/api-guide#find-
 (`/api/v1/{ws_id}/versioning`) is the *only* path between a client and the `graphver` Postgres
 store — it delegates to `GraphVersioningService`. The **graph router** (`/api/v1/{ws_id}/graph`) is
 the provider and engine read and write plane, made **draft-aware** by a single `?branchId=` query
-parameter. Auth is a cookie session plus CSRF; authorization reuses **data-source permissions** (a
+parameter. Auth is a cookie session plus CSRF, or an API key; authorization reuses **data-source permissions** (a
 graph is 1:1 with a data source); a graph, request or data source in another workspace answers
 **404**, never 403.
 
@@ -40,6 +40,18 @@ tables call out.
 `POST /api/v1/auth/refresh` renews every cookie, `nx_csrf` included. Working curl, `requests` and
 `httpx` helpers are in the [API Guide](/docs/api-guide#sign-in-from-a-script). The routers trust the
 authenticated `User` and `PermissionClaims`; they never re-derive identity.
+
+### API keys
+
+`Authorization: Bearer nxpat_…` replaces the cookies and the CSRF header — see
+[API Keys](/guide/api-keys). The key acts as its owner, narrowed to what it was limited to: data
+read for the reads, data read & write for every write. Every route below accepts a key except
+creating a graph (`POST /graphs`, `/blank-graphs`, `…/forks`), opening a draft by data source
+(`POST /resolve`), adding or removing a draft's members, projection rebuild and reconcile, and on
+the graph router `bootstrap…`, `resync` and `edges/aggregated/materialize`. A
+key limited to particular data sources reaches a graph, branch or request only when the data
+source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
+workspaces.
 
 ### Permissions (RBAC)
 
@@ -244,6 +256,7 @@ scripted run. The endpoints:
 | `POST …/exports` | `_READ` + **Export graph data** | `?format&asOfSeq&viewId&branchId&props&ids&types&filename&idempotencyKey` → **202** `{jobId, resultUri, status}`. The workers write the same records into the object store, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB) — what the Export dialog does for a data source with version control. `filename` (no extension) names the download |
 | `GET …/exports · /{jobId}` | `_READ`, and read access to the export's draft and view | The export jobs you may read, newest first, or one job: `queuedAhead` while it waits; while it runs, `summary` says how far it has got (`nodes` and `edges` this pass, `passes`, `bytes` written); once finished, `kept` says whether its file is still there to download (a day). An export of a draft or view you can't read is a **404**, and left out of the list |
 | `GET …/exports/{jobId}/download` | as above + **Export graph data** | The finished file, as a download that resumes: `Content-Length`, `Accept-Ranges: bytes`, `ETag`, `Last-Modified`. A `Range` → **206** with `Content-Range` (one range; a header asking for several gets the whole file); an `If-Range` that names another version → the whole file; a range past the end → **416**. No request time limit. **409 `not_ready`** until the job is `completed`; **404** once swept |
+| `POST …/exports/{jobId}/cancel` | as `GET …/exports/{jobId}`; then the export's creator, or `_MANAGE` | Stops an export that hasn't ended → the job, wherever it ended: `cancelled` (its `summary` names `cancelledBy`), or `completed`/`failed` when it ended first, left as it is. A queued export is never claimed; a running one stops at its next progress checkpoint, within seconds, and the part of its file written so far is removed. **403** for anyone else; **404** as for an export you may not read |
 | `GET /api/v1/{ws_id}/graph/export/plan · /stream` | `_READ` + **Export graph data** | `?dataSourceId&format[&props&filename]` → the same for a data source **without** version control: its live graph, read from the provider (rows carry URNs, not entity ids). Counts are estimates from the provider's statistics |
 
 > **Limitation.** The export **row and type scoping** parameters (`ids`, `types`) work end to end on

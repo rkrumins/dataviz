@@ -68,7 +68,10 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     // redacted section to everyone else, and that OR lives in
     // `useAnalyticsAccess` because a flag is not a permission.
     analytics:  { kind: 'anyPerm', perms: ['system:analytics:read', 'system:admin', 'system:org-admin', 'system:audit:read'] },
-    admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage'] },
+    // Every permission that opens an admin section must open the parent too —
+    // `/admin` is guarded before any section is. `system:audit:read` is how the
+    // org_auditor role reaches Activity (and Telemetry).
+    admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage', 'system:audit:read'] },
 }
 
 /**
@@ -93,6 +96,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     permissions:   { kind: 'perm', perm: 'system:admin' },
     sso:           { kind: 'perm', perm: 'system:admin' },
     audit:         { kind: 'perm', perm: 'system:audit:read' },
+    'api-keys':    { kind: 'perm', perm: 'system:audit:read' },
 }
 
 

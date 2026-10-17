@@ -24,7 +24,7 @@ import logging
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -430,12 +430,16 @@ class AdvancedSearchService:
         workspace_id: Optional[str],
         data_source_id: Optional[str] = None,
         branch_id: Optional[str] = None,
+        can_read_view: Optional[Callable[[Any], Awaitable[bool]]] = None,
     ) -> None:
         self._engine = engine
         self._session = session
         self._workspace_id = workspace_id
         self._data_source_id = data_source_id
         self._branch_id = branch_id
+        #: Whether the caller can read a view: what every scope is held to
+        #: (``ViewScopeResolver.resolve``). The HTTP routes always pass it.
+        self._can_read_view = can_read_view
 
     @classmethod
     def for_diagnostics(cls, engine: ContextEngine) -> "AdvancedSearchService":
@@ -980,6 +984,7 @@ class AdvancedSearchService:
                 requested=requested,
                 data_source_id=self._data_source_id,
                 branch_id=self._branch_id,
+                can_read=self._can_read_view,
             )
         except ViewNotFound as exc:
             # The HTTP layer maps NotImplementedError → 501 and

@@ -44,7 +44,8 @@ const AdminGroups = lazyWithRetry(() => import('@/components/admin/AdminGroups')
 const AdminPermissions = lazyWithRetry(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazyWithRetry(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const AdminSso = lazyWithRetry(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
-const AdminAudit = lazyWithRetry(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
+const AdminActivity = lazyWithRetry(() => import('@/components/admin/AdminActivity').then(m => ({ default: m.AdminActivity })))
+const AdminApiKeys = lazyWithRetry(() => import('@/components/admin/AdminApiKeys').then(m => ({ default: m.AdminApiKeys })))
 const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
@@ -54,6 +55,7 @@ const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReview
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
+const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m => ({ default: m.MyApiKeysPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
@@ -207,6 +209,10 @@ export const router = createBrowserRouter([
       { path: 'me/account', element: <Lazy><AccountSettingsPage /></Lazy> },
       // SSO identity management — link/unlink IdP connections.
       { path: 'me/identities', element: <Lazy><MyIdentitiesPage /></Lazy> },
+      // API keys that act as you. Ungated like its siblings, and not behind
+      // the apiKeysEnabled switch: with keys off you can still see and revoke
+      // yours — the page says so and offers nothing new.
+      { path: 'me/api-keys', element: <Lazy><MyApiKeysPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context
@@ -352,7 +358,15 @@ export const router = createBrowserRouter([
             path: 'audit',
             element: (
               <RequireNav group="admin" sectionKey="audit">
-                <Lazy><AdminAudit /></Lazy>
+                <Lazy><AdminActivity /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'api-keys',
+            element: (
+              <RequireNav group="admin" sectionKey="api-keys">
+                <Lazy><AdminApiKeys /></Lazy>
               </RequireNav>
             ),
           },

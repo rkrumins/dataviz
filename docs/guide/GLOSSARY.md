@@ -14,11 +14,11 @@ screen.
 | Term | What it means | Read more |
 |---|---|---|
 | **Access request** | A request to join a workspace with a chosen role, sent with **Request access**. A workspace admin approves or denies it, and you can follow it under **My access requests**. | [Requesting Access](/guide/requesting-access) |
+| **Activity** | The record of who did what across the platform — sign-ins, access changes, operations on data sources and settings — and why, under **Administration → Activity**; each workspace has its own **Activity** tab. | [The Admin Console](/guide/governance-ops#activity) |
 | **Aggregation** | The background job that builds a data source's lineage summaries (rollups), so lines can be drawn between collapsed items. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Analytics** | The sidebar page with growth, engagement and adoption figures for the platform. | [Analytics](/guide/analytics) |
 | **Announcement** | A banner message an administrator shows to everyone, set under **Administration → Announcements**. | [The Admin Console](/guide/governance-ops) |
 | **Approval** | The step where an administrator lets a new account in: **Approve** under **Administration → User Management**. | [Users & Access](/guide/users-access) |
-| **Audit Log** | The record of sign-ins, access changes and account changes, under **Administration → Audit Log**. | [The Admin Console](/guide/governance-ops) |
 | **Branding** | The app name, logo, theme and support address an administrator sets under **Administration → Branding**. | [The Admin Console](/guide/governance-ops) |
 | **Canvas** | The area where a view's graph is drawn and explored. | [Reading Lineage](/guide/reading-lineage) |
 | **Catalog item** | A graph found on a provider and registered so it can be added to a workspace as a data source. | [Admin Setup](/guide/admin-setup) |

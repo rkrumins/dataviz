@@ -63,12 +63,22 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
     ``idp_provider_repo.decrypt_settings`` returns). Only ``custom_profile``
     inspects it; the other kinds are decided by their protocol.
     """
+    return assurance_explained(kind, settings)[0]
+
+
+def assurance_explained(
+    kind: str, settings: dict | None = None,
+) -> tuple[str, str]:
+    """The level, and why, in words that name this row's cause and — when
+    it is weak — what to change. One decision for both, so the explanation
+    cannot drift from the rating. A generic "anyone can be anyone" told an
+    operator nothing about which switch made their connection unverified."""
     s = settings or {}
 
     if kind in {"oidc", "saml2"}:
         # Both verify a signature over the assertion before it reaches the
         # claim mapper — JWKS for OIDC, the IdP x509 cert for SAML.
-        return VERIFIED
+        return VERIFIED, ASSURANCE_DESCRIPTIONS[VERIFIED]
 
     if kind == "backchannel":
         # Server mode: verified with no signature needed. The claims did
@@ -91,7 +101,13 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         # the mode check below is belt-and-braces for out-of-band rows.)
         mode = str(s.get("exchange_mode") or "server").strip().lower()
         if mode == "browser" and _as_bool(s.get("trust_unsigned")):
-            return UNVERIFIED
+            return UNVERIFIED, (
+                "Trust unsigned is on: the browser hands over the gateway's "
+                "answer and nothing checks a signature on it, so anyone at a "
+                "browser can sign in as anyone. Verify it with the gateway's "
+                "JWKS URL, public key or shared secret — or run the exchange "
+                "on the server, if the corporate cookie reaches this app."
+            )
         # Server mode's VERIFIED rests on the transport: "came back over
         # TLS from the provider's own endpoint" is only true when that
         # TLS is verified. With ``tls_verify`` off, anyone on the path
@@ -99,7 +115,8 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         # a signature checked against a key the operator typed survives
         # an unverifiable channel. A JWKS does not: the key set itself
         # arrives over the channel we just declined to verify.
-        if not _as_bool(s.get("tls_verify", True)):
+        tls_off = not _as_bool(s.get("tls_verify", True))
+        if tls_off:
             pasted = bool(
                 s.get("jwt_public_key") or s.get("jwt_shared_secret")
             )
@@ -109,25 +126,56 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
                 == "jwt"
             )
             if not (pasted and signature_checked):
-                return UNVERIFIED
-        return VERIFIED
+                return UNVERIFIED, (
+                    "TLS verification is off for this connection, so anyone "
+                    "on the network path can answer as the gateway and sign "
+                    "in as anyone. Give this deployment your CA bundle "
+                    "(SSO_OUTBOUND_TLS_CA_CERTS) and turn verification back on"
+                    + (" — or paste the gateway's public key in place of its "
+                       "JWKS URL." if mode == "browser" else ".")
+                )
+        if mode == "browser":
+            return VERIFIED, (
+                "The gateway's token is signature-checked against the key "
+                "this connection holds, and accepted once."
+            )
+        if tls_off:
+            return VERIFIED, (
+                "The gateway's answer is signed, and checked against the key "
+                "pasted into this connection."
+            )
+        return VERIFIED, (
+            "The server asks the gateway itself, over verified TLS, at every "
+            "sign-in and renewal."
+        )
 
     if kind == "custom_profile":
         # An unsigned payload is unverifiable regardless of how it arrived,
         # so this check comes first: a JSON payload delivered by header is
         # still unverified, not asserted.
+        source = str(s.get("source") or "cookie")
         if str(s.get("payload_format") or "jwt") == "json" or _as_bool(
             s.get("trust_unsigned")
         ):
-            return UNVERIFIED
-        if str(s.get("source") or "cookie") == "header":
-            return ASSERTED
-        return VERIFIED
+            carrier = source if source in {"cookie", "header"} else "browser storage key"
+            return UNVERIFIED, (
+                f"The payload is accepted unsigned, so anyone able to set the "
+                f"{carrier} can sign in as anyone. Have the portal sign it as "
+                "a JWT and give this connection its verification key."
+            )
+        if source == "header":
+            return ASSERTED, ASSURANCE_DESCRIPTIONS[ASSERTED]
+        return VERIFIED, ASSURANCE_DESCRIPTIONS[VERIFIED]
 
-    # ``custom`` is the dev/demo mock. Its envelope IS signed with the
-    # platform secret, but it asserts whatever the developer typed into a
-    # form — that is authorship, not identity proof.
-    return UNVERIFIED
+    if kind == "custom":
+        # The dev/demo mock. Its envelope IS signed with the platform
+        # secret, but it asserts whatever the developer typed into a
+        # form — that is authorship, not identity proof.
+        return UNVERIFIED, (
+            "The development sign-in accepts whatever identity is typed into "
+            "it. Keep it off wherever real people sign in."
+        )
+    return UNVERIFIED, ASSURANCE_DESCRIPTIONS[UNVERIFIED]
 
 
 def at_least(level: str, minimum: str) -> bool:

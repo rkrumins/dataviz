@@ -499,13 +499,18 @@ _ACCOUNT_ACTIVITY_TYPES = (
     "user.role_changed",
     "user.suspended",
     "user.reactivated",
+    "identity.api_key.created",
+    "identity.api_key.rotated",
+    "identity.api_key.updated",
+    "identity.api_key.revoked",
+    "identity.api_key.misuse",
 )
 
 
 #: The payload key each of those events names its actor under.
 _ACTIVITY_ACTOR_KEYS = (
     "updated_by", "reset_by", "changed_by", "generated_by",
-    "suspended_by", "reactivated_by",
+    "suspended_by", "reactivated_by", "created_by", "revoked_by",
 )
 
 
@@ -1030,12 +1035,30 @@ async def set_system_account(
 
     if not body.is_system_account:
         from backend.app.api.v1.endpoints.admin_sso_config import (
-            _super_admin_user_ids,
+            break_glass_accounts,
         )
-        from backend.app.db.repositories import app_auth_config_repo
+        from backend.app.db.repositories import (
+            app_auth_config_repo, binding_repo,
+        )
         snap = await app_auth_config_repo.get_snapshot(session)
+        if not snap.allow_local_login:
+            # The account that survives an IdP outage must not be the one
+            # taken away: passwords could only be switched off because a
+            # ready break-glass account existed.
+            ready = [a for a in await break_glass_accounts(session) if a["ready"]]
+            if [a["id"] for a in ready] == [user.id]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "no_break_glass_account",
+                        "message": "Passwords are off and this is the only "
+                                   "break-glass account ready to sign in — "
+                                   "unmarking it would leave no way in "
+                                   "during an identity-provider outage.",
+                    },
+                )
         if not snap.allow_local_login and user.status == "active":
-            admin_ids = await _super_admin_user_ids(session)
+            admin_ids = await binding_repo.super_admin_user_ids(session)
             if user.id in admin_ids:
                 idents = await user_identity_repo.list_for_user(
                     session, user.id,

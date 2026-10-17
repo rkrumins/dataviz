@@ -39,11 +39,11 @@ after the frontend proxy. A request refused at any step never reaches the code b
 
 ```mermaid
 flowchart TB
-    A["Browser"] --> B["Frontend proxy:<br/>page CSP and headers"]
+    A["Browser, or a script<br/>with an API key"] --> B["Frontend proxy:<br/>page CSP and headers"]
     B --> C["Deadline and<br/>body-size cap"]
     C --> D["Security headers and<br/>Host allowlist"]
-    D --> E["Origin check and<br/>CSRF token"]
-    E --> F["Session cookie and<br/>revocation check"]
+    D --> E["Origin check, and<br/>CSRF token with cookies"]
+    E --> F["Session cookie and revocation,<br/>or API key, owner and scope"]
     F --> G["Permission and<br/>feature-switch check"]
     G --> H["Change and its<br/>audit event commit together"]
 ```
@@ -54,9 +54,11 @@ flowchart TB
    reads it.
 3. Security headers are added to every response. If you set `ALLOWED_HOSTS`, a request
    naming any other host is refused.
-4. A write must come from an allowed origin and carry a CSRF token bound to the session.
+4. A write must come from an allowed origin and carry a CSRF token bound to the session. A
+   request carrying an API key has its cookies removed and needs no CSRF token.
 5. The session cookie's signature, issuer and expiry are verified, and the session is checked
-   against the revocation list.
+   against the revocation list. An API key is checked instead: the key, its owner and what the
+   key may reach, on every request — see [API keys](#api-keys).
 6. The route's permission is checked against the caller's roles, and a switched-off feature
    is refused.
 7. A security-relevant change writes its audit event in the same database transaction as the
@@ -95,9 +97,18 @@ password, not the person.
   Self-registration**. Accounts created that way wait for approval in **Administration →
   User Management**. Invitations work either way, unless you also turn off **Invite links**.
 - To make single sign-on the only way in, turn off **Passwords** in **Administration → SSO →
-  Settings**. The switch refuses to turn off while an active Super Admin has no SSO identity
-  and isn't marked as a system (break-glass) account. System accounts keep password sign-in,
-  so an identity-provider outage can't lock everyone out.
+  Settings**. The switch refuses to turn off until a break-glass account is ready — an active
+  Super Admin with a password, marked as a system account — and lists any Super Admin it
+  would leave without a way in. System accounts keep password sign-in, so an
+  identity-provider outage can't lock everyone out. While passwords are off, an account that
+  may not use one gets the same answer as a wrong password, so the sign-in form does not
+  reveal which accounts may.
+- When an identity provider is confirmed down by the server's own checks — seen working,
+  then failing for three minutes on fresh evidence — Super Admins with a password may sign
+  in with it, and an administrator can open password sign-in to everyone for 1–24 hours.
+  Sessions opened that way end at their next renewal once single sign-on is back, and within
+  a day regardless; signed-in SSO users ride through the outage. Every one of these sign-ins
+  is audited. See [SSO](/docs/sso) §1.17.
 
 **Where in the code.** `backend/auth_service/core/password.py` (`hash_password`,
 `verify_password`), `backend/auth_service/providers/local.py` (`LocalIdentityProvider`),
@@ -303,6 +314,123 @@ CORS.
 **Where in the code.** `backend/auth_service/csrf.py` (`CSRFMiddleware`, `mint_csrf_token`,
 `verify_csrf_token`), registered in `backend/app/main.py`.
 
+## API keys
+
+**How it works.** Anyone can create keys under **Account → API keys** that let a script call
+the API as them — the person's side is in [API Keys](/guide/api-keys).
+
+- **The token.** `nxpat_`, 32 random base62 characters (about 190 bits) and a 6-character
+  checksum, so secret scanners can recognise a leaked key and a mistyped one is refused
+  without a database lookup. Only its SHA-256 hash is stored, and the token is shown once. It
+  is accepted only in the `Authorization: Bearer` header — never in a URL — and never logged.
+- **Minting needs a fresh sign-in.** Creating or rotating a key asks for the password, or for
+  the identity provider the session came from (named by a signed `idp` claim) to vouch for
+  the person now. A password counts only while the Passwords switch (`allow_local_login`) is
+  on: with it off, it is refused before it is checked (`step_up_unavailable`, reason
+  `passwords_off`) — even while the emergency window or the Super Admin outage door lets
+  people sign in with one, since a key would outlive the emergency. A provider that signs
+  someone back in silently from a session it still holds proves nothing about who is at the
+  keyboard, so:
+  - OIDC (`prompt=login` with `max_age`) and SAML (`ForceAuthn`) connections must have dated
+    a sign-in in the last 15 minutes, and the sign-in page asks them to. The proof is a
+    signed `auth_time_proven` claim beside `auth_time` in both session tokens, carried
+    through every renewal and never settable from outside the sign-in. A portal's
+    `auth_time`, which it maps from its own payload, never counts as proof.
+  - An **Enterprise gateway** this server can ask — server exchange with an ambient token
+    source — is asked, on the create or rotate request itself, whether the company session
+    behind the request is still live. Confirmed mints; ended or refused asks for a new
+    sign-in; no answer mints nothing (`503 gateway_unreachable`, `Retry-After`) — unlike
+    session renewal, there is no grace. It proves the company session is live, not that a
+    credential was typed just now. A gateway only the browser reaches vouches by having
+    signed the session in within the last 15 minutes. A gateway's sign-in runs in the
+    browser, so a refusal names the gateway rather than a sign-in URL: the page signs in
+    through it again in place, and sends the request again only if the same person is still
+    signed in.
+  - Portal connections can do neither, so their users cannot make keys unless an
+    administrator accepts a fresh round trip instead.
+  - While the reachability prober has the session's provider **confirmed down**, a step-up
+    that would ask it or send the person to it is answered at once — `503 idp_unreachable`,
+    `Retry-After`, no sign-in link — so no request waits on a gateway that is down, and nobody
+    is sent to an error page or to the sign-in page's password doors. A sign-in the provider
+    proved before it went down still counts.
+
+  Every `created` and `rotated` event records how it was confirmed (`step_up`). A person may
+  hold 25 keys still in date, and a rotation that keeps the old key working for a while
+  counts as one more until it ends; rotations and renewals take a per-person lock, so two at
+  once can neither pass the limit nor leave a revoked key with a live replacement, and a key
+  can be replaced only once.
+- **Narrower than its owner, never wider.** A key reaches everything its owner can, or chosen
+  workspaces, views and data sources; and none, read, or read & write on views (with
+  publishing) and on data. On anything, it may do what its owner may do there *now*, narrowed
+  by the key — a role taken away reaches the key within 30 seconds. A key never carries
+  platform permissions, workspace administration or sharing.
+- **The data plane only.** Keys may call a reviewed list of routes — views, graphs, version
+  control, data-source signals and jobs — and everything else answers
+  `403 api_key_not_allowed`. A request naming a workspace, view or data source outside the
+  key's limits answers `403 api_key_out_of_scope`, or `404` across workspaces; a read-only key
+  asking to change something answers `403 api_key_read_only`. A view opens reads of the data
+  it renders, never the routes about that data source itself (its jobs, readiness or pull
+  requests). A fork's pull request needs the parent graph's data source too, and a draft is
+  reached only through its own graph. The ontologies and catalog entries a key lists, and
+  the data sources a workspace shows it, are those of the data sources it covers; a
+  workspace-wide data source permission holds for a key limited to some of them only for a
+  data source the request names and the key selects itself, never one it reaches through a
+  view. A view named in a search's body must be one the caller can read. A key's job event
+  stream ends after five minutes, and the client's reconnect (with `Last-Event-ID`) checks
+  the key again.
+- **Checked on every request.** A revoked or expired key, a suspended owner, or a key used
+  from a network it isn't limited to is refused with `401`. So is the key of an owner marked as a
+  break-glass (system) account: one is kept for when nobody else can sign in, so nothing should
+  run as it, and it can't make keys either. So is the key of a person who signs in through an
+  identity provider and hasn't for a set time (30 days by default): the key pauses, and resumes
+  at their next sign-in, so a leaver's keys stop without anyone remembering them. An owner left
+  with no way to sign in pauses too, and a password is no way in while password sign-in is
+  switched off — an emergency window, which closes, doesn't count. Requests read that switch
+  from the cached sign-in posture, so it reaches them within 30 seconds; a server that can't
+  read the posture and has none cached takes passwords as on, as its sign-in page does.
+- **No cookies beside a key.** A request carrying a key has its cookies removed before any
+  route sees them, so it acts as the key alone. It needs no CSRF token — a browser cannot add
+  an `Authorization` header to a cross-site request without the API's consent — but a write
+  still passes the Origin check.
+- **Limits and outages.** Each key is limited to `RATELIMIT_API_KEY` requests (1,200 a minute
+  by default, a sliding window; `429` with `Retry-After`), counted before the key is looked up,
+  so a client told to slow down costs no database read. Tokens nobody issued count against
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` per client address (an IPv6 client per /64); a key that
+  exists but is refused — revoked, expired — is charged to its own budget instead, so one
+  integration looping on a dead key cannot lock out the healthy ones behind the same NAT. A
+  request with no client address at all (a Unix socket with no proxy headers) skips the
+  per-address budget, and the operator is warned once, rather than every such request
+  sharing one budget that 120 bad tokens would exhaust for every key. If the database can't
+  be reached the answer is `503`, never "invalid key".
+- **Network limits are as strong as the proxy setting.** A key limited to networks is checked
+  against the client address the API server sees, which behind a proxy comes from
+  `X-Forwarded-For` — believed only from the peers `FORWARDED_ALLOW_IPS` names. The shipped
+  Compose and Kubernetes settings trust every private range, so a client inside one of them
+  can claim any address. Name exactly your proxies there before relying on a key's network
+  limit. Recorded and notified addresses are only ever a parsed IP address, never header text.
+- **Not ended with sessions.** Sign Out, **Sign out everywhere**, password changes and **End
+  sessions** leave keys working; suspension stops them at once. To stop a key, revoke it: its
+  owner on **Account → API keys**, an administrator one key or all of a person's on
+  **Administration → API keys**, or whoever holds it with `DELETE /api/v1/api-keys/self`.
+
+**How to configure it.** Under **Administration → Features → Authentication**: **API keys**
+(`apiKeysEnabled`, on by default) refuses every key at once; **Longest an API key may live**
+(`apiKeyMaxLifetime`, no maximum by default) also shortens keys that already exist; **Pause keys
+of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default); **Accept a fresh
+sign-in round trip for API keys** (`apiKeySsoRoundTripStepUp`, off by default) lets people on
+portal connections make keys with a sign-in their portal did not date. Keys are
+refused with `503` while RBAC enforcement is switched off. Behind a proxy, set
+`FORWARDED_ALLOW_IPS` to exactly your proxies, so that per-key network limits and recorded
+addresses see the real client.
+
+**Where in the code.** `backend/auth_service/core/api_keys.py` (`generate`, `hash_token`,
+`lifecycle_refusal`), `backend/auth_service/service.py` (`validate_api_key`),
+`backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py`
+(`SURFACE`), `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`),
+`backend/auth_service/csrf.py` (`_dispatch_api_key`), `backend/app/api/v1/endpoints/api_keys.py`
+(`_sso_step_up`), `backend/app/db/repositories/api_key_repo.py` (`status_expr`,
+`hold_principal`), `backend/app/services/api_key_usage.py`.
+
 ## Who can do what
 
 ### Roles and permissions
@@ -327,8 +455,9 @@ workspaces they're explicitly added to, plus any view published to everyone. A r
 is HTTP 403 with
 `"error": "missing_permission"`, naming the permission and the scope.
 
-Entering **Administration** needs `system:admin` or `system:groups:manage`. Inside it, each
-page checks its own permission: **Audit Log** and **Telemetry** need `system:audit:read`,
+Entering **Administration** needs `system:admin`, `system:groups:manage` or
+`system:audit:read`. Inside it, each page checks its own permission: **Activity** and
+**Telemetry** need `system:audit:read`,
 **Groups** needs `system:groups:manage`, and every other page needs `system:admin`.
 
 **How to configure it.** Assign platform roles in **Administration → User Management**. Add
@@ -574,7 +703,10 @@ These surfaces are off by default in production. Turn one on only when you need 
 as the change, so the change can't be saved without its record. A background relay copies each
 event into an audit table (`auth_audit_log`) that the app only ever adds to, skipping any event
 it has already copied. The relay runs in the aggregation control plane (or in-process when the
-whole platform runs as one process), and only one copy of it works at a time. Recorded events include:
+whole platform runs as one process), and only one copy of it works at a time. Beside each
+record the relay stores indexed columns — category, who did it, who it happened to, target,
+workspace, data source, the reason given and the request it came in — which the record itself
+never changes. Recorded events include:
 
 - sign-ins and sign-outs, and failed sign-ins with the reason, client address and user agent;
 - sessions refused or revoked, and why;
@@ -585,26 +717,35 @@ whole platform runs as one process), and only one copy of it works at a time. Re
   switches, identity links, and every failed SSO sign-in, keyed by the reference the user was
   shown;
 - refused permission checks (`user.access_denied`), sampled to one per person, permission and
-  scope per hour.
+  scope per hour;
+- API keys created, rotated and revoked, and keys refused — expired or paused, or misused: a
+  revoked key presented again, or a key used from a network it isn't limited to — once per key
+  and reason an hour; every event a key's request writes names its owner as the actor and
+  carries the key's id, which the explorer filters on (**Its activity** on a key), including
+  for work the control plane does on the request's behalf;
+- operations people start by hand — aggregation runs started, resumed, stopped, purged or
+  skipped, freshness rebuilds, refreshes and holds — and changes to data sources, providers,
+  version control, feature switches and other platform settings, each with the person who
+  made it and the reason they gave, if any.
 
-**How to read it.** Open **Administration → Identity & Access → Audit Log**. The page needs
-`system:audit:read`, which `super_admin` and `org_auditor` hold, on top of a permission that
-opens Administration (see [Roles and permissions](#roles-and-permissions)). Choose a **Range**
-(**Last 24h**, **Last 7d**, **Last 30d** or **All time**) and a **Scope**:
-
-| Scope | Shows |
-|---|---|
-| **Security** (default) | Sign-ins, sign-outs, failed sign-ins, session revocations and every access-control change |
-| **Activity** | Everything in **Security**, plus sign-ups, password resets and access requests |
-| **Everything** | All events, including the hourly access-denied samples |
-
-Filter by who did something or who it affected — a name, email or user id — and open any row
-for its full detail. The same events are available to scripts from
-`GET /api/v1/admin/audit`, with the same permission and cursor pagination.
+**How to read it.** Open **Administration → Activity**. The page needs `system:audit:read`,
+which `super_admin` and `org_auditor` hold, and which also opens Administration (see
+[Roles and permissions](#roles-and-permissions)). Choose a range and a lens — **Everything**
+(the default, without the routine access-denied samples), **Operations**, **Access**,
+**Identity**, **Data**, **Content**, **Platform**, or **Security** for identity and access
+together with every refused request — then filter by a person, as the one who acted or the one
+it happened to, by action, by outcome or by whether a reason was given, and open any event for
+its full detail. **Export** downloads the view as CSV (at most 50,000 rows, with spreadsheet
+formulas neutralised), and the export is itself recorded. A workspace's admins see only that
+workspace's operations, access and data changes, on its **Activity** tab, and never the raw
+event. Scripts read the same log from `GET /api/v1/admin/activity/events`; the older
+`GET /api/v1/admin/audit` still serves RBAC and identity events with cursor pagination.
 
 **Where in the code.** `backend/app/db/repositories/user_repo.py` (`create_outbox_event`),
-`backend/app/services/outbox_relay.py` (`drain_once`), `backend/app/api/v1/endpoints/audit.py`
-(`list_audit_events`), `frontend/src/components/admin/AdminAudit.tsx`.
+`backend/app/services/outbox_relay.py` (`drain_once`), `backend/app/services/activity/catalogue.py`
+(what each event is), `backend/app/api/v1/endpoints/activity.py` and
+`backend/app/api/v1/endpoints/audit.py` (`list_audit_events`),
+`frontend/src/components/activity/`.
 
 ## Privacy
 
@@ -699,6 +840,7 @@ didn't. The policy itself is `.github/SECURITY.md` in the repository.
 | Refresh-token rotation | `backend/auth_service/refresh.py` |
 | Rate limits | `backend/auth_service/ratelimit.py` |
 | CSRF | `backend/auth_service/csrf.py` |
+| API keys | `backend/auth_service/core/api_keys.py`, `backend/app/auth/api_key_auth.py`, `backend/app/auth/api_key_surface.py` |
 | Session check, permission checks and revocation | `backend/app/auth/dependencies.py`, `backend/app/services/revocation_service.py` |
 | Roles and permissions | `backend/app/config/rbac_seed.py`, `backend/app/services/permission_service.py` |
 | Middleware order, Host allowlist, body and time limits, startup checks | `backend/app/main.py` |
@@ -717,3 +859,5 @@ didn't. The policy itself is `.github/SECURITY.md` in the repository.
   sign-in gateway team needs to know what an **Enterprise gateway** requires of them.
 - [Users & Access](/guide/users-access) — when you want the administrator's view of roles,
   invitations and access.
+- [API Keys](/guide/api-keys) — when you want a person's side of keys: creating, limiting,
+  rotating and revoking them.

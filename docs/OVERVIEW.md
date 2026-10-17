@@ -429,6 +429,7 @@ timeline
                           : Three-layer resolution (system + assigned + introspected)
                           : Impact analysis and coverage checking
         Auth & Users      : Argon2id passwords and HttpOnly cookie sessions with CSRF protection
+                          : Personal API keys scoped to chosen workspaces, views and data sources
                           : Eight built-in roles, custom roles, group bindings
                           : Signup with admin approval (default OFF) and invite links
         Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
@@ -478,7 +479,7 @@ timeline
 | Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Not started |
 | Integrations | DataHub beyond connectivity | Not started — the adapter answers ping, stats and basic lineage only |
 | Integrations | Event-streaming lineage ingestion | Partly covered — a drift probe notices an external load within about a minute, and a refresh endpoint takes push notice ([External Change Notification](features/external-change-notification.md)) |
-| Enterprise | API tokens and service accounts for automation | Not started — scripts sign in with a password |
+| Enterprise | Service accounts for automation | Not started — personal API keys ship ([API Keys](/guide/api-keys)); a key acts as the person who made it |
 | Enterprise | GraphQL API layer | Not started — `backend/app/graphql/types.py` is an unused sketch |
 | Enterprise | A general access-policy engine | Not started — workspace-scoped roles, group bindings, custom roles and per-view grants cover most needs today |
 | Collaboration | Comments and annotations | Not started — change proposals ship as versioning pull requests with reviewers |
