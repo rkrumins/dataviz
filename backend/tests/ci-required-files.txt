@@ -123,6 +123,7 @@ tests/test_housekeeping_loops.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_replace.py
+tests/test_import_replace_scope.py
 tests/test_import_resolve.py
 tests/test_import_resume.py
 tests/test_import_rowmodel.py

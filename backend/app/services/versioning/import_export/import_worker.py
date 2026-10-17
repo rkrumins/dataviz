@@ -12,7 +12,8 @@ Phases (all params on the ``JobORM`` row):
            (:func:`resolve_rows`);
   build    apply each window's ops via ``apply_ops(branch_id=draft)`` before the next is resolved.
 
-Invalid rows are quarantined (partial acceptance), not fatal; the tally lands on ``job.summary``.
+Invalid rows are quarantined (partial acceptance), not fatal — but a replace then deletes nothing;
+the tally lands on ``job.summary``.
 
 The job runs on its lease (:mod:`..job_lease`) and RESUMES: every unit of work commits together with
 the job's cursor (``last_cursor``) as one fenced transaction, so a worker that dies or is stopped
@@ -353,17 +354,23 @@ class ImportWorker:
         """Parse the file into ``import_rows`` from where an earlier run of the job got to, then
         point the job at its first window (``node:-1``), with how many rows it has (``total``).
         Nothing to do once the job is past parsing."""
-        cursor = (await self._position(job_id)).cursor
+        pos = await self._position(job_id)
+        cursor = pos.cursor
         if cursor is not None and not cursor.startswith("parse:"):
             return
         self._skip = int(cursor.partition(":")[2]) if cursor else 0
-        staged = await self._parse(job_id, source_uri, fmt)
+        staged, skipped = await self._parse(job_id, source_uri, fmt)
+        # Records that are neither a node nor an edge, kept on the job (a replace refuses them).
+        tally = {"summary": {**pos.summary, "skipped": skipped}} if skipped else {}
         async with db.graphver_session() as s:
             await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor="node:-1",
-                                         total=staged, current_phase="nodes")
+                                         total=staged, current_phase="nodes", **tally)
         self._cursor = "node:-1"
 
-    async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
+    async def _parse(self, job_id: str, source_uri: str, fmt: str) -> Tuple[int, int]:
+        """Stage the file's rows past those already staged. Returns how many rows the file has, and
+        how many of its records are neither a node nor an edge — counted over the whole file, a
+        resumed parse's already staged part too."""
         # xlsx IS a zip (PK); its adapter reads it natively. A view package's data is NDJSON read out
         # of its archive (uploads.open_source): nothing to sniff, and no second spool to sniff it.
         if (fmt or "").lower() != "xlsx" and not is_archive_source(source_uri):
@@ -380,12 +387,14 @@ class ImportWorker:
         adapter = get_adapter(fmt)
         native = is_archive_source(source_uri)            # a package: its lines may be format 2
         batch: List[Dict[str, Any]] = []
-        idx = 0
+        idx = skipped = 0
         # Closed however the parse ends, so a package's spool goes with it.
         async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
             async for page in _record_pages(adapter, chunks):
                 # Normalizing is per-row Python work: a page at a time, off the event loop.
-                for kind, row in await asyncio.to_thread(_normalize_page, page, native):
+                rows, page_skipped = await asyncio.to_thread(_normalize_page, page, native)
+                skipped += page_skipped
+                for kind, row in rows:
                     if idx >= self._skip:              # below it: staged by an earlier run of the job
                         batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
                     idx += 1
@@ -394,7 +403,7 @@ class ImportWorker:
                     batch = []
         if batch:
             await self._flush(batch)
-        return idx
+        return idx, skipped
 
     async def _flush(self, batch: List[Dict[str, Any]]) -> None:
         """Stage a batch of parsed rows — batched multi-row INSERTs, no ORM object per row — and
@@ -415,17 +424,37 @@ class ImportWorker:
         creates. A window looks up only the entities its own rows name (by id, urn, qualifiedName,
         endpoints) in the draft's composed state, where the windows before it are already applied,
         so memory stays flat whatever the size of the file or of the graph. Each window is retried
-        through a transient fault (``retry_transient``) from the cursor; returns the tallies."""
+        through a transient fault (``retry_transient``) from the cursor; returns the tallies.
+
+        A replace deletes whatever no row matched, so it refuses to while the file has rows it
+        couldn't apply, which may name what it means to keep: records that are neither a node nor
+        an edge (before the first window, so nothing is written), and invalid rows (once every
+        window is in, before any delete)."""
+        skipped = int((await self._position(job_id)).summary.get("skipped") or 0)
+        if reconcile_mode == "replace" and skipped:
+            raise ValueError(
+                f"Nothing was deleted: {skipped} record(s) of the file are neither a node nor an "
+                "edge, and a replace deletes whatever the file leaves out — which could include "
+                "what those records name. Nothing was imported either. Fix those records and "
+                "import the file again.")
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         more = True
         while more:
             more = await self._lease.retry_transient(
                 lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
+            invalid = int((await self._position(job_id)).summary.get("invalid") or 0)
+            if invalid:
+                raise ValueError(
+                    f"Nothing was deleted: {invalid} row(s) of the file couldn't be applied, and a "
+                    "replace deletes whatever the file leaves out — which would include what those "
+                    "rows name. The file's other rows are on the draft. Fix those rows and import "
+                    "the file again.")
             await self._lease.retry_transient(
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
-        return {k: int(summary.get(k) or 0) for k in _TALLIES}
+        tallies = {k: int(summary.get(k) or 0) for k in _TALLIES}
+        return {**tallies, "skipped": skipped} if skipped else tallies
 
     async def _next_window(self, job_id, snap, graph_id, branch_id, actor) -> bool:
         """Resolve and build the window after the job's cursor; False once none is left.
@@ -696,15 +725,18 @@ def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optiona
     return [op for op in ops if op["entity_id"] not in reasons]
 
 
-def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> List[tuple]:
-    """``(kind, normalized row)`` for each node or edge record; anything else is skipped (tallied
-    as skipped — a malformed record never aborts the parse). ``native``: a view package's lines."""
-    out = []
+def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[List[tuple], int]:
+    """``(kind, normalized row)`` for each node or edge record (its ``kind`` in any case), and how
+    many records are neither: those are skipped and counted — a malformed record never aborts the
+    parse. ``native``: a view package's lines."""
+    out, skipped = [], 0
     for raw in page:
-        kind = raw.get("kind") if isinstance(raw, dict) else None
+        kind = str(raw.get("kind") or "").strip().lower() if isinstance(raw, dict) else ""
         if kind in ("node", "edge"):
             out.append((kind, normalize(raw, kind, native=native)))
-    return out
+        else:
+            skipped += 1
+    return out, skipped
 
 
 async def _payloads(snap, kind: str, eids) -> Dict[str, dict]:

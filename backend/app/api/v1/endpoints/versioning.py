@@ -141,7 +141,7 @@ def get_import_export_service():
             versioning=_service, scope_resolver=_resolve_export_view_scope,
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
-            publish_hook=_publish_from_job)
+            publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope)
     return _ie_service
 
 
@@ -2624,10 +2624,24 @@ async def create_import(
             actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
             branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
             idempotency_key=idempotency_key)
-    await ie.store.put_stream(created["source_uri"], request.stream())
-    status = await ie.start_import(created["job_id"])
+    try:
+        await ie.store.put_stream(created["source_uri"], request.stream())
+        status = await ie.start_import(created["job_id"])
+    except BaseException:
+        await _abandon_unqueued(ie, created["job_id"])
+        raise
     return {"jobId": created["job_id"], "branchId": created["branch_id"],
             "sourceUri": created["source_uri"], "status": status}
+
+
+async def _abandon_unqueued(ie, job_id: str) -> None:
+    """Fail an import whose request broke off before it was queued (the client went away, the
+    request timed out), so its draft takes the next import now. Shielded, to land while the request
+    is cancelled; a failure is only logged, as the reaper fails the job within the hour."""
+    try:
+        await asyncio.shield(ie.abandon_unqueued(job_id))
+    except Exception:  # noqa: BLE001 — the request's own error is the one to raise
+        logger.exception("import job %s was left pending", job_id)
 
 
 # Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
@@ -2743,8 +2757,12 @@ async def complete_import_upload(
             actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
             source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
             scope_view_id=view_id)
-    await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
-    status = await ie.start_import(created["job_id"])
+    try:
+        await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
+        status = await ie.start_import(created["job_id"])
+    except BaseException:
+        await _abandon_unqueued(ie, created["job_id"])
+        raise
     return {"jobId": created["job_id"], "branchId": created["branch_id"],
             "sourceUri": created["source_uri"], "status": status}
 

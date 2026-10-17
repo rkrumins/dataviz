@@ -341,6 +341,15 @@ TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
 TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
 # A queued job no worker has started in this long reads as failed: none may be running.
 TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
+# The transfer lane's JobReaper rules (import_export/runner.py), here so the schema upgrade that
+# fails such jobs before building uq_jobs_ingest_active (models.py) applies the same ones.
+# What a queued job reads when no worker took it in TRANSFER_QUEUE_TIMEOUT_SECS.
+JOB_NOT_STARTED = ("No worker started the job in time. Start it again, or ask an administrator whether "
+                   "the versioning worker is running.")
+# What a job reads whose creator never stored its input and queued it (an upload cut off midway).
+JOB_NEVER_QUEUED = "The upload never finished, so the job never started. Start it again."
+# How long a job may sit created but never queued before that is what happened to it.
+JOB_NEVER_QUEUED_SECS = 3600
 
 
 # --------------------------------------------------------------------------- #

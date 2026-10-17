@@ -18,13 +18,15 @@ import asyncio
 import contextlib
 import importlib.util
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import config, db, models
+from backend.app.services.versioning.job_lease import QUEUED
 from backend.app.services.versioning.models import JOB_TYPES, JobORM
 
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -461,5 +463,117 @@ async def test_the_commit_key_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))
             assert "uq_commits_idem" in await _indexes(conn, "commits")
             await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── uq_jobs_ingest_active: one active import per draft (20261017_1950_gv_ingest_active) ──
+_INGEST_ACTIVE = _VERSIONS / "20261017_1950_gv_ingest_active.py"
+
+
+def test_one_active_import_per_draft_is_migrated_and_modelled():
+    migration = _migration(_INGEST_ACTIVE)
+    assert migration.revision == _INGEST_ACTIVE.stem
+    assert migration.down_revision == "20261017_1900_gv_commits_idem"
+    index = next(i for i in JobORM.__table__.indexes if i.name == "uq_jobs_ingest_active")
+    assert index.unique and [c.name for c in index.columns] == ["branch_id"]
+    assert str(index.dialect_options["postgresql"]["where"]) == models._INGEST_ACTIVE
+
+
+def _ago(secs: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=secs)).isoformat()
+
+
+async def _ingest(conn, branch: str, *, status: str = "pending", phase=None, created: float = 0,
+                  updated=None, started=None) -> str:
+    jid = f"vjob_one_{os.urandom(4).hex()}"
+    await conn.execute(text(
+        f"INSERT INTO {_JOBS} (id, job_type, graph_id, branch_id, status, current_phase, progress, "
+        "total, processed, batch_size, retry_count, max_retries, last_sequence, auto_publish, "
+        "created_at, updated_at, started_at) VALUES (:id, 'ingest', 'g_one', :b, :st, :ph, 0, 0, 0, "
+        "1, 0, 0, 0, false, :c, :u, :s)"),
+        {"id": jid, "b": branch, "st": status, "ph": phase, "c": _ago(created),
+         "u": _ago(updated if updated is not None else created),
+         "s": _ago(started) if started is not None else None})
+    return jid
+
+
+async def _state(conn, jid: str):
+    return tuple((await conn.execute(text(
+        f"SELECT status, error_message FROM {_JOBS} WHERE id = :id"), {"id": jid})).one())
+
+
+def _branch() -> str:
+    return "br_one_" + os.urandom(3).hex()
+
+
+@contextlib.asynccontextmanager
+async def _without_ingest_active(engine):
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".uq_jobs_ingest_active'))
+            yield conn
+        finally:
+            await trans.rollback()
+
+
+def _run_ingest_active(step: str):
+    migration = _migration(_INGEST_ACTIVE)
+
+    def apply(sync_conn):
+        migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                       execute=lambda sql: sync_conn.execute(text(sql)))
+        getattr(migration, step)()
+    return apply
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_uq_jobs_ingest_active(store):
+    """Before the build, the jobs nothing will run are failed by the reaper's rules, and of two
+    queued imports on one draft the later is failed: it never started."""
+    async with _without_ingest_active(store) as conn:
+        cut_off, live = _branch(), _branch()
+        never_queued = await _ingest(conn, cut_off, created=2 * 3600)   # its upload was cut off
+        retried = await _ingest(conn, cut_off, phase=QUEUED, created=60)
+        timed_out = await _ingest(conn, _branch(), phase=QUEUED,
+                                  updated=config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
+        first = await _ingest(conn, live, phase=QUEUED, created=60)
+        second = await _ingest(conn, live, phase=QUEUED, created=30)
+        await conn.run_sync(models._ensure_schema_upgrades)
+        assert "uq_jobs_ingest_active" in await _indexes(conn, "jobs")
+        assert await _state(conn, never_queued) == ("failed", config.JOB_NEVER_QUEUED)
+        assert await _state(conn, timed_out) == ("failed", config.JOB_NOT_STARTED)
+        assert await _state(conn, retried) == await _state(conn, first) == ("pending", None)
+        status, message = await _state(conn, second)
+        assert status == "failed" and "Another import was already running" in message
+        await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+
+
+@e2e
+async def test_a_running_import_is_never_failed_to_build_the_index(store):
+    """Two imports running on one draft (old workers mid-upgrade): the migration stops and names
+    them; a worker start leaves the index for a later start."""
+    async with _without_ingest_active(store) as conn:
+        branch = _branch()
+        a = await _ingest(conn, branch, status="running", started=60, created=90)
+        b = await _ingest(conn, branch, status="running", started=30, created=60)
+        with pytest.raises(RuntimeError, match=branch):
+            await conn.run_sync(_run_ingest_active("upgrade"))
+        await conn.run_sync(models._ensure_schema_upgrades)        # logs, never raises
+        assert "uq_jobs_ingest_active" not in await _indexes(conn, "jobs")
+        assert await _state(conn, a) == await _state(conn, b) == ("running", None)
+
+
+@e2e
+async def test_the_one_active_import_migration_round_trips(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(_run_ingest_active("downgrade"))
+            assert "uq_jobs_ingest_active" not in await _indexes(conn, "jobs")
+            await conn.run_sync(_run_ingest_active("upgrade"))
+            assert "uq_jobs_ingest_active" in await _indexes(conn, "jobs")
+            await conn.run_sync(_run_ingest_active("upgrade"))      # idempotent
         finally:
             await trans.rollback()

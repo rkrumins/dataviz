@@ -256,6 +256,28 @@ def test_two_items_of_one_file_sharing_a_qualified_name_are_not_merged():
         ("create", "ent_0"), ("update", "ent_0"), ("create", "ev_1")], ops
 
 
+def test_an_invalid_row_still_names_the_entity_it_matched():
+    """A row quarantined as invalid — its columns shifted, or its type off the ontology — still
+    records the entity it names, so a replace never reads that entity as absent from the file. A
+    qualifiedName several entities carry still names none of them."""
+    ops, res = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:A",
+         "entityType": "Tabel"},
+        {"_row_index": 1, "kind": "node", "op": "invalid", "op_error": "shifted", "entity_id": "",
+         "urn": "urn:A"},
+    ], _indexes(), mint_id=lambda: "never", ontology={"node_types": ["Table"]})
+    assert ops == []
+    assert [(r["resolved_op"], r["matched_entity_id"]) for r in res] == [
+        ("invalid", "ent_A"), ("invalid", "ent_A")], res
+    assert res[1]["reasons"] == ["shifted"]
+
+    _, res = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "invalid", "op_error": "shifted", "entity_id": "",
+         "qualifiedName": "shared.q"},
+    ], _two_nodes(), mint_id=lambda: "never")
+    assert (res[0]["resolved_op"], res[0]["matched_entity_id"]) == ("invalid", None), res
+
+
 def test_endpoints_resolve_by_entity_id_then_urn_then_qualified_name():
     idx = _two_nodes()
     minted = iter(["ev_1", "ev_2", "ev_3"])

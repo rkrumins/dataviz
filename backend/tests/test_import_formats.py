@@ -148,7 +148,7 @@ async def _worker_parse(declared: str, body: bytes):
         async def _capture(batch):
             staged.extend(batch)
         worker._flush = _capture
-        count = await worker._parse("job_1", "source", declared)
+        count, _skipped = await worker._parse("job_1", "source", declared)
         return count, [row["raw"] for row in staged]
     finally:
         shutil.rmtree(root, ignore_errors=True)

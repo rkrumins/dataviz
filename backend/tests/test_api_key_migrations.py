@@ -41,6 +41,8 @@ _ON_LIVE_TABLES = {
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
     # graphver.commits, which every save writes.
     "20261017_1900_gv_commits_idem.py": ("upgrade", "downgrade"),
+    # graphver.jobs, which every job's heartbeat writes.
+    "20261017_1950_gv_ingest_active.py": ("upgrade", "downgrade"),
 }
 
 

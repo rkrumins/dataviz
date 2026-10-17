@@ -17,7 +17,7 @@ is resolved via the small, mutable :class:`EntityHeadORM` pointer table (plan
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -293,6 +293,8 @@ class ProjectionStateORM(VersioningBase):
 
 
 # Every job type the code writes. ``ck_jobs_type`` allows these (∪ whatever a DB already holds).
+# An import that holds its draft (``uq_jobs_ingest_active``).
+_INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
              "package_inspect")
 
@@ -361,6 +363,14 @@ class JobORM(VersioningBase):
             "idempotency_key",
             unique=True,
             postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+        # One import at a time per draft: two would interleave their windows, and a replace
+        # among them would delete what the other writes.
+        Index(
+            "uq_jobs_ingest_active",
+            "branch_id",
+            unique=True,
+            postgresql_where=text(_INGEST_ACTIVE),
         ),
         CheckConstraint(
             "status IN ('pending','running','completed','failed','cancelled')",
@@ -721,6 +731,13 @@ def _ensure_schema_upgrades(conn) -> None:
             ensure_commits_idem_index(conn)
     except Exception:
         logger.exception("uq_commits_idem was not built; the next start tries again")
+    # 20261017_1950_gv_ingest_active. In a savepoint too; two imports still running on one draft
+    # leave the index for a later start.
+    try:
+        with conn.begin_nested():
+            ensure_ingest_active_index(conn, strict=False)
+    except Exception:
+        logger.exception("uq_jobs_ingest_active was not built; the next start tries again")
 
 
 def ensure_ps_fencing_columns(conn) -> None:
@@ -808,6 +825,58 @@ def ensure_commits_idem_index(conn) -> None:
     conn.execute(text(
         f"CREATE UNIQUE INDEX IF NOT EXISTS uq_commits_idem ON {commits} "
         "(graph_id, branch_id, idempotency_key) WHERE idempotency_key IS NOT NULL"))
+
+
+def ensure_ingest_active_index(conn, *, strict: bool) -> None:
+    """Build ``uq_jobs_ingest_active``: one import pending or running per draft. First, as the
+    transfer lane's JobReaper would, the imports nothing will run are failed (never queued for
+    ``JOB_NEVER_QUEUED_SECS``, or queued past ``TRANSFER_QUEUE_TIMEOUT_SECS``); then, of the
+    imports left on one draft, the first (a running one first) keeps it and a later one that never
+    started is failed. Imports that still share a draft have started, and are never failed here:
+    ``strict`` (the migration) raises naming them; otherwise the build waits for a later start.
+    A no-op once the index exists. ``conn`` is a synchronous connection (alembic's bind, or
+    ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("jobs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"), {"i": f'"{_SCHEMA}".uq_jobs_ingest_active'}).scalar():
+        return
+    jobs = f'"{_SCHEMA}"."jobs"'
+    now = datetime.now(timezone.utc)
+
+    def fail(where: str, message: str, **params) -> int:
+        return conn.execute(text(
+            f"UPDATE {jobs} j SET status = 'failed', error_message = :msg, completed_at = :now, "
+            f"updated_at = :now {where}"), {"msg": message, "now": now.isoformat(), **params}).rowcount
+
+    pending = "j.job_type = 'ingest' AND j.status = 'pending'"
+    reaped = fail(f"WHERE {pending} AND j.current_phase = 'queued' AND j.updated_at < :cut",
+                  config.JOB_NOT_STARTED,
+                  cut=(now - timedelta(seconds=config.TRANSFER_QUEUE_TIMEOUT_SECS)).isoformat())
+    reaped += fail(f"WHERE {pending} AND j.current_phase IS NULL AND j.created_at < :cut",
+                   config.JOB_NEVER_QUEUED,
+                   cut=(now - timedelta(seconds=config.JOB_NEVER_QUEUED_SECS)).isoformat())
+    stacked = fail(
+        f"FROM (SELECT id, row_number() OVER (PARTITION BY branch_id ORDER BY status = 'running' "
+        f"DESC, created_at) AS rn FROM {jobs} WHERE branch_id IS NOT NULL AND {_INGEST_ACTIVE}) d "
+        f"WHERE j.id = d.id AND d.rn > 1 AND {pending} AND j.started_at IS NULL",
+        "Another import was already running on this draft. Start this one again when it has finished.")
+    if reaped or stacked:
+        logger.warning("uq_jobs_ingest_active: failed %d import(s) nothing would run and %d queued "
+                       "behind another on its draft", reaped, stacked)
+    shared = conn.execute(text(
+        f"SELECT branch_id, string_agg(id, ', ' ORDER BY created_at) FROM {jobs} "
+        f"WHERE branch_id IS NOT NULL AND {_INGEST_ACTIVE} GROUP BY branch_id HAVING count(*) > 1")).all()
+    if shared:
+        message = ("uq_jobs_ingest_active: imports running together on one draft ("
+                   + "; ".join(f"{branch}: {ids}" for branch, ids in shared)
+                   + "). Let them finish, or fail the stale ones, then run this again.")
+        if strict:
+            raise RuntimeError(message)
+        logger.warning("%s The next start tries again.", message)
+        return
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_ingest_active ON {jobs} (branch_id) "
+        f"WHERE {_INGEST_ACTIVE}"))
 
 
 def widen_job_type_check(conn, required) -> None:

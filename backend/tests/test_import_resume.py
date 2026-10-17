@@ -298,8 +298,8 @@ async def test_an_import_taken_over_at_its_finish_stops_there():
 ])
 async def test_only_a_failed_job_is_queued_again(monkeypatch, status, cursor, queued, cleared):
     log = []
-    row = SimpleNamespace(status=status, last_cursor=cursor, current_phase=None,
-                          error_message="it broke", completed_at="t", updated_at="t",
+    row = SimpleNamespace(job_type="ingest", branch_id="br_1", status=status, last_cursor=cursor,
+                          current_phase=None, error_message="it broke", completed_at="t", updated_at="t",
                           summary={**_NO_TALLIES, "new": 9, "takeovers": 4,
                                    "failure": {"code": "infrastructure", "action": "resume"}})
     monkeypatch.setattr(ver_db, "graphver_session", _sessions(log, row))
