@@ -1654,6 +1654,8 @@ async def _publish_from_job(job: dict) -> dict:
         try:
             with _domain_errors():
                 meta = await svc.get_graph(graph_id)
+                if meta is None:                        # trashed, or being purged, since queued
+                    raise HTTPException(status_code=404, detail="graph not found")
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
@@ -3113,7 +3115,9 @@ async def open_pull_request(
     # parent's data source too, not only the fork's.
     parent_id = _meta.get("fork_parent_graph_id")
     if parent_id:
-        parent = await svc.get_graph(parent_id) or {}
+        parent = await svc.get_graph(parent_id)
+        if parent is None:                              # the parent is trashed, or purging
+            raise HTTPException(status_code=404, detail="parent graph not found")
         await api_key_auth.hold_to_data_source(
             request, parent.get("data_source_id"), parent.get("workspace_id"),
         )

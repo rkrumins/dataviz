@@ -166,6 +166,26 @@ async def test_a_data_source_change_is_recorded_once_under_its_workspace(
 
 
 @pytest.mark.asyncio
+async def test_a_permanent_delete_refused_for_live_forks_records_and_deletes_nothing(
+    test_client, db_session, estate, no_side_stores, monkeypatch,
+):
+    from backend.app.services.versioning import purge_worker
+
+    async def _refuse(**k):
+        raise purge_worker.PurgeRefused("1 fork(s) still read this graph's history", "live_forks")
+
+    monkeypatch.setattr(purge_worker, "purge_graph_for_data_source", _refuse)
+    resp = await test_client.delete(f"{DS}/ds_2?permanent=true", headers=HEADERS)
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["type"] == "live_forks"
+
+    assert await _recorded(db_session, "workspace.data_source.removed") == []
+    still = (await db_session.execute(select(WorkspaceDataSourceORM.id).where(
+        WorkspaceDataSourceORM.id == "ds_2"))).scalar()
+    assert still == "ds_2"
+
+
+@pytest.mark.asyncio
 async def test_onboarding_a_source_records_it_and_who_added_it(
     test_client, db_session, estate, no_side_stores,
 ):

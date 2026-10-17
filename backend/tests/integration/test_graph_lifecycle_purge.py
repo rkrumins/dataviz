@@ -1,0 +1,327 @@
+"""A deleted graph's way out — trash, restore, expiry, purge, retry — against a real Postgres.
+
+* a trashed graph is gone to every reader; a restore brings it back until a purge is queued;
+* a purge that fails half way still blocks the restore, and the reaper queues the same job again;
+* the purge cancels the graph's other jobs as it starts, and leaves no row of the graph behind;
+* a purge that "Delete permanently" queued is revived although its data source row is gone;
+* a graph that forks still read is never purged, whoever asks;
+* a restore that wins the race with the reaper keeps its graph.
+
+The data-source rows the reaper reads live in the management database; they are faked here.
+Unit level: ``test_purge_reaper_unit.py``.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import func, select, text
+
+from backend.app.services.versioning import db, models, purge_worker
+from backend.app.services.versioning.job_lease import Lease
+from backend.app.services.versioning.models import GraphORM, JobORM
+from backend.app.services.versioning.purge_worker import (
+    PurgeRefused,
+    PurgeRunner,
+    Reaper,
+    create_purge_job,
+    purge_pending_for_data_source,
+    restore_graphs_for_data_source,
+    tombstone_graphs_for_data_source,
+)
+from backend.app.services.versioning.service import GraphVersioningService
+from backend.tests.integration.test_versioning_projection import _edit_publish, _node
+
+pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
+                                reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+
+WS = "ws_purge"
+
+
+@pytest.fixture(autouse=True)
+async def _schema(monkeypatch):
+    await models.create_schema_and_partitions()
+    monkeypatch.setattr(Reaper, "_orphaned_package_sources", _no_orphans)
+    yield
+    await db.dispose_engine()
+
+
+async def _no_orphans(_self):
+    return 0
+
+
+async def _nobody(*_a):
+    return []
+
+
+def _runner() -> PurgeRunner:
+    # No FalkorDB here: the graph is never projected, and nothing else reads its key.
+    return PurgeRunner(None, key_in_use=_nobody)
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return list(self._rows)
+
+
+def _app(expired):
+    """The management database's data-source rows: ``expired`` are past their grace."""
+    gone = []
+
+    class _Session:
+        async def execute(self, _stmt):
+            return _Rows([(ds, WS, "alice") for ds in expired])
+
+        async def get(self, _model, ident):
+            if ident in expired and ident not in gone:
+                return SimpleNamespace(id=ident, deleted_at="2020-01-01T00:00:00+00:00")
+            return None
+
+        async def delete(self, row):
+            gone.append(row.id)
+
+        async def commit(self):
+            pass
+
+    def sessions():
+        return _Ctx(_Session())
+
+    return sessions, gone
+
+
+class _Ctx:
+    def __init__(self, s):
+        self._s = s
+
+    async def __aenter__(self):
+        return self._s
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+async def _graph(svc, *, published=True):
+    ds = "ds_purge_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id=WS, actor="alice"))["graph_id"]
+    if published:
+        await _edit_publish(svc, gid, "alice", [
+            {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+            {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        ], "seed")
+    return ds, gid
+
+
+async def _take(job_id) -> Lease:
+    async with db.graphver_session() as s:
+        job = await s.get(JobORM, job_id)
+        job.retry_count += 1
+        job.status = "running"
+        job.updated_at = models._now()
+        return Lease(job_id=job.id, job_type=job.job_type, epoch=job.retry_count,
+                     workspace_id=job.workspace_id, graph_id=job.graph_id)
+
+
+async def _job(job_id):
+    async with db.graphver_session() as s:
+        return await s.get(JobORM, job_id)
+
+
+async def _purges(gid):
+    async with db.graphver_session() as s:
+        return (await s.execute(select(JobORM).where(
+            JobORM.job_type == "purge", JobORM.graph_id == gid))).scalars().all()
+
+
+async def _rows_of(gid, table):
+    async with db.graphver_session() as s:
+        return int(await s.scalar(text(
+            f'SELECT count(*) FROM "{purge_worker._sch()}"."{table}" WHERE graph_id = :g'),
+            {"g": gid}))
+
+
+def _boom_on_nodes(monkeypatch, seen=None):
+    """Fail the purge, once, as it reaches node_versions — not a transient fault, so it is
+    recorded rather than waited out."""
+    original = PurgeRunner._delete_window
+    fired = []
+
+    async def window(self, lease, graph_id, table, pk):
+        if table == "node_versions" and not fired:
+            fired.append(1)
+            if seen is not None:
+                await seen()
+            raise RuntimeError("boom")
+        return await original(self, lease, graph_id, table, pk)
+
+    monkeypatch.setattr(PurgeRunner, "_delete_window", window)
+
+
+async def test_tombstone_restore_expire_purge_retry(monkeypatch):
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+
+    # 1. Trash, then undo.
+    assert await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS,
+                                                  actor="alice") == 1
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is True
+    assert await svc.get_graph(gid) is not None
+
+    # 2. Trash again: the graph is gone to every reader.
+    await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+    assert await svc.get_graph(gid) is None
+
+    # 3. A job of the graph's still queued.
+    async with db.graphver_session() as s:
+        export = JobORM(job_type="export", graph_id=gid, workspace_id=WS, data_source_id=ds,
+                        status="pending")
+        s.add(export)
+        await s.flush()
+        export_id = export.id
+
+    # 4. The grace runs out: the reaper queues the purge, and restore is now refused.
+    app, gone = _app([ds])
+    out = await Reaper(app_session_factory=app).run_once()
+    assert out["queued"] == 1 and gone == []
+    (purge,) = await _purges(gid)
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is False
+
+    # 5. The purge fails half way. By then its count phase has cancelled the export.
+    states = []
+
+    async def export_state():
+        states.append((await _job(export_id)).status)
+
+    _boom_on_nodes(monkeypatch, export_state)
+    assert (await _runner().run_job(await _take(purge.id)))["status"] == "failed"
+    assert states == ["cancelled"]
+    failed = await _job(purge.id)
+    assert (failed.status, failed.current_phase) == ("failed", "nodes")
+    assert failed.summary["failure"]["code"] == "infrastructure"
+
+    # 6. Half a graph is past the point of no return.
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is False
+    assert await purge_pending_for_data_source(data_source_id=ds) is True
+
+    # 7. The reaper queues the SAME job again, from where it stopped (a regression guard).
+    await Reaper(app_session_factory=app).run_once()
+    again = await _job(purge.id)
+    assert (again.status, again.current_phase) == ("pending", "nodes")
+    assert [j.id for j in await _purges(gid)] == [purge.id]
+
+    # 8. It finishes, and nothing of the graph is left but the purge's own receipt.
+    assert (await _runner().run_job(await _take(purge.id)))["status"] == "completed"
+    async with db.graphver_session() as s:
+        assert await s.get(GraphORM, gid) is None
+        assert await s.get(JobORM, export_id) is None
+    for table in [t for t, _ in purge_worker._BULK] + ["branches", "projection_state"]:
+        assert await _rows_of(gid, table) == 0, table
+
+    # 9. The next pass removes the data source row.
+    out = await Reaper(app_session_factory=app).run_once()
+    assert out["reaped"] == 1 and gone == [ds]
+
+
+async def test_a_failed_permanent_purge_is_revived_without_its_data_source(monkeypatch):
+    svc = GraphVersioningService()
+    _ds, gid = await _graph(svc)
+    job_id = await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    _boom_on_nodes(monkeypatch)
+    assert (await _runner().run_job(await _take(job_id)))["status"] == "failed"
+
+    app, _ = _app([])                              # "Delete permanently" removed the row
+    out = await Reaper(app_session_factory=app).run_once()
+    assert out["revived"] >= 1
+    assert (await _job(job_id)).status == "pending"
+
+
+async def test_a_graph_that_forks_read_is_never_purged():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob")
+    await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+
+    with pytest.raises(PurgeRefused) as exc:
+        await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    assert exc.value.code == "live_forks"
+    assert await create_purge_job(graph_id=gid, workspace_id=WS, actor="reaper",
+                                  require_tombstoned=True) is None
+    assert await _purges(gid) == []
+
+    # A purge queued some other way refuses at its count, and deletes nothing.
+    nodes = await _rows_of(gid, "node_versions")
+    async with db.graphver_session() as s:
+        job = JobORM(job_type="purge", graph_id=gid, workspace_id=WS, data_source_id=ds,
+                     status="pending", current_phase="count", idempotency_key=f"purge:{gid}",
+                     summary={"actor": "test"})
+        s.add(job)
+        await s.flush()
+        job_id = job.id
+    assert (await _runner().run_job(await _take(job_id)))["status"] == "failed"
+    refused = await _job(job_id)
+    assert refused.summary["failure"]["code"] == "live_forks"
+    assert await _rows_of(gid, "node_versions") == nodes > 0
+
+    # The reaper does not re-run a refusal.
+    app, _ = _app([])
+    await Reaper(app_session_factory=app).run_once()
+    assert (await _job(job_id)).status == "failed"
+
+
+async def test_a_restore_holding_the_graph_wins_the_race_with_the_reaper():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+
+    async with db.graphver_session() as s1:          # commits on exit
+        g = (await s1.execute(select(GraphORM).where(GraphORM.id == gid)
+                              .with_for_update())).scalars().one()
+        g.deleted_at = g.deleted_by = None
+        await s1.flush()
+        reaper = asyncio.create_task(create_purge_job(
+            graph_id=gid, workspace_id=WS, actor="reaper", require_tombstoned=True))
+        await asyncio.sleep(0.3)
+        assert not reaper.done(), "the reaper must wait for the graph row the restore holds"
+
+    assert await reaper is None
+    assert await _purges(gid) == []
+    assert await svc.get_graph(gid) is not None
+
+
+async def test_the_reaper_skips_a_graph_restored_mid_pass(monkeypatch):
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id=WS, actor="alice")
+    original = purge_worker.purge_graph_for_data_source
+
+    async def restored_first(**kw):
+        assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS)
+        return await original(**kw)
+
+    monkeypatch.setattr(purge_worker, "purge_graph_for_data_source", restored_first)
+    app, gone = _app([ds])
+    out = await Reaper(app_session_factory=app).run_once()
+
+    assert out["queued"] == 0 and gone == []
+    assert await _purges(gid) == []
+    assert await svc.get_graph(gid) is not None
+
+
+async def test_an_abandoned_enablement_does_not_block_a_later_restore():
+    """Regression guard: abandoning an enablement purges its graph and leaves the data source
+    live. Trashing that data source later must still be undoable."""
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc, published=False)
+    job_id = await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice",
+                                    data_source_id=ds)
+    assert (await _runner().run_job(await _take(job_id)))["status"] == "completed"
+
+    assert await restore_graphs_for_data_source(data_source_id=ds, workspace_id=WS) is True
+    assert await purge_pending_for_data_source(data_source_id=ds) is False
+    async with db.graphver_session() as s:
+        assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
+            GraphORM.data_source_id == ds))) == 0

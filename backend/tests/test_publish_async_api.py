@@ -148,3 +148,38 @@ async def test_a_refused_publish_job_keeps_a_bounded_refusal(monkeypatch):
     detail = out["error"]["detail"]
     assert detail["type"] == "ontology_violation" and detail["total"] == 250
     assert [v["reason"] for v in detail["violations"]] == [f"bad {i}" for i in range(100)]
+
+
+async def test_a_queued_publish_on_a_deleted_graph_is_refused(monkeypatch):
+    """A graph trashed (or being purged) after its publish was queued: the job answers 404, as
+    the route would, rather than publish into it with no ontology to check against."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.api.v1.endpoints import versioning as ep
+
+    published = []
+
+    class _Gone:
+        async def get_graph(self, graph_id):
+            return None
+
+        async def publish(self, **kw):
+            published.append(kw)
+            return "c1"
+
+    @asynccontextmanager
+    async def _session():
+        yield None
+
+    async def _nothing(*_args):
+        return None
+
+    monkeypatch.setattr(ep, "get_versioning_service", lambda: _Gone())
+    monkeypatch.setattr("backend.app.db.engine.get_async_session", _session)
+    for name in ("_live_containment_types", "_rules_for_meta", "_bump_main_cache",
+                 "_touch_views_data_updated", "_promote_view_layout_overlay", "nudge_projection"):
+        monkeypatch.setattr(ep, name, _nothing)
+    out = await ep._publish_from_job({"graphId": "g1", "branchId": "br_small", "actor": "a",
+                                      "workspaceId": "ws1", "message": "m"})
+    assert out["error"]["status"] == 404
+    assert published == []

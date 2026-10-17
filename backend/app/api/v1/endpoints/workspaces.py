@@ -732,6 +732,9 @@ async def remove_data_source(
                 data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
             logger.info("data source %s PERMANENTLY deleted by %s; purge queued: %s",
                         ds_id, _user.id, jobs)
+        except purge_worker.PurgeRefused as exc:
+            # Nothing was queued, so nothing is recorded or deleted (e.g. forks still read it).
+            raise HTTPException(status_code=409, detail={"type": exc.code, "message": exc.reason})
         except Exception:
             # Refuse rather than orphan. A permanent delete whose purge never got queued is
             # exactly the leak that put 2,296 unreachable graphs in this database.

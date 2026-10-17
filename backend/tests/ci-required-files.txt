@@ -175,6 +175,7 @@ tests/test_publish_async_api.py
 tests/test_publish_job_resume.py
 tests/test_publish_view_library_script.py
 tests/test_purge_ownership_guard.py
+tests/test_purge_reaper_unit.py
 tests/test_purge_then_rebuild.py
 tests/test_raw_properties.py
 tests/test_rbac_migration.py

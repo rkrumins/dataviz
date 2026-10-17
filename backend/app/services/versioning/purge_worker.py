@@ -50,7 +50,7 @@ import inspect
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text, update
 
 from . import config, db, job_lease
 from .job_lease import Draining, Lease, Superseded
@@ -126,6 +126,15 @@ async def delete_window(s, table: str, pk: str, graph_id: str, *, where: str = "
         f'WHERE t.graph_id = :g AND t.ctid = d.ctid'
     ), {"g": graph_id, "n": max(1000, int(config.PURGE_WINDOW)), **(params or {})})
     return res.rowcount or 0
+
+
+async def _forks_reading(s, graph: GraphORM) -> int:
+    """How many forks still read ``graph``'s history. A graph with nothing past its genesis
+    commit (an abandoned enablement) gives its forks nothing, so none hold it back."""
+    if graph.main_head_commit_seq <= 1:
+        return 0
+    return int(await s.scalar(select(func.count()).select_from(GraphORM).where(
+        GraphORM.fork_parent_graph_id == graph.id)) or 0)
 
 
 async def graph_key_readers(provider_id: Optional[str], graph_name: str,
@@ -254,6 +263,17 @@ class PurgeRunner:
                 raise PurgeRefused(
                     "this graph is still live — a purge only ever runs on a graph that was "
                     "explicitly deleted", "graph_not_deleted")
+            forks = await _forks_reading(s, graph)
+            if forks:
+                raise PurgeRefused(f"{forks} fork(s) still read this graph's history", "live_forks")
+
+            # Nothing else runs on a graph being destroyed. Cancelled with the checkpoint below,
+            # so a purge that is no longer ours cancels nothing.
+            await s.execute(update(JobORM).where(
+                JobORM.graph_id == graph_id, JobORM.id != lease.job_id,
+                JobORM.status.in_(("pending", "running")),
+            ).values(status="cancelled", error_message="the graph is being permanently deleted",
+                     completed_at=_now(), updated_at=_now()))
 
             total = 0
             for table, _pk in _BULK:
@@ -390,7 +410,8 @@ class PurgeRunner:
 # ------------------------------------------------------------------ enqueue --
 async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor: str,
                            data_source_id: Optional[str] = None,
-                           session_factory=None, session=None) -> Optional[str]:
+                           session_factory=None, session=None,
+                           require_tombstoned: bool = False) -> Optional[str]:
     """Soft-delete the graph and enqueue its purge, in ONE transaction.
 
     The two must be atomic. A soft-delete with no job leaks the rows forever (that is exactly the
@@ -403,22 +424,46 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
     Idempotent: a second delete of the same graph returns the job already in flight, and queues
     a FAILED one again (its phase kept — DELETE is idempotent, so it carries on) rather than
     adding another beside it: ``purge:{graph_id}`` is unique whatever the job's status
-    (``ix_jobs_idem_active``), and nothing else retries a purge.
+    (``ix_jobs_idem_active``).
+
+    ``require_tombstoned`` is the reaper's: it acts on a graph only while it is still in the
+    trash — a restore that took the graph row first wins — and re-queues only a purge that failed
+    on infrastructure, never one that was refused. A graph that forks still read is not purged:
+    the reaper leaves it (None); anyone else is refused (:class:`PurgeRefused` ``live_forks``).
     """
     sf = session_factory or db.graphver_session
     async with (contextlib.nullcontext(session) if session is not None else sf()) as s:
-        graph = await s.get(GraphORM, graph_id)
-        if graph is None:
-            return None
-
+        # Jobs before graphs (15 §8). The graph row is the one restore locks, so whichever of
+        # the two commits second sees what the other did.
         existing = (await s.execute(
             select(JobORM).where(
                 JobORM.job_type == PURGE_JOB_TYPE,
                 JobORM.graph_id == graph_id,
                 JobORM.status.in_(("pending", "running", "failed")),
-            ).limit(1))).scalars().first()
+            ).order_by(JobORM.created_at.desc()).limit(1).with_for_update())).scalars().first()
+        graph = (await s.execute(select(GraphORM).where(GraphORM.id == graph_id)
+                                 .with_for_update())).scalars().first()
+        if graph is None:
+            return None
+        if require_tombstoned and graph.deleted_at is None:
+            logger.info("purge skipped: graph %s was restored", graph_id)
+            return None
+
+        forks = await _forks_reading(s, graph)
+        if forks:
+            reason = f"{forks} fork(s) still read this graph's history"
+            if require_tombstoned:
+                logger.warning("purge of graph %s skipped: %s", graph_id, reason)
+                return None
+            raise PurgeRefused(reason, "live_forks")
+
         if existing is not None and existing.status != "failed":
             return existing.id
+        if existing is not None and require_tombstoned and \
+                ((existing.summary or {}).get("failure") or {}).get("code") != "infrastructure":
+            logger.warning("purge %s of graph %s was refused; not re-queueing it", existing.id,
+                           graph_id)
+            return None
 
         graph.deleted_at = graph.deleted_at or _now()
         graph.deleted_by = graph.deleted_by or actor
@@ -451,7 +496,7 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
 
 
 async def purge_graph_for_data_source(*, data_source_id: str, workspace_id: str,
-                                      actor: str) -> List[str]:
+                                      actor: str, require_tombstoned: bool = False) -> List[str]:
     """Soft-delete + enqueue a purge for every versioned graph of a data source.
 
     This is the PERMANENT path — "delete permanently", and the reaper once the grace period is
@@ -472,13 +517,22 @@ async def purge_graph_for_data_source(*, data_source_id: str, workspace_id: str,
     jobs: List[str] = []
     for gid in graphs:
         jid = await create_purge_job(graph_id=gid, workspace_id=workspace_id, actor=actor,
-                                     data_source_id=data_source_id)
+                                     data_source_id=data_source_id,
+                                     require_tombstoned=require_tombstoned)
         if jid:
             jobs.append(jid)
     return jobs
 
 
 # ---------------------------------------------------------------- the undo window --
+def _purge_jobs_of(data_source_id: str):
+    """Every purge job, in any status, of a graph the data source still has. A purge that
+    completed took its graph row with it, so it no longer counts: the purge of a graph whose
+    enablement was abandoned must not hold its data source back later."""
+    return and_(JobORM.job_type == PURGE_JOB_TYPE, JobORM.graph_id.in_(
+        select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))
+
+
 async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id: str,
                                            actor: str) -> int:
     """Hide a data source's graphs WITHOUT queueing anything. The reversible half of delete.
@@ -502,11 +556,12 @@ async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id:
 async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: str) -> bool:
     """Bring a data source's graphs back. Returns False if it is too late.
 
-    TOO LATE MEANS: a purge job exists. That is the whole concurrency design — rather than trying
-    to cancel a purge mid-flight and stitch a half-deleted graph back together, restore simply
-    REFUSES once a purge has been queued. A purge and a restore can therefore never overlap, and
-    there is no partial-restore state to reason about. The row lock below serialises us against
-    the reaper deciding to queue one at this exact moment.
+    TOO LATE MEANS: a purge job exists, in any status — a failed one has already deleted part
+    of the graph. That is the whole concurrency design — rather than trying to cancel a purge
+    mid-flight and stitch a half-deleted graph back together, restore simply REFUSES once a purge
+    has been queued. A purge and a restore can therefore never overlap, and there is no
+    partial-restore state to reason about. The row lock below serialises us against the reaper
+    deciding to queue one at this exact moment.
     """
     async with db.graphver_session() as s:
         graphs = (await s.execute(
@@ -515,12 +570,9 @@ async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: s
                 GraphORM.workspace_id == workspace_id,
             ).with_for_update())).scalars().all()
 
-        for g in graphs:
-            doomed = await s.scalar(select(func.count()).select_from(JobORM).where(
-                JobORM.job_type == PURGE_JOB_TYPE, JobORM.graph_id == g.id,
-                JobORM.status.in_(("pending", "running", "completed"))))
-            if doomed:
-                return False                       # being (or already) destroyed — cannot undo
+        if await s.scalar(select(func.count()).select_from(JobORM).where(
+                _purge_jobs_of(data_source_id))):
+            return False                           # being (or already) destroyed — cannot undo
 
         for g in graphs:
             g.deleted_at = None
@@ -529,19 +581,19 @@ async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: s
 
 
 async def purge_pending_for_data_source(*, data_source_id: str) -> bool:
-    """Is this data source past the point of no return? (Drives the trash UI's "Deleting…" state.)"""
+    """Is this data source past the point of no return? (Drives the trash UI's "Deleting…" state.)
+    A failed purge is too: it will be queued again, and restore refuses it."""
     async with db.graphver_session() as s:
         return bool(await s.scalar(
-            select(func.count()).select_from(JobORM)
-            .join(GraphORM, GraphORM.id == JobORM.graph_id)
-            .where(GraphORM.data_source_id == data_source_id,
-                   JobORM.job_type == PURGE_JOB_TYPE,
-                   JobORM.status.in_(("pending", "running")))))
+            select(func.count()).select_from(JobORM).where(_purge_jobs_of(data_source_id))))
 
 
 #: How long a data source made from a view package may stand without its versioned graph before the
 #: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
 ORPHAN_PACKAGE_SOURCE_SECS = 3600
+
+#: Expired data sources whose graph the reaper left standing, so it says so once, not every pass.
+_LEFT_STANDING: set = set()
 
 
 class Reaper:
@@ -585,48 +637,76 @@ class Reaper:
 
         queued = reaped = 0
         for ds_id, ws_id, actor in expired:
-            async with self._gv() as gs:
-                graphs = (await gs.execute(select(GraphORM.id).where(
-                    GraphORM.data_source_id == ds_id))).scalars().all()
-                unfinished = 0
-                if graphs:
-                    unfinished = int(await gs.scalar(
-                        select(func.count()).select_from(JobORM).where(
-                            JobORM.job_type == PURGE_JOB_TYPE,
-                            JobORM.graph_id.in_(graphs),
-                            JobORM.status.in_(("pending", "running")))) or 0)
+            try:
+                async with self._gv() as gs:
+                    graphs = (await gs.execute(select(GraphORM.id).where(
+                        GraphORM.data_source_id == ds_id))).scalars().all()
+                    unfinished = 0
+                    if graphs:
+                        unfinished = int(await gs.scalar(
+                            select(func.count()).select_from(JobORM).where(
+                                JobORM.job_type == PURGE_JOB_TYPE,
+                                JobORM.graph_id.in_(graphs),
+                                JobORM.status.in_(("pending", "running")))) or 0)
 
-            if graphs and not unfinished:
-                # Are they queued at all? A graph still standing with no job needs one.
-                jobs = await purge_graph_for_data_source(
-                    data_source_id=ds_id, workspace_id=ws_id, actor=actor or "reaper")
-                if jobs:
-                    queued += len(jobs)
-                    logger.info("reaper: grace expired for %s — purge queued %s", ds_id, jobs)
-                    continue          # let it run; we will remove the row on a later pass
-            if unfinished:
-                continue              # still being destroyed
+                if graphs and not unfinished:
+                    # Are they queued at all? A graph still standing with no job needs one.
+                    jobs = await purge_graph_for_data_source(
+                        data_source_id=ds_id, workspace_id=ws_id, actor=actor or "reaper",
+                        require_tombstoned=True)
+                    if jobs:
+                        queued += len(jobs)
+                        logger.info("reaper: grace expired for %s — purge queued %s", ds_id, jobs)
+                    elif ds_id not in _LEFT_STANDING:
+                        # Restored under us, read by a fork, or tombstoned without its graph
+                        # (a force-delete whose graph tombstone failed; a moved data source).
+                        # Its row is never removed while a graph of it stands.
+                        _LEFT_STANDING.add(ds_id)
+                        logger.warning("reaper: %s is past its grace period but its graph was "
+                                       "not purged; leaving both alone", ds_id)
+                    continue          # the row goes on a later pass, once no graph is left
+                if unfinished:
+                    continue              # still being destroyed
 
-            # Nothing left to purge (graph gone, or it never had one). The tombstone is the last
-            # trace of this data source, and its time is up.
-            #
-            # COMMIT EXPLICITLY. Unlike `graphver_session`, the app session factory does not
-            # commit on context exit — the first cut of this silently rolled the delete back and
-            # still counted it, so the reaper reported work it had not done. A janitor that lies
-            # about what it reclaimed is worse than one that does nothing.
-            async with Session() as s:
-                row = await s.get(WorkspaceDataSourceORM, ds_id)
-                if row is not None and row.deleted_at is not None:
-                    await s.delete(row)
-                    await s.commit()
-                    reaped += 1
-                    logger.info("reaper: %s is past its grace period and is now gone", ds_id)
+                # Nothing left to purge (graph gone, or it never had one). The tombstone is the
+                # last trace of this data source, and its time is up.
+                #
+                # COMMIT EXPLICITLY. Unlike `graphver_session`, the app session factory does not
+                # commit on context exit — the first cut of this silently rolled the delete back
+                # and still counted it, so the reaper reported work it had not done. A janitor
+                # that lies about what it reclaimed is worse than one that does nothing.
+                async with Session() as s:
+                    row = await s.get(WorkspaceDataSourceORM, ds_id)
+                    if row is not None and row.deleted_at is not None:
+                        await s.delete(row)
+                        await s.commit()
+                        reaped += 1
+                        logger.info("reaper: %s is past its grace period and is now gone", ds_id)
+            except Exception:
+                logger.exception("reaper: %s failed; carrying on with the rest", ds_id)
+
+        # A purge that failed on infrastructure is queued again — including one whose data
+        # source row is already gone ("Delete permanently"), which the loop above never sees.
+        async with self._gv() as gs:
+            failed = (await gs.execute(
+                select(JobORM.graph_id).join(GraphORM, GraphORM.id == JobORM.graph_id).where(
+                    JobORM.job_type == PURGE_JOB_TYPE, JobORM.status == "failed",
+                    JobORM.summary["failure"]["code"].astext == "infrastructure",
+                    GraphORM.deleted_at.isnot(None)))).scalars().all()
+        revived = 0
+        for gid in failed:
+            try:
+                if await create_purge_job(graph_id=gid, workspace_id=None, actor="reaper",
+                                          require_tombstoned=True, session_factory=self._gv):
+                    revived += 1
+            except Exception:
+                logger.exception("reaper: re-queueing the purge of graph %s failed", gid)
 
         orphans = await self._orphaned_package_sources()
-        if queued or reaped or orphans:
-            logger.info("reaper: %s purge(s) queued, %s data source(s) removed, %s orphaned "
-                        "package source(s) tombstoned", queued, reaped, orphans)
-        return {"queued": queued, "reaped": reaped, "orphans": orphans}
+        if queued or reaped or orphans or revived:
+            logger.info("reaper: %s purge(s) queued, %s re-queued, %s data source(s) removed, %s "
+                        "orphaned package source(s) tombstoned", queued, revived, reaped, orphans)
+        return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived}
 
     async def _orphaned_package_sources(self) -> int:
         """Tombstone each live data source made from a view package (``extra_config.origin.kind =

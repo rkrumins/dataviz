@@ -4389,10 +4389,13 @@ class GraphVersioningService:
         return out
 
     async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
-        """Graph metadata (or ``None``) — also the API's tenant-isolation guard."""
+        """Graph metadata (or ``None``) — also the API's tenant-isolation guard.
+
+        Soft-deleted graphs are invisible here, as in :meth:`get_graph_by_data_source`: a graph
+        in the trash, or being purged, is no graph to any route."""
         async with self._session() as s:
             g = await s.get(GraphORM, graph_id)
-            return None if g is None else self._graph_meta(g)
+            return None if g is None or g.deleted_at is not None else self._graph_meta(g)
 
     async def get_graph_by_data_source(self, data_source_id: str) -> Optional[Dict[str, object]]:
         """Reverse lookup: the versioned graph backing a data source (1:1 via the
