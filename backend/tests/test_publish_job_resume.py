@@ -23,7 +23,7 @@ import pytest
 
 from backend.app.api.v1.endpoints import versioning as ep
 from backend.app.services.versioning import db as ver_db
-from backend.app.services.versioning.errors import BranchNotOpen, ContentionExhausted, LockBusy
+from backend.app.services.versioning.errors import BranchNotOpen, ContentionExhausted, GroupsUnavailable, LockBusy
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import Superseded
 from backend.app.services.versioning.service import NotUpToDate
@@ -189,15 +189,19 @@ async def test_a_publish_job_no_longer_this_workers_stops_quietly(monkeypatch, s
     assert not (lease.failed or lease.released), "the job's new owner finishes it"
 
 
-@pytest.mark.parametrize("busy", [LockBusy("graph g1 is busy"), ContentionExhausted("graph g1 is busy")])
-async def test_a_publish_that_finds_the_graph_busy_fails_and_hands_back_the_draft(monkeypatch, set_off, busy):
-    """A busy graph is answered as the route answers it (503 lock_busy: publish again). Nothing can
-    resume a publish job, so the job is not failed as an outage, and the draft is handed back."""
+@pytest.mark.parametrize("busy,kind", [(LockBusy("graph g1 is busy"), "lock_busy"),
+                                       (ContentionExhausted("graph g1 is busy"), "lock_busy"),
+                                       (GroupsUnavailable(), "groups_unavailable")])
+async def test_a_publish_that_finds_the_graph_busy_fails_and_hands_back_the_draft(monkeypatch, set_off, busy,
+                                                                                  kind):
+    """A busy graph, or a group lookup that failed, is answered as the route answers it (503: publish
+    again). Nothing can resume a publish job, so the job is not failed as an outage, and the draft is
+    handed back."""
     svc = _Versioning(merged=[None, None], publish=busy)
     lease = _Lease()
     await _service(monkeypatch, svc).run_publish_safe("vjob_1", lease)
     status, values = lease.finished
     error = values["summary"]["error"]
-    assert (status, error["status"], error["detail"]["type"]) == ("failed", 503, "lock_busy")
+    assert (status, error["status"], error["detail"]["type"]) == ("failed", 503, kind)
     assert not lease.failed and set_off == []
     assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}], "the draft is handed back"

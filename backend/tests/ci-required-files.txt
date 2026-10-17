@@ -230,6 +230,7 @@ tests/test_versioned_branch_aggregated_edges.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioned_branch_trace_closure.py
 tests/test_versioned_sources_lookup.py
+tests/test_versioning_access_groups.py
 tests/test_versioning_admin_graphs_route.py
 tests/test_versioning_admin_watermarks_route.py
 tests/test_versioning_concurrency.py

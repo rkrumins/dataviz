@@ -18,7 +18,9 @@ from backend.app.services.versioning.errors import (
     BranchNotOpen,
     ContentionExhausted,
     CurationAtRisk,
+    DraftRoleRequired,
     ForkNotRestorable,
+    GroupsUnavailable,
     JobActive,
     LiveForks,
     LockBusy,
@@ -78,6 +80,30 @@ def test_not_draft_owner_is_403_access_denied():
     assert err.status_code == 403
     assert err.detail["type"] == "access_denied" and err.detail["code"] == "not_draft_owner"
     assert (err.detail["branchId"], err.detail["owner"]) == ("br_4", "alice")
+
+
+def test_a_shared_draft_refusal_names_the_role_it_needs():
+    exc = DraftRoleRequired("br_1", "editor")
+    assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)
+    err = _raised(exc)
+    assert err.status_code == 403
+    assert {k: err.detail[k] for k in ("type", "code", "required", "branchId")} == {
+        "type": "access_denied", "code": "not_owner_or_member", "required": "editor", "branchId": "br_1"}
+
+
+def test_a_group_lookup_outage_is_503_with_retry_after():
+    err = _raised(GroupsUnavailable())
+    assert err.status_code == 503
+    assert err.detail["type"] == "groups_unavailable" and err.detail["retryable"] is True
+    assert err.headers == {"Retry-After": "2"}
+
+
+@pytest.mark.asyncio
+async def test_managing_someone_elses_private_draft_is_not_draft_owner():
+    svc = GraphVersioningService.__new__(GraphVersioningService)
+    draft = SimpleNamespace(id="br_6", kind="draft", owner="alice", is_shared=False)
+    with pytest.raises(NotDraftOwner):               # decided before any query: no session needed
+        await svc._require_manage(None, draft, "bob", ())
 
 
 @pytest.mark.asyncio

@@ -43,9 +43,9 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit,
-                     ForkNotRestorable, HeadMoved, JobActive, LiveForks, LockBusy, MainWriteForbidden,
-                     MassDeleteBlocked, NotAFork, NotDraftOwner)
+from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftRoleRequired,
+                     ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, JobActive, LiveForks,
+                     LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -423,6 +423,19 @@ class Viewer:
     when a read is called without a Viewer (internal callers / tests) no scoping is applied."""
     actor: str
     can_manage: bool = False
+
+
+async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
+    """The group ids *actor* belongs to, from the management DB (READONLY pool, so it never waits on
+    a second WEB-pool connection while the request holds one). A failed lookup is
+    :class:`GroupsUnavailable`, never "no groups": that would refuse a member."""
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.db.repositories import user_repo
+    try:
+        async with get_readonly_session() as ms:
+            return tuple(await user_repo.get_groups_for_user(ms, actor))
+    except Exception as exc:
+        raise GroupsUnavailable() from exc
 
 
 class GraphVersioningService:
@@ -1081,10 +1094,7 @@ class GraphVersioningService:
                 await self._require_no_import(s, branch_id)
                 if await self._pending_count(s, graph_id, branch_id):
                     raise _StaleHead()
-                if draft.is_shared:                       # publishing a shared draft → maintainer
-                    await self._require_manage(s, draft, actor, actor_groups)
-                else:
-                    await self._require_edit(s, draft, actor, actor_groups)
+                await self._require_publish(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
                 # Require-up-to-date gate (Git "update branch before merging"): a draft that is BEHIND
                 # main must explicitly pull latest (rebase_draft) before it can publish, so the user
@@ -5139,20 +5149,34 @@ class GraphVersioningService:
             raise ValueError("unknown branch")
         return b
 
-    async def _branch_role(self, s, branch: BranchORM, actor: str, groups: Sequence[str] = ()):
+    async def _branch_role(self, s, branch: BranchORM, actor: str, groups: Sequence[str] = (),
+                           need: Optional[str] = None):
         """Effective role of *actor* on *branch*: the owner is an implicit
-        maintainer; otherwise the highest role from matching user/group members
-        (group resolution depends on the caller supplying ``groups``)."""
+        maintainer; on a private draft nobody else has one (member rows left on it
+        grant nothing); otherwise the highest role from matching user/group members.
+        The actor's groups are ``groups`` when given, else looked up
+        (:func:`_load_actor_groups`) only when a group row could decide the answer:
+        one that ranks above the actor's own row and meets ``need``."""
         if branch.owner == actor:
             return "maintainer"
+        if not branch.is_shared:
+            return None
         rows = (await s.execute(select(BranchMemberORM).where(
             BranchMemberORM.branch_id == branch.id
         ))).scalars().all()
         best = None
         for r in rows:
-            if (r.subject_type == "user" and r.subject_id == actor) or \
-               (r.subject_type == "group" and r.subject_id in groups):
+            if r.subject_type == "user" and r.subject_id == actor:
                 if best is None or ROLE_RANK[r.role] > ROLE_RANK[best]:
+                    best = r.role
+        if need and best and ROLE_RANK[best] >= ROLE_RANK[need]:
+            return best
+        floor = max(ROLE_RANK.get(best, 0) + 1, ROLE_RANK[need] if need else 0)
+        cand = [r for r in rows if r.subject_type == "group" and ROLE_RANK[r.role] >= floor]
+        if cand:
+            mine = set(groups) if groups else set(await _load_actor_groups(actor))
+            for r in cand:
+                if r.subject_id in mine and (best is None or ROLE_RANK[r.role] > ROLE_RANK[best]):
                     best = r.role
         return best
 
@@ -5181,14 +5205,23 @@ class GraphVersioningService:
             if branch.kind != "main" and branch.owner != actor:
                 raise NotDraftOwner(branch.id, branch.owner)
             return
-        role = await self._branch_role(s, branch, actor, groups)
+        role = await self._branch_role(s, branch, actor, groups, need="editor")
         if role is None or ROLE_RANK[role] < ROLE_RANK["editor"]:
-            raise AccessDenied(f"{actor} lacks editor access to draft {branch.id}")
+            raise DraftRoleRequired(branch.id, "editor")
 
     async def _require_manage(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
-        role = await self._branch_role(s, branch, actor, groups)
+        role = await self._branch_role(s, branch, actor, groups, need="maintainer")
         if role != "maintainer":
-            raise AccessDenied(f"{actor} lacks maintainer access to draft {branch.id}")
+            if not branch.is_shared:
+                raise NotDraftOwner(branch.id, branch.owner)
+            raise DraftRoleRequired(branch.id, "maintainer")
+
+    async def _require_publish(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
+        """Publishing a shared draft needs maintainer; any other draft, edit."""
+        if branch.is_shared:
+            await self._require_manage(s, branch, actor, groups)
+        else:
+            await self._require_edit(s, branch, actor, groups)
 
     # ── Read visibility (draft privacy + PR scoping) ──────────────────────────
     async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str) -> bool:
@@ -5212,7 +5245,7 @@ class GraphVersioningService:
             return True
         if viewer.can_manage or branch.owner == viewer.actor:
             return True
-        if branch.is_shared and await self._branch_role(s, branch, viewer.actor) is not None:
+        if branch.is_shared and await self._branch_role(s, branch, viewer.actor, need="viewer") is not None:
             return True
         return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
 

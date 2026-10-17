@@ -498,8 +498,9 @@ class ImportExportService:
         The draft is taken in the same transaction: under its row lock it must be open (main is
         :class:`MainWriteForbidden`, a closed draft :class:`BranchNotOpen`), and it becomes
         ``publishing``, closed to every write but the job's publish until the job ends. A publish of
-        someone else's private draft is :class:`NotDraftOwner`. The job is stored already queued: it
-        has no input to wait for."""
+        someone else's private draft is :class:`NotDraftOwner`, of a shared draft by anyone but its owner
+        or a maintainer :class:`DraftRoleRequired`. The job is stored already queued: it has no input
+        to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
@@ -511,7 +512,7 @@ class ImportExportService:
                 raise MainWriteForbidden()
             self._svc._require_open(branch)
             if not merge_request_id:                     # a review's merger need not own the draft
-                await self._svc._require_edit(s, branch, actor, ())
+                await self._svc._require_publish(s, branch, actor, ())
             await self._svc._require_no_import(s, branch_id)
             branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,

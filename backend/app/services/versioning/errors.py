@@ -59,6 +59,31 @@ class NotDraftOwner(_HttpMapped, AccessDenied):
                           "branchId": branch_id, "owner": owner})
 
 
+class DraftRoleRequired(_HttpMapped, AccessDenied):
+    """A write reached a shared draft the actor is not a member of in a role
+    that allows it: ``required`` names the role (editor, or maintainer to
+    publish, abandon or manage members)."""
+
+    status_code = 403
+
+    def __init__(self, branch_id: str, required: str):
+        self.branch_id, self.required = branch_id, required
+        super().__init__(f"needs {required} access to shared draft {branch_id}",
+                         {"type": "access_denied", "code": "not_owner_or_member",
+                          "required": required, "branchId": branch_id})
+
+
+class GroupsUnavailable(_HttpMapped, RuntimeError):
+    """The actor's groups could not be looked up, and a group decides their
+    role on the draft. Never read as "no groups": that would refuse a member."""
+
+    status_code = 503
+
+    def __init__(self):
+        super().__init__("couldn't check your groups; try again",
+                         {"type": "groups_unavailable", "retryable": True}, {"Retry-After": "2"})
+
+
 class HeadMoved(_HttpMapped, RuntimeError):
     """An approval named the head the reviewer saw, and the draft has moved on
     since: what they approved is not what would merge."""
@@ -150,5 +175,6 @@ class ForkNotRestorable(_HttpMapped, RuntimeError):
                          {"type": "fork_not_restorable", "graphId": graph_id, "reason": reason})
 
 
-HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, HeadMoved, LockBusy, JobActive,
-               CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable)
+HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, GroupsUnavailable,
+               HeadMoved, LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork,
+               LiveForks, ForkNotRestorable)
