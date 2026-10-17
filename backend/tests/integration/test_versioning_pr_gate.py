@@ -115,7 +115,7 @@ async def _run_head_bound_approvals() -> None:
         return d
 
     async def head(d):
-        return next(b for b in await svc.list_branches(graph_id=gid) if b["branch_id"] == d)["head_commit_id"]
+        return next(b for b in (await svc.list_branches(graph_id=gid))[0] if b["branch_id"] == d)["head_commit_id"]
 
     async def reviewed(ops):
         d = await draft("alice", ops)
