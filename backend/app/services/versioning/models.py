@@ -271,6 +271,13 @@ class ProjectionStateORM(VersioningBase):
     # Data health rebuild progress bar. NULL when no full seed is running.
     progress_done = Column(BigInteger, nullable=True)
     progress_total = Column(BigInteger, nullable=True)
+    # The fencing token. A projection pass claims the row by bumping it and publishes only while it
+    # is still its own; evict, rebuild, repin and the bootstrap head flip bump it too, so a pass
+    # they overtook never writes over them (20261017_1550_gv_ps_fencing).
+    epoch = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    # Consecutive failed passes, and when the poll may retry (ISO-8601 UTC, like _now()).
+    failed_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    next_retry_at = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = _plain(
@@ -692,6 +699,30 @@ def _ensure_schema_upgrades(conn) -> None:
             ensure_ps_key_index(conn, strict=False)
     except Exception:
         logger.exception("uq_ps_key was not built; the next start tries again")
+    # 20261017_1550_gv_ps_fencing.
+    try:
+        with conn.begin_nested():
+            ensure_ps_fencing_columns(conn)
+    except Exception:
+        logger.exception("the projection fencing columns were not added; the next start tries again")
+
+
+def ensure_ps_fencing_columns(conn) -> None:
+    """Add ``projection_state``'s fencing columns (``epoch``, ``failed_attempts``,
+    ``next_retry_at``). A no-op without the table, and once they are there: an ALTER takes the
+    table's ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this.
+    ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    if {"epoch", "failed_attempts", "next_retry_at"} <= present:
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0"))
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS next_retry_at TEXT"))
 
 
 def ensure_ps_key_index(conn, *, strict: bool) -> None:

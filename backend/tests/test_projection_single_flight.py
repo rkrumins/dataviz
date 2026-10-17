@@ -33,12 +33,16 @@ class _FakePS:
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None
+        self.epoch = 0
+        self.failed_attempts = 0
+        self.next_retry_at = None
 
 
 class _FakeGraph:
     data_source_id = "ds1"
     workspace_id = "ws1"
     fork_parent_graph_id = None
+    main_head_commit_seq = 5                           # never past the target: (5, 5) is a noop
 
 
 class _Advisory:

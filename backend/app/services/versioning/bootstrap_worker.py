@@ -1212,6 +1212,7 @@ class BootstrapRunner:
                 ps.target_commit_seq = commit.commit_seq
                 ps.status = "idle"
                 ps.last_projected_at = _now()
+                ps.epoch = ProjectionStateORM.epoch + 1      # fenced by the lease, with the flip
         logger.info("bootstrap %s: head flipped to seq %s (projection fast-forwarded)",
                     lease.job_id, commit.commit_seq)
         # On the decision, not on the tally of deletes: a window replayed after a crash between
@@ -1833,6 +1834,7 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
         if ps is not None:
             ps.projected_commit_seq = 1                   # see docstring — never project mid-bootstrap
             ps.target_commit_seq = 1
+            ps.epoch = ProjectionStateORM.epoch + 1
         commit = await _ensure_import_commit(
             s, gid, main_id, actor,
             message="seed from view package" if seed else "enable version control")

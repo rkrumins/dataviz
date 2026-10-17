@@ -62,6 +62,9 @@ class _PS:
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None
+        self.epoch = 0
+        self.failed_attempts = 0
+        self.next_retry_at = None
 
 
 class _Graph:
@@ -70,6 +73,7 @@ class _Graph:
     workspace_id = "ws1"
     fork_parent_graph_id = None
     deleted_at = None
+    main_head_commit_seq = 2
 
 
 class _Session:
@@ -97,8 +101,24 @@ def _projector(ps=None, graph=None, bootstrap_status=None, client=None):
     async def session():
         yield _Session(ps, graph, bootstrap_status)
 
-    return FalkorProjector(graph_client_factory=lambda name, provider_id=None: client,
-                           session_factory=session), ps, client
+    proj = FalkorProjector(graph_client_factory=lambda name, provider_id=None: client,
+                           session_factory=session)
+
+    # The fenced writes, applied to the fake row.
+    async def claim(graph_id, seen_epoch, from_seq):
+        ps.status = "rebuilding" if from_seq <= 0 else "projecting"
+        return seen_epoch + 1, ps.failed_attempts
+
+    async def finish(graph_id, mine, *, published, to_seq, error, attempts):
+        ps.status, ps.last_error = "idle", error
+        if published:
+            ps.projected_commit_seq = to_seq
+        elif attempts is not None:
+            ps.failed_attempts = attempts + 1
+        return True
+
+    proj._claim, proj._finish = claim, finish
+    return proj, ps, client
 
 
 def _node(i):
@@ -232,11 +252,8 @@ def test_full_seed_refusal_holds_watermark(monkeypatch):
     r = asyncio.run(proj.project_graph("g1"))
     assert "refusing" in r["verify_error"] and r["projected"] == 0, r
     assert calls == [False]
-    assert ps.projected_commit_seq == 0 and ps.target_commit_seq == 0
-    assert ps.status == "idle" and "refusing" in ps.last_error
-
-    again = asyncio.run(proj.project_graph("g1"))       # held back: later polls are no-ops
-    assert again["noop"] is True and calls == [False], again
+    assert ps.projected_commit_seq == 0 and ps.target_commit_seq == 2
+    assert ps.status == "idle" and "refusing" in ps.last_error and ps.failed_attempts == 1
 
 
 def test_full_seed_skipped_while_bootstrapping(monkeypatch):

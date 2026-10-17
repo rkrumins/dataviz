@@ -261,10 +261,11 @@ async def _run_tombstoned_and_refused() -> None:
     assert "refusing" in (r.get("verify_error") or ""), r
     async with db.graphver_session() as s:
         ps = await s.get(ProjectionStateORM, gid)
-        assert (ps.projected_commit_seq, ps.target_commit_seq, ps.status) == (0, 0, "idle")
-        assert "refusing" in ps.last_error
+        assert (ps.projected_commit_seq, ps.target_commit_seq, ps.status) == (0, 2, "idle")
+        assert "refusing" in ps.last_error and ps.failed_attempts == 1 and ps.next_retry_at
     assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
-    assert (await proj.project_graph(gid))["noop"] is True
+    assert "refusing" in ((await proj.project_graph(gid)).get("verify_error") or "")
+    assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
     await db.dispose_engine()
 
 

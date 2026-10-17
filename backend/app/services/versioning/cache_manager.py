@@ -129,7 +129,8 @@ class CacheManager:
                 row = (await s.execute(
                     update(ProjectionStateORM)
                     .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
-                    .values(status="evicted", projected_commit_seq=0, updated_at=_now())
+                    .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
+                            epoch=ProjectionStateORM.epoch + 1)
                     .returning(ProjectionStateORM.falkor_graph_name,
                                ProjectionStateORM.falkor_provider)
                     .execution_options(synchronize_session=False)

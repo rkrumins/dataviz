@@ -268,8 +268,11 @@ async def rebuild_now(graph_id: str) -> None:
         if proj is None:
             await nudge_projection(graph_id)             # worker deployments pick it up
             return
-        await asyncio.wait_for(
+        result = await asyncio.wait_for(
             proj.project_graph(graph_id), vconfig.REBUILD_SYNC_TIMEOUT_SECS)
+        if result.get("skipped") in ("in-flight", "superseded"):
+            # Another pass held the graph, or overtook this one: the rebuild still has to run.
+            await nudge_projection(graph_id)
     except (Exception, asyncio.CancelledError) as exc:
         # `except Exception` alone would let the wait_for timeout (CancelledError, a
         # BaseException) escape into the BackgroundTasks runner unlogged — the old

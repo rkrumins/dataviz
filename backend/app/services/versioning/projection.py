@@ -25,9 +25,10 @@ import logging
 import os
 import time
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from sqlalchemy import func, literal, null, or_, select
+from sqlalchemy import func, literal, null, or_, select, update
 
 from . import config, db
 from .falkor_indexes import ensure_urn_indexes
@@ -40,6 +41,7 @@ from .projection_reconcile import (
     ROLLUP_EDGE_TYPE, _local_chain, diff_projection, fingerprint, plan_rollup_deltas,
     urn_triples,
 )
+from .messaging import nudge_projection
 from .models import (
     EdgeVersionORM,
     EntityHeadORM,
@@ -379,6 +381,14 @@ def _edge_endpoints(payload: dict) -> Tuple[str, str]:
     return src, tgt
 
 
+def _retry_at(attempts: int) -> str:
+    """When the poll may retry after ``attempts`` consecutive failed passes: the base delay,
+    doubled per failure, capped (ISO-8601 UTC, comparable with ``_now()``)."""
+    delay = min(config.PROJECTION_RETRY_BASE_SECS * 2 ** (attempts - 1),
+                config.PROJECTION_RETRY_MAX_SECS)
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -481,6 +491,68 @@ class FalkorProjector:
             finally:
                 await lock_scope.__aexit__(None, None, None)
 
+    # The fenced writes to ``projection_state``. Each is its own short transaction on the store
+    # pool — the lock connection stays write-free — and a CAS on ``epoch``: whatever reset the
+    # watermark under a pass (evict, rebuild, repin, the bootstrap head flip) bumped it.
+    async def _claim(self, graph_id: str, seen_epoch: int,
+                     from_seq: int) -> Optional[Tuple[int, int]]:
+        """Take the row for a pass from ``from_seq``: bump the epoch and set the status, only if
+        neither the epoch nor the watermark moved since they were read. Returns ``(epoch,
+        failed_attempts)``, or None when something else got there first."""
+        # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
+        # reports "rebuilding"; an incremental window reports "projecting".
+        values = {"epoch": ProjectionStateORM.epoch + 1,
+                  "status": "rebuilding" if from_seq <= 0 else "projecting"}
+        if from_seq <= 0:
+            values.update(progress_done=0, progress_total=None)
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == seen_epoch,
+                       ProjectionStateORM.projected_commit_seq == from_seq)
+                .values(**values)
+                .returning(ProjectionStateORM.epoch, ProjectionStateORM.failed_attempts)
+                .execution_options(synchronize_session=False)
+            )).first()
+        return tuple(row) if row is not None else None
+
+    async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
+                      error: Optional[str], attempts: Optional[int]) -> bool:
+        """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
+        record the error and, unless ``attempts`` is None (a cancel), back off. Never writes the
+        target or the key, which belong to the publishers and the repin. Returns False when the
+        pass was superseded."""
+        values = {"status": "idle", "last_error": error,
+                  "progress_done": None, "progress_total": None}      # progress is over either way
+        if published:
+            values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
+                          failed_attempts=0, next_retry_at=None)
+        elif attempts is not None:
+            values.update(failed_attempts=attempts + 1, next_retry_at=_retry_at(attempts + 1))
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == mine)
+                .values(**values)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False)
+            )).first()
+        return row is not None
+
+    async def _yield_superseded(self, graph_id: str, from_seq: int) -> None:
+        """A superseded pass may have written after the pass that overtook it: lower the
+        watermark to where it began (a no-op after an evict, rebuild or repin, which lowered it
+        further) and bump the epoch, so the next pass re-applies over those writes."""
+        async with self._session() as s:
+            await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id)
+                .values(projected_commit_seq=func.least(ProjectionStateORM.projected_commit_seq,
+                                                        from_seq),
+                        epoch=ProjectionStateORM.epoch + 1, next_retry_at=None)
+                .execution_options(synchronize_session=False))
+
     async def _project_graph_locked(self, graph_id: str) -> Dict[str, object]:
         """Projection body — runs under the single-flight lock held by :meth:`project_graph`."""
         # Self-heal the target FIRST (re-points an orphaned graph to the data source's real graph and
@@ -495,7 +567,12 @@ class FalkorProjector:
                 raise ValueError(f"unknown graph {graph_id}")
             data_source_id = graph.data_source_id
             workspace_id = graph.workspace_id
-            from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
+            is_fork = graph.fork_parent_graph_id is not None
+            # Up to the committed head, not only the target: a pass that failed leaves the target
+            # where it was, and a target behind the head must never park the graph below it.
+            from_seq = ps.projected_commit_seq
+            to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
+            seen_epoch = ps.epoch
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
             owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
@@ -519,41 +596,47 @@ class FalkorProjector:
                 await self._svc._assert_not_bootstrapping(s, graph_id)
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
-            # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
-            # reports "rebuilding"; an incremental window reports "projecting".
-            ps.status = "rebuilding" if from_seq <= 0 else "projecting"
-            main_id = await self._svc._main_branch_id(s, graph_id)
-            is_fork = graph.fork_parent_graph_id is not None
-            # A full replay (first seed, explicit rebuild, repin) is an in-place
-            # reconcile against what the graph already holds — its writes are known
-            # only once the diff runs, so it computes (and reports) them itself.
-            changes = (await self._compute_changes(s, graph, main_id, from_seq, to_seq)
-                       if from_seq > 0 else ([], [], [], []))
-            total_items = sum(len(c) for c in changes)
-            structural, retypes = (await self._window_meta(s, graph, main_id, from_seq, changes)
-                                   if from_seq > 0 else (False, []))
-            if from_seq <= 0:
-                ps.progress_done = 0
-                ps.progress_total = None
-            # Incremental :AGGREGATED rollup maintenance for a publish window. A full
-            # replay's rollups are moved by the reconcile's own diff instead.
-            # Skipped for forks: their containment chains span the parent graph's rows, so
-            # incremental chains would under-roll; a fork's rollups come from full rebuilds.
-            # A failure here must NEVER wedge raw-edge projection — degrade to the rebuild.
-            rollup_pairs = None
-            if from_seq > 0 and not is_fork and self._edge_types_resolver is not None:
-                try:
-                    rollup_pairs = await self._compute_rollup_deltas(
-                        s, graph, main_id, from_seq, to_seq)
-                except Exception:                        # pragma: no cover - defensive
-                    logger.exception("rollup delta computation failed for %s — queuing rebuild",
-                                     graph_id)
-                    rollup_pairs = "stale"
 
+        # Claim the row before touching FalkorDB. Losing the claim means something reset the
+        # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
+        # worker run a pass over the new state.
+        claimed = await self._claim(graph_id, seen_epoch, from_seq)
+        if claimed is None:
+            await nudge_projection(graph_id)
+            return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "superseded"}
+        mine, attempts = claimed
+        changes, structural, retypes, rollup_pairs = ([], [], [], []), False, [], None
+        superseded = False
         try:
+            async with self._session() as s:
+                graph = await s.get(GraphORM, graph_id)
+                main_id = await self._svc._main_branch_id(s, graph_id)
+                # A full replay (first seed, explicit rebuild, repin) is an in-place
+                # reconcile against what the graph already holds — its writes are known
+                # only once the diff runs, so it computes (and reports) them itself.
+                if from_seq > 0:
+                    changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
+                total_items = sum(len(c) for c in changes)
+                if from_seq > 0:
+                    structural, retypes = await self._window_meta(s, graph, main_id, from_seq,
+                                                                  changes)
+                # Incremental :AGGREGATED rollup maintenance for a publish window. A full
+                # replay's rollups are moved by the reconcile's own diff instead.
+                # Skipped for forks: their containment chains span the parent graph's rows, so
+                # incremental chains would under-roll; a fork's rollups come from full rebuilds.
+                # A failure here must NEVER wedge raw-edge projection — degrade to the rebuild.
+                if from_seq > 0 and not is_fork and self._edge_types_resolver is not None:
+                    try:
+                        rollup_pairs = await self._compute_rollup_deltas(
+                            s, graph, main_id, from_seq, to_seq)
+                    except Exception:                        # pragma: no cover - defensive
+                        logger.exception("rollup delta computation failed for %s — queuing rebuild",
+                                         graph_id)
+                        rollup_pairs = "stale"
+
             # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
             # build (a genuine suspension point), so a cancellation here must ALSO reset the
-            # already-committed "projecting" row rather than strand it.
+            # already-claimed "projecting" row rather than strand it.
             client = await self._graph_client(name, provider_id)
             # Ontology entity-type→level map so projected nodes carry n.level (parity with
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
@@ -618,34 +701,24 @@ class FalkorProjector:
                     if config.PROJECTION_VERIFY_ENABLED else (None, False)
                 )
 
+            # Verified faithful → publish: advance the watermark so reads flip to FalkorDB. A reseed
+            # that did NOT match committed main (a dropped/mistyped edge, a drifted field — the
+            # content-drift class the old count-only verify published blind) is held back:
+            # projected stays below committed so `fresh` stays false and reads keep falling back
+            # to Postgres (the SoR) instead of flipping onto a corrupt cache, and the poll retries
+            # it after a backoff.
             published = verify_error is None
-            async with self._session() as s:
-                ps = await s.get(ProjectionStateORM, graph_id)
-                ps.status = "idle"
-                ps.falkor_graph_name = name
-                ps.last_error = verify_error
-                ps.progress_done = None                  # full-seed progress is over either way
-                ps.progress_total = None
-                if published:
-                    # Verified faithful → publish: advance the watermark so reads flip to FalkorDB.
-                    ps.projected_commit_seq = to_seq
-                    ps.last_projected_at = _now()
-                else:
-                    # The reseed did NOT match committed main (a dropped/mistyped edge, a drifted
-                    # field — the content-drift class the old count-only verify published blind).
-                    # DO NOT advance: hold projected < committed so `fresh` stays false and reads
-                    # keep falling back to Postgres (the SoR) instead of flipping onto a corrupt
-                    # cache. Pin target down to the un-advanced seq so the RETRY is bounded and
-                    # idempotent — each pass re-attempts this one seq rather than climbing.
-                    # It does NOT stop the poll: `project_pending` re-selects on
-                    # `projected < main_head_commit_seq` too, precisely because selecting on
-                    # target alone left a held-back graph unreachable forever once BOTH sat at
-                    # the un-advanced seq — that is the shape that wedged a projection for 14h
-                    # and silently routed every main read back to Postgres.
-                    ps.target_commit_seq = ps.projected_commit_seq
-                    logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
-                                 "at %d so reads stay on Postgres — %s", graph_id, to_seq,
-                                 ps.projected_commit_seq, verify_error)
+            if not await self._finish(graph_id, mine, published=published, to_seq=to_seq,
+                                      error=verify_error, attempts=attempts):
+                # Something reset the watermark while this pass wrote (an evict, a rebuild, a
+                # repin, another pass): it wins. This pass's writes may have landed after the
+                # winner's, so lower the watermark to where it began; the next pass re-applies.
+                superseded, published = True, False
+                await self._yield_superseded(graph_id, from_seq)
+            elif not published:
+                logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
+                             "at %d so reads stay on Postgres; retry after backoff — %s", graph_id,
+                             to_seq, from_seq, verify_error)
         except (Exception, asyncio.CancelledError) as exc:
             # Reset the "projecting" row committed above so it is not stranded — a stranded row
             # spins the UI's "Refreshing…" badge forever AND blocks the manual rebuild escape
@@ -663,24 +736,14 @@ class FalkorProjector:
                 logger.exception("projection apply failed for %s: %s", graph_id, exc)
 
             async def _reset_status() -> None:
-                async with self._session() as s:
-                    ps = await s.get(ProjectionStateORM, graph_id)
-                    if ps is not None:
-                        ps.status = "idle"
-                        ps.last_error = ("projection cancelled (timeout)" if cancelled
-                                         else str(exc)[:500])
-                        ps.progress_done = None          # don't strand a stale progress bar
-                        ps.progress_total = None
-                        # NB: do NOT pin target on a cancel here. The original "Rebuild fast read layer"
-                        # wipe-loop was driven by the O(N²) verify blowing past the 900s rebuild budget
-                        # and being cancelled — that root cause is fixed (the verify is now an O(N+E)
-                        # single scan, size-gated), so a full seed completes well inside the budget and
-                        # is not cancelled. A cancel now means a SHORT-budget caller gave up
-                        # (project_now's 10s interactive ceiling — common for a first-import / post-
-                        # eviction full seed) and DEFERS to the async worker, which re-runs with the
-                        # 900s budget. Pinning target here would strand that graph un-projected (the
-                        # nudge/worker could never rescue it) — the very regression an adversarial
-                        # review caught. Leave projected<target so project_pending re-selects it.
+                # NB: a cancel does not back off. It means a SHORT-budget caller gave up
+                # (project_now's 10s interactive ceiling — common for a first-import / post-
+                # eviction full seed) and DEFERS to the async worker, which re-runs with the
+                # 900s budget at once.
+                error = "projection cancelled (timeout)" if cancelled else str(exc)[:500]
+                if not await self._finish(graph_id, mine, published=False, to_seq=to_seq,
+                                          error=error, attempts=None if cancelled else attempts):
+                    await self._yield_superseded(graph_id, from_seq)
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the
@@ -761,8 +824,12 @@ class FalkorProjector:
             + int(heal_outcome.get("writes") or 0)
         # Report the seq actually PUBLISHED: to_seq when verified, else the held-back from_seq
         # (the watermark did not advance — reads stay on Postgres).
-        return {"projected": to_seq if published else from_seq, "applied": applied,
-                "noop": False, "verify_error": verify_error}
+        result = {"projected": to_seq if published else from_seq, "applied": applied,
+                  "noop": False, "verify_error": verify_error}
+        if superseded:
+            await nudge_projection(graph_id)
+            result["skipped"] = "superseded"
+        return result
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
                                 rollups_stale: bool = False) -> None:
@@ -815,25 +882,21 @@ class FalkorProjector:
                 select(ProjectionStateORM.graph_id).join(
                     GraphORM, GraphORM.id == ProjectionStateORM.graph_id,
                 ).where(
-                    # LAG IS MEASURED AGAINST THE COMMITTED HEAD, not against `target`.
-                    #
-                    # `target_commit_seq` is what a projection ATTEMPT aimed at, and the
-                    # failure path holds BOTH counters at the last good seq. So a graph that
-                    # fails to verify ends up `projected == target` below `main_head`: this
-                    # retry can never select it again, while the read path's freshness check
-                    # (`projected >= main_head`, service.py:2126) stays false forever and
-                    # routes every main read to Postgres. That is a permanent wedge with no
-                    # self-healing path — one cost a data source its entire aggregated
-                    # lineage layer for 14 hours and needed a hand-written UPDATE to escape.
-                    #
-                    # Selecting on the head means a held-back graph is retried on the next
-                    # poll. A genuinely unfixable graph therefore retries on a loop, which is
-                    # the correct trade: it is visible and bounded by the poll interval,
-                    # where silence was neither.
+                    # LAG IS MEASURED AGAINST THE COMMITTED HEAD as well as `target`, and a
+                    # pass projects up to `max(target, head)`. A graph left below `main_head`
+                    # is otherwise never caught up, while the read path's freshness check
+                    # (`projected >= main_head`) stays false forever and routes every main
+                    # read to Postgres — a wedge that once cost a data source its entire
+                    # aggregated lineage layer for 14 hours and needed a hand-written UPDATE.
                     or_(
                         ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
                         ProjectionStateORM.projected_commit_seq < GraphORM.main_head_commit_seq,
                     ),
+                    # A pass that failed is retried after its backoff (`_retry_at`), so a
+                    # genuinely unfixable graph retries visibly but without churning the loop.
+                    # A nudge (a publish) and project_now retry at once regardless.
+                    or_(ProjectionStateORM.next_retry_at.is_(None),
+                        ProjectionStateORM.next_retry_at <= _now()),
                     # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
                     # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
                     # Filtered here in SQL so hundreds of test-created graphs can't crowd out

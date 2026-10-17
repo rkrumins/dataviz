@@ -35,6 +35,7 @@ tests/integration/test_node_sort_desc_live.py
 tests/integration/test_nodes_type_paging_live.py
 tests/integration/test_package_seed_job.py
 tests/integration/test_projection_committed_rollups.py
+tests/integration/test_projection_fencing_e2e.py
 tests/integration/test_projection_merkle_diff.py
 tests/integration/test_projection_pending_retries_wedge.py
 tests/integration/test_projection_reconcile_live.py

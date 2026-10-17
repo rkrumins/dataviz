@@ -363,14 +363,15 @@ async def _run_holdback_on_count_shortfall() -> None:
     assert r["verify_error"] and r["projected"] == 0, r          # held back at from_seq (0)
     st, projected, target = await _status(gid)
     assert st == "idle" and projected == 0, (st, projected)
-    assert target == 0, "target must pin to the held-back seq so the poll stops re-running it"
+    assert target == 2, "target stays at the head: the retry aims at it again"
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert ps.failed_attempts == 1 and ps.next_retry_at, "the retry backs off"
     wm = await svc.projection_watermark(gid)
     assert wm["fresh"] is False and wm["last_error"], wm
 
-    # The poll loop DOES re-select this graph now — `project_pending` selects on
-    # `projected < main_head_commit_seq` as well as `projected < target`, because pinning
-    # target down used to make the retry unreachable forever (the 14-hour wedge). What must
-    # still hold is that the retry cannot ADVANCE a seed that deterministically fails verify.
+    # The poll loop leaves the graph alone until its backoff has passed; what must still hold
+    # is that no retry can ADVANCE a seed that deterministically fails verify.
     await proj.project_pending()
     assert (await _status(gid))[1] == 0, "project_pending must not advance a held-back seed"
 

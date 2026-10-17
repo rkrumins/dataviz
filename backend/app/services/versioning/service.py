@@ -2610,6 +2610,7 @@ class GraphVersioningService:
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
+            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
             return old
 
     async def request_projection_rebuild(self, graph_id: str) -> bool:
@@ -2642,6 +2643,9 @@ class GraphVersioningService:
             ps.target_commit_seq = graph.main_head_commit_seq
             ps.status = "rebuilding"
             ps.last_error = None
+            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+            ps.failed_attempts = 0
+            ps.next_retry_at = None
             return True
 
     async def neighbors_from_state(

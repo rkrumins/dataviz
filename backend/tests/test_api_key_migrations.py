@@ -38,6 +38,7 @@ _ON_LIVE_TABLES = {
     _LAST: ("upgrade", "downgrade"),
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
+    "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
 }
 
 

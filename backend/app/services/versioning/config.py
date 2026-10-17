@@ -129,6 +129,10 @@ PROJECTION_POLL_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_POLL_SECS", "5"))
 # Max graphs projected concurrently per reconciling poll pass (each id appears once per pass,
 # so there's no same-graph race) — keeps the worker caught up across 100s of graphs.
 PROJECTION_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CONCURRENCY", "8"))
+# The poll retries a failed pass after BASE seconds, doubling per consecutive failure up to MAX.
+# A publish (its nudge) and project_now retry at once regardless.
+PROJECTION_RETRY_BASE_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_BASE_SECS", "5"))
+PROJECTION_RETRY_MAX_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_MAX_SECS", "900"))
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
