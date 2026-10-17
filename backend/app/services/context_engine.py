@@ -17,7 +17,7 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
-from .versioning.errors import HTTP_MAPPED
+from .versioning.errors import HTTP_MAPPED, AccessDenied
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
     TRACE_ENGINE_HEADROOM_SECS,
@@ -104,10 +104,13 @@ class ContextEngine:
         data_source_id: Optional[str] = None,
         actor: Optional[str] = None,
         branch_id: Optional[str] = None,
+        viewer: Any = None,  # versioning Viewer
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
+        A draft ``viewer`` can't read is a ``KeyError`` (404), exactly like an unknown
+        branch; internal callers pass no viewer and are not scoped.
 
         Ontology is resolved and pushed into the provider *eagerly* so
         that endpoints which call ``engine.provider.*`` directly (e.g.
@@ -164,8 +167,9 @@ class ContextEngine:
                 if is_draft:
                     async with svc._session() as gv_s:
                         try:
-                            await svc._get_branch(gv_s, gid, norm)
-                        except ValueError as exc:
+                            branch = await svc._get_branch(gv_s, gid, norm)
+                            await svc._assert_branch_readable(gv_s, branch, viewer)
+                        except (ValueError, AccessDenied) as exc:
                             raise KeyError(f"branch_not_found: {norm}") from exc
                     # Draft = main ⊕ sparse delta: overlay the draft's bounded patch set on WHATEVER
                     # serves main — the live FalkorDB provider when fresh (so the materialized

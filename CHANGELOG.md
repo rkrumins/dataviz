@@ -19,10 +19,16 @@ on it answers **403 `access_denied`** with code `not_draft_owner` `{branchId, ow
 it answers 403 too. A shared draft keeps its members' roles. Merging a review someone raised from
 their draft is unchanged. The canvas offers to copy the refused edits to a new draft of your own.
 
+**A draft is read only by the people it is for:** its owner, workspace managers, members of a
+shared draft and the people on its pull request. To anyone else, a graph read with `?branchId=`
+naming it, and its neighbors, freshness and members, answer **404**, exactly as for a branch that
+doesn't exist.
+
 ### Upgrading
 
 - A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
   the draft and add the caller as an editor, or write into a draft the caller owns.
+- A script or API key that reads a teammate's private draft without workspace manage now gets 404.
 
 ---
 

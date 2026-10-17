@@ -1486,8 +1486,10 @@ async def list_branch_members(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         return {"members": await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)}
 
@@ -1802,10 +1804,12 @@ async def get_branch_freshness(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Live "is this draft behind main?" signal — O(1), safe to poll frequently while editing so a
     branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull."""
+    await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
@@ -2015,6 +2019,16 @@ async def _assert_line_readable(svc, graph_id: str, branch_id: Optional[str], vi
     if branch_id:
         with _domain_errors():
             await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+
+
+async def _assert_draft_visible(svc, graph_id: str, branch_id: str, viewer: Viewer) -> None:
+    """READ_DRAFT (doc 13): a draft the caller can't read is a 404, the same as a branch that
+    doesn't exist, so its existence doesn't leak."""
+    with _domain_errors():
+        try:
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        except AccessDenied as exc:
+            raise ValueError("unknown branch") from exc
 
 
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
@@ -2265,12 +2279,15 @@ async def graph_neighbors(
     limit: int = Query(500, ge=1, le=5000),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     read_factory=Depends(get_falkor_read_factory),
 ):
     """Bounded neighborhood of a node — FalkorDB-first only for `main`@head (when the
     projection is caught up); drafts and as-of reads are served from Postgres. Every
     response carries the freshness watermark."""
+    if branch_id:
+        await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     ets = [e for e in edge_types.split(",") if e] if edge_types else None
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,

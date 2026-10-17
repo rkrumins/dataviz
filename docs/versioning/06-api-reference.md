@@ -173,12 +173,12 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 |---|---|---|
 | `GET …/branches` | `_READ` | `?limit(100, max 500)&cursor&status&viewId` → `[BranchResponse]`, `main` first, then drafts newest first. When another page follows, the `X-Next-Cursor` header carries the `cursor` for it. `status` is repeatable: `open`, `publishing`, `merged`, `abandoned` or `all` (default `open` + `publishing`). Graph-wide by default; `viewId` narrows to that view's drafts (**branch-per-view**). Without `_MANAGE` you see `main`, your own drafts, the shared drafts you are a member of, and drafts with a PR you raised or review. That filter runs before the page is cut, so a page is never emptied by drafts you cannot see |
 | `POST …/branches` | `_MANAGE` | `{name?, originatingViewId?, shared?}` → **201** `{branchId}` |
-| `GET …/branches/{bid}/members` | `_READ` | A shared draft's collaborators: `{members: […]}` |
+| `GET …/branches/{bid}/members` | `_READ` | A shared draft's collaborators: `{members: […]}`. A draft you can't read is a **404** |
 | `POST …/branches/{bid}/members` | `_MANAGE` | Add one: `{subjectType: "user" \| "group", subjectId, role: "viewer" \| "editor" \| "maintainer"}` |
 | `DELETE …/branches/{bid}/members/{subjectType}/{subjectId}` | `_MANAGE` | Remove one → `{removed: true}` |
 | `PATCH …/branches/{bid}` | `_MANAGE` | `{name?, description?, isShared?}`, by the owner or a maintainer; `""` clears a name or description |
 | `POST …/branches/{bid}/abandon` | `_MANAGE` | Discard the draft → `BranchResponse`. Its layout edits go with it |
-| `GET …/branches/{bid}/freshness` | `_READ` | Is the draft behind `main`? `{behind, behindBy, mainHeadCommitSeq, baseCommitSeq}` — cheap enough to poll while editing |
+| `GET …/branches/{bid}/freshness` | `_READ` | Is the draft behind `main`? `{behind, behindBy, mainHeadCommitSeq, baseCommitSeq}` — cheap enough to poll while editing. A draft you can't read is a **404** |
 | `POST …/branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, seeds, changes, incoming, baseCommitSeq, alreadyUpToDate}`. On `clean: false`, resolve and resubmit with `resolutions`; `seeds` holds the draft's own value of each conflicting entity. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{branchId, commitIds, commitCount, contributors, stats, fromSeq, toSeq}`, the window to read from `…/diff-window`. A clean pull always writes a `pull` commit ([03](/docs/versioning-branching-and-merge)) |
 
 ### 2.4 Changes → checkpoint → publish
@@ -230,7 +230,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `GET …/graph/neighbors` | `_READ` | `?urn&branchId&asOfSeq&depth(1–20)&direction(out \| in \| both)&edgeTypes&limit(500, max 5,000)` → `GraphReadResponse{source: "falkordb" \| "postgres", watermark, nodes, edges}`. FalkorDB answers only for `main` at its head once the projection has caught up; **drafts and as-of reads always come from Postgres** |
+| `GET …/graph/neighbors` | `_READ` | `?urn&branchId&asOfSeq&depth(1–20)&direction(out \| in \| both)&edgeTypes&limit(500, max 5,000)` → `GraphReadResponse{source: "falkordb" \| "postgres", watermark, nodes, edges}`. FalkorDB answers only for `main` at its head once the projection has caught up; **drafts and as-of reads always come from Postgres**. A `branchId` you can't read is a **404** |
 
 ### 2.9 Bulk-ingest & authoritative sync
 
@@ -379,7 +379,9 @@ canvas save. Both become draft-aware through **one dependency**.
 The `branchId` query parameter of `get_context_engine` is passed to
 `ContextEngine.for_workspace(…, branch_id=branchId)`. Every `/graph` read and write built on this
 dependency targets a **draft overlay** when `?branchId=br_…` is present, and `main` otherwise. Omit
-it, or pass `main`, for the published graph. See
+it, or pass `main`, for the published graph. A draft the caller can't read (someone else's private
+draft, unless they manage the workspace, are a member or take part in its pull request) is a
+**404**, the same answer as a branch that doesn't exist. See
 [04 · Projection & Cache](/docs/versioning-projection-and-cache).
 
 ### Per-branch cache scoping

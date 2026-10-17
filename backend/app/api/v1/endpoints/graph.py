@@ -87,10 +87,11 @@ from backend.app.auth.dependencies import (
     get_optional_user,
     get_permission_claims,
 )
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.auth_service.interface import User
 from backend.app.services.top_level_cache import try_serve_top_level
 from backend.app.services.versioning.errors import LockBusy
+from backend.app.services.versioning.service import Viewer
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
@@ -163,6 +164,7 @@ async def get_context_engine(
     # engine._db_session for writes), so NOT the READONLY pool.
     session: AsyncSession = Depends(get_graph_read_db_session),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> ContextEngine:
     """
     FastAPI dependency that resolves the appropriate ContextEngine.
@@ -177,12 +179,17 @@ async def get_context_engine(
     all provider connectivity errors to ProviderUnavailable, which the
     global exception handler at main.py converts to HTTP 503 with
     Retry-After. KeyError (data source not found) becomes HTTP 404.
+    A draft the caller can't read is a 404 too, like an unknown branch: the
+    viewer is built as ``versioning.viewer_ctx`` builds it (under an API key,
+    the key's owner with the key's narrowed claims).
     """
     try:
         if ws_id:
+            viewer = Viewer(actor=user.id if user else "",
+                            can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id))
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
-                actor=(user.id if user else None), branch_id=branchId,
+                actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)
@@ -2387,6 +2394,7 @@ async def search_export_download(
     # The session the route's gate read the data source with (the same one, per request).
     gate: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
     """A complete export, streamed as the file it is — for the person it
     was exported for, for an hour after (``downloadToken``)."""
@@ -2403,7 +2411,7 @@ async def search_export_download(
         raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
     engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
                                       branchId=branchId, _admission=None, session=session,
-                                      user=user)
+                                      user=user, claims=claims)
     svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
                                 data_source_id=dataSourceId, branch_id=branchId)
     try:
