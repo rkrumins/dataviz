@@ -1,4 +1,4 @@
-> Verified review of the versioning subsystem (2026-10-09): 12 dimension reviewers + 5 gap reviewers, every finding adversarially verified (220 survived, 1 refuted). The delivery order in §5 is superseded by the rollout stages in [13](13-access-and-review.md), [14](14-graph-lifecycle-v2.md), [12](12-streaming-ingestion.md) and [15 §17](15-shared-contracts.md).
+> Verified review of the versioning subsystem (2026-10-09): 12 dimension reviewers + 5 gap reviewers, every finding adversarially verified (220 survived, 1 refuted). The delivery order in §5 is superseded by the rollout stages in [13](../versioning/13-access-and-review.md), [14](../versioning/14-graph-lifecycle-v2.md), [12](../versioning/12-streaming-ingestion.md) and [15 §17](../versioning/15-shared-contracts.md).
 
 # Versioned-graph review: readiness for 500+ graphs and hundreds of concurrent users
 
