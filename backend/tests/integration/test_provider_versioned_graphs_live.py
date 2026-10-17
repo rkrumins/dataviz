@@ -1,7 +1,8 @@
 """Which versioned graphs a provider hosts, read from Postgres.
 
 * ``versioned_sources.graphs_pinned_to`` lists every graph whose projection is pinned to the
-  provider, trashed ones marked, and none pinned elsewhere.
+  provider, trashed ones marked, and none pinned elsewhere. A graph whose version control is
+  still being enabled (an unfinished bootstrap) is marked too.
 * The provider delete guard counts them, and a blank model's manual data source, which has no
   catalog item.
 * The impact report lists each pinned graph's key.
@@ -15,7 +16,7 @@ import pytest
 
 from backend.app.services import versioned_sources
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+from backend.app.services.versioning.models import GraphORM, JobORM, ProjectionStateORM
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres to run")
@@ -61,6 +62,20 @@ async def _run() -> None:
     assert [(g.graph_id, g.falkor_graph_name, g.trashed) for g in pinned] == [
         (fork, f"key_{fork}", False), (trashed, f"key_{trashed}", True)]
     assert await versioned_sources.graphs_pinned_to(empty_prov) == []
+    assert not any(g.bootstrapping for g in pinned)
+
+    boot_prov = f"prov_boot_{tag}"
+    enabling, enabled = (f"g_{tag}_{n}" for n in ("a_enabling", "b_enabled"))
+    await _seed_graph(enabling, ds=f"dsboot_{tag}", provider=boot_prov)
+    await _seed_graph(enabled, ds=f"dsdone_{tag}", provider=boot_prov)
+    async with db.graphver_session() as s:
+        s.add(JobORM(job_type="bootstrap", graph_id=enabling, workspace_id="ws_any",
+                     status="failed"))
+        s.add(JobORM(job_type="bootstrap", graph_id=enabled, workspace_id="ws_any",
+                     status="completed"))
+    assert [(g.graph_id, g.bootstrapping)
+            for g in await versioned_sources.graphs_pinned_to(boot_prov)] == [
+        (enabling, True), (enabled, False)]
 
     async with get_async_session() as s:
         assert await provider_repo.has_workspaces(s, blank_prov) is True

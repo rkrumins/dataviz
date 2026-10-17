@@ -337,6 +337,9 @@ async function request<T>(
             if (detail?.type === 'versioned_graphs_pinned') {
                 throw new VersionedGraphsPinnedError(detail.message ?? '', detail.graphs ?? [])
             }
+            if (detail?.type === 'versioned_graphs_bootstrapping' && detail.message) {
+                throw new Error(detail.message)
+            }
         }
         throw new Error(friendlyError(text || res.statusText))
     }

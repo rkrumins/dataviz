@@ -7,7 +7,11 @@
 * An edit that moves the provider to another server is refused with 409
   ``versioned_graphs_pinned`` while live versioned graphs are projected there, unless it says
   ``confirmReseed=true``. Then their watermarks are reset, so each graph is reseeded on the new
-  server. An edit that keeps the server, such as a rename, is never refused.
+  server. The 409 lists exactly the graphs the reset reseeds, and the edit is committed before
+  any process drops its cached connection or the reset runs. A move is refused outright with
+  409 ``versioned_graphs_bootstrapping`` while version control is still being enabled for a
+  graph on the provider. An edit that keeps the server, such as a rename or the same sentinel
+  nodes in another shape or order, is never refused.
 * ``POST /versioning/graphs`` refuses a data source on a provider that cannot be copied.
 
 The graphver store is faked at ``versioned_sources.graphs_pinned_to`` and at the versioning
@@ -25,18 +29,24 @@ from backend.app.services import versioned_sources
 _PROVIDERS = "/api/v1/admin/providers"
 
 
-def _graph(graph_id: str, key: str, trashed: bool = False):
-    return SimpleNamespace(graph_id=graph_id, falkor_graph_name=key, trashed=trashed)
+def _graph(graph_id: str, key: str, trashed: bool = False, bootstrapping: bool = False):
+    return SimpleNamespace(graph_id=graph_id, falkor_graph_name=key, trashed=trashed,
+                           bootstrapping=bootstrapping)
 
 
 class _Versioning:
     def __init__(self):
         self.resets: list = []
         self.created: list = []
+        self.reseedable = ["g_live"]
+        self.on_reset = None
 
-    async def reset_projection_watermarks(self, *, provider, actor):
-        self.resets.append(provider)
-        return ["g_live"]
+    async def reset_projection_watermarks(self, *, provider, actor, dry_run=False):
+        if not dry_run:
+            if self.on_reset is not None:
+                self.on_reset()
+            self.resets.append(provider)
+        return list(self.reseedable)
 
     async def create_graph(self, **kw):
         self.created.append(kw)
@@ -65,10 +75,11 @@ def versioning():
     app.dependency_overrides.pop(get_versioning_service, None)
 
 
-async def _provider(client: AsyncClient, provider_type: str = "falkordb") -> str:
+async def _provider(client: AsyncClient, provider_type: str = "falkordb",
+                    extra_config: dict | None = None) -> str:
     resp = await client.post(_PROVIDERS, json={
         "name": f"{provider_type} provider", "providerType": provider_type,
-        "host": "falkor-a", "port": 6379, "tlsEnabled": False})
+        "host": "falkor-a", "port": 6379, "tlsEnabled": False, "extraConfig": extra_config})
     assert resp.status_code in (200, 201), resp.text
     return resp.json()["id"]
 
@@ -144,6 +155,82 @@ async def test_a_topology_change_moves_the_provider_too(test_client, pinned, ver
                                "cluster": {"startupNodes": [["falkor-c", 6379]]}}}})
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"]["type"] == "versioned_graphs_pinned"
+
+
+async def test_a_move_is_committed_before_caches_are_dropped_or_graphs_reset(
+        test_client, db_session, pinned, versioning, monkeypatch):
+    """A process that re-resolves the provider after the broadcast must read the new server,
+    and so must the projector that picks up the reset rows."""
+    from backend.app.api.v1.endpoints import providers as providers_endpoint
+
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_live", "customer360")]
+    steps: list = []
+    real_commit = db_session.commit
+
+    async def commit():
+        steps.append("commit")
+        await real_commit()
+
+    async def evict(provider_id):
+        steps.append("evict")
+
+    monkeypatch.setattr(db_session, "commit", commit)
+    monkeypatch.setattr(providers_endpoint.provider_registry, "evict_provider", evict)
+    versioning.on_reset = lambda: steps.append("reset")
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}?confirmReseed=true", json={"host": "falkor-b"})
+    assert resp.status_code == 200, resp.text
+    assert steps[:3] == ["commit", "evict", "reset"], steps
+
+
+async def test_the_409_lists_only_the_graphs_the_reset_reseeds(test_client, pinned, versioning):
+    """A graph the reset leaves alone (parked at genesis on its data source's own key, or on a
+    key nothing reads) is not offered for reseeding, so the count confirmed is the count reset."""
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_live", "customer360"), _graph("g_parked", "orders")]
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={"host": "falkor-b"})
+    assert resp.status_code == 409, resp.text
+    assert [g["id"] for g in resp.json()["detail"]["graphs"]] == ["g_live"]
+
+
+async def test_a_move_is_refused_while_a_graph_is_being_enabled(test_client, pinned, versioning):
+    """Its bootstrap would finish on the old server's copy and fast-forward the watermark over
+    a key the new server lacks; the reset skips it, so confirming cannot cover it either."""
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_live", "customer360"), _graph("g_boot", "pkg", bootstrapping=True)]
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}?confirmReseed=true", json={"host": "falkor-b"})
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["type"] == "versioned_graphs_bootstrapping"
+    assert detail["graphs"] == [{"id": "g_boot", "name": "pkg", "type": "versioned_graph"}]
+    assert (await test_client.get(f"{_PROVIDERS}/{prov}")).json()["host"] == "falkor-a"
+    assert versioning.resets == []
+
+
+@pytest.mark.parametrize("stored", [
+    ["h2:26379", "h1:26379"],
+    [{"host": "h1", "port": 26379}, {"host": "h2", "port": "26379"}],
+])
+async def test_the_same_sentinel_nodes_in_another_shape_are_not_a_move(
+        test_client, pinned, versioning, stored):
+    """The edit wizard resends the nodes as [host, port] pairs on every save, a rename too."""
+    def cfg(nodes):
+        return {"falkordbConnection": {"mode": "sentinel",
+                                       "sentinel": {"masterName": "m", "nodes": nodes}}}
+    prov = await _provider(test_client, extra_config=cfg(stored))
+    pinned[prov] = [_graph("g_live", "customer360")]
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={
+        "name": "Renamed", "extraConfig": cfg([["h1", 26379], ["h2", 26379]])})
+    assert resp.status_code == 200, resp.text
+    assert versioning.resets == []
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={
+        "extraConfig": cfg([["h1", 26379], ["h3", 26379]])})
+    assert resp.status_code == 409, resp.text
 
 
 async def test_an_edit_that_keeps_the_server_is_never_refused(test_client, pinned, versioning):

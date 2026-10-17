@@ -185,6 +185,7 @@ class PinnedGraph:
     graph_id: str
     falkor_graph_name: Optional[str]
     trashed: bool
+    bootstrapping: bool = False
 
 
 async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
@@ -192,23 +193,28 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
 
     The provider guards ask this: deleting a provider strands these graphs, and moving it to
     another server leaves their watermarks describing keys that server does not hold. Trashed
-    graphs are included and marked, since a restore or a purge still needs the provider. Forks
+    graphs are included and marked, since a restore or a purge still needs the provider, and so
+    are graphs whose version control is still being enabled, which a move cannot reseed. Forks
     and blank models are found here although no catalog item names the provider. Uncached and
     unbounded in time: a guard must not answer from a stale or missing read, so any failure
     raises."""
     from sqlalchemy import select
 
     from backend.app.services.versioning.db import get_session_factory
-    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+    from backend.app.services.versioning.models import GraphORM, JobORM, ProjectionStateORM
+    from backend.app.services.versioning.service import bootstrap_unfinished
 
     async with get_session_factory()() as session:
         rows = (await session.execute(
-            select(GraphORM.id, ProjectionStateORM.falkor_graph_name, GraphORM.deleted_at)
+            select(GraphORM.id, ProjectionStateORM.falkor_graph_name, GraphORM.deleted_at,
+                   select(JobORM.id).where(*bootstrap_unfinished(GraphORM.id))
+                   .correlate(GraphORM).exists())
             .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
             .where(ProjectionStateORM.falkor_provider == provider_id)
             .order_by(GraphORM.id)
         )).all()
-    return [PinnedGraph(graph_id=r[0], falkor_graph_name=r[1], trashed=r[2] is not None)
+    return [PinnedGraph(graph_id=r[0], falkor_graph_name=r[1], trashed=r[2] is not None,
+                        bootstrapping=bool(r[3]))
             for r in rows]
 
 

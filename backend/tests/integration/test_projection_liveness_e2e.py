@@ -8,7 +8,8 @@ cache, with ``ro_query`` and a key that can go missing).
   graphs still being enabled for version control, and graphs at genesis.
 * A pass that claims the row between liveness's read and its reset wins: the reset does not land.
 * ``reset_projection_watermarks`` resets exactly the provider's live, pinned, projected graphs, to
-  ``reseeding`` rather than to an error, and its dry run counts the same graphs.
+  ``reseeding`` rather than to an error, and its dry run counts the same graphs. A graph parked at
+  genesis on a key it does not own is left alone: the key is its data source's own graph.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -243,7 +244,12 @@ async def _run_the_operator_reset_is_scoped_to_a_provider() -> None:
         (await s.get(GraphORM, deleted)).deleted_at = models._now()
         s.add(JobORM(job_type="bootstrap", graph_id=bootstrapping, workspace_id="ws1",
                      status="failed"))
-    before = {gid: await _row(gid) for gid in (mine, theirs, deleted, bootstrapping)}
+    parked = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                     workspace_id="ws1", actor="a",
+                                     falkor_graph_name="orders_" + os.urandom(4).hex(),
+                                     falkor_provider=provider))["graph_id"]
+    assert (await _row(parked))["projected"] == 1
+    before = {gid: await _row(gid) for gid in (mine, theirs, deleted, bootstrapping, parked)}
 
     # The confirm dialog's count: the same graphs, and nothing changes.
     assert await svc.reset_projection_watermarks(provider=provider, actor="usr_admin",
@@ -255,7 +261,7 @@ async def _run_the_operator_reset_is_scoped_to_a_provider() -> None:
     assert row["projected"] == 0 and row["epoch"] == before[mine]["epoch"] + 1, row
     # Reseeding, not failed: no error is recorded.
     assert (row["status"], row["last_error"]) == ("reseeding", None), row
-    for gid in (theirs, deleted, bootstrapping):
+    for gid in (theirs, deleted, bootstrapping, parked):
         assert await _row(gid) == before[gid], gid
 
     await proj.project_graph(mine)

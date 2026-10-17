@@ -412,11 +412,18 @@ def _effective_provider_identity(prov) -> tuple:
 
 def _graph_server(host, port, extra_config: dict | None) -> tuple:
     """The server a provider's graphs live on: its address and FalkorDB topology. Credentials,
-    TLS and timeouts reach the same server, so they are not part of it."""
+    TLS and timeouts reach the same server, so they are not part of it. Node lists compare as
+    sets of (host, port), whatever shape they are stored in, and a mode's block counts only in
+    that mode: the edit wizard resends them in its own shape on every save, a rename too."""
+    from backend.app.providers.falkordb_connection import _parse_nodes
+
     conn = (extra_config or {}).get("falkordbConnection") or {}
-    sentinel, cluster = conn.get("sentinel") or {}, conn.get("cluster") or {}
-    return (host, port, conn.get("mode") or "standalone", sentinel.get("masterName"),
-            sentinel.get("nodes"), cluster.get("startupNodes"))
+    mode = conn.get("mode") or "standalone"
+    sentinel = (conn.get("sentinel") or {}) if mode == "sentinel" else {}
+    cluster = (conn.get("cluster") or {}) if mode == "cluster" else {}
+    return (host, port, mode, sentinel.get("masterName"),
+            sorted(set(_parse_nodes(sentinel.get("nodes")))),
+            sorted(set(_parse_nodes(cluster.get("startupNodes")))))
 
 
 @router.put("/{provider_id}", response_model=ProviderResponse)
@@ -439,7 +446,10 @@ async def update_provider(
     live versioned graphs are projected into it answers 409 ``versioned_graphs_pinned``, listing
     them: their watermarks describe keys the new server does not hold, so reads would trust a
     projection that is not there. With ``confirmReseed=true`` it is applied and their
-    watermarks are reset, so the projector reseeds each graph on the new server."""
+    watermarks are reset, so the projector reseeds each graph on the new server. The list is
+    the graphs the reset reseeds. While version control is still being enabled for a graph on
+    the provider, a move answers 409 ``versioned_graphs_bootstrapping`` naming them, confirmed
+    or not: the reset cannot cover them, and their bootstrap would finish on the old server."""
     from backend.app.services import versioned_sources
     from backend.app.services.node_identity import (
         invalidate_node_identity, provider_identity_from_extra_config,
@@ -462,8 +472,24 @@ async def update_provider(
             req.port if req.port is not None else old_prov.port,
             req.extra_config if req.extra_config is not None else old_extra)
         if new_server != old_server:
-            moved_graphs = [g for g in await versioned_sources.graphs_pinned_to(provider_id)
-                            if not g.trashed]
+            pinned = [g for g in await versioned_sources.graphs_pinned_to(provider_id)
+                      if not g.trashed]
+            bootstrapping = [provider_repo.pinned_graph_entity(g) for g in pinned
+                             if g.bootstrapping]
+            if bootstrapping:
+                raise HTTPException(status_code=409, detail={
+                    "type": "versioned_graphs_bootstrapping",
+                    "message": ("Version control is still being enabled for "
+                                f"{', '.join(g.name for g in bootstrapping)} on this provider. "
+                                "Let it finish, or resume or cancel it, before moving the "
+                                "provider to another server."),
+                    "graphs": [g.model_dump() for g in bootstrapping],
+                })
+            if pinned:
+                # Exactly the graphs the reset below reseeds: what is confirmed is what is reset.
+                reseeded = set(await versioning.reset_projection_watermarks(
+                    provider=provider_id, actor=user.id, dry_run=True))
+                moved_graphs = [g for g in pinned if g.graph_id in reseeded]
     if moved_graphs and not confirm_reseed:
         raise HTTPException(status_code=409, detail={
             "type": "versioned_graphs_pinned",
@@ -476,6 +502,10 @@ async def update_provider(
     prov = await provider_repo.update_provider(session, provider_id, req)
     if not prov:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    # Committed before any process drops its cached connection or the projector picks up a reset
+    # row: each re-reads the provider from its own session, which until then sees the old server
+    # and would keep it.
+    await session.commit()
     await provider_registry.evict_provider(provider_id)
     # Which fields were sent, never their values: one of them may be a secret.
     details = {"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))}

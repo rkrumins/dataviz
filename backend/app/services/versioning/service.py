@@ -2952,13 +2952,17 @@ class GraphVersioningService:
         cannot tell. Lowers each projected watermark to 0, marks it ``reseeding`` (not an error:
         nothing failed) and bumps its epoch, so a pass in flight cannot publish over it; the poll
         then reseeds each key in place, writing only what differs. Graphs the poll does not
-        project (unpinned, tombstoned, still being enabled for version control) are left alone.
-        Returns the ids reset; ``dry_run`` returns the ids it would reset and changes nothing."""
+        project (unpinned, tombstoned, still being enabled for version control) are left alone,
+        as are graphs parked at genesis on their data source's own key. Returns the ids reset;
+        ``dry_run`` returns the ids it would reset and changes nothing."""
         ps = ProjectionStateORM
         resettable = (
             func.coalesce(func.nullif(ps.falkor_provider, ""),
                           config.DEFAULT_FALKOR_PROVIDER) == provider,
             ps.projected_commit_seq > 0,
+            # Parked at genesis on a key we did not mint: the key is the data source's own
+            # graph, and a reseed from genesis would empty it (liveness's and eviction's rule).
+            or_(ps.owns_falkor_graph.is_(True), ps.projected_commit_seq > 1),
             ps.falkor_graph_name.isnot(None),
             ps.falkor_graph_name != literal("gv_").concat(ps.graph_id),
             select(1).where(GraphORM.id == ps.graph_id, GraphORM.deleted_at.is_(None))
