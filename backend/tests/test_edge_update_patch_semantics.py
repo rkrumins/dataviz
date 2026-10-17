@@ -132,22 +132,33 @@ async def test_branch_provider_missing_edge_is_none():
     assert svc.applied == []
 
 
-# ── versioned write-through: records the patch, forwards the same patch ────────
+# ── versioned write-through: records the patch, answers with the committed edge ─
 class _WriteSvc(_BranchSvc):
     async def entity_value(self, *, graph_id, entity_id, branch_id=None):
         return self.cur
 
+    async def apply_ops_detailed(self, **kw):
+        from backend.app.services.versioning.service import ApplyResult
+        self.applied.extend(kw["ops"])
+        return ApplyResult("c1", {"e1": ("edge", {"sourceEntityId": "a", "targetEntityId": "b",
+                                                  "edgeType": "FLOWS_TO", "properties": {}})})
+
 
 @pytest.mark.asyncio
-async def test_write_through_records_and_forwards_the_same_patch(monkeypatch):
+async def test_write_through_records_the_patch_and_does_not_forward_it(monkeypatch):
     async def _flag_on():
         return None
+
+    async def _nudge(graph_id):
+        return None
     monkeypatch.setattr(vwp, "_require_versioning_flag", _flag_on)
+    monkeypatch.setattr(vwp, "nudge_projection", _nudge)
     inner = _RecordingProvider()
     svc = _WriteSvc({"edgeType": "FLOWS_TO", "properties": {"a": 1}})
     provider = vwp.VersionedWriteProvider(inner, workspace_id="ws", data_source_id="ds", actor="u", svc=svc)
     provider._gid = "g"
-    await provider.update_edge("e1", {"a": PROP_DELETE})
+    edge = await provider.update_edge("e1", {"a": PROP_DELETE})
     assert svc.applied == [{"op": "update", "entity_kind": "edge", "entity_id": "e1",
                             "payload": {"properties": {"a": PROP_DELETE}}}]
-    assert inner.calls == [("e1", {"a": PROP_DELETE})]
+    assert edge.properties == {} and (edge.source_urn, edge.target_urn) == ("a", "b")
+    assert inner.calls == []                               # the projector writes FalkorDB

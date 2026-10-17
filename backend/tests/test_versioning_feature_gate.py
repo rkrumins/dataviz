@@ -184,11 +184,12 @@ async def test_write_provider_passes_when_enabled():
         async def resolve_graph(self, **kw):
             return {"graph_id": "g_stub"}
 
-        async def apply_ops(self, **kw):
+        async def apply_ops_detailed(self, **kw):
             calls["ops"] = kw["ops"]
+            return type("_NoCommit", (), {"commit_id": None})()   # a no-op: no nudge
 
     class _StubInner:
-        async def create_node(self, node, containment_edge=None):
+        async def create_node(self, node, containment_edge=None):  # pragma: no cover
             calls["inner"] = node
             return True
 
@@ -200,4 +201,4 @@ async def test_write_provider_passes_when_enabled():
     node = GraphNode(urn="urn:x:1", display_name="X", entity_type="Node")
     await provider.create_node(node)
     assert calls["ops"], "write must be recorded when the flag is on"
-    assert calls["inner"] is node
+    assert "inner" not in calls, "the projector, not the write-through, writes the provider"

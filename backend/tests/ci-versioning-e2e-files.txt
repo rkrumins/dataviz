@@ -113,6 +113,7 @@ tests/integration/test_versioning_roundtrip_fidelity.py
 tests/integration/test_versioning_scale_gate.py
 tests/integration/test_versioning_scale_smoke.py
 tests/integration/test_versioning_shared.py
+tests/integration/test_versioning_single_writer.py
 tests/integration/test_versioning_state_reconstruction.py
 tests/integration/test_versioning_sync.py
 tests/integration/test_versioning_sync_characterisation.py

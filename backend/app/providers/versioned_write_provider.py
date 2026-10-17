@@ -1,15 +1,15 @@
 """Provider write-through versioning — the out-of-the-box audit trail + branching.
 
 Wraps any :class:`GraphDataProvider`: reads (and lifecycle hooks) delegate unchanged,
-but every write also lands as an audited commit on the data source's versioned graph
-(resolved or created lazily) BEFORE it's applied to the underlying provider. This makes
-the versioning service the system of record for writes — branch/version history and
-"who changed what, when" come for free with the existing providers. Disable per
-deployment with ``GRAPHVER_VERSIONED_WRITES=0``.
+but every write lands as an audited commit on the data source's versioned graph — and
+ONLY there. The projector is the one process that writes a versioned graph's FalkorDB
+data; a direct provider write would be a second writer outside its ordering. Until the
+projection catches up, ContextEngine serves main from Postgres (read-your-writes).
 
 Entity ids in the versioned graph are aligned to provider identifiers (node ``urn``,
-edge ``id``) so a write maps to the same versioned entity every time, and edge endpoints
-are backfilled from the inner provider so the versioned graph stays referentially whole.
+edge ``id``) so a write maps to the same versioned entity every time. An edge endpoint
+main has never recorded is backfilled from the inner provider so the versioned graph
+stays referentially whole.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from backend.app.services.feature_flags import (
     FeatureDisabledError,
     feature_flags,
 )
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.messaging import nudge_projection
+from backend.app.services.versioning.service import ApplyResult, GraphVersioningService
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ def _edge_payload(edge: GraphEdge) -> dict:
 
 
 class VersionedWriteProvider:
-    """Records every write to the versioning service, then delegates to the wrapped
-    provider. Everything not overridden here (all reads + lifecycle) delegates
+    """Records every write to the versioning service; the wrapped provider is never
+    written. Everything not overridden here (all reads + lifecycle) delegates
     transparently via ``__getattr__``."""
 
     def __init__(self, inner, *, workspace_id: str, data_source_id: str,
@@ -137,19 +138,27 @@ class VersionedWriteProvider:
                     self._gid = res["graph_id"]
         return self._gid
 
-    async def _record(self, ops: List[dict], message: str) -> None:
+    async def _record(self, ops: List[dict], message: str) -> Optional[ApplyResult]:
+        """Commit the ops to main, then nudge the projector to carry them to FalkorDB."""
         ops = [o for o in ops if o is not None]
         if not ops:
-            return
-        await _require_versioning_flag()
-        await self._svc.apply_ops(graph_id=await self._graph_id(), ops=ops,
-                                  actor=self._actor, message=message,
-                                  containment_edge_types=self._containment_types,
-                                  ontology_rules=self._ontology_rules)
+            return None
+        gid = await self._graph_id()
+        res = await self._svc.apply_ops_detailed(
+            graph_id=gid, ops=ops, actor=self._actor,
+            message=message, containment_edge_types=self._containment_types,
+            ontology_rules=self._ontology_rules)
+        if res.commit_id is not None:
+            await nudge_projection(gid)
+        return res
 
     async def _endpoint_op(self, urn: str) -> Optional[dict]:
-        """A create op for an edge endpoint node (fetched from the inner provider) so the
-        versioned graph stays referentially consistent — a no-op if already current."""
+        """A create op for an edge endpoint node main has never recorded (fetched from the
+        inner provider), so the versioned graph stays referentially whole. A recorded one —
+        live or deleted — is left alone: re-sending FalkorDB's copy as a full-replace create
+        would overwrite, or bring back, what main committed."""
+        if await self._svc.entity_recorded(graph_id=await self._graph_id(), entity_id=urn):
+            return None
         try:
             node = await self._inner.get_node(urn)
         except Exception:                                # pragma: no cover - provider read hiccup
@@ -157,8 +166,10 @@ class VersionedWriteProvider:
         return None if node is None else {
             "op": "create", "entity_kind": "node", "entity_id": urn, "payload": _node_payload(node)}
 
-    # ---- writes: record to versioning, then apply to the provider ---- #
+    # ---- writes: record to versioning only; the projector applies them ---- #
+    # Each checks the admin flag first, before any service call.
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        await _require_versioning_flag()
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,
                 "payload": _node_payload(node)}]
         if containment_edge is not None:
@@ -166,33 +177,47 @@ class VersionedWriteProvider:
             ops.append({"op": "create", "entity_kind": "edge",
                         "entity_id": containment_edge.id, "payload": _edge_payload(containment_edge)})
         await self._record(ops, f"create node {node.urn}")
-        return await self._inner.create_node(node, containment_edge)
+        return True
 
     async def create_edge(self, edge: GraphEdge) -> bool:
+        await _require_versioning_flag()
         ops = [await self._endpoint_op(edge.source_urn), await self._endpoint_op(edge.target_urn),
                {"op": "create", "entity_kind": "edge", "entity_id": edge.id, "payload": _edge_payload(edge)}]
         await self._record(ops, f"create edge {edge.id}")
-        return await self._inner.create_edge(edge)
+        return True
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        # `properties` is a PATCH (a removal is PROP_DELETE); versioning applies it onto the
-        # stored edge and the provider onto its own copy — the same patch, the same result.
-        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is not None:
-            await self._record([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
-                                 "payload": {"properties": dict(properties or {})}}],
-                               f"update edge {edge_id}")
-        return await self._inner.update_edge(edge_id, properties)
+        # `properties` is a PATCH (a removal is PROP_DELETE) that versioning applies onto the
+        # stored edge; the answer is the edge as committed. An edge main does not hold is not
+        # found (ContextEngine says so), as on VersionedBranchProvider.
+        await _require_versioning_flag()
+        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is None:
+            return None
+        res = await self._record([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
+                                   "payload": {"properties": dict(properties or {})}}],
+                                 f"update edge {edge_id}")
+        _, payload = res.written[edge_id]
+        return GraphEdge(
+            id=edge_id,
+            sourceUrn=payload.get("sourceEntityId") or payload.get("source_entity_id") or "",
+            targetUrn=payload.get("targetEntityId") or payload.get("target_entity_id") or "",
+            edgeType=payload.get("edgeType"),
+            confidence=payload.get("confidence"),
+            properties=payload.get("properties") or {})
 
     async def delete_edge(self, edge_id: str) -> bool:
-        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is not None:
-            await self._record([{"op": "delete", "entity_kind": "edge",
-                                 "entity_id": edge_id, "payload": None}], f"delete edge {edge_id}")
-        return await self._inner.delete_edge(edge_id)
+        await _require_versioning_flag()
+        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is None:
+            return False
+        await self._record([{"op": "delete", "entity_kind": "edge",
+                             "entity_id": edge_id, "payload": None}], f"delete edge {edge_id}")
+        return True
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        await _require_versioning_flag()
         ops = [{"op": "create", "entity_kind": "node", "entity_id": n.urn, "payload": _node_payload(n)}
                for n in nodes]
         ops += [{"op": "create", "entity_kind": "edge", "entity_id": e.id, "payload": _edge_payload(e)}
                 for e in edges]
         await self._record(ops, "save custom graph")
-        return await self._inner.save_custom_graph(nodes, edges)
+        return True

@@ -176,7 +176,8 @@ REBUILD_SYNC_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_REBUILD_TIMEOUT_SECS", 
 
 # Provider write-through: record every graph write as an audited versioned commit on the
 # data source's versioned graph (the audit trail + branch/version history, on by default).
-# Set GRAPHVER_VERSIONED_WRITES=0 to opt out (writes then hit the provider only).
+# Set GRAPHVER_VERSIONED_WRITES=0 to opt out data sources that are not versioned (their writes
+# then hit the provider only); a versioned graph is always written through versioning.
 VERSIONED_WRITES_ENABLED: bool = os.getenv("GRAPHVER_VERSIONED_WRITES", "1").lower() not in ("0", "false", "no")
 
 # Evictable/rebuildable FalkorDB cache (plan §5, §16.5 #9-10): single-flight

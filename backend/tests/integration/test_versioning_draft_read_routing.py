@@ -24,6 +24,8 @@ from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.integration.test_versioning_projection import FakeFalkor
 from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+from backend.app.providers.versioned_write_provider import VersionedWriteProvider
+from backend.app.db.repositories import data_source_repo
 from backend.app.services.context_engine import ContextEngine
 
 
@@ -55,16 +57,22 @@ async def _run() -> None:
          "payload": {"urn": "N1", "entityType": "Table", "displayName": "N1"}}])
     draft = await svc.open_draft(graph_id=gid, owner="u")
 
-    # Isolate the selection rule: no write-through wrap, no ontology DB dependency, and a
-    # deterministic projection watermark (no FalkorDB / projector running here).
+    # Isolate the selection rule: write-through opted out (a versioned graph is wrapped
+    # anyway), no ontology or management DB dependency, and a deterministic projection watermark
+    # (no FalkorDB / projector running here).
     prev_writes = vconfig.VERSIONED_WRITES_ENABLED
     prev_resolve = ContextEngine._resolve_ontology
     prev_wm = GraphVersioningService.projection_watermark
+    prev_ds = data_source_repo.get_data_source_orm
     vconfig.VERSIONED_WRITES_ENABLED = False
 
     async def _noop(self):
         return None
+
+    async def _no_ds(session, ds_id):
+        return None
     ContextEngine._resolve_ontology = _noop
+    data_source_repo.get_data_source_orm = _no_ds
     try:
         # resolved draft on a versioned graph → the overlay provider, bound to that branch. The
         # real watermark here is NOT fresh (no projector ran), so the overlay's base is the Postgres
@@ -81,16 +89,19 @@ async def _run() -> None:
         # Once the projection holds the head, both say FalkorDB (the live provider).
         await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
         assert (await svc.projection_watermark(gid))["read_route"] == {"main": "falkordb", "drafts": "overlay"}
-        assert isinstance((await _for_workspace(ds, "main")).provider, _StubProvider)
+        live_main = (await _for_workspace(ds, "main")).provider
+        assert isinstance(live_main, VersionedWriteProvider) and isinstance(live_main._inner, _StubProvider)
         assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
 
-        # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live provider
+        # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live
+        # provider, wrapped so a write commits to versioning even with GRAPHVER_VERSIONED_WRITES=0
         async def _fresh(self, graph_id):
             return {"fresh": True, "committed": 1, "projected": 1}
         GraphVersioningService.projection_watermark = _fresh
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
-            assert isinstance(e.provider, _StubProvider)
+            assert isinstance(e.provider, VersionedWriteProvider)
+            assert isinstance(e.provider._inner, _StubProvider)
 
         # a draft while main is FRESH → overlay wraps the LIVE main provider (reusing its
         # materialized aggregated lineage), not a Postgres reader. This is the scalable hot path.
@@ -119,6 +130,7 @@ async def _run() -> None:
         vconfig.VERSIONED_WRITES_ENABLED = prev_writes
         ContextEngine._resolve_ontology = prev_resolve
         GraphVersioningService.projection_watermark = prev_wm
+        data_source_repo.get_data_source_orm = prev_ds
 
     await db.dispose_engine()
 

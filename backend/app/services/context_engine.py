@@ -200,12 +200,13 @@ class ContextEngine:
                     return engine
             # graph is None → not versioned: ignore branch_id, serve the live provider.
 
-        # Out-of-the-box write-through versioning: wrap the provider so every write also
-        # lands as an audited commit on the data source's versioned graph (the audit trail
-        # + branch/version history). Reads delegate unchanged. Opt out with
-        # GRAPHVER_VERSIONED_WRITES=0.
+        # Out-of-the-box write-through versioning: wrap the provider so every write lands
+        # as an audited commit on the data source's versioned graph (the audit trail +
+        # branch/version history). Reads delegate unchanged. A versioned graph is always
+        # wrapped: a raw provider write would be a second FalkorDB writer the projector cannot
+        # see. GRAPHVER_VERSIONED_WRITES=0 opts out only data sources that are not versioned.
         from .versioning import config as vconfig
-        if vconfig.VERSIONED_WRITES_ENABLED and data_source_id:
+        if data_source_id and (vconfig.VERSIONED_WRITES_ENABLED or graph is not None):
             from ..providers.versioned_write_provider import VersionedWriteProvider
             # Resolve the data source's real FalkorDB graph so a lazily-created versioned graph
             # projects merged main state into the SAME graph the canvas reads (not an orphan gv_<id>).

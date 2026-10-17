@@ -1,11 +1,11 @@
 """Provider write-through versioning (unification Phase 5) — needs Postgres.
 
-The VersionedWriteProvider wraps any provider so every write also lands as an audited
+The VersionedWriteProvider wraps any provider so every write lands as an audited
 commit on the data source's versioned graph (which must already exist: enablement is an
 explicit job, and a write to an un-versioned source is refused), attributed to the
-acting user, while still delegating to the underlying provider. Edge endpoints are
-backfilled so the versioned graph stays referentially whole; updates/deletes are versioned
-too. Reads delegate unchanged.
+acting user. The underlying provider is never written: the projector is its only writer.
+An edge endpoint main never recorded is backfilled so the versioned graph stays
+referentially whole; updates/deletes are versioned too. Reads delegate unchanged.
 """
 import asyncio
 import os
@@ -13,6 +13,7 @@ import os
 import pytest
 
 from backend.common.models.graph import GraphEdge, GraphNode
+from backend.app.providers import versioned_write_provider as vwp
 from backend.app.providers.versioned_write_provider import VersionedWriteProvider, VersioningNotEnabled
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import GraphVersioningService
@@ -76,17 +77,16 @@ async def _run() -> None:
     assert inner.calls == []
     gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u_alice"))["graph_id"]
 
-    # ── create node: delegated AND recorded on the now-enabled graph ──
+    # ── create node: recorded on the now-enabled graph ──
     assert await prov.create_node(A) is True
-    assert ("create_node", "u:A") in inner.calls
     main = await svc.main_branch_id(gid)
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
     assert st["nodes"]["u:A"]["properties"]["owner"] == "t1"
 
-    # ── create edge: backfills the endpoint node + records the edge ──
+    # ── create edge: backfills u:B (never recorded), not u:A, + records the edge ──
     E = GraphEdge(id="e1", sourceUrn="u:A", targetUrn="u:B", edgeType="FLOWS_TO")
     assert await prov.create_edge(E) is True
-    assert ("create_edge", "e1") in inner.calls
+    assert [h["op"] for h in await svc.entity_history(graph_id=gid, entity_id="u:A")] == ["create"]
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
     assert "u:B" in st["nodes"] and st["edges"]["e1"]["edgeType"] == "FLOWS_TO"
 
@@ -103,13 +103,17 @@ async def _run() -> None:
 
     await prov.delete_edge("e1")
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
-    assert "e1" not in st["edges"] and ("delete_edge", "e1") in inner.calls
+    assert "e1" not in st["edges"]
 
+    assert inner.calls == []                               # the provider is never written
     await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_write_through_e2e():
+def test_versioning_write_through_e2e(monkeypatch):
+    async def _no_nudge(graph_id):
+        return None
+    monkeypatch.setattr(vwp, "nudge_projection", _no_nudge)
     asyncio.run(_run())
 
 

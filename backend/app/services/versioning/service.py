@@ -6951,6 +6951,14 @@ class GraphVersioningService:
                 return eid
         return None
 
+    async def entity_recorded(self, *, graph_id: str, entity_id: str) -> bool:
+        """Whether main holds any version of the entity, live OR deleted — how the write-through
+        tells a node versioning never saw from one main deleted. This graph's rows only (not
+        fork-aware)."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            return entity_id in await self._current_skeletons(s, graph_id, main_id, [entity_id])
+
     async def entity_value(
         self, *, graph_id: str, entity_id: str, branch_id: Optional[str] = None,
     ) -> Optional[dict]:

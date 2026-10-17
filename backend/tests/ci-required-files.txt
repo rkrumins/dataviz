@@ -236,6 +236,7 @@ tests/test_versioning_raw_path_route.py
 tests/test_versioning_read_only_queries.py
 tests/test_versioning_rollup_canonical.py
 tests/test_versioning_schema.py
+tests/test_versioning_single_writer.py
 tests/test_view_avatar_ids.py
 tests/test_view_branch_scope.py
 tests/test_view_bundle_schema.py
