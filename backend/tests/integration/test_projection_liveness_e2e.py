@@ -132,9 +132,12 @@ async def _run_a_dropped_key_is_reseeded() -> None:
     row = await _row(gid)
     assert row["projected"] == 0 and row["epoch"] == before["epoch"] + 1, row
     assert row["last_error"] == "liveness: projection key missing", row
+    # The watermark names the reset as a liveness failure, until a pass clears it.
+    assert (await svc.projection_watermark(gid))["liveness_error"] == row["last_error"]
     assert await _ours(proj, gid) == [], "a second sweep must not reset it again"
 
     assert (await proj.project_graph(gid))["projected"] == 3
+    assert (await svc.projection_watermark(gid))["liveness_error"] is None
     await _assert_matches_main(svc, fake, gid)
     assert graph.proj_meta["seq"] == 3
     await db.dispose_engine()

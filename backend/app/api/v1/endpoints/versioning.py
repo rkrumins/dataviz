@@ -43,7 +43,7 @@ from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo
+from backend.app.db.repositories import data_source_repo, provider_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -868,6 +868,18 @@ class WatermarkModel(_ApiModel):
     # The main revision each side is at: the system of record's head, and what the graph holds.
     committed_revision: Optional[RevisionModel] = Field(default=None, alias="committedRevision")
     projected_revision: Optional[RevisionModel] = Field(default=None, alias="projectedRevision")
+    # Where the projection lives (doc 14 LifecycleSnapshot.projection): its FalkorDB key, the
+    # provider hosting it (null = the default instance) and whether the platform minted the key
+    # (`owned`) or it is the customer's own graph. Then the fencing epoch, the poll's backoff, and
+    # the reason of the last liveness reset (a key that lost what the watermark said it held).
+    projection_key: Optional[str] = Field(default=None, alias="projectionKey")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    provider_name: Optional[str] = Field(default=None, alias="providerName")
+    owned: bool = False
+    epoch: int = 0
+    failed_attempts: int = Field(default=0, alias="failedAttempts")
+    next_retry_at: Optional[str] = Field(default=None, alias="nextRetryAt")
+    liveness_error: Optional[str] = Field(default=None, alias="livenessError")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -1746,9 +1758,10 @@ async def get_watermark(
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    return _watermark_model(await svc.projection_watermark(graph_id))
+    return await _watermark_model(session, await svc.projection_watermark(graph_id))
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
@@ -1767,7 +1780,10 @@ async def get_branch_freshness(
                                 base_commit_seq=f["base_commit_seq"])
 
 
-def _watermark_model(wm: dict) -> WatermarkModel:
+async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
+    # The provider's display name lives in the management DB, not the graphver store.
+    provider = (await provider_repo.get_provider_orm(session, wm["falkor_provider"])
+                if wm.get("falkor_provider") else None)
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
                           fresh=wm["fresh"], status=wm["status"],
                           target=wm.get("target", 0),
@@ -1776,7 +1792,15 @@ def _watermark_model(wm: dict) -> WatermarkModel:
                           progress_done=wm.get("progress_done"),
                           progress_total=wm.get("progress_total"),
                           committed_revision=_revision_model(wm.get("committed_revision")),
-                          projected_revision=_revision_model(wm.get("projected_revision")))
+                          projected_revision=_revision_model(wm.get("projected_revision")),
+                          projection_key=wm.get("falkor_graph_name"),
+                          provider_id=wm.get("falkor_provider"),
+                          provider_name=provider.name if provider is not None else None,
+                          owned=wm.get("owns_falkor_graph", False),
+                          epoch=wm.get("epoch", 0),
+                          failed_attempts=wm.get("failed_attempts", 0),
+                          next_retry_at=wm.get("next_retry_at"),
+                          liveness_error=wm.get("liveness_error"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
@@ -1793,6 +1817,7 @@ async def rebuild_projection(
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Force a full replay of committed ``main`` from Postgres (the SoR) into the graph's FalkorDB
     cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
@@ -1819,7 +1844,8 @@ async def rebuild_projection(
     # rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed actually finish.
     background.add_task(rebuild_now, graph_id)
     return RebuildResponse(started=started, already_running=not started,
-                           watermark=_watermark_model(await svc.projection_watermark(graph_id)))
+                           watermark=await _watermark_model(
+                               session, await svc.projection_watermark(graph_id)))
 
 
 # Per-graph in-process guard: a reconcile is a request-scoped full scan; a second concurrent one

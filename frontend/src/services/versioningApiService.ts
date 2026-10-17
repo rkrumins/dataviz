@@ -128,6 +128,18 @@ export interface Watermark {
   /** Live full-rebuild progress (items applied / total); null unless a full seed is running. */
   progressDone?: number | null
   progressTotal?: number | null
+  /** Where the projection lives: its FalkorDB key and the provider hosting it (null = the
+   *  default instance). `owned` = the platform minted the key; false = the customer's own graph. */
+  projectionKey?: string | null
+  providerId?: string | null
+  providerName?: string | null
+  owned?: boolean
+  /** Fencing epoch and the poll's backoff: failed passes in a row and when it may retry. */
+  epoch?: number
+  failedAttempts?: number
+  nextRetryAt?: string | null
+  /** Why the last liveness check lowered the watermark (the key lost what it held), else null. */
+  livenessError?: string | null
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a

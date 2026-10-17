@@ -2589,6 +2589,15 @@ class GraphVersioningService:
                 "last_projected_at": ps.last_projected_at if ps else None,
                 "progress_done": ps.progress_done if ps else None,
                 "progress_total": ps.progress_total if ps else None,
+                # Whose key it is, the fencing epoch, and the poll's backoff — so a graph backing
+                # off can be told from a wedged one. A liveness reset records its reason in
+                # last_error with this prefix (FalkorProjector.check_liveness).
+                "owns_falkor_graph": bool(ps.owns_falkor_graph) if ps else False,
+                "epoch": ps.epoch if ps else 0,
+                "failed_attempts": ps.failed_attempts if ps else 0,
+                "next_retry_at": ps.next_retry_at if ps else None,
+                "liveness_error": (ps.last_error if ps and (ps.last_error or "").startswith("liveness:")
+                                   else None),
             }
 
     async def ensure_projection_target(
