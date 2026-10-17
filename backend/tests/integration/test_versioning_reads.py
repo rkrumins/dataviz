@@ -136,7 +136,14 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_reads_e2e():
+def test_versioning_reads_e2e(monkeypatch):
+    from backend.app.api.v1.endpoints import versioning as V
+
+    async def _no_projection(graph_id: str) -> None:
+        return None
+
+    # publish projects in-process; the test needs the projection to lag until it runs one itself
+    monkeypatch.setattr(V, "project_now", _no_projection)
     asyncio.run(_run())
 
 

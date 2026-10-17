@@ -93,8 +93,8 @@ async def _run() -> None:
     async def _noop_project_now(graph_id: str) -> None:
         return None
 
-    _orig_project_now = V.project_now
-    V.project_now = _noop_project_now
+    _orig_project_now, _orig_rebuild_now = V.project_now, V.rebuild_now
+    V.project_now = V.rebuild_now = _noop_project_now
     c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
     ws1 = "/api/v1/ws1/versioning"
 
@@ -118,8 +118,8 @@ async def _run() -> None:
         h = _hdr(f"{R},{M}")
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={"originatingViewId": "v1"}, headers=h)).json()["branchId"]
         r = await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"displayName": "Alpha"}},
-            {"op": "create", "entityKind": "node", "entityId": "B", "payload": {"displayName": "Beta"}},
+            {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"entityType": "Dataset", "displayName": "Alpha"}},
+            {"op": "create", "entityKind": "node", "entityId": "B", "payload": {"entityType": "Dataset", "displayName": "Beta"}},
             {"op": "create", "entityKind": "edge", "entityId": "E1", "payload": {"edgeType": "R", "sourceEntityId": "A", "targetEntityId": "B"}},
         ]})
         assert r.json()["count"] == 3, r.text
@@ -148,7 +148,7 @@ async def _run() -> None:
         # advance main under it (publish another draft adding C), then the rebase pulls main forward
         adv = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "C", "payload": {"displayName": "Gamma"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "C", "payload": {"entityType": "Dataset", "displayName": "Gamma"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/commit", json={}, headers=h)
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/publish", json={"message": "add C"}, headers=h)
         pulled = await c.post(f"{ws1}/graphs/{gid}/branches/{rb}/rebase", json={}, headers=h)
@@ -204,7 +204,7 @@ async def _run() -> None:
         # a checkpoint with no message no longer bakes the actor id into the stored message.
         mdb = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "Z", "payload": {"displayName": "Zed"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "Z", "payload": {"entityType": "Dataset", "displayName": "Zed"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/commit", json={}, headers=h)
         dcl = (await c.get(f"{ws1}/graphs/{gid}/commits", params={"branchId": mdb}, headers=h)).json()
         assert any(cm["message"] == "checkpoint" for cm in dcl["commits"]), dcl
@@ -265,7 +265,7 @@ async def _run() -> None:
         # cross-tenant rebuild via ws2 → 404
         assert (await c.post(f"/api/v1/ws2/versioning/graphs/{pinned}/projection/rebuild", headers=h)).status_code == 404
 
-    V.project_now = _orig_project_now                # restore: don't leak the no-op into other tests
+    V.project_now, V.rebuild_now = _orig_project_now, _orig_rebuild_now   # restore: don't leak the no-op
     await db.dispose_engine()
 
 

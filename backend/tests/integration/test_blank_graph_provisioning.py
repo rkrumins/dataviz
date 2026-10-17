@@ -191,7 +191,8 @@ async def _run() -> None:
         # (case is normalized, not rejected — "UPPER_Case" → available as "upper_case")
         r = await c.get(f"{base}/blank-graphs/name-check",
                         params={"providerId": ids["falkor"], "graphName": "UPPER_Case"}, headers=_hdr())
-        assert r.json() == {"available": True, "normalized": "upper_case", "reason": None}, r.text
+        assert r.json() == {"available": True, "normalized": "upper_case", "reason": None,
+                            "suggestion": None}, r.text
         for bad, why in [("Ab", "too short"), ("has space", "slug rules"),
                          ("-leading", "slug rules"),
                          ("gv_mine", "reserved"), ("blank_mine", "reserved"),

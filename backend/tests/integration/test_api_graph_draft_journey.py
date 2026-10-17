@@ -46,10 +46,19 @@ class _StubManager:
     async def get_provider_for_workspace(self, workspace_id, session, data_source_id=None):
         return _StubLiveProvider()
 
+    def admit_graph_request(self, source_key):
+        return None
+
+    def release_graph_request(self, source_key):
+        return None
+
 
 class _StubCache:
     async def bump_generation(self, scope):
         return None
+
+    async def get_or_compute(self, *, compute, **_kw):
+        return await compute()
 
 
 def _build_app():
@@ -137,7 +146,7 @@ async def _run() -> None:
                 "sourceUrn": "urn:t:child", "targetUrn": new_urn, "edgeType": "LINEAGE"})
             assert r.status_code == 201, r.text
 
-            # 5. read-your-writes on the draft (uncached endpoints — no Redis needed)
+            # 5. read-your-writes on the draft (the stub cache computes every read — no Redis needed)
             nodes = (await c.post(f"{GP}/nodes/query", params=qd, json={"query": {}})).json()
             assert {"urn:t:root", "urn:t:child", new_urn} <= {n["urn"] for n in nodes}
             edges = (await c.post(f"{GP}/edges/query", params=qd, json={"query": {}})).json()
@@ -170,9 +179,10 @@ async def _run() -> None:
             assert st_b["urn:t:child"]["displayName"] == "Child v2", st_b["urn:t:child"]
             assert st_b["urn:t:child"]["entityType"] == "Table", st_b["urn:t:child"]  # merge kept it
 
-            # 6. routing isolation: the same read on MAIN (no branchId) hits the live stub (empty)
+            # 6. routing isolation: the same read on MAIN (no branchId) never sees the draft. No
+            #    projector runs here, so main is stale and served from Postgres: the import only.
             main_nodes = (await c.post(f"{GP}/nodes/query", params={"dataSourceId": ds}, json={"query": {}})).json()
-            assert {n["urn"] for n in main_nodes} == set(), main_nodes
+            assert {n["urn"] for n in main_nodes} == {"urn:t:root", "urn:t:child"}, main_nodes
 
             # 7. store isolation: versioning main state has the import but NOT the draft node yet
             st = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()

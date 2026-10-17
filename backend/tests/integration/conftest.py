@@ -61,10 +61,11 @@ def _fresh_graphver_engine():
     module-level cache whose pooled connections belong to the loop that opened them. A test
     that fails before its own ``dispose_engine()`` would hand the next test connections on a
     closed loop ("attached to a different loop"), failing it for no reason of its own.
-    The management engines and the broker client are cached the same way, so they are
-    reset too.
+    The management engines, the broker client and the process-wide FalkorDB client
+    cache are cached the same way, so they are reset too.
     """
     from backend.app.db import engine as mgmt_engine
+    from backend.app.providers import falkordb_connection
     from backend.app.services.versioning import db as gvdb
     from backend.app.services.versioning import messaging
 
@@ -73,4 +74,5 @@ def _fresh_graphver_engine():
     mgmt_engine._engines.clear()
     mgmt_engine._session_factories.clear()
     messaging._client = None
+    falkordb_connection._GRAPH_CLIENTS = falkordb_connection.TopologyGraphClients()
     yield

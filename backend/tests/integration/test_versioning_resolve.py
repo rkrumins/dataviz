@@ -40,6 +40,20 @@ def _build_app():
     return app, V
 
 
+async def _seed_data_source(ds: str, ws: str = "ws1") -> None:
+    """A live data source row in the path workspace: GET /resolve 404s any other."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+
+    async with get_async_session() as s:
+        if await s.get(WorkspaceORM, ws) is None:
+            s.add(WorkspaceORM(id=ws, name=ws))
+        s.add(ProviderORM(id=f"prov_{ds}", name=f"prov_{ds}", provider_type="falkordb"))
+        await s.flush()
+        s.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id=f"prov_{ds}", label=ds))
+        await s.commit()
+
+
 async def _run() -> None:
     from httpx import ASGITransport, AsyncClient
 
@@ -48,6 +62,7 @@ async def _run() -> None:
     svc = GraphVersioningService()
     ws1 = "/api/v1/ws1/versioning"
     ds = "ds_" + os.urandom(4).hex()
+    await _seed_data_source(ds)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
