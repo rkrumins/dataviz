@@ -4,7 +4,7 @@
  *
  * Mount it once per canvas (CanvasRouter). It:
  *  - Once initial hydration COMPLETES, attempts a restore: a safe snapshot
- *    (right branch, not mid-commit) is appended onto the canvas + the review
+ *    (right branch) is appended onto the canvas + the review
  *    op-log, its count surfaced for the "Restored N unsaved changes" banner;
  *    an unsafe one is discarded. Restore waits for hydration on purpose — the
  *    hydration effect clears the canvas and then replaces it with server
@@ -27,6 +27,7 @@ import type { LineageEdge, LineageNode } from '@/store/canvas'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { layoutWriter } from '@/store/canvasLayoutBridge'
 import { assignEntities } from '@/components/canvas/context-view/assignmentMutations'
+import { getPendingSave, resumePendingSave } from '@/features/versioning/model/saveStagedChangesToDraft'
 import {
   clearSnapshot,
   markSnapshotCommitting,
@@ -100,6 +101,7 @@ export function buildSnapshot(scopeKey: string, branchId: string | null): Staged
     pendingNodes: pending.nodes,
     pendingEdges: pending.edges,
     pins,
+    pendingSave: getPendingSave() ?? undefined,
   }
 }
 
@@ -127,6 +129,8 @@ export function useStagedDraftPersistence(
       return
     }
     if (verdict === 'noop' || !snapshot) return
+    // A save that was in flight (or never answered): saving this batch again reuses its key.
+    if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave)
 
     // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
     // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
@@ -169,15 +173,14 @@ export function useStagedDraftPersistence(
     if (!scopeKey) return
 
     const unsub = useStagedChangesStore.subscribe((state, prev) => {
-      // A save going in-flight: freeze the snapshot as 'committing' so a crash
-      // between the server commit and the store-clear can't restore committed
-      // work (would duplicate it).
+      // A save going in-flight: mark the snapshot 'committing' (the save adds
+      // its Idempotency-Key before the request leaves — see StagedDraftSnapshot).
       if (state.applyStatus === 'applying' && prev.applyStatus !== 'applying') {
         markSnapshotCommitting(scopeKey)
         return
       }
       // A save that settles with its changes still staged (it failed) rewrites the snapshot as
-      // 'staged', so a reload keeps the work rather than discarding a 'committing' snapshot.
+      // 'staged': no save is in flight any more.
       if (state.changes === prev.changes && state.applyStatus === prev.applyStatus) return
       if (state.changes.length === 0) {
         if (writeTimerRef.current) clearTimeout(writeTimerRef.current)

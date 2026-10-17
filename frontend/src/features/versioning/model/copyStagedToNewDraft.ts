@@ -28,8 +28,23 @@ export async function copyStagedToNewDraft(fromBranchId: string, viewId: string 
   if (!snapshot) throw new Error('There are no unsaved changes to copy.')
 
   const { branchId } = await openDraft(workspaceId, graphId, { originatingViewId: viewId ?? undefined })
-  writeSnapshot({ ...snapshot, scopeKey: scopeKey(branchId), branchId })
+  // Copy is offered only after the save was refused, so nothing was committed: the edits arrive as
+  // unsaved ones, without the closed draft's save key.
+  writeSnapshot({ ...snapshot, scopeKey: scopeKey(branchId), branchId, phase: 'staged', pendingSave: undefined })
+  if (!readSnapshot(scopeKey(branchId))) {
+    throw new Error('Couldn’t copy your unsaved changes — they are still on the closed draft.')
+  }
   clearSnapshot(fromKey)
+  // The edits left the closed draft: none stay live or parked there to count against it, or to come
+  // back if it is handed back open.
+  const staged = useStagedChangesStore.getState()
+  if (staged._scopeKey === fromKey) {
+    useStagedChangesStore.setState({ changes: [], redoStack: [] })   // no discard hooks: the canvas moves on
+  } else if (staged._byScope[fromKey]) {
+    const byScope = { ...staged._byScope }
+    delete byScope[fromKey]
+    useStagedChangesStore.setState({ _byScope: byScope })
+  }
   useBranchStore.getState().switchToDraft(branchId, viewId)
   invalidateVersioningCaches()
   return branchId

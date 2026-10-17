@@ -1,8 +1,8 @@
 /**
  * The crash snapshot stays 'committing' for as long as a save runs — including when an edit made
- * mid-save rewrites it — so a reload never replays work that may already be committed. When the
- * save fails (it settles with the changes still staged) the snapshot goes back to 'staged', so a
- * reload keeps the unsaved work instead of discarding it.
+ * mid-save rewrites it — so a reload knows a save may have reached the server (its retry reuses the
+ * key: useStagedDraftPersistence.reload.test). When the save fails (it settles with the changes
+ * still staged) the snapshot goes back to 'staged'.
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

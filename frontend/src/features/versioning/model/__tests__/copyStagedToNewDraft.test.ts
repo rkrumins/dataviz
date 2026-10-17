@@ -17,7 +17,7 @@ vi.mock('@/lib/queryClient', () => ({
 import { openDraft } from '@/services/versioningApiService'
 import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
-import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { unsavedCountOnBranch, useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { readSnapshot, writeSnapshot } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { copyStagedToNewDraft } from '../copyStagedToNewDraft'
 
@@ -76,6 +76,62 @@ describe('copyStagedToNewDraft', () => {
     expect(openDraftMock).toHaveBeenCalledWith('ws1', 'g1', { originatingViewId: undefined })
     expect(readSnapshot(NEW)).toMatchObject({ branchId: 'br_new', changes: [expect.objectContaining({ id: 'c9' })] })
     expect(readSnapshot(OLD)).toBeNull()
+  })
+
+  it('copies the edits of a save that was in flight as unsaved edits', async () => {
+    // The canvas left the draft before the failed save's 'staged' rewrite landed.
+    useBranchStore.setState({ currentBranchId: null })
+    useStagedChangesStore.setState({ _scopeKey: 'ws1::ds1::main', changes: [], redoStack: [] })
+    writeSnapshot({
+      version: 1, scopeKey: OLD, branchId: 'br_old', phase: 'committing', savedAt: 0,
+      changes: [{ id: 'c9', type: 'create_entity', targetId: 'tmp_9', after: {}, summary: 'Create B', timestamp: 2 }],
+      pendingNodes: [], pendingEdges: [],
+    })
+
+    await copyStagedToNewDraft('br_old', null)
+
+    expect(readSnapshot(NEW)).toMatchObject({ phase: 'staged', changes: [expect.objectContaining({ id: 'c9' })] })
+  })
+
+  it('keeps the closed draft’s snapshot when the copy could not be stored', async () => {
+    useBranchStore.setState({ currentBranchId: null })
+    useStagedChangesStore.setState({ _scopeKey: 'ws1::ds1::main', changes: [], redoStack: [] })
+    writeSnapshot({
+      version: 1, scopeKey: OLD, branchId: 'br_old', phase: 'staged', savedAt: 0,
+      changes: [{ id: 'c9', type: 'create_entity', targetId: 'tmp_9', after: {}, summary: 'Create B', timestamp: 2 }],
+      pendingNodes: [], pendingEdges: [],
+    })
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota', 'QuotaExceededError')
+    })
+
+    try {
+      await expect(copyStagedToNewDraft('br_old', null)).rejects.toThrow()
+    } finally {
+      setItem.mockRestore()
+    }
+
+    expect(readSnapshot(OLD)).toMatchObject({ changes: [expect.objectContaining({ id: 'c9' })] })
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
+  })
+
+  it('leaves no copied edit behind on the closed draft, live or parked', async () => {
+    // Still on the closed draft: the live edits move.
+    await copyStagedToNewDraft('br_old', null)
+    useStagedChangesStore.getState().setScope(NEW)   // CanvasRouter follows the switch
+    expect(unsavedCountOnBranch(useStagedChangesStore.getState(), 'br_old')).toBe(0)
+
+    // Already moved to Published: the parked edits move.
+    useStagedChangesStore.setState({
+      _scopeKey: 'ws1::ds1::main', changes: [], redoStack: [], _byScope: { [OLD]: { changes: [change], redoStack: [] } },
+    })
+    writeSnapshot({
+      version: 1, scopeKey: OLD, branchId: 'br_old', phase: 'staged', savedAt: 0,
+      changes: [{ id: 'c1', type: 'create_entity', targetId: 'tmp_1', after: {}, summary: 'Create A', timestamp: 1 }],
+      pendingNodes: [], pendingEdges: [],
+    })
+    await copyStagedToNewDraft('br_old', null)
+    expect(unsavedCountOnBranch(useStagedChangesStore.getState(), 'br_old')).toBe(0)
   })
 
   it('opens no draft when there is nothing to copy', async () => {

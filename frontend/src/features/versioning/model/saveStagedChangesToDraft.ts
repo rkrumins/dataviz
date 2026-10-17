@@ -14,8 +14,9 @@
 import { applyGraphChanges, type EntityView, type GraphChangeOp } from '@/services/versioningApiService'
 import { newRequestId } from '@/services/viewTransferApiService'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
-import type { StagedChange } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useCanvasStore } from '@/store/canvas'
+import { markSnapshotCommitting } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { stagedChangesToOps, unsavedNodeFields } from './stagedChangesToOps'
 
 export interface DraftSaveTarget {
@@ -39,6 +40,16 @@ export interface DraftSaveTarget {
 /** A save that may have reached the server: a retry of the very same batch reuses its key, so the
  *  server answers with what that save did instead of applying it twice. */
 let pendingSave: { body: string; key: string } | null = null
+
+/** The save that may have reached the server, for the staged-draft snapshot to carry over a reload. */
+export function getPendingSave(): { body: string; key: string } | null {
+  return pendingSave
+}
+
+/** After a reload, take back the save the snapshot carried, so saving that batch again reuses its key. */
+export function resumePendingSave(save: { body: string; key: string }): void {
+  pendingSave = save
+}
 
 export async function saveStagedChangesToDraft(
   changes: StagedChange[],
@@ -68,6 +79,9 @@ export async function saveStagedChangesToDraft(
   const body = JSON.stringify([target.wsId, target.dataSourceId, target.branchId, ops, target.message])
   const key = pendingSave?.body === body ? pendingSave.key : newRequestId()
   pendingSave = { body, key }
+  // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
+  const scope = useStagedChangesStore.getState()._scopeKey
+  if (scope) markSnapshotCommitting(scope, pendingSave)
   const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
   pendingSave = null
   const assigned = res.assigned ?? {}
