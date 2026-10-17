@@ -29,7 +29,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1367,8 +1367,11 @@ async def get_graph(
 @router.get("/graphs/{graph_id}/branches", response_model=List[BranchResponse])
 async def list_branches(
     ws_id: str, graph_id: str,
+    response: Response,
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None),
+    branch_status: List[Literal["open", "publishing", "merged", "abandoned", "all"]] = Query(
+        ["open", "publishing"], alias="status"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
@@ -1377,10 +1380,17 @@ async def list_branches(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Branches on the graph — graph-wide (every view) by default; ``viewId`` narrows to
-    that view's own branches (the Data-Source rollup stays the default, unfiltered)."""
-    branches = await svc.list_branches(
-        graph_id=graph_id, limit=limit, offset=offset, viewer=viewer,
-        originating_view_id=view_id)
+    that view's own branches (the Data-Source rollup stays the default, unfiltered).
+    ``status`` (repeatable; default open + publishing) filters by status. ``main`` comes
+    first, then drafts newest first; ``X-Next-Cursor`` is set when another page follows."""
+    try:
+        branches, next_cursor = await svc.list_branches(
+            graph_id=graph_id, limit=limit, cursor=cursor, viewer=viewer,
+            originating_view_id=view_id, status=branch_status)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="malformed cursor")
+    if next_cursor is not None:
+        response.headers["X-Next-Cursor"] = next_cursor
     await _attach_user_names(session, branches)
     return branches
 

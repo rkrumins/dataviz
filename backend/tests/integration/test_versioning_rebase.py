@@ -45,7 +45,7 @@ async def _run() -> None:
     d1 = await _draft(svc, gid, "alice", "feature-x", [_upd("A", f=2)])     # edits A
     d2 = await _draft(svc, gid, "bob", "feature-y", [_upd("B", f=2)])       # edits B (non-overlapping)
     d3 = await _draft(svc, gid, "carol", "feature-z", [_upd("A", f=99)])    # edits A (will clash with d1)
-    metas = {b["branch_id"]: b for b in await svc.list_branches(graph_id=gid)}
+    metas = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid))[0]}
     assert metas[d1]["name"] == "feature-x" and metas[d2]["name"] == "feature-y"   # names round-trip
 
     # ── merge one (main advances: A.f -> 2) ──

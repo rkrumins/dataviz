@@ -51,7 +51,7 @@ async def _run() -> None:
     # only the idle, still-open draft is abandoned
     assert await svc.sweep_idle_drafts(ttl_days=30) == [stale]
 
-    by_id = {b["branch_id"]: b for b in await svc.list_branches(graph_id=gid)}
+    by_id = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid, status=["all"]))[0]}
     assert by_id[stale]["status"] == "abandoned"
     assert by_id[fresh]["status"] == "open"
     assert by_id[merged]["status"] == "merged"
@@ -64,8 +64,7 @@ async def _run() -> None:
     young = await svc.open_draft(graph_id=gid, owner="alice")
     await _backdate(young, 10)
     assert await svc.sweep_idle_drafts(ttl_days=30) == []
-    assert young not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid)
-                         if b["status"] == "abandoned"]
+    assert young not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, status=["abandoned"]))[0]]
 
     # worker wiring: no service → no-op; a wired service → delegates (default TTL)
     assert await ProjectionWorker(None, versioning=None).sweep_once() == []

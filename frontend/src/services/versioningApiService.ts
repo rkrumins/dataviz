@@ -529,6 +529,13 @@ export class MainWriteForbiddenError extends Error {
 // ============================================
 
 async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const res = await vfetchResponse(url, init)
+  if (res.status === 204) return undefined as T
+  return readJsonLossless<T>(res)
+}
+
+/** {@link vfetch} up to a successful response, for callers that read its headers too. */
+async function vfetchResponse(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<Response> {
   let res: Response
   try {
     res = await fetchWithTimeout(url, init)
@@ -546,8 +553,7 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     }
     throw versioningError(res.status, body?.detail, text || res.statusText)
   }
-  if (res.status === 204) return undefined as T
-  return readJsonLossless<T>(res)
+  return res
 }
 
 /** A refusal's `detail`: a message, or an object whose `type` names the refusal. */
@@ -904,17 +910,30 @@ export function decideBootstrapDuplicates(
 // Branches / drafts
 // ============================================
 
-/** Branches on a graph. Graph-wide (every view — the Data-Source rollup) by DEFAULT; pass
- *  `viewId` to get only that Context View's own branches (branch-per-view). The backend also
- *  scopes a non-manager to their own + shared drafts, so the switcher lists what the user owns
- *  or was invited to — not everyone's private drafts. */
-export function listBranches(
-  wsId: string, graphId: string, opts: { viewId?: string | null } = {},
+export type BranchStatusFilter = 'open' | 'publishing' | 'merged' | 'abandoned' | 'all'
+
+/** Branches on a graph, `main` first, then drafts newest first. Graph-wide (every view — the
+ *  Data-Source rollup) by DEFAULT; pass `viewId` to get only that Context View's own branches
+ *  (branch-per-view). `status` keeps those statuses; without it the server keeps open and
+ *  publishing drafts. The backend also scopes a non-manager to the drafts they may read, so the
+ *  switcher lists what the user owns or was invited to — not everyone's private drafts. Reads
+ *  every page (`X-Next-Cursor`). */
+export async function listBranches(
+  wsId: string, graphId: string,
+  opts: { viewId?: string | null; status?: BranchStatusFilter[] } = {},
 ): Promise<Branch[]> {
-  const q = new URLSearchParams()
-  if (opts.viewId) q.set('viewId', opts.viewId)
-  const qs = q.toString()
-  return vfetch<Branch[]>(`${base(wsId)}/graphs/${graphId}/branches${qs ? `?${qs}` : ''}`)
+  const out: Branch[] = []
+  let cursor: string | null = null
+  do {
+    const q = new URLSearchParams({ limit: '500' })
+    if (opts.viewId) q.set('viewId', opts.viewId)
+    for (const st of opts.status ?? []) q.append('status', st)
+    if (cursor) q.set('cursor', cursor)
+    const res = await vfetchResponse(`${base(wsId)}/graphs/${graphId}/branches?${q}`)
+    out.push(...await readJsonLossless<Branch[]>(res))
+    cursor = res.headers.get('X-Next-Cursor')
+  } while (cursor)
+  return out
 }
 
 export function openDraft(

@@ -3034,8 +3034,9 @@ app.add_middleware(
     #
     # The view-file export (``/views/transfer/export``) names its download and proves its
     # content in headers: the filename, and the hashes the Export dialog shows.
+    # ``X-Next-Cursor`` pages the versioning branch list, whose body stays a bare list.
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
-                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

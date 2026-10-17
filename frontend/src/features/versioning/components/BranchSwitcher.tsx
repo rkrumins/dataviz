@@ -2,8 +2,9 @@
  * BranchSwitcher — the canvas-toolbar control for "which branch am I on".
  *
  * Resolves the active data source to its versioned graph (syncing the result into
- * `branchStore`), lists main + open drafts with a per-draft up-to-date status, and lets the
- * user create a NAMED draft, switch between them, or pull the latest main into a behind draft.
+ * `branchStore`), lists main + open and publishing drafts with a per-draft up-to-date status, and
+ * lets the user create a NAMED draft, switch between them, or pull the latest main into a behind
+ * draft.
  * Shared across all three canvases via the toolbars. Renders nothing when the data source has
  * no versioned graph (the common case until a graph is created).
  */
@@ -22,7 +23,7 @@ import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
 import { isLivePr } from '../model/prStatus'
-import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
+import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
 import { BranchManager } from './BranchManager'
@@ -79,7 +80,9 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Passing graphId=null when originatingViewId hasn't resolved yet disables the query (its own
   // `enabled: !!graphId` check) — a momentary null activeView mid-switch pauses the list rather
   // than falling back to graph-wide for a tick.
-  const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId)
+  // Every status: the deep-link and the active-branch guard below need a merged or abandoned
+  // draft to be present and say so (an absent one is ambiguous).
+  const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId, ['all'])
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
   // Which drafts already have an OPEN review (PR)? Badge them in the list so it's clear at a glance.
@@ -161,7 +164,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
     return null
   }
 
-  const drafts = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open')
+  const drafts = (branchesQ.data ?? []).filter(
+    (b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
   const onMain = !currentBranchId
   const activeDraft = drafts.find((b) => b.branchId === currentBranchId)
   const isBehind = (b: Branch) => (b.baseCommitSeq ?? 0) < mainHead
@@ -272,7 +276,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   subtitle={draftSubtitle(b)}
                   active={b.branchId === currentBranchId}
                   statusPill={status}
-                  prBadge={openPrBranchIds.has(b.branchId) ? (
+                  prBadge={b.status === 'publishing' ? <PublishingBadge /> : openPrBranchIds.has(b.branchId) ? (
                     <HoverTip
                       className="inline-flex shrink-0"
                       label={`A ${BRANCH_VOCAB.reviewRequest.toLowerCase()} is already open for this draft`}
@@ -283,7 +287,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                       </span>
                     </HoverTip>
                   ) : undefined}
-                  pullSlot={canManage ? (
+                  pullSlot={canManage && b.status === 'open' ? (
                     <PullLatestButton
                       variant="row" wsId={workspaceId} graphId={graphId ?? ''}
                       branchId={b.branchId} behind={status.behind}

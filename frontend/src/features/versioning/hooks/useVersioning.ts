@@ -5,7 +5,7 @@
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -21,11 +21,10 @@ export const VERSIONING_KEYS = {
     viewId
       ? ([...VERSIONING_KEYS.all, 'resolve', ws, ds, viewId] as const)
       : ([...VERSIONING_KEYS.all, 'resolve', ws, ds] as const),
-  // `viewId` is appended only when given, so graph-wide callers keep their existing cache key.
-  branches: (ws?: string, gid?: string | null, viewId?: string | null) =>
-    viewId
-      ? ([...VERSIONING_KEYS.all, 'branches', ws, gid, viewId] as const)
-      : ([...VERSIONING_KEYS.all, 'branches', ws, gid] as const),
+  // `viewId` and `status` are appended only when given, so graph-wide callers keep their existing
+  // cache key, and invalidating the graph's key still reaches every list.
+  branches: (ws?: string, gid?: string | null, viewId?: string | null, status?: BranchStatusFilter[]) =>
+    [...VERSIONING_KEYS.all, 'branches', ws, gid, ...(viewId ? [viewId] : []), ...(status ? [{ status }] : [])] as const,
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
   branchFreshness: (ws?: string, gid?: string | null, bid?: string | null) =>
@@ -100,11 +99,14 @@ export function useResolveGraph(wsId?: string, dataSourceId?: string | null, vie
 }
 
 /** Branches on a graph. Omit `viewId` for the graph-wide (Data-Source) list; pass the active
- *  Context View's id to list only THAT view's branches (branch-per-view — what the switcher shows). */
-export function useBranches(wsId?: string, graphId?: string | null, viewId?: string | null) {
+ *  Context View's id to list only THAT view's branches (branch-per-view — what the switcher shows).
+ *  Omit `status` for the open and publishing drafts. */
+export function useBranches(
+  wsId?: string, graphId?: string | null, viewId?: string | null, status?: BranchStatusFilter[],
+) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.branches(wsId, graphId, viewId),
-    queryFn: () => api.listBranches(wsId!, graphId!, { viewId }),
+    queryKey: VERSIONING_KEYS.branches(wsId, graphId, viewId, status),
+    queryFn: () => api.listBranches(wsId!, graphId!, { viewId, status }),
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
   })

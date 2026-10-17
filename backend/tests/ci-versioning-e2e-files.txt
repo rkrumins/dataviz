@@ -63,6 +63,7 @@ tests/integration/test_versioning_asof_reads.py
 tests/integration/test_versioning_batch_create_edge.py
 tests/integration/test_versioning_bootstrap.py
 tests/integration/test_versioning_branch_freshness.py
+tests/integration/test_versioning_branch_list.py
 tests/integration/test_versioning_branch_per_view.py
 tests/integration/test_versioning_branch_provider_stats.py
 tests/integration/test_versioning_bulk_ingest.py

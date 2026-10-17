@@ -49,7 +49,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
-  const branchesQ = useBranches(wsId, graphId)
+  const branchesQ = useBranches(wsId, graphId, undefined, ['all'])
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
   const mrsQ = useMergeRequests(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)

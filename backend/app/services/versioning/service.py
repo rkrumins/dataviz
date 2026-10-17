@@ -33,7 +33,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, N
                     Sequence, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
-                        literal, text, update, or_, tuple_)
+                        literal, text, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -4713,33 +4713,52 @@ class GraphVersioningService:
         }
 
     async def list_branches(
-        self, *, graph_id: str, limit: int = 100, offset: int = 0,
+        self, *, graph_id: str, limit: int = 100, cursor: Optional[str] = None,
+        status: Sequence[str] = ("open", "publishing"),
         viewer: Optional[Viewer] = None, originating_view_id: Optional[str] = None,
-    ) -> List[dict]:
-        """Branches of a graph (``main`` + drafts/forks), oldest first — graph-keyed by
-        DEFAULT (every view's branches, the Data-Source rollup). Optional
-        ``originating_view_id`` narrows to that view's own branches (``main`` carries no
-        view, so it drops out of a view-scoped slice). With a ``viewer`` who isn't a
-        manager, only ``main`` + the caller's own or shared drafts are returned — others'
-        private drafts aren't browsable (so the switcher won't list them)."""
+    ) -> Tuple[List[dict], Optional[str]]:
+        """A page of a graph's branches (``main`` + drafts/forks) and the cursor of the next page
+        (``None`` on the last). ``main`` comes first, then drafts newest first. Graph-keyed by
+        DEFAULT (every view's branches, the Data-Source rollup); ``originating_view_id`` narrows
+        to that view's own branches (``main`` carries no view, so it drops out). ``status`` keeps
+        those statuses (``"all"`` keeps every one). A ``viewer`` who isn't a manager gets only the
+        branches :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so
+        others' private drafts can't crowd theirs off a page. ``ValueError`` on a malformed cursor."""
+        rank = case((BranchORM.kind == "main", 0), else_=1)       # main first
+        stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
+        if originating_view_id is not None:
+            stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
+        if "all" not in status:
+            stmt = stmt.where(BranchORM.status.in_(status))
+        if viewer is not None and not viewer.can_manage:
+            actor = viewer.actor
+            stmt = stmt.where(or_(
+                BranchORM.kind == "main",
+                BranchORM.owner == actor,
+                and_(BranchORM.is_shared, BranchORM.id.in_(
+                    select(BranchMemberORM.branch_id).where(BranchMemberORM.subject_type == "user",
+                                                            BranchMemberORM.subject_id == actor))),
+                BranchORM.id.in_(
+                    select(MergeRequestORM.source_branch_id).where(
+                        MergeRequestORM.graph_id == graph_id,
+                        or_(MergeRequestORM.actor == actor,
+                            MergeRequestORM.reviewers.contains([actor])))),
+            ))
+        if cursor is not None:
+            after_rank, after_at, after_id = cursor.split("|", 2)
+            stmt = stmt.where(or_(
+                rank > int(after_rank),
+                and_(rank == int(after_rank),
+                     tuple_(BranchORM.created_at, BranchORM.id) < tuple_(after_at, after_id))))
         async with self._session() as s:
-            stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
-            if originating_view_id is not None:
-                stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
             rows = (await s.execute(
-                stmt.order_by(BranchORM.created_at).limit(limit).offset(offset)
+                stmt.order_by(rank, BranchORM.created_at.desc(), BranchORM.id.desc()).limit(limit + 1)
             )).scalars().all()
-            if viewer is not None and not viewer.can_manage:
-                member_ids = set((await s.execute(
-                    select(BranchMemberORM.branch_id)
-                    .join(BranchORM, BranchORM.id == BranchMemberORM.branch_id)
-                    .where(BranchORM.graph_id == graph_id,
-                           BranchMemberORM.subject_type == "user",
-                           BranchMemberORM.subject_id == viewer.actor)
-                )).scalars().all())
-                rows = [b for b in rows
-                        if b.kind == "main" or b.owner == viewer.actor or b.id in member_ids]
-            return [self._branch_meta(b) for b in rows]
+        nxt = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            nxt = f"{0 if last.kind == 'main' else 1}|{last.created_at}|{last.id}"
+        return [self._branch_meta(b) for b in rows[:limit]], nxt
 
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:

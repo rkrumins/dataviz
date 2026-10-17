@@ -95,6 +95,14 @@ describe('BranchSwitcher menu', () => {
     expect(switchToDraft).toHaveBeenCalledWith('br_1', 'v1')
   })
 
+  it('lists a draft being published, badged \'Publishing…\'', () => {
+    branchesData = [draft(), draft({ branchId: 'br_2', name: 'Logo refresh', status: 'publishing' })]
+    renderInBlurredHeader()
+    openMenu()
+    expect(screen.getByText('Logo refresh')).toBeInTheDocument()
+    expect(screen.getByText('Publishing…')).toBeInTheDocument()
+  })
+
   it('advertises itself to assistive tech', () => {
     renderInBlurredHeader()
     const trigger = screen.getByRole('button', { name: /Published/ })

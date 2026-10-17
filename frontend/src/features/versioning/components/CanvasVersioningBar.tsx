@@ -132,7 +132,8 @@ export function CanvasVersioningBar({
   // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
   // viewId) while the switcher fetched the view-scoped one — two cache entries and two requests for
   // the same data, with `behindMain` derived from the wrong (graph-wide) one.
-  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId)
+  // Every status, so the guard below sees a merged or abandoned draft (shares BranchSwitcher's query).
+  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId, ['all'])
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
 
   // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate

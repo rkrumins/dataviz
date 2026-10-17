@@ -55,7 +55,7 @@ async def _run() -> None:
 
     # re-abandon is idempotent; the branch listing reflects the status
     assert (await svc.abandon_draft(graph_id=gid, branch_id=d, actor="alice"))["status"] == "abandoned"
-    branches = {b["branch_id"]: b for b in await svc.list_branches(graph_id=gid)}
+    branches = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid, status=["all"]))[0]}
     assert branches[d]["status"] == "abandoned"
 
     # ── cannot abandon main, nor an already-merged draft ────────────────────
