@@ -112,11 +112,24 @@ def test_a_database_left_between_the_two_still_comes_back_down():
 
 
 def test_the_chain_ends_at_the_ledger_revision():
+    """One head, and nothing after the ledger revision touches the ledger,
+    so its exclusive lock still lasts only for its own build.
+
+    Revisions after it still run inside the same transaction when an
+    upgrade starts below it: a database jumping straight from before
+    ``20261014_1200`` to a later head holds the ledger's lock through every
+    later revision too. Deploy that revision on its own first."""
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "20261014_1200_aal_api_key",
+    scripts = ScriptDirectory.from_config(config)
+    assert len(scripts.get_heads()) == 1, scripts.get_heads()
+    later = [
+        s for s in scripts.walk_revisions(base=_LAST[:-3], head="heads")
+        if s.revision != _LAST[:-3]
     ]
+    assert [
+        s.revision for s in later if "auth_audit_log" in Path(s.path).read_text()
+    ] == []
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

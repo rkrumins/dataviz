@@ -35,6 +35,7 @@ class RoleName(str, Enum):
     WORKSPACE_ADMIN = "workspace_admin"
     WORKSPACE_DATA_ENGINEER = "workspace_data_engineer"
     WORKSPACE_MEMBER = "workspace_member"
+    WORKSPACE_PUBLISHER = "workspace_publisher"
     WORKSPACE_VIEWER = "workspace_viewer"
 
 

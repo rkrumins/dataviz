@@ -71,6 +71,16 @@ def test_workspace_leaf_implied_by_all_shortcuts() -> None:
     ]
 
 
+def test_datasource_publish_implied_by_workspace_admin() -> None:
+    """ACCESS R0: ``workspace:admin`` implies publish, and
+    ``system:org-viewer`` does not (publish is not a read)."""
+    assert compute_implied_by("workspace:datasource:publish", "workspace") == [
+        "system:admin",
+        "system:org-admin",
+        "workspace:admin",
+    ]
+
+
 def test_workspace_leaf_not_in_category_excludes_workspace_admin() -> None:
     """A workspace-category permission that is intentionally NOT in
     _WORKSPACE_CATEGORY_LEAVES (e.g. a hypothetical privileged perm

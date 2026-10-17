@@ -744,7 +744,7 @@ These are owned by CONVERSION and INGEST. ACCESS only binds each route to its Ac
 | An approver loses access | The merge re-resolves standing; the approval no longer counts. A failed lookup returns 503; it never guesses. | Another approval. |
 | The management DB is down during group resolution | 503 groups_unavailable only when a group row matters. Owner and user-member paths keep working. | Retry. |
 | A stale token carries `datasource:*` | Bounded by the claims TTL. R3 requires a forced claims refresh first. | – |
-| A custom role holds `workspace:datasource:*` | It gains publish. These roles are listed in the R0 report and reviewed before R3. | The admin narrows the role. |
+| A custom role holds datasource read+manage | No role can store `workspace:datasource:*` (`role_permissions.permission_id` references `permissions`, which has no wildcard rows), so nothing gains publish. Since R0 the pair no longer collapses either, so its holders cannot publish once R3 enforces. | The admin adds publish to the role. |
 | The access_events insert fails | It is in the same transaction, so the action rolls back with 500. | Retry. |
 | A denial flood | Sampled once per hour per (actor, action, graph). | – |
 | A reviewer is unavailable, or changes_requested blocks | P or A dismisses with a reason, or an eligible user bypasses. The TTL sweep never archives drafts in review. | – |
@@ -778,6 +778,12 @@ The rollout follows the shared §17 order.
    - open private drafts with non-owner contributors;
    - PRs whose approvals were reset.
 
+> **Deviation (Stage 1, as shipped).** R0 shipped as `20261017_1000_datasource_publish` (down_revision `20261014_1200_aal_api_key`), with `rbac_seed`, `SYSTEM_ROLE_DEFAULTS`, `RoleName.WORKSPACE_PUBLISHER` and the `_SEED_LEAVES` / `_WORKSPACE_CATEGORY_LEAVES` change. Nothing checks publish yet, so:
+> - step 2, the forced claims refresh, moves to the R3 preconditions. Until then a session minted before R0 holds `workspace:datasource:*` until its next refresh;
+> - step 5, the R0 report, moves to R2, where admins use it. Its activity inputs (M2, M10, possibly a separate `GRAPHVER_DB_URL`) are not readable from a management-DB migration. `docs/RBAC.md` lists who holds publish.
+>
+> API keys cannot carry `workspace:datasource:publish`: it is not in `KEY_GRANTABLE_PERMISSIONS`. Before R3 gates publish, revert, restore and merge, it must extend the key profile (`KeyScope`, `KEY_GRANTABLE_PERMISSIONS`, `api_keys._access`, the frontend ApiKeyWizard). Otherwise `test_api_key_surface.py::test_nothing_on_the_surface_needs_more_than_a_key_can_hold` fails and scripted callers lose publish.
+
 **R1: fences (enforce immediately, independent of the flag).**
 - branch_closed, the foreign-graph 404, main_write_forbidden on `/graph/changes` and imports, the `publishing` status during jobs, service and system principal restrictions, and graph_not_writable.
 - Every non-legacy action enforces from the day it ships.
@@ -790,7 +796,8 @@ The rollout follows the shared §17 order.
 **R3: enforce. Preconditions:**
 - `would_deny` is about 0 on legitimate paths, or each case is explained;
 - queues are drained of jobs without a snapshot;
-- a second claims refresh has run.
+- a claims refresh has run;
+- the API-key profile can carry publish (see the R0 deviation note).
 
 From R3, private drafts are owner-and-member only, main-advancing actions need P, `expectedHeadCommitId` is required and PR lists narrow.
 

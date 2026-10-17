@@ -83,7 +83,7 @@ screen.
 | **Relationship type** | A kind of edge, defined by the semantic layer — some mean "contains", others mean data flows. | [The Semantic Layer](/guide/semantic-layer) |
 | **Review & Save** | Where you check every staged edit and save them to your draft together — the **Review & Save Changes** dialog, then **Save N changes**. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Review Center** | A workspace's **Reviews** tab: the merge requests waiting for review across the workspace. | [The Review Center](/guide/review-center) |
-| **Role** | A named set of permissions. Organisation-wide: **User**, **Org Auditor**, **Org Admin**, **Super Admin**. In a workspace: **Workspace Admin**, **Data Engineer**, **Member**, **Viewer**. | [Users & Access](/guide/users-access) |
+| **Role** | A named set of permissions. Organisation-wide: **User**, **Org Auditor**, **Org Admin**, **Super Admin**. In a workspace: **Workspace Admin**, **Data Engineer**, **Member**, **Publisher**, **Viewer**. | [Users & Access](/guide/users-access) |
 | **Rollup** | A line between two collapsed items that summarises the lineage between everything inside them. Built by the data source's aggregation. | [Rollup Capacity & Large Graphs](/guide/rollup-capacity) |
 | **Root Cause** | Everything upstream of an entity — where its data comes from. **Root Cause** in the entity drawer traces it. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 

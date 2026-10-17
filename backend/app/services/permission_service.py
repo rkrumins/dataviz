@@ -430,7 +430,8 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     # missing, a role holding the four legacy leaves would still
     # collapse to ``workspace:view:*``, and the wildcard expansion in
     # ``has_permission`` would silently satisfy publish checks for
-    # every workspace_member.
+    # every workspace_member. The same holds for
+    # ``workspace:datasource:publish``: read+manage must not collapse.
     "workspace:view": frozenset({
         "workspace:view:create",
         "workspace:view:edit",
@@ -440,6 +441,7 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     }),
     "workspace:datasource": frozenset({
         "workspace:datasource:manage",
+        "workspace:datasource:publish",
         "workspace:datasource:read",
     }),
     # Phase 18: read+manage split for ontology / catalog; provider
@@ -474,6 +476,7 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
 _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
+    "workspace:datasource:publish",
     "workspace:datasource:read",
     "workspace:view:create",
     "workspace:view:edit",

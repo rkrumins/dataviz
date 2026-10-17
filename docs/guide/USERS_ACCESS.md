@@ -223,6 +223,7 @@ do their job; you can always raise it later.
 | **Workspace admin** | `workspace_admin` | Everything inside that workspace — settings, members, deletion, data and views. Nothing outside it. |
 | **Data engineer** | `workspace_data_engineer` | Owns the workspace's data — data sources, semantic layers, catalog items and views — without managing members or workspace settings. |
 | **Workspace member** | `workspace_member` | The everyday contributor: creates, edits and deletes views, and manages data sources. |
+| **Publisher** | `workspace_publisher` | A workspace member trusted to publish a versioned data source's drafts to its Published version. Publishing isn't restricted to this role yet, so members can still publish too. |
 | **Workspace viewer** | `workspace_viewer` | Read-only: opens the workspace's views and sees its data sources, semantic layers and providers. |
 
 To change someone's organization-wide role:

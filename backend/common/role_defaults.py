@@ -62,6 +62,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
+            "workspace:datasource:publish",
             "workspace:datasource:read",
             "workspace:ontology:manage",
             "workspace:ontology:read",
@@ -86,6 +87,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
+            "workspace:datasource:publish",
             "workspace:datasource:read",
             "workspace:ontology:manage",
             "workspace:ontology:read",
@@ -128,6 +130,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:manage",
             "workspace:catalog:read",
             "workspace:datasource:manage",
+            "workspace:datasource:publish",
             "workspace:datasource:read",
             "workspace:ontology:manage",
             "workspace:ontology:read",
@@ -144,6 +147,25 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         permissions=frozenset({
             "workspace:catalog:read",
             "workspace:datasource:manage",
+            "workspace:datasource:read",
+            "workspace:ontology:read",
+            "workspace:provider:read",
+            "workspace:view:create",
+            "workspace:view:delete",
+            "workspace:view:edit",
+            "workspace:view:read",
+        }),
+    ),
+    RoleName.WORKSPACE_PUBLISHER.value: SystemRoleDefault(
+        description=(
+            "Workspace member who can also publish versioned data sources "
+            "(advance their Published version)."
+        ),
+        scope_type="global",
+        permissions=frozenset({
+            "workspace:catalog:read",
+            "workspace:datasource:manage",
+            "workspace:datasource:publish",
             "workspace:datasource:read",
             "workspace:ontology:read",
             "workspace:provider:read",
