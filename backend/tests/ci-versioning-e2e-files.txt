@@ -27,9 +27,9 @@ tests/integration/test_graph_changes_one_commit.py
 tests/integration/test_graph_lifecycle_purge.py
 tests/integration/test_graph_rebuild_decoding_live.py
 tests/integration/test_graph_store_placement_by_graph.py
+tests/integration/test_graph_store_versioned_overlay_live.py
 tests/integration/test_import_branch_validation.py
 tests/integration/test_import_one_active.py
-tests/integration/test_graph_store_versioned_overlay_live.py
 tests/integration/test_import_resume_e2e.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
@@ -51,8 +51,8 @@ tests/integration/test_provider_versioned_graphs_live.py
 tests/integration/test_publish_narrow_squash.py
 tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
-tests/integration/test_sync_curation_guard.py
 tests/integration/test_review_inbox_open_prs.py
+tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
 tests/integration/test_versioning_admin_graphs_live.py
 tests/integration/test_versioning_api.py
