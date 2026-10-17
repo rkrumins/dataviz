@@ -115,10 +115,11 @@ class ImportExportService:
         a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
         any other branch ``ValueError``.
 
-        One import at a time per draft (``uq_jobs_ingest_active``): while one is pending or running
-        it is :class:`JobActive`. A job nothing will run does not count — the transfer lane's
-        reaper rules are applied to it first — but a running one whose worker went quiet does: it
-        is taken over and resumed.
+        One import at a time per draft: while one is pending or running it is :class:`JobActive`.
+        It is checked under the draft's lock, so the rule holds where a worker start has not built
+        ``uq_jobs_ingest_active`` yet, and the index settles it too. A job nothing will run does not
+        count — the transfer lane's reaper rules are applied to it first — but a running one whose
+        worker went quiet does: it is taken over and resumed.
         """
         if branch_id is None:
             branch_id = await self._svc.open_draft(
@@ -129,11 +130,14 @@ class ImportExportService:
         async def insert() -> Dict[str, str]:
             uri = source_uri
             async with db.graphver_session() as s:
-                branch = await self._svc._get_branch(s, graph_id, branch_id)
+                branch = await self._svc._lock_branch(s, graph_id, branch_id)
                 if branch.kind == "main":
                     raise MainWriteForbidden()
                 self._svc._require_open(branch)
                 await self._svc._require_edit(s, branch, actor, ())
+                active = await self._import_on(s, branch_id, idempotency_key)
+                if active is not None:
+                    raise JobActive(active)
                 job = JobORM(
                     job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
                     data_source_id=data_source_id, provider_id=provider_id,
@@ -154,6 +158,8 @@ class ImportExportService:
         for attempt in (1, 2):
             try:
                 return await insert()
+            except JobActive as busy:
+                active = busy.job_id
             except IntegrityError:
                 # A repeated idempotency key: the caller answers with that key's job (find_job).
                 if idempotency_key and await self.find_job(graph_id=graph_id, idempotency_key=idempotency_key):
@@ -163,9 +169,20 @@ class ImportExportService:
                     if attempt == 2:
                         raise
                     continue
-                if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
-                    raise JobActive(active, f"Another import is still running on this draft (job "
-                                            f"{active}). Wait for it to finish, then import again.") from None
+            if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
+                raise JobActive(active, f"Another import is still running on this draft (job "
+                                        f"{active}). Wait for it to finish, then import again.") from None
+
+    @staticmethod
+    async def _import_on(s, branch_id: str, idempotency_key: Optional[str]) -> Optional[str]:
+        """The import pending or running on draft ``branch_id``, read in ``s`` under the draft's
+        lock — but not one created for ``idempotency_key``: that is this request sent twice at
+        once, which its key's index answers."""
+        look = select(JobORM.id).where(JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+                                       JobORM.status.in_(("pending", "running")))
+        if idempotency_key:
+            look = look.where(JobORM.idempotency_key.is_distinct_from(idempotency_key))
+        return await s.scalar(look.limit(1))
 
     async def _active_import(self, branch_id: str) -> Optional[str]:
         """The import pending or running on draft ``branch_id``, if any."""

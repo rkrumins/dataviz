@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import importlib.util
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -441,6 +442,32 @@ async def test_a_commit_key_index_that_cannot_be_built_never_stops_a_worker(stor
     async with _without_commits_idem(store) as conn:
         await conn.run_sync(models._ensure_schema_upgrades)        # logs, never raises
         assert (await conn.execute(text("SELECT 1"))).scalar() == 1
+
+
+@e2e
+async def test_a_busy_table_never_stalls_a_worker_start(store):
+    """A save or a job's heartbeat holding ``commits`` or ``jobs`` open: each index build waits at
+    most five seconds for its table, then is left for the next start, rather than queue every
+    later write on the table behind it. The statement timeout stands in for a wait that has no
+    end of its own."""
+    async with store.begin() as conn:
+        await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".uq_commits_idem'))
+        await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".uq_jobs_ingest_active'))
+    async with store.connect() as holder, store.connect() as conn:
+        held = await holder.begin()
+        try:
+            await holder.execute(text(
+                f'LOCK TABLE "{models._SCHEMA}".commits, {_JOBS} IN ROW EXCLUSIVE MODE'))
+            async with conn.begin():
+                await conn.execute(text("SET LOCAL statement_timeout = '20s'"))
+                started = time.monotonic()
+                await conn.run_sync(models._ensure_schema_upgrades)    # logs, never raises
+                waited = time.monotonic() - started
+                assert "uq_commits_idem" not in await _indexes(conn, "commits")
+                assert "uq_jobs_ingest_active" not in await _indexes(conn, "jobs")
+        finally:
+            await held.rollback()
+    assert waited < 15, f"waited {waited:.0f}s for the busy tables"   # the store fixture rebuilds them
 
 
 @e2e

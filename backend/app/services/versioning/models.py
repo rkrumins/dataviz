@@ -707,54 +707,52 @@ def _ensure_schema_upgrades(conn) -> None:
     With ``GRAPHVER_DB_URL`` pointing at a separate database, alembic migrates only the management
     DB, and ``create_all`` creates missing tables but never alters an existing one's checks or
     indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
-    added since. Each step is idempotent and a no-op once applied, so it runs on every start."""
-    widen_job_type_check(conn, JOB_TYPES)
+    added since. Each step is idempotent and a no-op once applied, so it runs on every start, in its
+    own savepoint (:func:`_bounded_step`)."""
+    _bounded_step(conn, "ck_jobs_type was not widened",
+                  lambda: widen_job_type_check(conn, JOB_TYPES))
+
     # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
-    if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
-        rows = f'"{_SCHEMA}"."import_rows"'
-        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
-                          "(job_id, kind, row_index)"))
-        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
-        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
-    # 20261017_1500_gv_ps_keys. Never strict here, and in a savepoint: a store holding two live pins
-    # on one key, or a lock it waits too long for, starts without the index rather than not at all.
-    try:
-        with conn.begin_nested():
-            ensure_ps_key_index(conn, strict=False)
-    except Exception:
-        logger.exception("uq_ps_key was not built; the next start tries again")
+    def import_rows_indexes() -> None:
+        if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
+            rows = f'"{_SCHEMA}"."import_rows"'
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
+                              "(job_id, kind, row_index)"))
+            conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
+            conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
+    _bounded_step(conn, "the import_rows indexes were not swapped", import_rows_indexes)
+    # 20261017_1500_gv_ps_keys. Never strict here: a store holding two live pins on one key starts
+    # without the index rather than not at all.
+    _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
     # 20261017_1550_gv_ps_fencing.
-    try:
-        with conn.begin_nested():
-            ensure_ps_fencing_columns(conn)
-    except Exception:
-        logger.exception("the projection fencing columns were not added; the next start tries again")
-    # 20261017_1900_gv_commits_idem. In a savepoint: a lock it waits too long for leaves the worker
-    # starting without the index rather than not at all.
-    try:
-        with conn.begin_nested():
-            ensure_commits_idem_index(conn)
-    except Exception:
-        logger.exception("uq_commits_idem was not built; the next start tries again")
-    # 20261017_1950_gv_ingest_active. In a savepoint too; two imports still running on one draft
-    # leave the index for a later start.
-    try:
-        with conn.begin_nested():
-            ensure_ingest_active_index(conn, strict=False)
-    except Exception:
-        logger.exception("uq_jobs_ingest_active was not built; the next start tries again")
+    _bounded_step(conn, "the projection fencing columns were not added",
+                  lambda: ensure_ps_fencing_columns(conn))
+    # 20261017_1900_gv_commits_idem.
+    _bounded_step(conn, "uq_commits_idem was not built", lambda: ensure_commits_idem_index(conn))
+    # 20261017_1950_gv_ingest_active. Two imports still running on one draft leave the index for a
+    # later start.
+    _bounded_step(conn, "uq_jobs_ingest_active was not built",
+                  lambda: ensure_ingest_active_index(conn, strict=False))
     # 20261017_2000_gv_ps_reseeding.
-    try:
-        with conn.begin_nested():
-            ensure_ps_reseeding_status(conn)
-    except Exception:
-        logger.exception("the reseeding status was not allowed; the next start tries again")
+    _bounded_step(conn, "the reseeding status was not allowed",
+                  lambda: ensure_ps_reseeding_status(conn))
     # 20261018_1000_gv_mr_approvals.
+    _bounded_step(conn, "merge_requests.approvals was not added",
+                  lambda: ensure_mr_approvals_column(conn))
+
+
+def _bounded_step(conn, failure: str, step) -> None:
+    """Run one schema step in a savepoint that waits at most five seconds for a lock, as the
+    migrations do (``_bound_lock_wait``): a table a save or a job's heartbeat holds makes the step
+    give up rather than queue every later write on the table behind it. Then, or on any other
+    failure, the step is rolled back and logged, and the worker starts without it; the next start
+    tries again."""
     try:
         with conn.begin_nested():
-            ensure_mr_approvals_column(conn)
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            step()
     except Exception:
-        logger.exception("merge_requests.approvals was not added; the next start tries again")
+        logger.exception("%s; the next start tries again", failure)
 
 
 def ensure_ps_fencing_columns(conn) -> None:

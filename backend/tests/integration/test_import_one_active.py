@@ -2,8 +2,9 @@
 
 Two imports running on one draft interleave their windows, and a replace among them deletes what
 the other is writing. So a second import onto a draft whose import is pending or running is
-refused with ``JobActive`` (409 ``job_active``, naming that job), and ``uq_jobs_ingest_active``
-settles two creates racing past each other.
+refused with ``JobActive`` (409 ``job_active``, naming that job), checked under the draft's lock so
+two creates racing on it are settled even where a worker start left ``uq_jobs_ingest_active``
+unbuilt; the index settles them too.
 
 A job nothing will run does not hold the draft: the refusal applies the transfer lane's reaper
 rules to that job first (never queued for an hour, or queued past the queue timeout), and a job
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from backend.app.api.v1.endpoints.versioning import _domain_errors, create_import
 from backend.app.services.storage.object_store import LocalFsObjectStore
@@ -93,6 +94,31 @@ async def _one_at_a_time(svc, ie):
 
     a, b = await _create(ie, gid), await _create(ie, gid)    # no branch: a draft each
     assert a["branch_id"] != b["branch_id"]
+
+
+async def _without_the_index(svc, ie):
+    """A worker start that skipped ``uq_jobs_ingest_active`` (imports still sharing a draft, or a
+    busy table) leaves the rule to the draft's lock until a later start builds it."""
+    async with db.get_engine().begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{models._SCHEMA}".uq_jobs_ingest_active'))
+    try:
+        gid = await _graph(svc)
+        first = await _create(ie, gid)
+        draft = first["branch_id"]
+        await _refused(ie, gid, draft, first["job_id"])
+        await _set(first["job_id"], status="completed")
+        raced = await asyncio.gather(_create(ie, gid, draft), _create(ie, gid, draft),
+                                     return_exceptions=True)
+        assert sorted(type(r).__name__ for r in raced) == ["JobActive", "dict"], raced
+        assert await _jobs_on(draft) == 2, "one import from the race"
+        await _set(next(r for r in raced if isinstance(r, dict))["job_id"], status="completed")
+        # One request sent twice at once is not another import: its key's index answers the second.
+        raced = await asyncio.gather(*(ie.create_import_job(
+            workspace_id="ws1", data_source_id=gid, graph_id=gid, actor="u", import_format="ndjson",
+            branch_id=draft, idempotency_key="k_" + draft) for _ in range(2)), return_exceptions=True)
+        assert sorted(type(r).__name__ for r in raced) == ["IntegrityError", "dict"], raced
+    finally:
+        await models.create_schema_and_partitions()        # and the index is built again
 
 
 async def _a_job_nothing_will_run_lets_go(svc, ie):
@@ -181,6 +207,10 @@ async def _a_finished_import_frees_the_draft(svc, ie):
     first = await _create(ie, gid)
     look = ie._active_import
 
+    async def unchecked(s, branch_id, key):     # an API pod from before the check: the index meets it
+        return None
+    ie._import_on = unchecked
+
     async def finished_meanwhile(branch_id):        # it finished between the insert and the look
         await _set(first["job_id"], status="completed")
         return await look(branch_id)
@@ -220,6 +250,10 @@ async def _a_replayed_key_answers_with_its_import(svc, ie, root):
 
 def test_a_draft_takes_one_import_at_a_time():
     _e2e(_one_at_a_time)
+
+
+def test_a_draft_takes_one_import_at_a_time_without_its_index():
+    _e2e(_without_the_index)
 
 
 def test_a_job_nothing_will_run_never_holds_the_draft():
