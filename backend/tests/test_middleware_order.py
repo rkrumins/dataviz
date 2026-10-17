@@ -29,8 +29,19 @@ def _stack() -> list[str]:
 
 
 EXPECTED = [
-    # Outermost. The deadline has to enclose everything it is meant to
-    # bound, gzip included.
+    # Outermost, and it has to be outside the deadline rather than inside
+    # it. ``_TimeoutMiddleware`` answers the readiness-gate 503 and the
+    # 504 itself, returning without calling the chain below — so a counter
+    # mounted under it records neither. Those two are the pathologies the
+    # metric exists to show: a deploy refusing every request while it comes
+    # up, and a fleet timing out, both of which would otherwise read as a
+    # fleet nobody is using. Safe to sit outside the deadline because this
+    # layer does no I/O — a dict lookup and a counter increment — so there
+    # is nothing here for a deadline to bound.
+    "RequestMetricsMiddleware",
+    # The deadline has to enclose everything it is meant to bound, gzip
+    # included. Adding the counter above it changes nothing about that:
+    # every layer the deadline covered before is still inside it.
     "_TimeoutMiddleware",
     # Refuses an oversized body before anything reads or parses it,
     # while still inside the deadline that bounds the check.

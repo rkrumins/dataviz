@@ -31,6 +31,13 @@ export const POLLING_INTERVALS = {
    * minute of announcement latency is invisible. Ops can still dial
    * it down remotely via the admin config when a faster banner is
    * genuinely needed.
+   *
+   * This value used to be decorative. The admin config's own default
+   * was 15s (`announcement_config.poll_interval_seconds`) and the
+   * service's failure fallback was 15s too, so the moment
+   * `fetchConfig()` resolved — or failed — every tab dropped to 15s and
+   * the constant below stopped applying. Both are 60s now, so the three
+   * agree and this is genuinely the baseline.
    */
   announcements: 60_000,
   /**
@@ -40,6 +47,26 @@ export const POLLING_INTERVALS = {
    * failures and the health banner long before this poll.
    */
   providerStatus: 60_000,
+  /**
+   * The change manifest (`GET /api/v1/changes`) — the one request that
+   * replaced nine.
+   *
+   * This is a reconciliation floor, not the mechanism: surfaces are woken
+   * by the feed, and this exists to catch anything the transport missed
+   * (a bump lost to a Redis blip, a stream that was disconnected). 60s is
+   * the cadence the *slowest* of the nine polls used to run at, so the
+   * worst case after this change is the best case before it — for one
+   * endpoint instead of nine.
+   */
+  changeManifest: 60_000,
+  /**
+   * Aggregation worker fleet panel (admin → workspace). Ticks while the
+   * panel is mounted; the fleet is a live operational view, so 10s is
+   * the cadence an operator expects. Jitter and the hidden-tab pause
+   * come from `usePolling`, which this now uses — the panel previously
+   * hand-rolled its own loop and had neither.
+   */
+  aggregationFleet: 10_000,
   /**
    * Aggregation job history — only ticks while a job is actually
    * pending/running. Bumped from 3s to 5s because below 5s the UI

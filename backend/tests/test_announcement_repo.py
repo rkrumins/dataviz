@@ -202,9 +202,20 @@ async def test_delete_announcement_returns_false_for_missing(db_session: AsyncSe
 # ── announcement config ──────────────────────────────────────────────
 
 async def test_get_announcement_config_default(db_session: AsyncSession):
+    """The seeded default is 60s, and that number is load-bearing.
+
+    The frontend's ``POLLING_INTERVALS.announcements`` is only the value
+    used until ``GET /announcements/config`` resolves; after that, this
+    row decides how often every open tab polls the banner. While this
+    defaulted to 15 the frontend's tuned 60 never applied anywhere, and
+    the banner was the highest-frequency idle poll in the app. If this
+    assertion is ever "fixed" by changing the expected number, change
+    ``config/polling.ts`` and ``announcementService.getConfig``'s
+    fallback with it — the three have to agree.
+    """
     config = await announcement_repo.get_announcement_config(db_session)
     assert isinstance(config, AnnouncementConfigResponse)
-    assert config.poll_interval_seconds == 15
+    assert config.poll_interval_seconds == 60
     assert config.default_snooze_minutes == 30
 
 

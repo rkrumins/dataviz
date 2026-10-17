@@ -208,16 +208,31 @@ Every module-level mutable state moves to Redis or is eliminated:
 - Frontend already uses a single base URL (load balancer / ingress). No fetch logic changes needed.
 - **Sticky sessions forbidden.** Any feature that assumes per-user in-memory state breaks. (None today, verified.)
 - Long-lived connections (SSE for job progress, if added) must use Redis pub/sub on the backend so any web replica can fan events out from any worker.
+- **The change feed** (`app/changes/`) follows that rule, with one addition worth stating because the obvious implementation gets it wrong: fan-out is **per process, not per client**. One background task per web process tails the change stream and serves every client attached to it from memory. The job-events SSE next door does the opposite — a blocking `XREAD` per connected client — and that only works because almost nobody watches job rows. The bus pool is `max_connections=20` per process, it is shared with session revocation and permission claims, and it *raises* rather than waits when exhausted. A channel every open tab holds would take the whole replica's ability to authenticate down with it.
+- **Realtime is a secondary signal, always.** Every subscribed surface also reconciles against `GET /api/v1/changes` on a slow timer, so a dropped connection, a lost bump or a refused stream costs latency and never correctness. This is what lets the transport be lossy, and lossy is what lets it be cheap.
+- **One connection per browser, not per tab.** Tabs elect a leader via `navigator.locks`; followers receive updates over a `BroadcastChannel`. Web Locks release automatically when the holding tab goes away, so failover needs no lease, heartbeat, or stale-leader detection.
 - New `X-Synodic-Replica-Id` response header (uuid per process) — debugging aid surfaced in DevTools.
 
 ## Observability
 
-- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Shipped instead as `GET /api/v1/metrics`, behind `METRICS_ENABLED` and a token and off by default; nothing scrapes it yet (`docs/TECHNICAL_DEBT.md` §1.4). Designed to expose:
-  - DB pool stats per tier (today: JSON at `/internal/metrics/db`, from `backend/app/middleware/db_metrics.py`).
-  - Redis stream lag (`XLEN` vs. consumer-group last-id) on `aggregation.jobs`.
-  - Outbox backlog size.
-  - Active aggregation jobs by status.
-  - Per-tier role identifier for routing dashboards.
+- **Two** Prometheus scrape endpoints exist, which is the open item rather than
+  the achievement (see `docs/TECHNICAL_DEBT.md` §1.4):
+  - `GET /api/v1/metrics` — `METRICS_ENABLED` **plus a bearer token**, fail-closed,
+    404 when the token is unset. Per-process registry. Exposes provider breaker
+    and provider-manager events and the job counters.
+  - `GET /internal/metrics` — `INTERNAL_METRICS_ENABLED` only, no token. Aggregated
+    across gunicorn workers when `PROMETHEUS_MULTIPROC_DIR` is set, and
+    `backend/gunicorn_conf.py` retires a dead worker's files so live gauges do not
+    accumulate across restarts. Exposes requests by route template and status, DB
+    statements by pool role (the queries-per-request ratio is what makes a
+    per-request tax visible), pool utilisation, and held change-feed connections.
+  - The token gate is the right door and `metrics_authorized()` is already exported
+    for reuse; the fleet-wide aggregation is the right reading. One endpoint should
+    have both.
+  - Still unexposed either way: Redis stream lag (`XLEN` vs. consumer-group
+    last-id) on `aggregation.jobs`, outbox backlog size, active aggregation jobs by
+    status, event-loop lag (still log-only), and a per-tier role identifier for
+    routing dashboards.
 - K8s probes: `/health/live` (process responsive), `/health/ready` (DB + Redis reachable, Alembic head matches schema-ready key).
 
 ## Breaking changes (operator-visible)

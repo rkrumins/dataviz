@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef } from 'react'
 import { withJitter } from '@/config/polling'
+import { onAppVisible } from '@/lib/appVisibility'
 
 export interface UsePollingOptions {
   /** When false, the hook does nothing (no initial fetch, no timer). */
@@ -131,24 +132,25 @@ export function usePolling(
     // Wake-on-visible: when the user returns to the tab, fire one
     // immediate tick so the UI snaps fresh. The tick itself re-arms
     // the timer at the jittered cadence.
-    const onVisibilityChange = () => {
-      if (typeof document === 'undefined') return
-      if (document.hidden) return
+    //
+    // Routed through the shared `onAppVisible` signal rather than a
+    // private `visibilitychange` listener. Four other always-mounted
+    // surfaces were each waking on their own copy of this event, so a
+    // single alt-tab cost 5-7 immediate requests across the app;
+    // `onAppVisible` coalesces the `visibilitychange`/`focus` pair and
+    // applies a refresh floor so repeated window-switching cannot
+    // multiply into a burst.
+    const unsubscribeVisible = onAppVisible(() => {
       if (cancelled) return
       if (timer) clearTimeout(timer)
       void tick()
-    }
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', onVisibilityChange)
-    }
+    })
 
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
       timer = null
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibilityChange)
-      }
+      unsubscribeVisible()
     }
     // ``callback`` intentionally NOT in deps — it's accessed via the
     // ref so identity changes don't trigger a timer reset.

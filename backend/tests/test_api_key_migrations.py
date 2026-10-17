@@ -111,12 +111,50 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_the_chain_ends_at_the_ledger_revision():
+def test_nothing_that_locks_a_live_table_runs_after_the_ledger():
+    """The ledger is last among the revisions that take a lock.
+
+    Was ``get_heads() == [the ledger]``. The reason behind that assertion
+    is the one worth keeping: the upgrade runs in a single transaction, so
+    the ledger's exclusive lock — reads included — is held until the whole
+    upgrade commits, and putting it last keeps that to its own build
+    rather than to every revision after it.
+
+    Pinning the literal tip also pinned something it did not mean to: that
+    no revision may ever be added after the API-key work. A branch that
+    adds one has only bad options, and the tidy-looking one is the actual
+    bug — re-parenting it *before* the ledger means alembic never runs it
+    on any database already stamped at the ledger, because alembic only
+    walks forward. Silently, and permanently. Main's own earlier merge
+    note makes the same point from the other side: re-parent forward,
+    because the target is already stamped and there is nothing to stamp
+    back.
+
+    So this now asserts what the docstring at the top of this file
+    actually claims. It still fails for the case that matters — a revision
+    locking ``users``, ``user_identities`` or the ledger landing after it
+    — and it still fails if the chain forks.
+    """
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "20261014_1200_aal_api_key",
+    script = ScriptDirectory.from_config(config)
+
+    heads = script.get_heads()
+    assert len(heads) == 1, f"the migration chain has forked: {heads}"
+
+    ledger = _LAST[:-3]
+    after = [
+        rev.revision
+        for rev in script.iterate_revisions(heads[0], ledger)
+        if rev.revision != ledger
     ]
+    locks_a_live_table = {name[:-3] for name in _ON_LIVE_TABLES}
+
+    offenders = sorted(set(after) & locks_a_live_table)
+    assert not offenders, (
+        f"{offenders} lock a live table and run after the ledger, so the "
+        f"ledger's exclusive lock is held for their work too"
+    )
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

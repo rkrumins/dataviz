@@ -1022,4 +1022,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 3,
         "deprecated": False,
     },
+    {
+        "key": "realtimeChangeFeedEnabled",
+        "name": "Live updates",
+        "description": (
+            "Let the server tell open tabs when something changes — announcements, notifications, "
+            "your permissions, provider status — instead of every tab asking on a timer. One "
+            "connection per browser replaces nine repeating requests per tab."
+        ),
+        "impact_when_off": (
+            "Tabs go back to asking on a schedule: they check once a minute for anything that "
+            "moved. Everything still works and stays correct, it just takes up to a minute to "
+            "appear and costs a request per minute per tab."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn on to cut idle request volume to roughly nothing. Safe to toggle at any time: "
+            "the periodic check remains underneath as a safety net either way, so switching this "
+            "off never loses an update — it only makes it arrive later."
+        ),
+        # 4, not 0: 0 was already toursEnabled's, which this shipped on top
+        # of, and main has since taken 1-3. Two rows claiming one position
+        # order arbitrarily, so the admin list silently reshuffles between
+        # deployments.
+        "sort_order": 4,
+        "deprecated": False,
+    },
 ]

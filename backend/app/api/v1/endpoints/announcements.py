@@ -17,6 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import require_admin
+from backend.app.changes import topics as change_topics
+from backend.app.changes.publish import publish_change_after_commit
 from backend.app.common.http_caching import make_etag, maybe_not_modified
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import announcement_repo, feature_flags_repo
@@ -109,7 +111,9 @@ async def create_announcement(
         )
     if req.snooze_duration_minutes < 0:
         raise HTTPException(status_code=400, detail="snoozeDurationMinutes must be >= 0")
-    return await announcement_repo.create_announcement(session, req, created_by=user.id)
+    created = await announcement_repo.create_announcement(session, req, created_by=user.id)
+    publish_change_after_commit(session, change_topics.ANNOUNCEMENTS)
+    return created
 
 
 @admin_router.patch("/{ann_id}", response_model=AnnouncementResponse)
@@ -129,6 +133,7 @@ async def update_announcement(
     result = await announcement_repo.update_announcement(session, ann_id, req, updated_by=user.id)
     if result is None:
         raise HTTPException(status_code=404, detail="Announcement not found")
+    publish_change_after_commit(session, change_topics.ANNOUNCEMENTS)
     return result
 
 
@@ -141,6 +146,7 @@ async def delete_announcement(
     ok = await announcement_repo.delete_announcement(session, ann_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Announcement not found")
+    publish_change_after_commit(session, change_topics.ANNOUNCEMENTS)
 
 
 # ── Config endpoints (admin) ───────────────────────────────────────────

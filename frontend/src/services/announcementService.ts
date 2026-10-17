@@ -6,6 +6,7 @@
  */
 import { authFetch } from './apiClient'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { POLLING_INTERVALS } from '@/config/polling'
 
 const PUBLIC_URL = '/api/v1/announcements'
 const ADMIN_URL = '/api/v1/admin/announcements'
@@ -98,14 +99,26 @@ export const announcementService = {
     })
   },
 
-  /** Fetch global banner config (public, no auth). */
+  /**
+   * Fetch global banner config (public, no auth).
+   *
+   * The failure fallback matches ``POLLING_INTERVALS.announcements`` rather
+   * than undercutting it. It used to return 15s, so a config endpoint that
+   * 404'd or timed out quietly put every tab on a 4x faster poll than the
+   * tuned constant — the failure mode made the load problem worse instead of
+   * degrading to the documented baseline.
+   */
   async getConfig(): Promise<AnnouncementConfigResponse> {
+    const fallback = {
+      pollIntervalSeconds: POLLING_INTERVALS.announcements / 1000,
+      defaultSnoozeMinutes: 30,
+    }
     try {
       const res = await fetchWithTimeout(`${PUBLIC_URL}/config`)
-      if (!res.ok) return { pollIntervalSeconds: 15, defaultSnoozeMinutes: 30 }
+      if (!res.ok) return fallback
       return res.json()
     } catch {
-      return { pollIntervalSeconds: 15, defaultSnoozeMinutes: 30 }
+      return fallback
     }
   },
 

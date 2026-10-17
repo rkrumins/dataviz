@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import { create } from 'zustand'
-import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { providerService, type ProviderStatusResponse } from '@/services/providerService'
+import { onAppVisible } from '@/lib/appVisibility'
+import { TOPICS, subscribeToTopic } from '@/store/changeFeed'
 
 export interface ProviderStatusEntry extends ProviderStatusResponse {}
 
@@ -21,8 +22,6 @@ interface ProviderStatusState {
   /** Resume provider polling immediately. */
   unsnooze: () => void
 }
-
-const POLL_INTERVAL_MS = POLLING_INTERVALS.providerStatus
 
 const SNOOZE_KEY = 'providerStatusSnoozeV1'
 
@@ -119,14 +118,16 @@ export const useProviderStatusStore = create<ProviderStatusState>((set, get) => 
     const until = Date.now() + ms
     persistSnooze(until)
     set({ snoozeUntil: until })
-    // Restart the loop so it pauses immediately and wakes exactly at expiry.
-    restartPolling()
+    // Nothing to restart: `refreshOnce` reads the snooze on every call, so
+    // the pause takes effect at the next signal without touching a timer.
   },
 
   unsnooze: () => {
     persistSnooze(null)
     set({ snoozeUntil: null })
-    restartPolling()
+    // Un-snoozing is the user asking to see current state now, and the
+    // subscription only fires on the next transition — so read once here.
+    refreshOnce()
   },
 
   refresh: async () => {
@@ -178,65 +179,62 @@ export function useProviderSnooze(): {
   return { snoozeUntil, snooze, unsnooze }
 }
 
-let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
+/** Teardown for the change-topic subscription, or null when not subscribed. */
+let unsubscribeTopic: (() => void) | null = null
 // `running` is set SYNCHRONOUSLY before the first await; `epoch` invalidates a
-// chain that is parked in `await refresh()` and therefore has no timer handle
-// for stopPolling() to clear. See store/providerHealth.ts for the full write-up
-// — this file had the identical defect: the re-entrancy guard tested
-// `pollTimer`, which is only assigned AFTER the await, so every re-entrant call
-// during an in-flight request leaked another immortal, self-rescheduling chain.
-// restartPolling() made it worse: stopPolling() could not cancel an in-flight
-// poll, so that poll survived and re-armed itself on top of the fresh chain.
+// read parked in `await refresh()` when the session ends underneath it.
+//
+// This file carried the same self-rescheduling-chain defect written up in
+// store/providerHealth.ts: the re-entrancy guard tested `pollTimer`, only
+// assigned AFTER the await, so every re-entrant call during an in-flight
+// request leaked another immortal chain — and restartPolling() made it worse,
+// because stopPolling() could not cancel an in-flight poll, so that poll
+// survived and re-armed itself on top of the fresh chain. Nothing re-arms
+// now, so none of that is reachable.
 let running = false
 let epoch = 0
 
 function stopPolling() {
   epoch += 1
   running = false
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = null
+  if (unsubscribeTopic) {
+    unsubscribeTopic()
+    unsubscribeTopic = null
   }
 }
 
-function startPolling() {
+/** Read provider status once. Nothing re-arms; the caller decides when. */
+function refreshOnce() {
   if (running || !authReady || typeof document === 'undefined' || document.hidden) return
+  // Snoozed: the user asked not to be bothered, and that has to mean no
+  // requests, not just no banner.
+  const snoozeUntil = useProviderStatusStore.getState().snoozeUntil
+  if (snoozeUntil && Date.now() < snoozeUntil) return
+
   running = true
   const myEpoch = epoch
-
-  const poll = async () => {
-    if (myEpoch !== epoch) return
-    // Snoozed: skip the refresh entirely and wake exactly at expiry, then
-    // resume the normal cadence. This is the request saving the user asked
-    // for — no polls fire while the banner is snoozed.
-    const snoozeUntil = useProviderStatusStore.getState().snoozeUntil
-    if (snoozeUntil && Date.now() < snoozeUntil) {
-      pollTimer = setTimeout(poll, snoozeUntil - Date.now() + 50)
-      return
+  void (async () => {
+    try {
+      if (myEpoch !== epoch) return
+      await useProviderStatusStore.getState().refresh()
+    } finally {
+      if (myEpoch === epoch) running = false
     }
-    await useProviderStatusStore.getState().refresh()
-    if (myEpoch !== epoch) return
-    // Jitter every reschedule so 1000 clients that mounted near the
-    // same instant don't fire in lockstep forever. Same flat-load
-    // motivation as the announcements + aggregation-history pollers.
-    pollTimer = setTimeout(poll, withJitter(POLL_INTERVAL_MS))
-  }
-
-  void poll()
+  })()
 }
 
-/** Stop then start — used when snooze state changes so the pause/resume
- *  takes effect immediately instead of on the next scheduled tick. */
-function restartPolling() {
-  stopPolling()
-  startPolling()
-}
-
-/** Call once after auth resolves to enable polling. */
+/** Call once after auth resolves. */
 export function enableProviderStatusPolling() {
   authReady = true
-  startPolling()
+  // Provider status moves when a provider trips or recovers, and the
+  // backend publishes those transitions specifically — not every probe,
+  // which would make this noisier than the minute-by-minute poll it
+  // replaces.
+  if (unsubscribeTopic === null) {
+    unsubscribeTopic = subscribeToTopic(TOPICS.providerStatus, refreshOnce)
+  }
+  refreshOnce()
 }
 
 /** Tear the poller down — called when the user lacks ``system:admin``
@@ -249,12 +247,6 @@ export function disableProviderStatusPolling() {
   stopPolling()
 }
 
-if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      stopPolling()
-    } else {
-      startPolling()
-    }
-  })
-}
+// Coming back to a tab is worth one read: the change feed's transport may
+// have been disconnected while it was hidden.
+onAppVisible(refreshOnce)

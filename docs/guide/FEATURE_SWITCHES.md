@@ -123,7 +123,7 @@ Badges in the right-hand pane tell you how a switch behaves:
 | Badge | Meaning |
 | --- | --- |
 | **Enforced by the server** | Turning it off doesn't just hide a button — the server refuses the request. |
-| **Not enforced — the endpoint still answers** | The switch only changes what the browser shows. On a new deployment the summary says **3 switches are not enforced**: **Guided product tours** and **Fold distant layers**, which only change the screen, and the retired **Roll up lineage to unloaded entities**. |
+| **Not enforced — the endpoint still answers** | The switch only changes what the browser shows. On a new deployment the summary says **4 switches are not enforced**: **Guided product tours**, **Fold distant layers** and **Live updates**, which only change what the browser does, and the retired **Roll up lineage to unloaded entities**. |
 | **Security setting** | If the setting can't be read, the more restrictive answer is assumed. |
 | **Preview — still being built** | A preview that ships off. Turning it on exposes unfinished work to everyone. |
 | **Being removed** | On its way out. Don't rely on it. |
@@ -246,6 +246,7 @@ will ask for.
 | **Fold distant layers** (`canvasLayerFoldEnabled`) | Off (preview) | Offers a **Fold** button on the Context View when a view is wider than the screen, so layers outside the part being read fold into slim spines. Each person still chooses whether to fold. | People reading wide Context Views. Every layer stays full width and wide views scroll sideways; folding one layer from its header still works. | [The Lineage Lens & Context View](/guide/lineage-lens) |
 | **Roll up lineage to unloaded entities** (`canvasLineageRollupEnabled`) | Off | Retired: nothing reads it, so it has no effect either way. A line to an entity the canvas hasn't loaded always rolls up to the nearest container on screen. | Nobody. It shows **Being removed** and will be removed in a later release. | — |
 | **One placement rule for every view surface** (`placementContractEnabled`) | Off (preview) | Uses one shared rule to decide which layer each entity sits in, everywhere views place entities — the canvas, the View wizard's preview, trace lanes, search badges, edit mode and view imports — so they can't disagree. | Off keeps today's placement, including its known disagreements. Saved views aren't changed either way. While it's on, creating a view or saving its layers refuses a layer rule that can never match. Ask your platform team to run the placement dry run before you turn it on. | [Navigating Layers](/guide/navigating-layers) |
+| **Live updates** (`realtimeChangeFeedEnabled`) | Off (preview) | Lets the server tell open tabs when something changed — announcements, notifications, your permissions, provider status — instead of each tab asking on a timer. One connection per browser, shared across its tabs, replaces nine repeating requests per tab. | Nobody loses an update. Tabs go back to checking on a schedule, so a change appears within a minute instead of within a second, at a request a minute per tab. The periodic check stays underneath either way, so turning this off never loses anything — it only makes it arrive later. | — |
 
 ---
 
