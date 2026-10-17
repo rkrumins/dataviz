@@ -378,6 +378,9 @@ export function useDataSourcePullRequests(
     queryFn: () => api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
+    // A 404 is terminal (the data source has no versioned graph); the review inbox reads every
+    // data source in the workspace, versioned or not.
+    retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 1,
   })
 }
 

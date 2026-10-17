@@ -3431,8 +3431,9 @@ async def list_data_source_pull_requests(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """All PRs against a data source (every view on it). Tenant-isolated: the data source's
-    graph must live in ``ws_id``."""
+    """All PRs against a data source (every view on it). ``status=open`` lists every PR not yet
+    merged or closed (the review inbox). Tenant-isolated: the data source's graph must live in
+    ``ws_id``."""
     g = await svc.get_graph_by_data_source(data_source_id)
     if g is None or g["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="data source not found in workspace")

@@ -4724,8 +4724,10 @@ class GraphVersioningService:
         ``data_source_id`` joins the target graph (all PRs on a data source & its views);
         ``originating_view_id`` joins the source branch (PRs raised from one view) — both stay
         within the versioning store, so the join is local. ``active_only`` drops the terminal
-        (merged/closed) PRs — the "still needs attention" set the indicator counts. A non-manager
-        ``viewer`` only sees PRs they authored or are a reviewer on (the inbox is scoped)."""
+        (merged/closed) PRs — the "still needs attention" set the indicator counts. ``status``
+        "open" means the same set (a PR is stored as mergeable/conflicts/approved, never plain
+        "open"); any other ``status`` is an exact match. A non-manager ``viewer`` only sees PRs
+        they authored or are a reviewer on (the inbox is scoped)."""
         if data_source_id is not None:
             stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
                 GraphORM.data_source_id == data_source_id)
@@ -4734,7 +4736,9 @@ class GraphVersioningService:
         if originating_view_id is not None:
             stmt = stmt.join(BranchORM, BranchORM.id == MergeRequestORM.source_branch_id).where(
                 BranchORM.originating_view_id == originating_view_id)
-        if status is not None:
+        if status == "open":
+            active_only = True
+        elif status is not None:
             stmt = stmt.where(MergeRequestORM.status == status)
         if active_only:
             stmt = stmt.where(MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS))

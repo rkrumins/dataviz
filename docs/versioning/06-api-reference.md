@@ -292,7 +292,7 @@ scripted run. The endpoints:
 | `GET …/merge-requests` | `_READ` | `?limit&offset` — draft requests and incoming fork PRs into this graph's `main` |
 | `GET /views/{viewId}/pull-requests` | `_READ`, and the view is in this workspace | `?status&limit&offset` — requests raised from this view's drafts |
 | `GET /views/{viewId}/pull-requests/count` | `_READ`, and the view is in this workspace | `{fromView, onDataSource}`, active requests only |
-| `GET /data-sources/{dataSourceId}/pull-requests` | `_READ` | `?status&limit&offset` — every request on the data source; **404** unless its graph is in this workspace |
+| `GET /data-sources/{dataSourceId}/pull-requests` | `_READ` | `?status&limit&offset` — every request on the data source, newest first; `status=open` lists every request not yet merged or closed (the review inbox), any other status is an exact match; **404** unless its graph is in this workspace |
 | `GET /merge-requests/{pr}` (and `/preview`, `/diff`, `/diff/summary`, `/diff/children`) | `_READ`, and you take part in it | The **unified** read surface — it serves draft requests and fork PRs alike |
 | `PATCH /merge-requests/{pr}` | `_MANAGE` | Edit `title` and `description` |
 | `POST /merge-requests/{pr}/approve · /close · /merge` | `_MANAGE` | `merge` takes `{message, resolutions?}` → `{commitId}`, checked against the target's live containment types and ontology rules. As with publish, a draft that changes more than 20,000 entities merges as a job: **202**, then poll `…/publish-jobs/{jobId}` |
