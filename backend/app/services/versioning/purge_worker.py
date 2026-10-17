@@ -690,6 +690,9 @@ class Reaper:
     It also tombstones a data source made from a view package that has stood without a graph for
     ``ORPHAN_PACKAGE_SOURCE_SECS`` (:meth:`_orphaned_package_sources`); the stages above take it
     from there.
+
+    A trashed fork has no data-source row (its ``dsfork_`` id is minted, not stored), so its own
+    tombstone's age is its schedule (:meth:`_expired_forks`).
     """
 
     def __init__(self, *, app_session_factory=None, graphver_session_factory=None):
@@ -763,6 +766,7 @@ class Reaper:
                         logger.info("reaper: %s is past its grace period and is now gone", ds_id)
             except Exception:
                 logger.exception("reaper: %s failed; carrying on with the rest", ds_id)
+        queued += await self._expired_forks(cutoff)
 
         # A purge that failed on infrastructure, or was refused for forks (queued again only once
         # none reads the graph), is queued again — including one whose data source row is
@@ -787,6 +791,28 @@ class Reaper:
             logger.info("reaper: %s purge(s) queued, %s re-queued, %s data source(s) removed, %s "
                         "orphaned package source(s) tombstoned", queued, revived, reaped, orphans)
         return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived}
+
+    async def _expired_forks(self, cutoff: str) -> int:
+        """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge
+        exists is skipped, whatever its status: a failed one is the revive pass's."""
+        async with self._gv() as gs:
+            expired = (await gs.execute(
+                select(GraphORM.id, GraphORM.workspace_id, GraphORM.deleted_by).where(
+                    GraphORM.fork_parent_graph_id.isnot(None), GraphORM.deleted_at.isnot(None),
+                    GraphORM.deleted_at < cutoff,
+                    ~select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                             JobORM.graph_id == GraphORM.id).exists()))).all()
+        queued = 0
+        for gid, ws_id, actor in expired:
+            try:
+                if await create_purge_job(graph_id=gid, workspace_id=ws_id,
+                                          actor=actor or "reaper", require_tombstoned=True,
+                                          session_factory=self._gv):
+                    queued += 1
+                    logger.info("reaper: grace expired for fork %s — purge queued", gid)
+            except Exception:
+                logger.exception("reaper: fork %s failed; carrying on with the rest", gid)
+        return queued
 
     async def _orphaned_package_sources(self) -> int:
         """Tombstone each live data source made from a view package (``extra_config.origin.kind =

@@ -2117,8 +2117,9 @@ class GraphVersioningService:
 
     async def delete_fork(self, *, graph_id: str, workspace_id: str, actor: str) -> str:
         """Move a fork to the trash; returns its parent's id. Its drafts and pull requests are
-        kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: its
-        parent's purge takes it along. Refused while its pull request into the parent is live
+        kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: by
+        the reaper once ``config.PURGE_GRACE_DAYS`` have passed, or by its parent's purge, which
+        takes it along. Refused while its pull request into the parent is live
         (:class:`PullRequestExists`) or forks of its own are (:class:`LiveForks`). The row is
         held FOR UPDATE, so an open_pr or fork_graph on it (FOR KEY SHARE) is seen or sees us."""
         async with self._session() as s:

@@ -76,8 +76,9 @@ pull request into its parent is open, or that has live forks of its own, is not 
 `pull_request_exists`, `live_forks`), and a fork is not restored once its purge is queued or while
 its parent is in the trash (**409** `fork_not_restorable`). `GET …/versioning/graphs/{graphId}/forks`
 lists a graph's forks, those in the trash included, with when each one's undo window ends
-(`GRAPHVER_PURGE_GRACE_DAYS`, 30 days). A data source's own graph is still deleted with its data
-source (**409** `not_a_fork`).
+(`GRAPHVER_PURGE_GRACE_DAYS`, 30 days). Once that window ends the reaper purges the fork, dropping
+its own FalkorDB key and never its parent's. A data source's own graph is still deleted with its
+data source (**409** `not_a_fork`).
 
 ### Changed
 
@@ -115,6 +116,8 @@ Anyone else gets **403 `needs_admin`**.
 - On graphs under about 10,000 entities the 500-entity floor decides, so a truncated snapshot that
   deletes fewer than 500 entities still lands. A real removal of a large subtree needs
   `allowMassDelete`.
+- A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
+  key as unregistered meanwhile, as it does for a data source in the trash.
 
 ---
 

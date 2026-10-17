@@ -1,6 +1,7 @@
 """The purge and its reaper, with their sessions faked: what they refuse, and what they leave alone.
 
 * the reaper takes each expired data source on its own — one that fails does not stop the rest;
+  so too each trashed fork past its grace, which has no data source row to expire;
 * a graph restored while the reaper looked is left standing, and so is its data source;
 * a graph that forks still read is never purged: a person's "delete permanently" is refused, the
   reaper skips it, and the purge itself refuses at its count;
@@ -69,9 +70,9 @@ def _app(expired, rows):
     return sessions, deleted
 
 
-def _gv(graphs_by_ds, failed=()):
-    """The version store: each data source's graphs, no unfinished purge, and the graphs whose
-    purge failed (what the revive pass selects)."""
+def _gv(graphs_by_ds, failed=(), forks=()):
+    """The version store: each data source's graphs, no unfinished purge, the graphs whose
+    purge failed (what the revive pass selects), and the trashed forks past their grace."""
     seen = []
 
     class _Session:
@@ -79,6 +80,8 @@ def _gv(graphs_by_ds, failed=()):
             seen.append(stmt)
             if "JOIN" in str(stmt):
                 return _Rows(failed)
+            if "fork_parent_graph_id IS NOT NULL" in str(stmt):
+                return _Rows(forks)
             params = stmt.compile().params.values()
             return _Rows(next((graphs_by_ds[v] for v in params if v in graphs_by_ds), []))
 
@@ -165,6 +168,30 @@ async def test_the_reaper_revives_only_purges_that_failed_on_infrastructure_or_f
     assert "'infrastructure'" in sql, "a refused purge must not be re-run every pass"
     assert "'live_forks'" in sql, "a purge refused for forks is retried once they are gone"
     assert "deleted_at IS NOT NULL" in sql
+
+
+async def test_the_reaper_queues_the_purge_of_an_expired_trashed_fork(monkeypatch):
+    app, _ = _app([], {})
+    gv, seen = _gv({}, forks=[("f1", "ws1", "alice"), ("f2", "ws1", None)])
+    asked = []
+
+    async def create(**kw):
+        asked.append(kw)
+        if kw["graph_id"] == "f1":
+            raise ConnectionError("the version store blinked")
+        return "vjob_f2"
+
+    monkeypatch.setattr(purge_worker, "create_purge_job", create)
+    monkeypatch.setattr(purge_worker.Reaper, "_orphaned_package_sources", _no_orphans)
+    out = await purge_worker.Reaper(app_session_factory=app, graphver_session_factory=gv).run_once()
+
+    assert asked[1] == {"graph_id": "f2", "workspace_id": "ws1", "actor": "reaper",
+                        "require_tombstoned": True, "session_factory": gv}
+    assert out == {"queued": 1, "reaped": 0, "orphans": 0, "revived": 0}
+    (sql,) = [_sql(s) for s in seen if "fork_parent_graph_id IS NOT NULL" in str(s)]
+    assert "deleted_at IS NOT NULL" in sql and "deleted_at <" in sql
+    assert "NOT (EXISTS" in sql and "'purge'" in sql, "a fork whose purge exists is skipped"
+    assert "JOIN" not in sql
 
 
 # ── create_purge_job ──────────────────────────────────────────────────────────

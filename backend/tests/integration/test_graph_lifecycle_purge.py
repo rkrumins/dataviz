@@ -8,6 +8,8 @@
 * a graph that forks still read is never purged, whoever asks;
 * a trashed fork is no reader, unless a fork of its own reads through it; the parent's purge
   takes it along, and a purge refused for forks is retried once they are gone;
+* a trashed fork past its grace is purged by the reaper, which drops the fork's own key and
+  never its parent's — a customer's;
 * a restore that wins the race with the reaper keeps its graph, and so does a fork's restore
   that wins the race with its parent's purge; a fork made during a parent's purge loses.
 
@@ -23,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select, text
 
-from backend.app.services.versioning import db, models, purge_worker
+from backend.app.services.versioning import config, db, models, purge_worker
 from backend.app.services.versioning.errors import ForkNotRestorable
 from backend.app.services.versioning.job_lease import Lease
 from backend.app.services.versioning.models import GraphORM, JobORM
@@ -111,9 +113,10 @@ class _Ctx:
         return False
 
 
-async def _graph(svc, *, published=True):
+async def _graph(svc, *, published=True, **kw):
     ds = "ds_purge_" + os.urandom(4).hex()
-    gid = (await svc.create_graph(data_source_id=ds, workspace_id=WS, actor="alice"))["graph_id"]
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id=WS, actor="alice",
+                                  **kw))["graph_id"]
     if published:
         await _edit_publish(svc, gid, "alice", [
             {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
@@ -450,6 +453,43 @@ async def test_a_live_forks_refusal_is_retried_once_the_fork_is_deleted():
     assert fork_job.summary["parentGraphId"] == gid
     assert (await _runner().run_job(await _take(job_id)))["status"] == "completed"
     assert await _row(gid) is None
+
+
+async def test_the_reaper_purges_an_expired_trashed_fork_dropping_only_its_own_key():
+    svc = GraphVersioningService()
+    key = "cust_" + os.urandom(4).hex()           # the customer's graph: pinned, not ours
+    _ds, gid = await _graph(svc, falkor_graph_name=key, owns_falkor_graph=False)
+    fid, _ = await _fork(svc, gid)
+    kept, _ = await _fork(svc, gid)
+    for f in (fid, kept):
+        await svc.delete_fork(graph_id=f, workspace_id=WS, actor="bob")
+    async with db.graphver_session() as s:          # fid's grace ran out; kept's has not
+        (await s.get(GraphORM, fid)).deleted_at = purge_worker._now_minus(
+            (config.PURGE_GRACE_DAYS + 1) * 86400)
+
+    app, _ = _app([])
+    assert (await Reaper(app_session_factory=app).run_once())["queued"] >= 1
+    (job,) = await _purges(fid)
+    assert await _purges(kept) == [] and await _purges(gid) == []
+
+    dropped = []
+
+    class _Key:
+        def __init__(self, name):
+            self.name = name
+
+        async def delete(self):
+            dropped.append(self.name)
+
+    runner = PurgeRunner(lambda name, provider_id=None: _Key(name), key_in_use=_nobody)
+    assert (await runner.run_job(await _take(job.id)))["status"] == "completed"
+    assert dropped == [f"{key}__fork_{fid}"]
+
+    assert await _row(gid) is not None and await _row(kept) is not None
+    assert await _rows_of(gid, "node_versions") > 0
+    assert await _rows_of(gid, "projection_state") == 1
+    for table in [t for t, _ in purge_worker._BULK] + ["branches", "projection_state"]:
+        assert await _rows_of(fid, table) == 0, table
 
 
 async def test_a_fork_waits_for_and_loses_to_a_parent_purge_being_queued():
