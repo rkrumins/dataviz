@@ -155,10 +155,14 @@ class ImportExportService:
             try:
                 return await insert()
             except IntegrityError:
-                # Not the draft's import (a repeated idempotency key): the caller's to answer.
-                active = await self._active_import(branch_id)
-                if active is None:
+                # A repeated idempotency key: the caller answers with that key's job (find_job).
+                if idempotency_key and await self.find_job(graph_id=graph_id, idempotency_key=idempotency_key):
                     raise
+                active = await self._active_import(branch_id)
+                if active is None:          # the import it met has finished since: the draft is free
+                    if attempt == 2:
+                        raise
+                    continue
                 if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
                     raise JobActive(active, f"Another import is still running on this draft (job "
                                             f"{active}). Wait for it to finish, then import again.") from None
@@ -491,6 +495,7 @@ class ImportExportService:
             self._svc._require_open(branch)
             if not merge_request_id:                     # a review's merger need not own the draft
                 await self._svc._require_edit(s, branch, actor, ())
+            await self._svc._require_no_import(s, branch_id)
             branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,

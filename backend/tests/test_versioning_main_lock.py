@@ -4,7 +4,8 @@ unbounded.
 * ``_lock_graph`` and ``_lock_branch`` bound their wait (``GRAPHVER_GRAPH_LOCK_TIMEOUT_MS``); a
   wait that runs out (SQLSTATE 55P03) is :class:`LockBusy`, a 503 with Retry-After.
 * ``_retry_seq`` retries a lost seq race, a head CAS miss and a busy lock with full-jitter backoff,
-  and gives up with :class:`ContentionExhausted`. Any other integrity error is not retried.
+  and gives up with :class:`ContentionExhausted`. Any other integrity error is not retried, nor is
+  an inner ``_retry_seq`` that gave up already.
 * ``_apply_ops_once`` re-reads the graph row after the lock, so the main head it composes against
   is the one the lock holder left.
 * revert, restore, sync and the API path of bulk import take the lock, then refuse a graph whose
@@ -132,6 +133,14 @@ async def test_the_backoff_is_capped_at_two_seconds(backoff, monkeypatch):
     fn, _ = _thunk(*(LockBusy() for _ in range(9)))
     await GraphVersioningService()._retry_seq("t", fn)
     assert max(hi for _, hi in backoff) == 2.0
+
+
+async def test_an_inner_retry_that_gave_up_is_not_retried_again(backoff):
+    """A publish's checkpoint has its own retries: they are not multiplied by the publish's."""
+    fn, calls = _thunk(ContentionExhausted())
+    with pytest.raises(ContentionExhausted):
+        await GraphVersioningService()._retry_seq("t", fn)
+    assert len(calls) == 1
 
 
 async def test_an_integrity_error_that_is_not_a_seq_race_is_not_retried(backoff):

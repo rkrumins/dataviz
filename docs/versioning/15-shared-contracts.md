@@ -154,7 +154,7 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 1. `_lock_graph`.
 2. `graphs` re-read (policy plus lifecycle) and `_assert_writable`.
 3. Draft FOR UPDATE populate_existing, then PR FOR UPDATE.
-4. PR live, `_require_open`, graph match.
+4. PR live, `_require_open`, no import pending or running on the draft (job_active), graph match.
 5. `_authorize(PR_MERGE | DIRECT_PUBLISH)`.
 6. pending_changes.
 7. Review gate, or bypass.

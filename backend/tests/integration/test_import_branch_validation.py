@@ -6,7 +6,8 @@ Postgres.
 * a merged or abandoned draft: 409 ``branch_closed``;
 * none of these leaves a job behind.
 
-A job created on an open draft that is published before the job runs fails at its first window, and
+A job created on an open draft that is published before the job runs — the create read the draft
+before the publish committed, so the publish did not see the job — fails at its first window, and
 nothing lands on the merged draft (regression guard: each window's ``apply_ops`` checks the draft).
 """
 import asyncio
@@ -17,7 +18,7 @@ import tempfile
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from backend.app.api.v1.endpoints.versioning import _domain_errors
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
@@ -120,7 +121,11 @@ async def _published_before_it_runs(svc):
         await store.put_stream(key, body())
         job_id = (await _create(ie, gid, draft, source_uri=key))["job_id"]
         await ie.start_import(job_id)
+        async with db.graphver_session() as s:       # the publish does not see it (see above)
+            await s.execute(update(JobORM).where(JobORM.id == job_id).values(status="failed"))
         await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="ship")
+        async with db.graphver_session() as s:
+            await s.execute(update(JobORM).where(JobORM.id == job_id).values(status="pending"))
         async with db.graphver_session() as s:
             commits = await s.scalar(select(func.count()).select_from(CommitORM).where(
                 CommitORM.graph_id == gid, CommitORM.branch_id == draft))

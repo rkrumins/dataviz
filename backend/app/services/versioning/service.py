@@ -1078,6 +1078,7 @@ class GraphVersioningService:
                 # it merged. An edit staged after the fold above is folded by the retry.
                 draft = await self._lock_branch(s, graph_id, branch_id)
                 self._require_open(draft, publishing_ok=queued)
+                await self._require_no_import(s, branch_id)
                 if await self._pending_count(s, graph_id, branch_id):
                     raise _StaleHead()
                 if draft.is_shared:                       # publishing a shared draft → maintainer
@@ -2656,6 +2657,7 @@ class GraphVersioningService:
                     raise ValueError("merge request endpoints missing")
                 draft = await self._lock_branch(s, graph.id, pr.source_branch_id)   # as in publish
                 self._require_open(draft, publishing_ok=queued)
+                await self._require_no_import(s, pr.source_branch_id)
                 if await self._pending_count(s, graph.id, pr.source_branch_id):
                     raise _StaleHead()
                 # The approval gate (plan §17 #5), ahead of the merge computation: a refusal costs
@@ -5158,6 +5160,18 @@ class GraphVersioningService:
         if branch.status != "open" and not (publishing_ok and branch.status == "publishing"):
             raise BranchNotOpen(branch.id, branch.status)
 
+    @staticmethod
+    async def _require_no_import(s, branch_id: str) -> None:
+        """A draft is not published while an import is pending or running on it
+        (:class:`JobActive`): main would get the windows it has written so far, and the import
+        fail on the closed draft. Under the draft's lock, so no import window lands in between."""
+        active = await s.scalar(select(JobORM.id).where(
+            JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+            JobORM.status.in_(("pending", "running"))).limit(1))
+        if active is not None:
+            raise JobActive(active, f"An import is still running on this draft (job {active}). "
+                                    "Publish once it has finished.")
+
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         if not branch.is_shared:                          # a private draft is its owner's alone (D4)
             if branch.kind != "main" and branch.owner != actor:
@@ -6246,6 +6260,8 @@ class GraphVersioningService:
             try:
                 return await fn()
             except (IntegrityError, _StaleHead, LockBusy) as exc:
+                if isinstance(exc, ContentionExhausted):   # an inner retry gave up: not again
+                    raise
                 # Only a unique-key race is "the branch moved": any other integrity error (a
                 # check or a not-null) fails the same way every time, and re-running a large
                 # import window or publish for it only multiplies the work.

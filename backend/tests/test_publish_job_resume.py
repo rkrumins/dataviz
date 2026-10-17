@@ -12,6 +12,7 @@ integration/test_versioning_publish_job.py.
 
 A queued publish holds its draft ``publishing``. A refusal that fails the job hands the draft back
 at once (``release_publishing``); a job that lands, or is no longer this worker's, leaves it alone.
+A busy graph is such a refusal: no route resumes a publish job, so it is published again.
 """
 from __future__ import annotations
 
@@ -189,11 +190,14 @@ async def test_a_publish_job_no_longer_this_workers_stops_quietly(monkeypatch, s
 
 
 @pytest.mark.parametrize("busy", [LockBusy("graph g1 is busy"), ContentionExhausted("graph g1 is busy")])
-async def test_a_publish_that_finds_the_graph_busy_can_be_resumed(monkeypatch, set_off, busy):
-    """A busy graph is not a refusal: the job fails as an outage would, to be resumed, and the
-    draft stays held for it."""
-    svc = _Versioning(merged=[None], publish=busy)
+async def test_a_publish_that_finds_the_graph_busy_fails_and_hands_back_the_draft(monkeypatch, set_off, busy):
+    """A busy graph is answered as the route answers it (503 lock_busy: publish again). Nothing can
+    resume a publish job, so the job is not failed as an outage, and the draft is handed back."""
+    svc = _Versioning(merged=[None, None], publish=busy)
     lease = _Lease()
     await _service(monkeypatch, svc).run_publish_safe("vjob_1", lease)
-    assert lease.finished is None and lease.failed[1:] == ("infrastructure", "resume")
-    assert set_off == [] and svc.releases == []
+    status, values = lease.finished
+    error = values["summary"]["error"]
+    assert (status, error["status"], error["detail"]["type"]) == ("failed", 503, "lock_busy")
+    assert not lease.failed and set_off == []
+    assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}], "the draft is handed back"

@@ -23,7 +23,7 @@ from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export.service import ImportExportService
-from backend.app.services.versioning.models import JobORM
+from backend.app.services.versioning.models import BranchORM, JobORM
 from backend.app.services.versioning.service import GraphVersioningService
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
@@ -150,6 +150,74 @@ async def _a_broken_upload_lets_go(svc, ie, root):
     assert (await _create(ie, gid, draft))["branch_id"] == draft
 
 
+async def _no_publish_while_importing(svc, ie):
+    gid = await _graph(svc)
+    first = await _create(ie, gid)
+    draft = first["branch_id"]
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="u", message="window", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "N",
+         "payload": {"urn": "urn:N", "entityType": "Table", "displayName": "N"}}])
+    mr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="u")
+    publishes = [
+        lambda: svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m"),
+        lambda: svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m", queued=True),
+        lambda: svc.merge_mr(mr_id=mr, actor="u", message="m"),
+        lambda: ie.create_publish_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                      branch_id=draft, actor="u", message="m"),
+    ]
+    for status in ("pending", "running"):
+        await _set(first["job_id"], status=status)
+        for publish in publishes:
+            with pytest.raises(JobActive) as exc:
+                await publish()
+            assert exc.value.job_id == first["job_id"]
+    assert (await svc.branch_statuses([draft]))[draft] == "open", "not taken for a publish"
+    await _set(first["job_id"], status="completed")
+    assert await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m")
+
+
+async def _a_finished_import_frees_the_draft(svc, ie):
+    gid = await _graph(svc)
+    first = await _create(ie, gid)
+    look = ie._active_import
+
+    async def finished_meanwhile(branch_id):        # it finished between the insert and the look
+        await _set(first["job_id"], status="completed")
+        return await look(branch_id)
+    ie._active_import = finished_meanwhile
+    second = await _create(ie, gid, first["branch_id"])
+    assert second["job_id"] != first["job_id"] and second["branch_id"] == first["branch_id"]
+
+
+class _Body:
+    async def stream(self):
+        yield b'{"kind": "node", "urn": "urn:a"}\n'
+
+
+async def _a_replayed_key_answers_with_its_import(svc, ie, root):
+    gid = await _graph(svc)
+    ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
+    user = type("U", (), {"id": "u"})()
+
+    def post(branch_id=None):
+        return create_import("ws1", gid, _Body(), format="ndjson", reconcile_mode="upsert",
+                             branch_id=branch_id, view_id=None, idempotency_key="k1", user=user,
+                             claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
+    first = await post()
+    same = (first["jobId"], first["branchId"], first["sourceUri"])
+    again = await post()                                     # its answer was lost: sent again
+    assert (again["jobId"], again["branchId"], again["sourceUri"]) == same
+    again = await post(first["branchId"])                    # not "another import" on its draft
+    assert (again["jobId"], again["status"]) == (first["jobId"], "pending")
+    await _set(first["jobId"], status="completed")
+    again = await post(first["branchId"])
+    assert (again["jobId"], again["status"]) == (first["jobId"], "completed")
+    async with db.graphver_session() as s:
+        assert await s.scalar(select(func.count()).select_from(JobORM).where(JobORM.graph_id == gid)) == 1
+        assert await s.scalar(select(func.count()).select_from(BranchORM).where(
+            BranchORM.graph_id == gid, BranchORM.kind != "main")) == 1, "no draft opened per replay"
+
+
 def test_a_draft_takes_one_import_at_a_time():
     _e2e(_one_at_a_time)
 
@@ -164,3 +232,15 @@ def test_a_failed_import_is_retried_only_once_the_draft_is_free():
 
 def test_an_import_whose_upload_broke_off_frees_the_draft_at_once(tmp_path):
     _e2e(lambda svc, ie: _a_broken_upload_lets_go(svc, ie, tmp_path))
+
+
+def test_a_draft_is_not_published_while_its_import_runs():
+    _e2e(_no_publish_while_importing)
+
+
+def test_an_import_that_finished_meanwhile_frees_the_draft():
+    _e2e(_a_finished_import_frees_the_draft)
+
+
+def test_a_replayed_idempotency_key_answers_with_its_import(tmp_path):
+    _e2e(lambda svc, ie: _a_replayed_key_answers_with_its_import(svc, ie, tmp_path))
