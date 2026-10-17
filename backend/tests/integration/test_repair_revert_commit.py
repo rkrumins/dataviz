@@ -32,10 +32,11 @@ async def _run() -> None:
     assert st["nodes"]["urn:li:dataset:ds_a"]["displayName"] == "Accounts"
 
     # commit 2 — the corruption: a commit rewrites the node with a TRUNCATED payload (the pre-fix
-    # partial-update bug). displayName/qualifiedName/properties are gone.
-    await svc.bulk_ingest(graph_id=gid, actor="alice", rows=[
-        {"kind": "node", "id": "urn:li:dataset:ds_a", "urn": "urn:li:dataset:ds_a",
-         "entityType": "Dataset", "description": "ds_a v2"},
+    # partial-update bug). displayName/qualifiedName/properties are gone. (A create is a full
+    # replace; bulk import seeds only an empty graph.)
+    await svc.apply_ops(graph_id=gid, actor="alice", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "urn:li:dataset:ds_a",
+         "payload": {"urn": "urn:li:dataset:ds_a", "entityType": "Dataset", "description": "ds_a v2"}},
     ])
     bad = (await svc.commit_log(graph_id=gid, limit=1))[0]          # the corrupting commit is head
     st = await svc.materialize_state(graph_id=gid, branch_id=mid)

@@ -88,3 +88,31 @@ def test_the_per_entity_cost_is_the_measured_one():
     # 2,030 MiB of growth over 478,430 entities = 4.45 KiB/entity. If someone "tidies" this
     # constant, the message starts lying to operators about how much memory they need.
     assert 4_000 <= _SYNC_BYTES_PER_ENTITY <= 5_200
+
+
+@pytest.mark.parametrize("exc, status, kind", [
+    ("concurrency", 409, "integrity"),
+    ("merge", 409, "merge_conflict"),
+])
+async def test_the_resync_route_answers_a_refused_sync(monkeypatch, exc, status, kind):
+    """A sync refused for an unfinished enablement, or for conflicts with people's edits, is a 409
+    like every other versioning refusal, not a 500."""
+    from fastapi import HTTPException
+
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.services.versioning import service as svc_mod
+
+    class _Svc:
+        async def resolve_graph(self, **_kw):
+            return {"graph_id": "g1"}
+
+        async def resync_from_provider(self, **_kw):
+            if exc == "merge":
+                raise svc_mod.MergeConflict([{"entity_id": "e1", "path": ["x"]}])
+            raise svc_mod.ConcurrencyError("version control is still being enabled")
+    monkeypatch.setattr(svc_mod, "GraphVersioningService", _Svc)
+    with pytest.raises(HTTPException) as refused:
+        await graph_ep.resync_versioned_graph_endpoint(
+            ws_id="ws1", dataSourceId="ds1", strategy="merge", _gate=None, _perm=None, user=None,
+            engine=type("_E", (), {"provider": None})(), session=None)
+    assert refused.value.status_code == status and refused.value.detail["type"] == kind

@@ -88,6 +88,7 @@ from backend.app.auth.dependencies import (
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
 from backend.app.services.top_level_cache import try_serve_top_level
+from backend.app.services.versioning.errors import LockBusy
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
@@ -540,8 +541,14 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
-    result = await svc.resync_from_provider(
-        graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+    from backend.app.services.versioning.service import ConcurrencyError, MergeConflict
+    try:
+        result = await svc.resync_from_provider(
+            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+    except MergeConflict as exc:
+        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+    except ConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     await _record_versioning(
         session, "workspace.versioning.resynced", dataSourceId,
         {"strategy": strategy, "commitId": (result or {}).get("commit_id")},
@@ -4114,6 +4121,8 @@ async def batch_commands(
                     ref=cmd.ref, op=cmd.op, success=False,
                     error=f"Unsupported op: {cmd.op}",
                 ))
+        except LockBusy:
+            raise                                  # 503 + Retry-After for the whole batch
         except Exception as exc:
             failed += 1
             results.append(BatchCommandResult(

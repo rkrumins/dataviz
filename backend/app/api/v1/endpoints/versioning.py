@@ -60,7 +60,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
-from backend.app.services.versioning.errors import HTTP_MAPPED
+from backend.app.services.versioning.errors import HTTP_MAPPED, LockBusy
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -1687,6 +1687,8 @@ async def _publish_from_job(job: dict) -> dict:
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
                         queued=True)
         except HTTPException as exc:
+            if isinstance(exc.__context__, LockBusy):   # a busy graph is no refusal: the job is
+                raise exc.__context__                   # failed as resumable, and the draft held
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
     await _touch_views_data_updated(graph_id, actor)

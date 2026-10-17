@@ -22,7 +22,7 @@ import pytest
 
 from backend.app.api.v1.endpoints import versioning as ep
 from backend.app.services.versioning import db as ver_db
-from backend.app.services.versioning.errors import BranchNotOpen
+from backend.app.services.versioning.errors import BranchNotOpen, ContentionExhausted, LockBusy
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import Superseded
 from backend.app.services.versioning.service import NotUpToDate
@@ -69,8 +69,8 @@ class _Lease:
     async def release(self):
         self.released = True
 
-    async def fail(self, *_args, **_kwargs):
-        self.failed = True
+    async def fail(self, *args, **_kwargs):
+        self.failed = args or True
 
 
 @pytest.fixture
@@ -186,3 +186,14 @@ async def test_a_publish_job_no_longer_this_workers_stops_quietly(monkeypatch, s
     ie = _service(monkeypatch, svc)
     await ie.run_publish_safe("vjob_1", lease)
     assert not (lease.failed or lease.released), "the job's new owner finishes it"
+
+
+@pytest.mark.parametrize("busy", [LockBusy("graph g1 is busy"), ContentionExhausted("graph g1 is busy")])
+async def test_a_publish_that_finds_the_graph_busy_can_be_resumed(monkeypatch, set_off, busy):
+    """A busy graph is not a refusal: the job fails as an outage would, to be resumed, and the
+    draft stays held for it."""
+    svc = _Versioning(merged=[None], publish=busy)
+    lease = _Lease()
+    await _service(monkeypatch, svc).run_publish_safe("vjob_1", lease)
+    assert lease.finished is None and lease.failed[1:] == ("infrastructure", "resume")
+    assert set_off == [] and svc.releases == []

@@ -616,6 +616,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_EVICT_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_BUDGETS` | (empty) | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` | `0` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_HASH_ALGO` | `blake2b` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_HASH_DIGEST_SIZE` | `32` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_BATCH_SIZE` | `5000` | `backend/app/services/versioning/config.py` |

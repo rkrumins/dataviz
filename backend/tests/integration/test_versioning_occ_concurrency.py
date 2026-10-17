@@ -15,6 +15,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.errors import ContentionExhausted
 from backend.app.services.versioning.service import (
     GraphVersioningService, MergeConflict, NotUpToDate, ConcurrencyError,
 )
@@ -158,7 +159,8 @@ async def _run() -> None:
         svc.rebase_draft(graph_id=gid, branch_id=d, actor="bot"),
         return_exceptions=True)
     for r in res:
-        assert not isinstance(r, Exception) or isinstance(r, (ConcurrencyError, MergeConflict)), r
+        assert not isinstance(r, Exception) or isinstance(
+            r, (ConcurrencyError, MergeConflict, ContentionExhausted)), r
 
     await db.dispose_engine()
 

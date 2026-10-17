@@ -50,6 +50,9 @@ class _FakeSession:
         # see GraphVersioningService._assert_not_bootstrapping). None = no such job.
         return self._bootstrap_status
 
+    async def refresh(self, _obj):
+        pass
+
 
 def _factory(rows):
     @contextlib.asynccontextmanager
@@ -146,15 +149,15 @@ def test_lock_branch_is_graph_scoped_no_key_update():
             return None
 
     class _S:
-        async def execute(self, stmt):
+        async def execute(self, stmt, params=None):
             seen.append(stmt)
             return _Result()
 
     with pytest.raises(ValueError, match="unknown branch"):
         asyncio.run(GraphVersioningService._lock_branch(_S(), "g1", "draft1"))
-    sql = str(seen[0].compile(dialect=postgresql.dialect()))
+    sql = str(seen[-1].compile(dialect=postgresql.dialect()))
     assert "FOR NO KEY UPDATE" in sql and "branches.graph_id" in sql, sql
-    assert seen[0].get_execution_options().get("populate_existing") is True
+    assert seen[-1].get_execution_options().get("populate_existing") is True
 
 
 def test_fork_merge_missing_base_raises():

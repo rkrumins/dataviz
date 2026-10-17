@@ -223,6 +223,10 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 # Retries when a commit races another writer for the next per-branch commit_seq
 # (uq_commits_branch_seq) — concurrent write-through writes to main.
 COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
+# How long a writer waits for a graph's lock (or a draft's row lock) before it gives up with
+# 503 lock_busy and retries. Bounded, so a writer queued behind a long publish or sync cannot pin
+# a pooled connection indefinitely; the 5 s matches the lease renewal's and the migrations' bound.
+GRAPH_LOCK_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_GRAPH_LOCK_TIMEOUT_MS", "5000"))
 DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 
 # A draft changing more entities than this has its Changes panel counted, not laid out as a

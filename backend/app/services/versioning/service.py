@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -35,14 +36,14 @@ from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, sele
                         literal, text, update, or_, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
 from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import BranchNotOpen, MainWriteForbidden
+from .errors import BranchNotOpen, ContentionExhausted, LockBusy, MainWriteForbidden
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -228,6 +229,8 @@ def _copy_versions_sql(model, columns: str) -> "TextClause":
 _COPY_NODE_VERSIONS = _copy_versions_sql(NodeVersionORM, "urn, entity_type, display_name, qualified_name")
 _COPY_EDGE_VERSIONS = _copy_versions_sql(
     EdgeVersionORM, "source_entity_id, target_entity_id, edge_type, confidence, discriminator")
+# SET LOCAL lock_timeout with a bound value (set_config's third argument, is_local).
+_SET_LOCK_TIMEOUT = text("SELECT set_config('lock_timeout', :ms, true)")
 
 
 class _StaleHead(Exception):
@@ -1715,7 +1718,18 @@ class GraphVersioningService:
         pre-commit state. If a later commit also changed one of those entities the
         revert can't apply cleanly and raises :class:`MergeConflict`. Deleting a
         node on revert cascades to its incident edges, same as publish."""
+        return await self._retry_seq(
+            f"revert {commit_id}",
+            lambda: self._revert_commit_once(
+                graph_id=graph_id, commit_id=commit_id, actor=actor, message=message))
+
+    async def _revert_commit_once(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str],
+    ) -> str:
+        """One attempt at :meth:`revert_commit`, under the graph lock."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -1832,7 +1846,18 @@ class GraphVersioningService:
         well-defined "empty the graph". Ontology rules are deliberately not
         applied (administrative path, same as revert — must be able to restore
         pre-ontology states)."""
+        return await self._retry_seq(
+            f"restore to {commit_id}",
+            lambda: self._restore_to_commit_once(
+                graph_id=graph_id, commit_id=commit_id, actor=actor, message=message))
+
+    async def _restore_to_commit_once(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str],
+    ) -> str:
+        """One attempt at :meth:`restore_to_commit`, under the graph lock."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -5272,8 +5297,30 @@ class GraphVersioningService:
         ATOMIC: the whole import (every insert chunk + the Merkle update + the commit
         row) runs in one transaction — any chunk failing rolls the entire commit back,
         so a graph is never left partially seeded. Pass ``session`` to fold this into a
-        larger transaction (e.g. create-graph + seed as one unit)."""
+        larger transaction (e.g. create-graph + seed as one unit).
+
+        Without ``session`` (the API path) it runs under the graph lock, is retried, and seeds
+        only an EMPTY graph: every row becomes a ``create`` with no prior, so on a graph that has
+        entities it would write versions that ignore what main holds. Updating one is a sync."""
+        rows = list(rows)        # every attempt reads it
+
+        async def once():
+            return await self._bulk_ingest_once(
+                graph_id=graph_id, rows=rows, actor=actor, idempotency_key=idempotency_key,
+                message=message, session=session)
+        if session is not None:  # seeding a graph made in this transaction: no one else sees it
+            return await once()
+        return await self._retry_seq(f"bulk import into {graph_id}", once)
+
+    async def _bulk_ingest_once(
+        self, *, graph_id: str, rows, actor: str, idempotency_key: Optional[str],
+        message: str, session,
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`bulk_ingest`."""
         async with self._session_scope(session) as s:
+            if session is None:
+                await self._lock_graph(s, graph_id)
+                await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -5289,6 +5336,11 @@ class GraphVersioningService:
                     return {"commit_id": prior.id, "commit_seq": prior.commit_seq,
                             "ingested": st.get("nodes", 0) + st.get("edges", 0),
                             "rejected": [], "idempotent_replay": True}
+            if session is None and await s.scalar(select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.is_tombstone.is_(False)).limit(1)) is not None:
+                raise ConcurrencyError("bulk import only seeds an empty graph — this one already "
+                                       "has entities; use sync to update it")
 
             rejected: List[dict] = []
             node_deltas: List[Delta] = []
@@ -5469,7 +5521,25 @@ class GraphVersioningService:
         ~30 GB just as surely as a full re-sync does. That is why the guard lives here and not
         only on the resync path. See :class:`GraphTooLargeToSync`."""
         await self._assert_syncable(graph_id)
+        rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
+        return await self._retry_seq(
+            f"sync {graph_id}",
+            lambda: self._sync_ingest_once(
+                graph_id=graph_id, rows=rows, actor=actor, source=source,
+                idempotency_key=idempotency_key, message=message, strategy=strategy,
+                resolutions=resolutions, containment_edge_types=containment_edge_types))
+
+    async def _sync_ingest_once(
+        self, *, graph_id: str, rows, actor: str, source: str,
+        idempotency_key: Optional[str], message: str, strategy: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]],
+        containment_edge_types: Optional[Sequence[str]],
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
+        last sync and main's head are all read with main held still."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -5820,36 +5890,60 @@ class GraphVersioningService:
 
     async def _retry_seq(self, label: str, fn):
         """Run ``fn`` — an async thunk that opens its OWN session, RE-FETCHES state, and
-        commits — retrying on a ``commit_seq`` unique-constraint collision with bounded
-        backoff. Because the whole body re-runs on each attempt, the write is always
-        recomputed against the current head: this fixes both the crash (unhandled
-        ``IntegrityError``) AND the read-stale-then-write race where a merge computed
-        against a stale ``main`` would otherwise silently drop intervening edits."""
+        commits — retrying with bounded, full-jitter backoff when it lost to a concurrent
+        writer: a ``commit_seq`` unique-constraint collision, a head CAS miss, or a lock not
+        granted within ``GRAPH_LOCK_TIMEOUT_MS`` (:class:`LockBusy`). Because the whole body
+        re-runs on each attempt, the write is always recomputed against the current head: this
+        fixes both the crash (unhandled ``IntegrityError``) AND the read-stale-then-write race
+        where a merge computed against a stale ``main`` would otherwise silently drop
+        intervening edits. Raises :class:`ContentionExhausted` (503, retryable) when every
+        attempt lost."""
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await fn()
-            except (IntegrityError, _StaleHead) as exc:
+            except (IntegrityError, _StaleHead, LockBusy) as exc:
                 # Only a unique-key race is "the branch moved": any other integrity error (a
                 # check or a not-null) fails the same way every time, and re-running a large
                 # import window or publish for it only multiplies the work.
                 state = getattr(getattr(exc, "orig", None), "sqlstate", None)
                 if isinstance(exc, IntegrityError) and state not in (None, "23505"):
                     raise
-                # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss. Both
-                # mean "the branch moved under us" — re-run the thunk, which re-reads current state
-                # and recomputes (auto-rebase / 3-way merge) against the new head.
+                # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss;
+                # LockBusy = another writer still holds the lock. All mean "the branch moved (or is
+                # moving) under us" — re-run the thunk, which re-reads current state and recomputes
+                # (auto-rebase / 3-way merge) against the new head.
                 if attempt + 1 >= config.COMMIT_MAX_RETRIES:
-                    raise ConcurrencyError(f"{label} commit-seq contention")
-                await asyncio.sleep(0.02 * (2 ** attempt))
+                    raise ContentionExhausted(f"{label}: every attempt lost to a concurrent "
+                                              "writer; try again") from exc
+                # Full jitter: writers that collided once do not collide again in lockstep.
+                await asyncio.sleep(random.uniform(0, min(2.0, 0.02 * (2 ** attempt))))
+
+    @staticmethod
+    async def _bounded_lock(s, stmt, what: str):
+        """Execute the lock-taking ``stmt``, waiting at most ``GRAPH_LOCK_TIMEOUT_MS`` for the
+        lock: a wait that runs out (SQLSTATE 55P03) is :class:`LockBusy`, which ``_retry_seq``
+        retries. The timeout is ``SET LOCAL`` (``set_config(..., true)``), so it holds for the
+        rest of the transaction and ends with it."""
+        ms = config.GRAPH_LOCK_TIMEOUT_MS
+        await s.execute(_SET_LOCK_TIMEOUT, {"ms": str(ms)})
+        try:
+            return await s.execute(stmt)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "55P03":
+                raise
+            raise LockBusy(f"{what} is busy with another change; try again shortly",
+                           retry_after=max(1, ms // 1000)) from exc
 
     @staticmethod
     async def _lock_graph(s, graph_id: str) -> None:
-        """Serialize same-graph main-advancing writes (publish/merge/revert/sync) with a
-        transaction-scoped Postgres advisory lock (auto-released at commit/rollback).
-        Acquire it BEFORE reading ``main`` head/state so the merge composes against the
-        current main; different graphs never contend, so this adds no cross-graph
-        latency and makes the commit-seq retry converge in ~1 attempt."""
-        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph_id))))
+        """Serialize same-graph main-advancing writes (publish, merge, revert, restore, sync,
+        bulk import, and apply_ops on main) with a transaction-scoped Postgres advisory lock
+        (auto-released at commit/rollback). Acquire it BEFORE reading ``main`` head/state so the
+        write composes against the current main; different graphs never contend, so this adds no
+        cross-graph latency and makes the commit-seq retry converge in ~1 attempt. The wait is
+        bounded (:meth:`_bounded_lock`)."""
+        await GraphVersioningService._bounded_lock(
+            s, select(func.pg_advisory_xact_lock(func.hashtext(graph_id))), f"graph {graph_id}")
 
     @staticmethod
     async def _lock_branch(s, graph_id: str, branch_id: str) -> BranchORM:
@@ -5857,10 +5951,13 @@ class GraphVersioningService:
         writer of one draft (apply_ops, stage, checkpoint, pull, claim, abandon) serializes here,
         so a writer that waited sees what the holder committed, a closed status included. FOR NO
         KEY UPDATE: inserts that reference the branch (its members) do not wait on it. Scoped to
-        the graph, so another graph's draft is unknown here."""
-        branch = (await s.execute(
+        the graph, so another graph's draft is unknown here. The wait is bounded
+        (:meth:`_bounded_lock`)."""
+        branch = (await GraphVersioningService._bounded_lock(
+            s,
             select(BranchORM).where(BranchORM.id == branch_id, BranchORM.graph_id == graph_id)
-            .with_for_update(key_share=True).execution_options(populate_existing=True)
+            .with_for_update(key_share=True).execution_options(populate_existing=True),
+            f"draft {branch_id}",
         )).scalar_one_or_none()
         if branch is None:
             raise ValueError("unknown branch")
@@ -5887,7 +5984,7 @@ class GraphVersioningService:
 
         Concurrent writers to the same branch race for the next ``commit_seq``; on the
         unique-constraint collision this retries (bounded backoff) before giving up with
-        :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
+        :class:`ContentionExhausted`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
 
         ``on_commit(session)``, when given, is awaited at the end of the batch's transaction, in
@@ -5943,14 +6040,17 @@ class GraphVersioningService:
             # write-through composes against — and advances — the current main atomically
             # (head read → commit → head advance): the same lock publish/merge/revert take,
             # without which a write-through racing a merge reads a stale head and spuriously
-            # trips NotUpToDate / flaps the projection target. A draft write takes the draft's
-            # row lock instead, then checks the draft is still open: its writers serialize, and
-            # none lands on a merged or abandoned draft. Both are xact-scoped, so _retry_seq
-            # re-takes them on each fresh-session attempt.
+            # trips NotUpToDate / flaps the projection target. The graph row was loaded before
+            # the lock, and the holder may have moved main since: re-read it, or every read of
+            # main below (values, skeletons, cascades) is at the old head. A draft write takes
+            # the draft's row lock instead, then checks the draft is still open: its writers
+            # serialize, and none lands on a merged or abandoned draft. Both are xact-scoped, so
+            # _retry_seq re-takes them on each fresh-session attempt.
             if bid == main_id:
                 if branch_id is not None and not allow_main:
                     raise MainWriteForbidden()
                 await self._lock_graph(s, graph_id)
+                await s.refresh(graph)
                 branch = await s.get(BranchORM, bid)
             else:
                 branch = await self._lock_branch(s, graph_id, bid)
