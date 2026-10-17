@@ -59,6 +59,16 @@ class NotDraftOwner(_HttpMapped, AccessDenied):
                           "branchId": branch_id, "owner": owner})
 
 
+class HeadMoved(_HttpMapped, RuntimeError):
+    """An approval named the head the reviewer saw, and the draft has moved on
+    since: what they approved is not what would merge."""
+
+    def __init__(self, pr_id: str, head_commit_id: Optional[str]):
+        self.pr_id, self.head_commit_id = pr_id, head_commit_id
+        super().__init__(f"pr {pr_id} has changed since it was reviewed",
+                         {"type": "head_moved", "prId": pr_id, "headCommitId": head_commit_id})
+
+
 class LockBusy(_HttpMapped, RuntimeError):
     """A graph or draft lock was not granted within the lock timeout."""
 
@@ -111,5 +121,5 @@ class ForkLimit(_HttpMapped, RuntimeError):
                          {"type": "fork_limit", "limit": limit})
 
 
-HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, LockBusy, JobActive,
+HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, HeadMoved, LockBusy, JobActive,
                CurationAtRisk, MassDeleteBlocked, ForkLimit)

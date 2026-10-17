@@ -110,6 +110,7 @@ router = APIRouter(route_class=RawPathSegmentRoute)
 # write routes additionally require ``workspace:datasource:manage`` so a
 # read-only workspace member cannot mutate the graph.
 require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
+require_ws_publish = requires("workspace:datasource:publish", workspace="ws_id")
 
 # The server half of two admin toggles that, until now, toggled nothing. A flag that only hides
 # a button is a lie — the endpoint is still there and anyone who knows the URL still has the
@@ -535,6 +536,7 @@ async def resync_versioned_graph_endpoint(
     # Tightening is deliberate and is a breaking change for any caller relying on read-only
     # access — which is precisely the access that should never have worked.
     _perm=Depends(require_ws_manage),
+    _publish=Depends(require_ws_publish),          # a sync advances main
     user=Depends(get_optional_user),
     # Before `engine`: dependencies resolve in order, so a refused override never builds a provider.
     overrides: SyncOverrides = Depends(sync_override_gate),

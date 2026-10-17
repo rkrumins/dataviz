@@ -81,7 +81,8 @@ async def _run() -> None:
                                  resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}})
     assert rc2["clean"] is True
     # The SAME PR merges — a pull does not stale a PR, so no second one is opened (nor could be:
-    # one live PR per branch). Its diff is computed live from the branch, so the rebase is already
+    # one live PR per branch). This one has no reviewers; what a pull does to an approval is pinned
+    # in test_versioning_pr_gate. Its diff is computed live from the branch, so the rebase is already
     # reflected in it, and the pull cleared its behind-gate.
     assert (await svc.get_pr(mr3a))["behind"] is False
     assert await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z2")

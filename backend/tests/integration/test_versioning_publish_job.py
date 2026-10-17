@@ -77,7 +77,8 @@ async def _run(monkeypatch) -> None:
         return await ie.run_publish(job["job_id"])
 
     unapproved = await merge_by_job()
-    assert unapproved["error"] == {"status": 409, "detail": {"type": "approval_required", "pending": ["carol"]}}
+    assert unapproved["error"] == {"status": 409, "detail": {"type": "approval_required", "pending": ["carol"],
+                                                           "stale": []}}
     assert await status(reviewed) == "open", "refused: open again, so it can be queued again"
     await svc.approve_pr(pr_id=mr, actor="carol")
     merged = await merge_by_job()

@@ -183,24 +183,18 @@ POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/abandon r
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/changes resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/commit resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-requests resource
-POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/publish resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/rebase resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/bulk-ingest resource
-POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore resource
-POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/revert resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource reads-only
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
-POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/sync resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/approve resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/close resource
-POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/merge resource
 POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/approve resource
 POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/close resource
-POST /api/v1/{ws_id}/versioning/pulls/{pr_id}/merge resource
 PUT /api/v1/views/{view_id} resource
 PUT /api/v1/views/{view_id}/layout resource
 PUT /api/v1/views/{view_id}/library/queries resource

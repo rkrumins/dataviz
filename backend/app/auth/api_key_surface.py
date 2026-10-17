@@ -162,24 +162,25 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "list_workspace_templates", "get_workspace_template",
     ),
 
-    # ── Versioning: drafts, proposals, publishing, history ──────────
+    # ── Versioning: drafts, proposals, history ──────────────────────
     # Not here: creating graphs (blank or forked) and opening a draft by
     # data source, which name their target in the body; rebuilding or
-    # reconciling a projection (operations); and adding or removing a
-    # draft's members (sharing).
+    # reconciling a projection (operations); adding or removing a
+    # draft's members (sharing); and advancing main (publish, merge,
+    # revert, restore, sync), which needs a publish no key holds.
     **_entries(
         "versioning", RESOURCE,
         "resolve_graph_get", "get_graph", "get_watermark", "graph_neighbors",
         "list_branches", "open_draft", "update_branch", "abandon_draft",
-        "stage_changes", "checkpoint", "rebase_draft", "publish",
+        "stage_changes", "checkpoint", "rebase_draft",
         "get_state", "get_diff", "get_diff_vs_main", "get_diff_vs_main_summary",
         "get_diff_vs_main_children", "get_diff_window", "get_branch_freshness",
         "list_branch_members", "merge_preview", "branch_view_changes",
         "get_commit_log", "get_commit_state", "get_commit_diff_summary",
         "get_commit_diff_children", "get_squashed_commits",
-        "get_restore_preview", "restore_to_commit", "revert_commit",
+        "get_restore_preview",
         "get_entity_history", "get_entity_summary",
-        "bulk_ingest", "sync_ingest", "get_publish_job",
+        "bulk_ingest", "get_publish_job",
         "list_imports", "import_template", "create_import", "get_import",
         "get_import_preview", "create_import_upload", "get_import_upload",
         "put_import_upload_part", "complete_import_upload",
@@ -187,11 +188,11 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "download_export", "cancel_export",
         "open_merge_request", "list_merge_requests", "get_merge_request",
         "update_merge_request", "approve_merge_request", "close_merge_request",
-        "merge_merge_request", "diff_merge_request", "diff_merge_request_summary",
+        "diff_merge_request", "diff_merge_request_summary",
         "diff_merge_request_children", "preview_merge_request_endpoint",
         "open_pull_request", "list_pull_requests", "get_pull_request",
         "update_pull_request", "approve_pull_request", "close_pull_request",
-        "merge_pull_request", "diff_pull_request", "diff_pull_request_summary",
+        "diff_pull_request", "diff_pull_request_summary",
         "diff_pull_request_children", "preview_pull_request",
         "list_data_source_pull_requests", "list_view_pull_requests",
         "count_view_pull_requests",

@@ -55,19 +55,20 @@ workspaces.
 
 ### Permissions (RBAC)
 
-Two permission strings gate the whole surface (`_READ` and `_MANAGE` in
+Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLISH` in
 `backend/app/api/v1/endpoints/versioning.py`):
 
 | Constant | Value | Applies to |
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
-| `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**; **merge** and **publish**; projection rebuild and reconcile; branch admin; upload and publish-job status |
+| `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
+| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, and the graph router's `/resync`. A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission` |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
 > changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
-> (`POST /graphs/{gid}/forks`) creates a graph, so it needs `_MANAGE`. Landing changes on a shared
-> `main` — **merge** and **publish** — needs `_MANAGE`. That asymmetry is the review gate; there is
-> no separate ACL system.
+> (`POST /graphs/{gid}/forks`) creates a graph, so it needs `_MANAGE`, as do editing drafts and
+> raising reviews. Landing changes on a shared `main` — **merge** and **publish** — needs `_PUBLISH`
+> as well.
 
 `system:admin` implies both everywhere, `system:org-admin` in every workspace, and `workspace:admin`
 in its own workspace. Which roles hold which permission is in [RBAC](/docs/rbac). One read accepts
@@ -108,7 +109,8 @@ that backs `dataSourceId`.
 | `OntologyViolation` | **422** | `{type: "ontology_violation", violations: [{entity_id, kind, reason, rule}]}` |
 | `AccessDenied` | **403** | `{type: "access_denied", message}` |
 | `NotDraftOwner` | **403** | `{type: "access_denied", code: "not_draft_owner", branchId, owner, message}` — a write to someone else's private draft; only its owner writes it |
-| `ApprovalRequired` | **409** | `{type: "approval_required", pending: […]}` |
+| `ApprovalRequired` | **409** | `{type: "approval_required", pending: […], stale: […]}` — `pending` are the requested reviewers without a standing approval; `stale` are those of them who approved an earlier version (a content commit landed on the draft since) and must approve again |
+| `HeadMoved` | **409** | `{type: "head_moved", prId, headCommitId, message}` — an approve named the head the reviewer saw (`expectedHeadCommitId`), and the draft has moved on; review `headCommitId` and approve again |
 | `NotUpToDate` | **409** | `{type: "not_up_to_date", branchId, behindBy, message}` — pull `main` in with `…/rebase`, then retry |
 | `PullRequestExists` | **409** | `{type: "pull_request_exists", prId, branchId, title, message}` — the branch already has a live request ([03](/docs/versioning-branching-and-merge)); `prId` is the one that exists, so send the user *to* it |
 | `ConcurrencyError` | **409** | `{type: "integrity", message}` |
@@ -189,7 +191,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 | `POST …/branches/{bid}/commit` | `_MANAGE` | Checkpoint the draft. `{message?, resolutions?}` → `{commitId?, stagedChanges}`. Resolves the live containment types and ontology rules — the authoritative ontology check |
 | `GET …/branches/{bid}/merge-preview` | `_READ` | Dry-run publish → `{clean, conflicts, changes: {create, update, delete}}` |
 | `GET …/branches/{bid}/view-changes` | `_READ` | What the draft changes in views besides the graph: `{branchId, views, hidden}` — views it creates or updates, which go live when it is published. Views you can't read are only counted, in `hidden` |
-| `POST …/branches/{bid}/publish` | `_MANAGE` | Squash-publish the draft to `main`. `{message, resolutions?}` → `{commitId}`. Staged changes are folded in first. **409 `not_up_to_date`** when `main` moved since the draft's base — pull with `…/rebase`, then publish again; nothing is rebased for you. A draft that changes more than 20,000 entities (`GRAPHVER_SYNC_PUBLISH_MAX_CHANGES`) publishes as a job: **202** `{jobId, graphId, status}`. After the write it invalidates `main`'s read cache, stamps the views' data freshness, folds the draft's layout edits into the view, and schedules the in-process FalkorDB catch-up |
+| `POST …/branches/{bid}/publish` | `_PUBLISH` | Squash-publish the draft to `main`. `{message, resolutions?}` → `{commitId}`. Staged changes are folded in first. **409 `not_up_to_date`** when `main` moved since the draft's base — pull with `…/rebase`, then publish again; nothing is rebased for you. A draft that changes more than 20,000 entities (`GRAPHVER_SYNC_PUBLISH_MAX_CHANGES`) publishes as a job: **202** `{jobId, graphId, status}`. After the write it invalidates `main`'s read cache, stamps the views' data freshness, folds the draft's layout edits into the view, and schedules the in-process FalkorDB catch-up |
 | `GET …/publish-jobs/{jobId}` | `_MANAGE` | A publish or review merge run as a job: `{jobId, graphId, status, commitId?, error?}`. `error` is `{status, detail}` — the answer the route would have given inside the request; a refusal keeps the first 100 ontology violations and their `total` |
 
 ### 2.5 Projection, Data health, rebuild, revert & restore
@@ -199,9 +201,9 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 | `GET …/watermark` | `_READ` | `WatermarkModel{committed, projected, fresh, status, target, lastError?, lastProjectedAt?, progressDone?, progressTotal?, committedRevision?, projectedRevision?, projectionKey?, providerId?, providerName?, owned, epoch, failedAttempts, nextRetryAt?, livenessError?, readRoute}`. `status` is `idle`, `projecting`, `rebuilding` or `evicted`; each revision is `{commitId, createdAt, actor, message}`. `projectionKey` and `providerId` are the FalkorDB key and provider from `projection_state` (a null provider is the default instance); `owned` is true when the platform minted the key. `livenessError` is set while the last liveness check's reset is the latest error. `readRoute` is `{main: 'falkordb'|'postgres', drafts: 'overlay'}` by the canvas read rule: main from FalkorDB only while `fresh`, a draft always an overlay on whatever serves main. Drives the "refreshing…" badge and the Data health tab |
 | `POST …/projection/rebuild` | `_MANAGE` | Full replay Postgres → FalkorDB → `{started, alreadyRunning, watermark}`. **409** when there is no real target (unpinned, or the synthetic `gv_<id>`). Idempotent; it also self-heals a stranded status |
 | `POST …/projection/reconcile` | `_MANAGE` | `{deep?}` → `DriftReportModel` (counts and id-set differences; `deep` also compares fields). A request-scoped full scan: a second one for the same graph → **409**; a read-layer failure → **503** |
-| `POST …/commits/{cid}/revert` | `_MANAGE` | Apply the inverse of one `main` commit as a new `revert` commit. `{message?}` → `{commitId}`. **409** if a later commit changed the same entities. The genesis commit can't be reverted |
+| `POST …/commits/{cid}/revert` | `_PUBLISH` | Apply the inverse of one `main` commit as a new `revert` commit. `{message?}` → `{commitId}`. **409** if a later commit changed the same entities. The genesis commit can't be reverted |
 | `GET …/commits/{cid}/restore-preview` | `_READ` | What a restore would do: `{commitsUndone, nodes, edges}`, each with create, update and delete counts. Nothing is written |
-| `POST …/commits/{cid}/restore` | `_MANAGE` | Reset `main` to its state at that commit, as one new `restore` commit (point-in-time rollback). `{message?}` → `{commitId}`. No conflict path: everything after the target is overridden by definition |
+| `POST …/commits/{cid}/restore` | `_PUBLISH` | Reset `main` to its state at that commit, as one new `restore` commit (point-in-time rollback). `{message?}` → `{commitId}`. No conflict path: everything after the target is overridden by definition |
 
 See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what these do.
 
@@ -237,7 +239,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST …/bulk-ingest` | `_MANAGE` | An NDJSON body (one node or edge per line) → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected`, not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
-| `POST …/sync` | `_MANAGE` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; API keys cannot hold `workspace:admin`, so they get **403 `needs_admin`**). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
+| `POST …/sync` | `_PUBLISH` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; API keys cannot hold `workspace:admin`, so they get **403 `needs_admin`**). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
 
 ### 2.10 Imports & exports
 
@@ -285,7 +287,7 @@ scripted run. The endpoints:
 | `GET /pulls/{pr}` | `_READ`, and you take part in it | One PR, with `sourceBranchOwner` and `sourceBranchName` |
 | `PATCH /pulls/{pr}` | `_MANAGE` | Edit `title` and `description` |
 | `GET /pulls/{pr}/preview · /diff · /diff/summary · /diff/children` | `_READ`, and you take part in it | Merge preview, and the itemised and hierarchical "Files changed" |
-| `POST /pulls/{pr}/approve · /close · /merge` | `_MANAGE` | `merge` takes `{message, resolutions?}` → `{commitId}`, judged by the **target's** ontology; then the target's read cache, view freshness and FalkorDB catch-up |
+| `POST /pulls/{pr}/approve · /close · /merge` | `_MANAGE`; `merge` `_PUBLISH` | `approve` takes an optional `{expectedHeadCommitId}` (**409 `head_moved`** when the source has moved on). `merge` takes `{message, resolutions?}` → `{commitId}`, judged by the **target's** ontology; then the target's read cache, view freshness and FalkorDB catch-up |
 
 ### 2.13 Draft merge requests (reviewed publish) & scoped PR lists
 
@@ -298,7 +300,7 @@ scripted run. The endpoints:
 | `GET /data-sources/{dataSourceId}/pull-requests` | `_READ` | `?status&limit&offset` — every request on the data source, newest first; `status=open` lists every request not yet merged or closed (the review inbox), any other status is an exact match; **404** unless its graph is in this workspace |
 | `GET /merge-requests/{pr}` (and `/preview`, `/diff`, `/diff/summary`, `/diff/children`) | `_READ`, and you take part in it | The **unified** read surface — it serves draft requests and fork PRs alike |
 | `PATCH /merge-requests/{pr}` | `_MANAGE` | Edit `title` and `description` |
-| `POST /merge-requests/{pr}/approve · /close · /merge` | `_MANAGE` | `merge` takes `{message, resolutions?}` → `{commitId}`, checked against the target's live containment types and ontology rules. As with publish, a draft that changes more than 20,000 entities merges as a job: **202**, then poll `…/publish-jobs/{jobId}` |
+| `POST /merge-requests/{pr}/approve · /close · /merge` | `_MANAGE`; `merge` `_PUBLISH` | `approve` takes an optional `{expectedHeadCommitId}`, the draft head the reviewer saw (**409 `head_moved`** when the draft has moved on). An approval is of the draft's head: a later content commit on the draft makes it stale, and `merge` answers **409 `approval_required`** with the reviewer in `stale` until they approve again; a pull that rewrote none of the draft's own edits keeps it. The PR's `approvedBy` and `approvalStatus` count only approvals that still stand. `merge` takes `{message, resolutions?}` → `{commitId}`, checked against the target's live containment types and ontology rules. As with publish, a draft that changes more than 20,000 entities merges as a job: **202**, then poll `…/publish-jobs/{jobId}` |
 
 ---
 
@@ -454,7 +456,7 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `POST /bootstrap/abandon?dataSourceId=…` drive recovery. The worker reads the source in bounded
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —
   see the [End-to-End Testing Guide](/docs/versioning-e2e).
-- `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + **Version control**)
+- `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + `workspace:datasource:publish` + **Version control**)
   re-syncs a versioned graph from its provider's current state with the service's 3-way merge;
   **404** when the data source isn't versioned. It refuses above `GRAPHVER_RESYNC_MAX_ENTITIES`
   (250,000) with **422 `graph_too_large_to_sync`**, and with **409 `curation_at_risk`** or

@@ -44,7 +44,8 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, ForkLimit,
-                     JobActive, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotDraftOwner)
+                     HeadMoved, JobActive, LockBusy, MainWriteForbidden, MassDeleteBlocked,
+                     NotDraftOwner)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -288,12 +289,14 @@ class OntologyViolation(RuntimeError):
 
 
 class ApprovalRequired(RuntimeError):
-    """A PR's required reviewers haven't all approved yet — merge is blocked."""
+    """A PR's required reviewers haven't all approved yet — merge is blocked. ``stale`` are those
+    of them whose approval was of an earlier version of the PR."""
 
-    def __init__(self, pr_id: str, pending):
+    def __init__(self, pr_id: str, pending, stale=()):
         super().__init__(f"pr {pr_id} needs approval from {pending}")
         self.pr_id = pr_id
         self.pending = list(pending)
+        self.stale = list(stale)
 
 
 # Peak bytes of RSS `sync_ingest` costs per entity, MEASURED — not guessed. A 478,430-entity
@@ -2076,10 +2079,16 @@ class GraphVersioningService:
             await s.flush()
             return pr.id
 
-    async def approve_pr(self, *, pr_id: str, actor: str) -> dict:
+    async def approve_pr(
+        self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
+    ) -> dict:
         """Record ``actor``'s approval of a PR. The author can't approve their own
         PR; once every requested reviewer has approved, ``approval_status`` flips
-        to ``approved`` (and an otherwise-mergeable PR to status ``approved``)."""
+        to ``approved`` (and an otherwise-mergeable PR to status ``approved``).
+
+        The approval is of the source branch's head now: a content commit after it makes it
+        stale (:meth:`_approvals`). ``expected_head_commit_id`` is the head the reviewer saw;
+        :class:`HeadMoved` when the branch has moved on since."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
@@ -2088,10 +2097,18 @@ class GraphVersioningService:
                 raise ValueError(f"pr {pr_id} is {pr.status}")
             if actor == pr.actor:
                 raise AccessDenied("author cannot approve their own PR")
+            src = await s.get(BranchORM, pr.source_branch_id)
+            head = src.head_commit_id if src else None
+            if expected_head_commit_id is not None and expected_head_commit_id != head:
+                raise HeadMoved(pr_id, head)
             approved = list(dict.fromkeys((pr.approved_by or []) + [actor]))
             pr.approved_by = approved
+            pr.approvals = {**(pr.approvals or {}), actor: {
+                "headCommitId": head, "at": _now(),
+                "headSeq": await self._next_seq(s, pr.graph_id, pr.source_branch_id) - 1}}
+            standing, _stale = await self._approvals(s, pr)
             reviewers = set(pr.reviewers or [])
-            pr.approval_status = "approved" if reviewers <= set(approved) else "pending"
+            pr.approval_status = "approved" if reviewers <= set(standing) else "pending"
             if pr.approval_status == "approved" and pr.status == "mergeable":
                 pr.status = "approved"
             pr.updated_at = _now()
@@ -2223,9 +2240,7 @@ class GraphVersioningService:
                     kind_by_entity, containment_edge_types=containment_edge_types or [],
                     ontology_rules=ontology_rules,
                     strict=parent.ontology_enforcement == "strict", known=merged)
-                reviewers = set(pr.reviewers or [])
-                if reviewers and pr.approval_status != "approved":
-                    raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
+                await self._require_approvals(s, pr)
 
                 new_seq = parent.main_head_commit_seq + 1
                 contributors = await self._branch_contributors(s, fork.id, fork_main)
@@ -2508,6 +2523,9 @@ class GraphVersioningService:
                 self._require_open(draft, publishing_ok=queued)
                 if await self._pending_count(s, graph.id, pr.source_branch_id):
                     raise _StaleHead()
+                # The approval gate (plan §17 #5), ahead of the merge computation: a refusal costs
+                # one indexed read, never a 3-way merge of the draft.
+                await self._require_approvals(s, pr)
                 main_id = await self._main_branch_id(s, graph.id)
                 # Require-up-to-date gate (see publish / docs 03 §3.13): a PR whose source draft is
                 # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
@@ -2522,9 +2540,6 @@ class GraphVersioningService:
                     )
                     if conflicts:
                         raise MergeConflict(conflicts)
-                reviewers = set(pr.reviewers or [])          # approval gate (plan §17 #5)
-                if reviewers and pr.approval_status != "approved":
-                    raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
                 if narrow:
                     commit_id = await self._squash_up_to_date(
                         s, graph, draft, main_id, actor, message,
@@ -2542,6 +2557,45 @@ class GraphVersioningService:
                 pr.updated_at = _now()
                 return commit_id
         return await self._retry_seq(f"merge_mr {mr_id}", _once)
+
+    async def _approvals(self, s, pr: MergeRequestORM) -> Tuple[List[str], List[str]]:
+        """``(standing, stale)``: who approved ``pr``, split by whether the approval still holds
+        (doc 13 'Staleness').
+
+        An approval records the source branch's head when it was given (:meth:`approve_pr`) and
+        holds until a content commit lands on the branch after it. A pull that rewrote none of
+        the draft's own edits (``stats.rebased`` all zero) is not content, so it keeps approvals.
+        An approval with no recorded head was given before approvals were bound to one: stale.
+        Past 1000 later commits, an approval older than all of them counts as stale too."""
+        approved = list(pr.approved_by or [])
+        seqs = {a: v["headSeq"] for a, v in (pr.approvals or {}).items() if a in approved}
+        last_content = 0
+        if seqs:
+            rows = (await s.execute(
+                select(CommitORM.commit_seq, CommitORM.kind, CommitORM.stats)
+                .where(CommitORM.graph_id == pr.graph_id, CommitORM.branch_id == pr.source_branch_id,
+                       CommitORM.commit_seq > min(seqs.values()))
+                .order_by(CommitORM.commit_seq.desc()).limit(1001))).all()
+            for seq, kind, stats in rows:
+                rebased = (stats or {}).get("rebased")
+                if kind != "pull" or rebased is None or any(rebased.values()):
+                    last_content = seq
+                    break
+            else:
+                if len(rows) > 1000:
+                    last_content = rows[-1].commit_seq
+        standing = [a for a in approved if a in seqs and seqs[a] >= last_content]
+        return standing, [a for a in approved if a not in standing]
+
+    async def _require_approvals(self, s, pr: MergeRequestORM) -> None:
+        """The approval gate (plan §17 #5): every requested reviewer's approval must still hold.
+        A PR with no requested reviewers needs none."""
+        if not pr.reviewers:
+            return
+        standing, stale = await self._approvals(s, pr)
+        pending = sorted(set(pr.reviewers) - set(standing))
+        if pending:
+            raise ApprovalRequired(pr.id, pending, stale=sorted(set(pending) & set(stale)))
 
     async def _compute_fork_merge(self, s, fork, resolutions):
         """3-way merge a fork's divergence into its parent's current main.
@@ -4901,16 +4955,25 @@ class GraphVersioningService:
             base = (src.base_commit_seq if src else pr.base_commit_seq) or 0
             behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
             behind = behind_by > 0
+        # A live PR shows only the approvals that still hold, so a reviewer whose approval went
+        # stale is asked again, and the PR is no longer shown as approved.
+        status, approved_by, approval_status = pr.status, pr.approved_by, pr.approval_status
+        if approved_by and status not in ("merged", "closed"):
+            approved_by, _stale = await self._approvals(s, pr)
+            if pr.reviewers:
+                approval_status = "approved" if set(pr.reviewers) <= set(approved_by) else "pending"
+                if status == "approved" and approval_status != "approved":
+                    status = "mergeable"
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
             "source_branch_id": pr.source_branch_id,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
-            "base_commit_seq": pr.base_commit_seq, "status": pr.status,
+            "base_commit_seq": pr.base_commit_seq, "status": status,
             "behind": behind, "behind_by": behind_by,
             "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
-            "reviewers": pr.reviewers, "approved_by": pr.approved_by,
-            "approval_status": pr.approval_status, "checks_status": pr.checks_status,
+            "reviewers": pr.reviewers, "approved_by": approved_by,
+            "approval_status": approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
             "merged_at": pr.merged_at, "merged_by": pr.merged_by, "merged_via": pr.merged_via,
             "closed_at": pr.closed_at, "closed_by": pr.closed_by,

@@ -66,6 +66,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const { pathname } = useLocation()
   const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', wsId)
+  // Merging, and reverting a merge, advance main: that needs publish as well.
+  const canPublish = usePermission('workspace:datasource:publish', wsId)
   const user = useAuthStore((s) => s.user)
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
@@ -497,8 +499,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             ) : (
               <button
                 onClick={() => runMerge()}
-                disabled={busy || unsaved > 0}
-                title="Apply these changes to main"
+                disabled={busy || unsaved > 0 || !canPublish}
+                title={canPublish
+                  ? 'Apply these changes to main'
+                  : 'Merging into main needs the publish permission on this workspace'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
@@ -551,7 +555,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         )}
 
         {/* Merged terminal state — the one action left is undoing the merge. */}
-        {pr && pr.status === 'merged' && canManage && versioningEnabled && pr.resultingCommitId && (
+        {pr && pr.status === 'merged' && canManage && canPublish && versioningEnabled && pr.resultingCommitId && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center justify-between gap-3">
             <p className="text-[12px] text-ink-muted leading-snug">
               Merged the wrong thing? Undo it as a new revision — history is kept.

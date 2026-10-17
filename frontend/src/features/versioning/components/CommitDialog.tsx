@@ -55,6 +55,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const { notify } = useAppNotifications()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
+  // Publishing straight to the live version needs publish; without it, a draft goes through review.
+  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
 
@@ -292,14 +294,16 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
           {canManage && (
             <HoverTip
               className="inline-flex"
-              label={inReview
-                ? 'Publish straight to the live version, bypassing the open review'
-                : 'Publish straight to the live version, skipping review'}
-              detail="Everyone sees the result immediately"
+              label={!canPublish
+                ? 'Publishing straight to the live version needs the publish permission on this workspace'
+                : inReview
+                  ? 'Publish straight to the live version, bypassing the open review'
+                  : 'Publish straight to the live version, skipping review'}
+              detail={canPublish ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges || unsaved > 0}
+              disabled={busy || !hasChanges || unsaved > 0 || !canPublish}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass

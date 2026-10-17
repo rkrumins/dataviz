@@ -209,6 +209,9 @@ class MergeRequestORM(VersioningBase):
     resolutions = Column(JSONB, nullable=True)            # who resolved / chosen value
     reviewers = Column(JSONB, nullable=True)
     approved_by = Column(JSONB, nullable=True)
+    # {actor: {headCommitId, headSeq, at}}: the source branch's head each approval was of. A
+    # content commit after it makes the approval stale (GraphVersioningService._approvals).
+    approvals = Column(JSONB, nullable=True)
     approval_status = Column(Text, nullable=True)
     checks_status = Column(JSONB, nullable=True)          # ontology re-validation etc.
     resulting_commit_id = Column(Text, nullable=True)
@@ -746,6 +749,12 @@ def _ensure_schema_upgrades(conn) -> None:
             ensure_ps_reseeding_status(conn)
     except Exception:
         logger.exception("the reseeding status was not allowed; the next start tries again")
+    # 20261018_1000_gv_mr_approvals.
+    try:
+        with conn.begin_nested():
+            ensure_mr_approvals_column(conn)
+    except Exception:
+        logger.exception("merge_requests.approvals was not added; the next start tries again")
 
 
 def ensure_ps_fencing_columns(conn) -> None:
@@ -783,6 +792,18 @@ def ensure_ps_reseeding_status(conn) -> None:
     conn.execute(text(
         f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status "
         "CHECK (status IN ('idle','projecting','rebuilding','evicted','reseeding'))"))
+
+
+def ensure_mr_approvals_column(conn) -> None:
+    """Add ``merge_requests.approvals``, the head each approval was of. A no-op without the table,
+    and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("merge_requests", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
 
 
 def ensure_ps_key_index(conn, *, strict: bool) -> None:

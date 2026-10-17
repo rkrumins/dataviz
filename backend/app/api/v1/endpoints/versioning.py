@@ -106,6 +106,8 @@ _GATE_BLANK_MODELS = require_feature("blankModelsEnabled")
 # Permission constants (a graph is a data source — reuse its perms).
 _READ = "workspace:datasource:read"
 _MANAGE = "workspace:datasource:manage"
+# Advancing main (publish, merge, revert, restore, sync) also needs publish, which no API key holds.
+_PUBLISH = "workspace:datasource:publish"
 
 
 async def viewer_ctx(
@@ -492,7 +494,8 @@ def _domain_errors():
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
-        raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending})
+        raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending,
+                                                     "stale": exc.stale})
     except NotUpToDate as exc:
         raise HTTPException(status_code=409, detail={
             "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
@@ -714,6 +717,11 @@ class RebaseRequest(_ApiModel):
 class MergePrRequest(_ApiModel):
     message: str
     resolutions: Optional[Dict[str, Optional[dict]]] = None
+
+
+class ApproveRequest(_ApiModel):
+    # The source head the reviewer saw: 409 head_moved when the draft has moved on since.
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
 
 
 class CreateGraphResponse(_ApiModel):
@@ -1616,6 +1624,7 @@ async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -1929,6 +1938,7 @@ async def revert_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -1947,6 +1957,7 @@ async def restore_to_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -2439,6 +2450,7 @@ async def sync_ingest(
     strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
     source: str = Query("external"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     overrides: SyncOverrides = Depends(sync_override_gate),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -3329,12 +3341,14 @@ async def diff_pull_request_children(
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
+    body: Optional[ApproveRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager approves
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
 
 
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
@@ -3353,6 +3367,7 @@ async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -3558,12 +3573,14 @@ async def diff_merge_request_children(
 @router.post("/merge-requests/{pr_id}/approve", response_model=PrResponse)
 async def approve_merge_request(
     ws_id: str, pr_id: str,
+    body: Optional[ApproveRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
 
 
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
@@ -3582,6 +3599,7 @@ async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),

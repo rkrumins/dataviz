@@ -18,6 +18,7 @@ from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 R, M = "workspace:datasource:read", "workspace:datasource:manage"
+P = "workspace:datasource:publish"
 
 
 # --- a minimal fake FalkorDB read client returning reader-shaped results --- #
@@ -65,7 +66,7 @@ def _build_app():
 
     async def fake_claims(request: Request):
         ws = request.path_params.get("ws_id") or "ws1"
-        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M)})
+        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M, P)})
 
     app = FastAPI()
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")

@@ -24,11 +24,32 @@ shared draft and the people on its pull request. To anyone else, a graph read wi
 naming it, and its neighbors, freshness and members, answer **404**, exactly as for a branch that
 doesn't exist.
 
+**Advancing the Published version needs `workspace:datasource:publish`.** Publishing a draft,
+merging a review (draft or fork), reverting or restoring `main`, and a sync or `/graph/resync` now
+need publish on top of manage, or answer **403** `missing_permission`. `workspace_publisher`,
+`workspace_data_engineer` and the admins hold it; `workspace_member` does not. The canvas disables
+Publish now, Merge and the rollback actions for people without it, and says why.
+
+**An approval is of what the reviewer saw.** Each approval records the draft's head. A content commit
+on the draft after it makes it stale: the merge answers **409 `approval_required`** with that
+reviewer in the new `stale` list, and the review shows them as still to approve. A pull that rewrote
+none of the draft's own edits keeps approvals. `POST …/approve` takes an optional
+`{expectedHeadCommitId}` and answers **409 `head_moved`** `{headCommitId}` when the draft has moved
+on. The approval check now runs before the merge is computed.
+
 ### Upgrading
 
 - A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
   the draft and add the caller as an editor, or write into a draft the caller owns.
 - A script or API key that reads a teammate's private draft without workspace manage now gets 404.
+- Run the `20261018_1000_gv_mr_approvals` migration (it adds `merge_requests.approvals`). Approvals
+  given before it have no recorded head and count as stale: their reviewers approve again before the
+  merge.
+- Members who published or merged with `workspace_member` now get 403. Grant them
+  `workspace_publisher` (or `workspace_data_engineer`), or have them submit drafts for review.
+- API keys cannot hold `workspace:datasource:publish`, so a key can no longer publish, merge, revert,
+  restore or sync: those routes are off the key surface. A key can still edit drafts and open
+  reviews; a person with publish lands them.
 
 ---
 

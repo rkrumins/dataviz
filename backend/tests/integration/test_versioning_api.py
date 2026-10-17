@@ -18,6 +18,7 @@ from backend.app.services.versioning import db, models
 
 R = "workspace:datasource:read"
 M = "workspace:datasource:manage"
+P = "workspace:datasource:publish"
 
 
 def _hdr(perms: str) -> dict:
@@ -115,7 +116,7 @@ async def _run(data_sources: dict) -> None:
         assert r.status_code == 404, r.text
 
         # ── happy path (read+manage) ─────────────────────────────────────
-        h = _hdr(f"{R},{M}")
+        h = _hdr(f"{R},{M},{P}")
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={"originatingViewId": "v1"}, headers=h)).json()["branchId"]
         r = await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", headers=h, json={"ops": [
             {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"entityType": "Dataset", "displayName": "Alpha"}},

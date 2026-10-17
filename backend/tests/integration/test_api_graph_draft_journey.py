@@ -82,7 +82,8 @@ def _build_app():
         ws = request.path_params.get("ws_id") or "ws1"
         return PermissionClaims(
             sid="", global_perms=(),
-            ws_perms={ws: ("workspace:datasource:read", "workspace:datasource:manage")})
+            ws_perms={ws: ("workspace:datasource:read", "workspace:datasource:manage",
+                           "workspace:datasource:publish")})
 
     async def fake_db():
         # for_workspace only uses this session for ontology resolution (degrades gracefully

@@ -646,3 +646,57 @@ async def test_the_reseeding_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── merge_requests.approvals: the head each approval was of (20261018_1000_gv_mr_approvals) ──
+_MR_APPROVALS = _VERSIONS / "20261018_1000_gv_mr_approvals.py"
+
+
+async def _mr_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'merge_requests'"),
+        {"s": models._SCHEMA})).all()}
+
+
+def test_the_approvals_column_is_declared_and_migrated():
+    assert models.MergeRequestORM.__table__.c.approvals.nullable
+    migration = _migration(_MR_APPROVALS)
+    assert migration.revision == _MR_APPROVALS.stem
+    assert migration.down_revision == "20261017_2000_gv_ps_reseeding"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_approvals_column(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'ALTER TABLE "{models._SCHEMA}".merge_requests DROP COLUMN approvals'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "approvals" in await _mr_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_approvals_migration_round_trips(store):
+    migration = _migration(_MR_APPROVALS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "approvals" not in await _mr_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "approvals" in await _mr_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

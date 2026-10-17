@@ -18,9 +18,10 @@ from backend.app.services.versioning.errors import CurationAtRisk, MassDeleteBlo
 from backend.app.services.versioning.service import GraphVersioningService
 
 WS = "ws_sync_guard"
-_MANAGER = PermissionClaims(
+_MANAGER = PermissionClaims(                  # a sync advances main, so it needs publish too
     sid="sess_test",
-    ws_perms={WS: ("workspace:datasource:read", "workspace:datasource:manage")})
+    ws_perms={WS: ("workspace:datasource:read", "workspace:datasource:manage",
+                   "workspace:datasource:publish")})
 _HUMAN = ("cmt_1", 3, "squash_publish", "alice", "2026-10-01T00:00:00Z")
 
 
@@ -144,13 +145,15 @@ async def test_sync_route_override_requires_workspace_admin(test_client, app, fl
 
 @pytest.mark.parametrize("flag", ["force", "allowMassDelete"])
 async def test_an_api_key_cannot_override(test_client, app, flag):
-    """Keys can never hold workspace:admin, so scripted callers cannot override either."""
+    """Keys can never hold workspace:admin, so scripted callers cannot override either. Nor can
+    they hold publish, so they are refused a sync before the override is looked at."""
     svc = _Versioning()
     _install(app, svc, PermissionClaims(
         sid="", ws_perms={WS: ("workspace:datasource:read", "workspace:datasource:manage")},
         key_scope=KeyScope(key_id="k", data="write", all_resources=True)))
-    _needs_admin(await test_client.post(
-        f"/api/v1/{WS}/versioning/graphs/g1/sync?{flag}=true", content=b""))
+    resp = await test_client.post(f"/api/v1/{WS}/versioning/graphs/g1/sync?{flag}=true", content=b"")
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["permission"] == "workspace:datasource:publish"
     assert svc.calls == []
 
 

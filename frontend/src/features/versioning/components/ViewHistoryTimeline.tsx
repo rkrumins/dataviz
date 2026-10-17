@@ -12,6 +12,7 @@ import { useCallback, useMemo, useState, type ComponentType } from 'react'
 import { Loader2, Eye, Layers, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useFeature } from '@/store/features'
+import { usePermission } from '@/store/auth'
 import { useCommitLog, useViewCommitLog } from '../hooks/useVersioning'
 import { CommitRow } from './CommitRow'
 import { RevertDialog, RestoreDialog } from './RollbackDialogs'
@@ -38,9 +39,11 @@ export function ViewHistoryTimeline({
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
   // Rollback affordances: published (main) rows only — draft checkpoints aren't
-  // main commits. Manager + admin-flag gated; dialogs own the confirm/impact UX.
+  // main commits. Manager + admin-flag gated, and both write main, so they need publish too;
+  // dialogs own the confirm/impact UX.
   const versioningEnabled = useFeature('versioningEnabled')
-  const canRollback = canManage && versioningEnabled
+  const canPublish = usePermission('workspace:datasource:publish', wsId)
+  const canRollback = canManage && canPublish && versioningEnabled
   const [revertTarget, setRevertTarget] = useState<Record<string, unknown> | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<Record<string, unknown> | null>(null)
 
