@@ -1,7 +1,9 @@
 """Auto-abandon idle drafts (P13) — needs Postgres.
 
 sweep_idle_drafts abandons open drafts whose updated_at is older than the TTL,
-leaving fresh drafts, already-terminal branches, and main untouched. It is global
+leaving fresh drafts, already-terminal branches, and main untouched. It also leaves an
+idle draft that is still in use: one with a live PR, one being published, one with
+staged (uncheckpointed) work, and one on a deleted graph. It is global
 (a janitor across all graphs). The worker runs it on a timer; here we drive
 sweep_once directly, which is all the worker loop adds.
 """
@@ -13,7 +15,7 @@ import pytest
 from sqlalchemy import update
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.models import BranchORM
+from backend.app.services.versioning.models import BranchORM, GraphORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.app.services.versioning.worker import ProjectionWorker
 
@@ -27,6 +29,11 @@ async def _backdate(bid: str, days: int) -> None:
     old = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     async with db.graphver_session() as s:
         await s.execute(update(BranchORM).where(BranchORM.id == bid).values(updated_at=old))
+
+
+async def _set(orm, row_id: str, **values) -> None:
+    async with db.graphver_session() as s:
+        await s.execute(update(orm).where(orm.id == row_id).values(**values))
 
 
 async def _run() -> None:
@@ -44,18 +51,47 @@ async def _run() -> None:
     await svc.checkpoint(graph_id=gid, branch_id=merged, actor="alice")
     await svc.publish(graph_id=gid, branch_id=merged, actor="alice", message="ship")
 
+    # idle, but still in use → kept
+    in_review = await svc.open_draft(graph_id=gid, owner="alice")  # live PR
+    await svc.stage_changes(graph_id=gid, branch_id=in_review, actor="alice", ops=[_n("R")])
+    await svc.checkpoint(graph_id=gid, branch_id=in_review, actor="alice")
+    await svc.open_draft_mr(graph_id=gid, branch_id=in_review, actor="alice")
+    publishing = await svc.open_draft(graph_id=gid, owner="alice")  # mid-publish
+    await _set(BranchORM, publishing, status="publishing")
+    staged = await svc.open_draft(graph_id=gid, owner="alice")      # uncheckpointed work
+    await svc.stage_changes(graph_id=gid, branch_id=staged, actor="alice", ops=[_n("S")])
+    dead_gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                       workspace_id="ws1", actor="alice"))["graph_id"]
+    orphan = await svc.open_draft(graph_id=dead_gid, owner="alice")  # graph deleted
+    await _set(GraphORM, dead_gid, deleted_at=datetime.now(timezone.utc).isoformat())
+
+    # idle, checkpointed work, its PR closed → nothing keeps it: swept
+    done = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.stage_changes(graph_id=gid, branch_id=done, actor="alice", ops=[_n("D")])
+    await svc.checkpoint(graph_id=gid, branch_id=done, actor="alice")
+    await svc.close_pr(pr_id=await svc.open_draft_mr(graph_id=gid, branch_id=done, actor="alice"),
+                       actor="alice")
+
     await _backdate(stale, 60)
     await _backdate(merged, 60)                                   # idle but already merged
     await _backdate(main, 60)                                     # main is not a draft
+    for bid in (in_review, publishing, staged, orphan, done):
+        await _backdate(bid, 60)
 
-    # only the idle, still-open draft is abandoned
-    assert await svc.sweep_idle_drafts(ttl_days=30) == [stale]
+    # only the idle, still-open drafts nothing else is using are abandoned
+    assert sorted(await svc.sweep_idle_drafts(ttl_days=30)) == sorted([stale, done])
 
     by_id = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid, status=["all"]))[0]}
     assert by_id[stale]["status"] == "abandoned"
     assert by_id[fresh]["status"] == "open"
     assert by_id[merged]["status"] == "merged"
     assert by_id[main]["kind"] == "main" and by_id[main]["status"] == "open"
+    assert by_id[done]["status"] == "abandoned"
+    assert by_id[in_review]["status"] == "open"
+    assert by_id[publishing]["status"] == "publishing"
+    assert by_id[staged]["status"] == "open"
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, orphan)).status == "open"
 
     # idempotent: nothing stale-open remains
     assert await svc.sweep_idle_drafts(ttl_days=30) == []

@@ -1655,9 +1655,18 @@ class GraphVersioningService:
         """Auto-abandon open drafts idle past the TTL (plan §17 #8) and return the
         ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic. Only ``open``
         drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
-        ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon)."""
+        ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon).
+        An idle draft still in use is kept: one with a live PR, staged (uncheckpointed)
+        work, or on a deleted graph (its purge owns it). A ``publishing`` draft is not open."""
         ttl = config.DRAFT_TTL_DAYS if ttl_days is None else ttl_days
         cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl)).isoformat()
+        live_pr = select(1).where(MergeRequestORM.source_branch_id == BranchORM.id,
+                                  MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
+        staged = select(1).where(WorkingChangeORM.graph_id == BranchORM.graph_id,
+                                 WorkingChangeORM.branch_id == BranchORM.id,
+                                 WorkingChangeORM.committed_into_commit_id.is_(None))
+        tombstoned = select(1).where(GraphORM.id == BranchORM.graph_id,
+                                     GraphORM.deleted_at.isnot(None))
         async with self._session() as s:
             swept = (await s.execute(
                 update(BranchORM)
@@ -1665,6 +1674,7 @@ class GraphVersioningService:
                     BranchORM.kind.in_(("draft", "fork_draft")),
                     BranchORM.status == "open",
                     BranchORM.updated_at < cutoff,
+                    ~live_pr.exists(), ~staged.exists(), ~tombstoned.exists(),
                 )
                 .values(status="abandoned", updated_at=_now())
                 .returning(BranchORM.id)

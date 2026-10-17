@@ -44,6 +44,11 @@ The review shows each reviewer as approved, stale (the new `staleApprovedBy`) or
 and offers Approve to the requested reviewers only. Two reviewers approving at the same moment are
 both recorded; before, one approval could overwrite the other.
 
+**The idle-draft sweep leaves drafts that are still in use.** After `GRAPHVER_DRAFT_TTL_DAYS` idle,
+a draft is abandoned only if it has no open review, no staged edits waiting for a checkpoint, and
+its graph is not deleted. Before, it abandoned those too, closing the draft under its review and
+dropping the staged edits.
+
 ### Upgrading
 
 - A script or API key that writes into a teammate's private draft now gets 403. Have the owner share

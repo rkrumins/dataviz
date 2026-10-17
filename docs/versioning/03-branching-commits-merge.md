@@ -98,7 +98,7 @@ stateDiagram-v2
     open --> open : rebase_draft (pull latest main)
     open --> publishing : publish / merge_mr (under _lock_graph)
     publishing --> merged : squash lands on main
-    open --> abandoned : abandon_draft / idle-TTL sweep
+    open --> abandoned : abandon_draft / idle-TTL sweep (no live PR or staged work)
     merged --> [*]
     abandoned --> [*]
     note right of publishing
