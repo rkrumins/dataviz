@@ -58,6 +58,11 @@ describe('useActiveBranchGuard', () => {
     expect(onMain()).toBe(false)
   })
 
+  it('does NOT evict while the branch is being published — a failed publish hands it back', () => {
+    renderHook(() => useActiveBranchGuard({ ...BASE, branches: [branch('br_1', 'publishing')] }))
+    expect(onMain()).toBe(false)
+  })
+
   it('does NOT evict on a stale list mid-refetch — a just-opened draft is not in it yet', () => {
     renderHook(() =>
       useActiveBranchGuard({ ...BASE, listRefreshing: true, branches: [branch('br_1', 'merged')] }),

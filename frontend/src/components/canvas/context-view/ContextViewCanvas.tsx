@@ -32,8 +32,9 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { BranchClosedError, IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
 import { markConflicts } from '@/features/versioning/model/mapConflicts'
+import { copyStagedToNewDraft } from '@/features/versioning/model/copyStagedToNewDraft'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -6382,6 +6383,16 @@ export function ContextViewCanvas({
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
               } else if (e instanceof IntegrityError) {
                 notify('error', `Nothing was saved. ${e.message}`)
+              } else if (e instanceof BranchClosedError) {
+                // The draft closed under the save. Keep the staged edits; they can go to a new draft.
+                const fromBranchId = bs.currentBranchId
+                notify('error', `Nothing was saved. ${e.message} Your changes are still here.`, {
+                  label: 'Copy to a new draft',
+                  onClick: () => {
+                    void copyStagedToNewDraft(fromBranchId, activeView?.id ?? null)
+                      .catch(err => notify('error', (err as Error).message))
+                  },
+                })
               } else {
                 notify('error', (e as Error).message)
               }

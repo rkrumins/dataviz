@@ -78,7 +78,7 @@ function hydrateChange(sc: SerializableChange): StagedChange {
 }
 
 /** Build a fresh snapshot from live store state, or null when nothing is staged. */
-function buildSnapshot(scopeKey: string, branchId: string | null): StagedDraftSnapshot | null {
+export function buildSnapshot(scopeKey: string, branchId: string | null): StagedDraftSnapshot | null {
   const staged = useStagedChangesStore.getState()
   if (staged.changes.length === 0) return null
   const cs = useCanvasStore.getState()

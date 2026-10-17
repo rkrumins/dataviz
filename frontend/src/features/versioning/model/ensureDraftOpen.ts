@@ -27,7 +27,7 @@ import { VERSIONING_KEYS } from '../hooks/useVersioning'
  *  list, and a stale list makes it reject (and notify about) a draft this very
  *  function just opened or resumed. Loaded lazily so this model module keeps
  *  react-query out of its static graph. Fire-and-forget; never blocks the caller. */
-function invalidateVersioningCaches(): void {
+export function invalidateVersioningCaches(): void {
   void import('@/lib/queryClient')
     .then((m) => m.getQueryClient()?.invalidateQueries({ queryKey: VERSIONING_KEYS.all }))
     .catch(() => {})

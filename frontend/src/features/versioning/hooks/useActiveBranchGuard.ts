@@ -7,11 +7,12 @@
  * stale `?branch=` link. In every one of those cases the server flips the branch to
  * `merged`/`abandoned`, but the client used to keep pointing `currentBranchId` at it — leaving you
  * "in a branch that doesn't exist", editing a scope whose writes the server rejects
- * (`_require_open`).
+ * (`_require_open`, 409 branch_closed).
  *
  * Rather than bolt a `switchToMain()` onto each of those call sites — and miss the next one — this
- * derives liveness from server truth and self-heals: if the active branch is no longer `open`, eject
- * to Published. One rule, every path.
+ * derives liveness from server truth and self-heals: if the active branch is merged or abandoned,
+ * eject to Published. One rule, every path. A `publishing` draft stays active: a failed publish hands
+ * it back as `open`, and saves made meanwhile get branch_closed, which the save path handles.
  *
  * Two deliberate constraints:
  *  • ACT ONLY ON AN EXPLICIT NON-OPEN STATUS. `list_branches` returns merged/abandoned branches (it
@@ -58,7 +59,8 @@ export function useActiveBranchGuard({
     if (evictedRef.current === currentBranchId) return
 
     const active = branches.find((b) => b.branchId === currentBranchId)
-    if (!active || active.status === 'open') return   // absent ⇒ ambiguous; open ⇒ healthy
+    // absent ⇒ ambiguous; open ⇒ healthy; publishing ⇒ may come back open
+    if (!active || active.status === 'open' || active.status === 'publishing') return
 
     // Latched per-branch: merged/abandoned are terminal, so a branch we evict from can never become
     // active again — the latch only stops a double-fire if the effect re-runs before the store's

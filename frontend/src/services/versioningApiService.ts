@@ -499,6 +499,31 @@ export class PullRequestExistsError extends Error {
   }
 }
 
+/** The draft closed under the save — published, being published, or discarded — so it takes no
+ *  more changes. Nothing was written; the staged edits can be copied to a new draft. */
+export class BranchClosedError extends Error {
+  status?: string
+  branchId?: string
+  constructor(detail: { status?: string; branchId?: string }) {
+    super(detail.status === 'merged'
+      ? 'This draft has been published, so it can’t take more changes.'
+      : detail.status === 'publishing'
+      ? 'This draft is being published, so it can’t take more changes.'
+      : 'This draft was discarded, so it can’t take more changes.')
+    this.name = 'BranchClosedError'
+    this.status = detail.status
+    this.branchId = detail.branchId
+  }
+}
+
+/** The save named Published itself; edits reach it only through a draft. */
+export class MainWriteForbiddenError extends Error {
+  constructor() {
+    super('Published can’t be changed directly — open a draft to save these changes.')
+    this.name = 'MainWriteForbiddenError'
+  }
+}
+
 // ============================================
 // Fetch helper — JSON + structured domain errors
 // ============================================
@@ -534,6 +559,8 @@ type RefusalDetail = string | {
   current?: Record<string, unknown>
   violations?: Array<Record<string, unknown>>
   branchId?: string
+  /** A closed draft's status (`branch_closed`). */
+  status?: string
   behindBy?: number
   prId?: string
   title?: string | null
@@ -555,6 +582,12 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'not_up_to_date') {
     return new NotUpToDateError(d)
+  }
+  if (status === 409 && d?.type === 'branch_closed') {
+    return new BranchClosedError(d)
+  }
+  if (status === 409 && d?.type === 'main_write_forbidden') {
+    return new MainWriteForbiddenError()
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
