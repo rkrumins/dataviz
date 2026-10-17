@@ -1604,6 +1604,8 @@ export function ContextViewCanvas({
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       const isMod = e.metaKey || e.ctrlKey
       if (!isMod) return
+      // Nothing is undone under a save in flight: it already carries the change.
+      if (useStagedChangesStore.getState().applyStatus === 'applying') return
       const key = e.key.toLowerCase()
       if (key === 'z' && !e.shiftKey) {
         e.preventDefault()
@@ -6332,8 +6334,9 @@ export function ContextViewCanvas({
                 },
                 message: `Canvas edits (${stagedChangeList.length})`,
               })
-              // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
-              useStagedChangesStore.setState({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
+              // Clear only what this save carried (a change staged while it ran stays); no discard
+              // hooks run, so the optimistic canvas is kept.
+              useStagedChangesStore.getState().clearSaved(stagedChangeList.map(c => c.id))
               // A save creates a new draft commit that every versioning surface must reflect — the
               // cumulative branch diff (Changes tab), the commit log (Commits tab), and per-entity
               // history. Invalidate the whole versioning namespace so saved changes appear at once

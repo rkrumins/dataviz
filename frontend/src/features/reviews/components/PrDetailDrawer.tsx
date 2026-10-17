@@ -39,6 +39,7 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
@@ -78,6 +79,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
+  // Edits still staged on the canvas for this draft are not part of it: a merge would leave them behind.
+  const unsaved = useUnsavedCountOnBranch(pr?.sourceBranchId)
 
   // Pre-merge: the draft's individual commits (each with its author), expandable to per-commit diffs.
   // Draft MRs only — a fork PR's source branch lives on another graph (legacy), so leave it disabled.
@@ -145,7 +148,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   useEffect(() => { setNeedsPull(!terminal && !!pr?.behind) }, [pr?.behind, terminal])
 
   const runMerge = async (resolutions?: ResolutionMap) => {
-    if (!pr) return
+    if (!pr || unsaved > 0) return
     try {
       const res = await merge.mutateAsync({
         prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
@@ -458,6 +461,13 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           </div>
         )}
 
+        {pr && !terminal && unsaved > 0 && (
+          <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>You have {unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on this draft. Save or discard {unsaved === 1 ? 'it' : 'them'} on the canvas before merging; a merge would leave {unsaved === 1 ? 'it' : 'them'} behind.</span>
+          </div>
+        )}
+
         {/* Action bar */}
         {pr && !terminal && canManage && !dismissing && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
@@ -487,7 +497,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             ) : (
               <button
                 onClick={() => runMerge()}
-                disabled={busy}
+                disabled={busy || unsaved > 0}
                 title="Apply these changes to main"
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >

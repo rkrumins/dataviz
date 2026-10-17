@@ -181,12 +181,38 @@ describe('importInParts', () => {
     expect(vi.mocked(fetchWithTimeout).mock.calls.every(([, init]) => init?.credentials === undefined)).toBe(true)
   })
 
-  it('starts afresh when the remembered upload was already imported', async () => {
-    localStorage.setItem('import-upload:ws1:g1:graph.ndjson:10:1:ndjson', 'iu_old')
-    server(upload({ uploadId: 'iu_old', received: [0, 1, 2], jobId: 'j0' }))
-    vi.mocked(fetchWithTimeout).mockImplementation(async () => new Response(null, { status: 200 }))
+  describe('when the remembered upload already started an import (its answer was lost)', () => {
+    const remembered = (status: string) => {
+      localStorage.setItem('import-upload:ws1:g1:graph.ndjson:10:1:ndjson', 'iu_old')
+      const existing = upload({ uploadId: 'iu_old', received: [0, 1, 2], jobId: 'j0' })
+      vi.mocked(authFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'POST' && url.endsWith('/imports/uploads')) return upload()
+        if (url.includes('/complete')) return CREATED
+        if (url.endsWith('/imports/j0')) return { jobId: 'j0', status }
+        if (url.endsWith('/uploads/iu_old')) return existing
+        throw new Error('This upload has expired.')
+      })
+      vi.mocked(fetchWithTimeout).mockImplementation(async () => new Response(null, { status: 200 }))
+    }
+    const completedOn = () => vi.mocked(authFetch).mock.calls
+      .filter(([url]) => String(url).includes('/complete')).map(([url]) => String(url).split('/uploads/')[1].split('/')[0])
 
-    await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
-    expect(sentParts()).toHaveLength(3)
+    it.each(['pending', 'running'])('picks up that import while it is %s, sending nothing again', async (status) => {
+      remembered(status)
+      const created = await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
+      expect(created).toEqual(CREATED)
+      expect(sentParts()).toEqual([])
+      expect(vi.mocked(authFetch).mock.calls.some(([url, init]) => init?.method === 'POST' && String(url).endsWith('/uploads')))
+        .toBe(false)
+      expect(completedOn()).toEqual(['iu_old'])
+      expect(localStorage.length).toBe(0)
+    })
+
+    it.each(['completed', 'failed'])('starts afresh once that import is %s', async (status) => {
+      remembered(status)
+      await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
+      expect(sentParts()).toHaveLength(3)
+      expect(completedOn()).toEqual(['iu_1'])
+    })
   })
 })

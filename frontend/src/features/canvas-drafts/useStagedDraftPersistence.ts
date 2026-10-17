@@ -93,7 +93,8 @@ export function buildSnapshot(scopeKey: string, branchId: string | null): Staged
     version: SNAPSHOT_VERSION,
     scopeKey,
     branchId,
-    phase: 'staged',
+    // A write while a save runs (an edit made mid-save, the unload flush) keeps the crash guard.
+    phase: staged.applyStatus === 'applying' ? 'committing' : 'staged',
     savedAt: 0,
     changes: staged.changes.map(toSerializableChange),
     pendingNodes: pending.nodes,
@@ -175,7 +176,9 @@ export function useStagedDraftPersistence(
         markSnapshotCommitting(scopeKey)
         return
       }
-      if (state.changes === prev.changes) return
+      // A save that settles with its changes still staged (it failed) rewrites the snapshot as
+      // 'staged', so a reload keeps the work rather than discarding a 'committing' snapshot.
+      if (state.changes === prev.changes && state.applyStatus === prev.applyStatus) return
       if (state.changes.length === 0) {
         if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
         clearSnapshot(scopeKey)

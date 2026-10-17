@@ -20,6 +20,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
@@ -67,6 +68,9 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const viewChanges = viewChangesQ.data
   const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
   const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
+  // Edits still staged on the canvas are not on the draft: publishing would leave them behind. A
+  // review is not blocked — it tracks the branch, so edits saved later land in it.
+  const unsaved = useUnsavedCountOnBranch(branchId)
 
   // The review that already covers this branch — from the list, or from a lost race.
   const existingPr = livePr ? { prId: livePr.prId, title: livePr.title } : raced
@@ -107,6 +111,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   }
 
   const handlePublish = () => {
+    if (unsaved > 0) return
     // Publishing lands exactly what the open review proposed, so the server resolves that review as
     // merged. It's legitimate (it's the :manage escape hatch) but it skips the reviewers — so ask.
     if (inReview && !confirmBypass) {
@@ -239,6 +244,17 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             </>
           )}
 
+          {unsaved > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="text-[11px] text-ink-muted leading-relaxed">
+                <span className="font-medium text-amber-500">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
+                They aren’t part of this draft yet, so publishing now would leave them behind. Save them
+                in Review &amp; Save first, or discard them.
+              </div>
+            </div>
+          )}
+
           {confirmBypass && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
               <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
@@ -283,7 +299,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges}
+              disabled={busy || !hasChanges || unsaved > 0}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass

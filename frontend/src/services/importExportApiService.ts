@@ -368,10 +368,14 @@ export async function importInParts(
   const key = `import-upload:${wsId}:${graphId}:${file.name}:${file.size}:${file.lastModified}:${format}`
   const upload = await sendInParts(file, {
     key,
-    // One already imported is done with: this is a new import.
+    // One whose import is still under way (its answer was lost) is picked up: /complete answers
+    // with that import, so nothing is sent again. One whose import has finished is done with: this
+    // is a new import.
     find: async (id) => {
       const found = await authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${id}`)
-      return found.jobId ? null : found
+      if (!found.jobId) return found
+      const job = await getImport(wsId, graphId, found.jobId).catch(() => null)
+      return job?.status === 'pending' || job?.status === 'running' ? found : null
     },
     create: () => createImportUpload(wsId, graphId, file, format),
     partUrl: (id, n) => `${uploadsUrl(wsId, graphId)}/${id}/parts/${n}`,

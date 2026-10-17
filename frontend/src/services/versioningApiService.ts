@@ -1057,6 +1057,8 @@ export interface GraphChangesResult {
  * The unified draft-save path: apply a batch of canvas edits to a draft as ONE atomic,
  * server-merged commit (create/update/delete, nodes + edges). On the *graph* route
  * because it edits graph entities; `update` ops send only changed fields.
+ * `idempotencyKey`: a retry sent with the first attempt's key gets that attempt's result back
+ * instead of applying the batch twice.
  */
 export function applyGraphChanges(
   wsId: string,
@@ -1064,11 +1066,15 @@ export function applyGraphChanges(
   branchId: string,
   ops: GraphChangeOp[],
   message?: string,
+  idempotencyKey?: string,
 ): Promise<GraphChangesResult> {
   const qs = `dataSourceId=${encodeURIComponent(dataSourceId)}&branchId=${encodeURIComponent(branchId)}`
   return vfetch<GraphChangesResult>(`/api/v1/${wsId}/graph/changes?${qs}`, {
     method: 'POST',
     body: JSON.stringify({ ops, message }),
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    // Outlasts the 120s /graph tier, so the server's answer always lands.
+    timeoutMs: 150_000,
   })
 }
 

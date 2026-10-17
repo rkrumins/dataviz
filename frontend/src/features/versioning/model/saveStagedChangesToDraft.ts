@@ -12,6 +12,7 @@
  * user-drawn edges are re-pointed at the real endpoints.
  */
 import { applyGraphChanges, type EntityView, type GraphChangeOp } from '@/services/versioningApiService'
+import { newRequestId } from '@/services/viewTransferApiService'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import type { StagedChange } from '@/store/stagedChangesStore'
 import { useCanvasStore } from '@/store/canvas'
@@ -34,6 +35,10 @@ export interface DraftSaveTarget {
    */
   pruneTempAssignments?: () => void
 }
+
+/** A save that may have reached the server: a retry of the very same batch reuses its key, so the
+ *  server answers with what that save did instead of applying it twice. */
+let pendingSave: { body: string; key: string } | null = null
 
 export async function saveStagedChangesToDraft(
   changes: StagedChange[],
@@ -60,7 +65,11 @@ export async function saveStagedChangesToDraft(
   // ── One atomic commit ───────────────────────────────────────────────────────────────────────
   // On any failure NOTHING is persisted (no partial state). The error propagates to the caller,
   // which surfaces it; the staged changes stay put for a clean retry.
-  const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
+  const body = JSON.stringify([target.wsId, target.dataSourceId, target.branchId, ops, target.message])
+  const key = pendingSave?.body === body ? pendingSave.key : newRequestId()
+  pendingSave = { body, key }
+  const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
+  pendingSave = null
   const assigned = res.assigned ?? {}
   const resolveRef = (id: string) => assigned[id] ?? id
 
