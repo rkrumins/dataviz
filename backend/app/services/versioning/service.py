@@ -4503,6 +4503,24 @@ class GraphVersioningService:
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
 
+    async def projection_placements(self, graph_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
+        """Where each live graph projects, for the placement routes: its workspace (their gate),
+        data source, and the FalkorDB key and provider from ``projection_state`` — the key the
+        projector writes, which for a fork or a blank model is not its data source's
+        ``graph_name``. Soft-deleted and unknown ids are absent; one query."""
+        if not graph_ids:
+            return {}
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(GraphORM.id, GraphORM.workspace_id, GraphORM.data_source_id,
+                       ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider)
+                .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+                .where(GraphORM.id.in_(list(graph_ids)), GraphORM.deleted_at.is_(None))
+            )).all()
+        return {r.id: {"workspace_id": r.workspace_id, "data_source_id": r.data_source_id,
+                       "falkor_graph_name": r.falkor_graph_name, "falkor_provider": r.falkor_provider}
+                for r in rows}
+
     @staticmethod
     def _draft_ref(b: BranchORM) -> dict:
         return {"branch_id": b.id, "head_commit_id": b.head_commit_id,

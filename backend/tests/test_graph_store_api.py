@@ -169,19 +169,19 @@ def test_the_ingestion_gate_is_only_half_the_check(monkeypatch):
     # 404, not 403: an answer that differs by existence is an oracle over
     # every other tenant's ids.
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId="ds-theirs", providerId=None, graph=None,
+        _run(gs.get_placement(dataSourceId="ds-theirs", providerId=None, graph=None, graphId=None,
                               claims=_claims(workspaces=("ws-mine",))))
     assert exc.value.status_code == 404
 
     # The batch answers about the ids it may: the rest are simply absent,
     # which is the same shape a deleted source produces.
-    out = _run(gs.get_placements(dataSourceIds="ds-theirs",
+    out = _run(gs.get_placements(dataSourceIds="ds-theirs", graphIds=None,
                                  claims=_claims(workspaces=("ws-mine",))))
     assert out.placements == {}
 
     # …and the platform tiers still see it, which is what the fleet pages read.
     assert _run(gs.get_placement(dataSourceId="ds-theirs", providerId=None,
-                                 graph=None, claims=_ADMIN)).provider_id == "p1"
+                                 graph=None, graphId=None, claims=_ADMIN)).provider_id == "p1"
 
 
 def test_a_caller_bound_to_nothing_reads_nothing(monkeypatch):
@@ -189,7 +189,7 @@ def test_a_caller_bound_to_nothing_reads_nothing(monkeypatch):
     workspace_id IN () must return no rows rather than every row."""
     _wire(monkeypatch, data_sources=[_ds("ds1")])
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+        _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None, graphId=None,
                               claims=_claims(workspaces=())))
     assert exc.value.status_code == 404
 
@@ -200,10 +200,10 @@ def test_looking_a_graph_up_by_name_is_administrators_only(monkeypatch):
     with the node, its replicas and what shares the shard."""
     _wire(monkeypatch)
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+        _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1", graphId=None,
                               claims=_claims()))
     assert exc.value.status_code == 403
-    assert _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+    assert _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1", graphId=None,
                                  claims=_ADMIN)).placements[0].graph_key == "g1"
 
 
@@ -220,12 +220,12 @@ def test_what_else_shares_the_shard_is_not_part_of_reading_your_own_source(monke
     shard.graphs[1].data_sources = [DataSourceRef(id="ds-theirs", label="Acme payroll")]
     _wire(monkeypatch, snapshot, data_sources=[_ds("ds1", graph="g1")])
 
-    mine = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+    mine = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None, graphId=None,
                                  claims=_claims()))
     assert mine.placements[0].siblings_sample == []
     assert mine.placements[0].siblings == 1              # the count survives
 
-    admin = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+    admin = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None, graphId=None,
                                   claims=_ADMIN))
     assert [g["label"] for g in admin.placements[0].siblings_sample] == ["Acme payroll"]
 
@@ -281,7 +281,7 @@ def test_a_refresh_behind_figures_already_on_screen_says_so(monkeypatch):
 def test_placement_answers_for_a_data_source_including_its_projection(monkeypatch):
     ds = _ds(graph="g1", mode="dedicated", dedicated="g1_proj")
     _wire(monkeypatch, _snapshot(graphs=("g1", "g1_proj")), data_sources=[ds])
-    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None, graphId=None,
                               claims=_claims()))
     assert out.provider_id == "p1" and out.mode == "cluster" and out.reachable
     assert [(p.role, p.graph_key) for p in out.placements] == [
@@ -293,7 +293,7 @@ def test_placement_answers_for_a_data_source_including_its_projection(monkeypatc
 
 def test_placement_by_provider_and_graph_serves_a_catalogue_keyed_view(monkeypatch):
     _wire(monkeypatch)
-    out = _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+    out = _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1", graphId=None,
                               claims=_ADMIN))
     assert [p.graph_key for p in out.placements] == ["g1"]
     assert out.data_source_id is None
@@ -302,7 +302,7 @@ def test_placement_by_provider_and_graph_serves_a_catalogue_keyed_view(monkeypat
 def test_placement_needs_something_to_look_up(monkeypatch):
     _wire(monkeypatch)
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId=None, providerId=None, graph=None,
+        _run(gs.get_placement(dataSourceId=None, providerId=None, graph=None, graphId=None,
                               claims=_claims()))
     assert exc.value.status_code == 400
 
@@ -311,7 +311,7 @@ def test_an_unknown_data_source_is_a_404(monkeypatch):
     _wire(monkeypatch, data_sources=[])
     with pytest.raises(HTTPException) as exc:
         _run(gs.get_placement(dataSourceId="ds-missing", providerId=None, graph=None,
-                              claims=_claims()))
+                              graphId=None, claims=_claims()))
     assert exc.value.status_code == 404
 
 
@@ -321,7 +321,7 @@ def test_the_batch_answers_one_chip_per_source_and_is_capped(monkeypatch):
     sources = [_ds(f"ds{i}", graph=f"g{i}") for i in range(5)]
     _wire(monkeypatch, _snapshot(graphs=tuple(f"g{i}" for i in range(5))),
           data_sources=sources)
-    out = _run(gs.get_placements(dataSourceIds="ds0, ds1 ,ds2,ds3,ds4",
+    out = _run(gs.get_placements(dataSourceIds="ds0, ds1 ,ds2,ds3,ds4", graphIds=None,
                                claims=_claims()))
     assert set(out.placements) == {f"ds{i}" for i in range(5)}
     assert out.placements["ds2"].master == "10.0.0.1:6379"
@@ -331,7 +331,7 @@ def test_the_batch_answers_one_chip_per_source_and_is_capped(monkeypatch):
 
 def test_a_provider_the_snapshot_never_read_still_answers_with_the_reason(monkeypatch):
     _wire(monkeypatch, data_sources=[_ds(provider="p-other")])
-    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None, graphId=None,
                               claims=_claims()))
     assert not out.reachable
     assert "has not been read" in (out.error or "")
@@ -373,3 +373,90 @@ def test_the_provider_view_says_how_its_reads_were_served(monkeypatch):
     # Nothing built here yet: absent, never a misleading zero.
     monkeypatch.setattr(provider_manager, "instantiated", lambda pid: [])
     assert mod._read_routing("p1") is None
+
+
+# ── by versioned graph id ────────────────────────────────────────────────
+
+
+def _graphs(monkeypatch, rows):
+    """The versioned graphs the route resolves ``graphId`` against: a stand-in
+    for ``projection_placements``, answering only for the live ids asked."""
+    from backend.app.api.v1.endpoints import versioning as v_ep
+
+    class _Svc:
+        async def projection_placements(self, graph_ids):
+            return {g: rows[g] for g in graph_ids if g in rows}
+
+    monkeypatch.setattr(v_ep, "get_versioning_service", lambda: _Svc())
+
+
+def _graph(*, ws="ws1", ds="ds1", key="g1", provider="p1"):
+    return {"workspace_id": ws, "data_source_id": ds,
+            "falkor_graph_name": key, "falkor_provider": provider}
+
+
+def _readers(*workspaces):
+    from backend.app.services.permission_service import PermissionClaims
+
+    return PermissionClaims(sid="s1", global_perms=(),
+                            ws_perms={ws: ("workspace:datasource:read",) for ws in workspaces})
+
+
+def test_placement_by_graph_id_answers_for_the_key_the_projector_writes(monkeypatch):
+    """A fork projects into its own ``…__fork_<id>`` key and its data source
+    is a synthetic ``dsfork_`` id with no row behind it, so looking it up by
+    data source finds nothing — and ``ds.graph_name`` names the PARENT's
+    key. ``projection_state`` is where the projector writes, so that is what
+    a graph's placement is read from."""
+    _wire(monkeypatch, _snapshot(graphs=("cust", "cust__fork_graph_f")),
+          data_sources=[_ds("ds1", graph="cust")])
+    _graphs(monkeypatch, {"graph_f": _graph(ds="dsfork_1", key="cust__fork_graph_f")})
+    out = _run(gs.get_placement(graphId="graph_f", dataSourceId=None, providerId=None,
+                                graph=None, claims=_readers("ws1")))
+    assert [(p.role, p.graph_key) for p in out.placements] == [("source", "cust__fork_graph_f")]
+    assert out.placements[0].present
+    assert out.placements[0].slot == topology.key_slot("cust__fork_graph_f")
+    assert out.provider_id == "p1" and out.provider_name == "Falkor"
+    assert out.data_source_id == "dsfork_1"
+
+
+def test_placement_by_graph_id_is_gated_on_reading_the_graphs_workspace(monkeypatch):
+    """The ingestion gate is any-workspace; the graph's own workspace is the
+    other half. Outside it is a 404, like a data source outside it, so graph
+    ids are no oracle."""
+    _wire(monkeypatch)
+    _graphs(monkeypatch, {"graph_x": _graph(ws="ws-other")})
+    for claims in (_readers("ws1"), _claims(workspaces=("ws-other",))):
+        with pytest.raises(HTTPException) as exc:
+            _run(gs.get_placement(graphId="graph_x", dataSourceId=None, providerId=None,
+                                  graph=None, claims=claims))
+        assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        _run(gs.get_placement(graphId="graph_gone", dataSourceId=None, providerId=None,
+                              graph=None, claims=_ADMIN))
+    assert exc.value.status_code == 404
+    assert _run(gs.get_placement(graphId="graph_x", dataSourceId=None, providerId=None,
+                                 graph=None, claims=_readers("ws-other"))).placements
+
+
+def test_a_graph_with_no_projection_key_yet_places_nothing(monkeypatch):
+    _wire(monkeypatch)
+    _graphs(monkeypatch, {"graph_new": _graph(key=None, provider=None)})
+    out = _run(gs.get_placement(graphId="graph_new", dataSourceId=None, providerId=None,
+                                graph=None, claims=_readers("ws1")))
+    assert out.placements == []
+
+
+def test_the_batch_answers_by_graph_id_for_the_graphs_the_caller_may_read(monkeypatch):
+    _wire(monkeypatch, _snapshot(graphs=("cust", "cust__fork_graph_f")))
+    _graphs(monkeypatch, {
+        "graph_p": _graph(key="cust"),
+        "graph_f": _graph(ds="dsfork_1", key="cust__fork_graph_f"),
+        "graph_theirs": _graph(ws="ws-other", key="theirs"),
+    })
+    out = _run(gs.get_placements(dataSourceIds=None,
+                                 graphIds="graph_p,graph_f,graph_theirs,graph_gone",
+                                 claims=_readers("ws1")))
+    assert {g: b.graph_key for g, b in out.placements.items()} == {
+        "graph_p": "cust", "graph_f": "cust__fork_graph_f"}
+    assert out.placements["graph_f"].master == "10.0.0.1:6379"

@@ -25,6 +25,7 @@ tests/integration/test_graph_changes_freshness.py
 tests/integration/test_graph_changes_one_commit.py
 tests/integration/test_graph_lifecycle_purge.py
 tests/integration/test_graph_rebuild_decoding_live.py
+tests/integration/test_graph_store_placement_by_graph.py
 tests/integration/test_import_resume_e2e.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
