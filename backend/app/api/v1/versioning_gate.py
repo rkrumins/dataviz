@@ -11,16 +11,27 @@ Two flavours:
   rebuild/reconcile and exports (read-shaped, produces files).
 * ``require_versioning_enabled`` — explicit per-route dependency for write routes
   that live on OTHER routers (e.g. ``/graph/bootstrap``, ``/graph/resync``).
+* ``require_branch_scope`` — the view, layout and library routes that take a
+  ``branchId`` call it whatever ``RBAC_ENFORCE_VIEWS`` says: the branch must be one
+  of the view's own graph that the caller can read (404), and a write needs an open
+  draft (409 branch_closed) the caller can edit (403); main is never written (409).
 
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
 **enabled** so a missing definition can never lock users out.
 """
 import logging
+from typing import Optional
 
 from fastapi import HTTPException, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.models import ViewORM
+from backend.app.db.repositories import data_source_repo
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.versioning.errors import MainWriteForbidden
+from backend.app.services.versioning.service import Viewer
 
 logger = logging.getLogger(__name__)
 
@@ -63,3 +74,27 @@ async def versioning_write_gate(request: Request) -> None:
     if not await feature_flags.is_enabled_self_session(VERSIONING_FLAG, default=True):
         logger.info("versioning write blocked by feature flag: %s %s", request.method, path)
         raise _disabled_error()
+
+
+async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch_id: Optional[str], *,
+                               actor: str, claims: PermissionClaims, write: bool) -> None:
+    """Gate a view route's ``branchId`` (see module doc); a no-op without one. The literal
+    ``'main'`` (which ``graph.py`` accepts too) reads the published view. The caller is the key's
+    owner under an API key, and ``claims`` are narrowed to the key, as in ``viewer_ctx``."""
+    if not branch_id:
+        return
+    # Lazy: this module is imported by api.py, before the versioning router.
+    from backend.app.api.v1.endpoints.versioning import _domain_errors
+
+    with _domain_errors():
+        if branch_id == "main":
+            if write:
+                raise MainWriteForbidden()
+            return
+        ds_id = view.data_source_id
+        if ds_id is None:
+            primary = await data_source_repo.get_primary_data_source(session, view.workspace_id)
+            ds_id = primary.id if primary else None
+        viewer = Viewer(actor=actor, can_manage=has_permission(
+            claims, "workspace:datasource:manage", workspace_id=view.workspace_id))
+        await svc.check_view_branch(data_source_id=ds_id, branch_id=branch_id, viewer=viewer, write=write)

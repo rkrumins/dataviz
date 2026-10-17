@@ -272,6 +272,25 @@ def view_portability_enabled():
     yield
 
 
+class _AnyOpenDraft:
+    async def check_view_branch(self, **_):
+        return None
+
+
+@pytest.fixture()
+def any_open_draft():
+    """Every ``branchId`` a view route is given passes as an open draft the caller may edit.
+
+    For view tests that exercise overlays without a versioning store: the SQLite harness has
+    no graphver tables, and the view routes ask the versioning service about the branch."""
+    from backend.app.api.v1.endpoints.versioning import get_versioning_service
+    from backend.app.main import app
+
+    app.dependency_overrides[get_versioning_service] = lambda: _AnyOpenDraft()
+    yield
+    app.dependency_overrides.pop(get_versioning_service, None)
+
+
 @pytest.fixture()
 async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """

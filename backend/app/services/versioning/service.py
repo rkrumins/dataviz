@@ -41,7 +41,7 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import BranchNotOpen
+from .errors import BranchNotOpen, MainWriteForbidden
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -4744,6 +4744,26 @@ class GraphVersioningService:
         ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+
+    async def check_view_branch(self, *, data_source_id: Optional[str], branch_id: str, viewer: "Viewer",
+                                write: bool) -> None:
+        """The gate for a view route's ``branchId`` (VIEWS-5). ``ValueError`` (404) unless the
+        branch is on the live graph of ``data_source_id`` and ``viewer`` may read it. Main reads
+        as the published view; a write to it is ``MainWriteForbidden``. A draft write needs the
+        draft open (``BranchNotOpen``) and ``_require_edit`` (``AccessDenied``). Reads of a merged
+        or abandoned draft pass: a tab still on it must load."""
+        async with self._session() as s:
+            branch = await s.get(BranchORM, branch_id)
+            graph = await s.get(GraphORM, branch.graph_id) if branch is not None else None
+            if (graph is None or graph.deleted_at is not None or graph.data_source_id != data_source_id
+                    or not await self._branch_readable(s, branch, viewer)):
+                raise ValueError("unknown branch")
+            if not write:
+                return
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._require_open(branch)
+            await self._require_edit(s, branch, viewer.actor, ())
 
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results

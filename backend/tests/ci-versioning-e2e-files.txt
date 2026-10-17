@@ -116,6 +116,7 @@ tests/integration/test_versioning_visibility.py
 tests/integration/test_versioning_worker.py
 tests/integration/test_versioning_write_correctness.py
 tests/integration/test_versioning_write_through.py
+tests/integration/test_view_branch_scope_live.py
 tests/integration/test_view_package_roundtrip.py
 tests/integration/test_watermark_revisions.py
 tests/integration/test_written_state_ontology_gate.py

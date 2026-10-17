@@ -62,7 +62,7 @@ async def test_a_layout_save_cannot_change_the_rules(test_client: AsyncClient):
         assert [r["id"] for r in await _rules(test_client, view_id)] == ["rule_1"]
 
 
-async def test_draft_layout_save_keeps_the_drafts_rules(test_client: AsyncClient):
+async def test_draft_layout_save_keeps_the_drafts_rules(test_client: AsyncClient, any_open_draft):
     view_id = await _view(test_client)
     await _add_rule(test_client, view_id, branch="br_rules")
     resp = await test_client.put(f"/api/v1/views/{view_id}/layout?branchId=br_rules",
