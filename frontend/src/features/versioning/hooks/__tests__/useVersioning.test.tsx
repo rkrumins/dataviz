@@ -6,18 +6,24 @@
 import React from 'react'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import type { RebuildResponse } from '@/services/versioningApiService'
 
 const rebuildProjection = vi.fn()
 const decideBootstrapDuplicates = vi.fn()
+const rebaseDraft = vi.fn()
 vi.mock('@/services/versioningApiService', () => ({
   rebuildProjection: (...args: unknown[]) => rebuildProjection(...args),
   decideBootstrapDuplicates: (...args: unknown[]) => decideBootstrapDuplicates(...args),
+  rebaseDraft: (...args: unknown[]) => rebaseDraft(...args),
 }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 
-import { useDecideBootstrapDuplicates, useRebuildProjection, VERSIONING_KEYS } from '../useVersioning'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { useBranchStore } from '@/store/branchStore'
+import {
+  useDecideBootstrapDuplicates, usePullLatestDraft, useRebuildProjection, VERSIONING_KEYS,
+} from '../useVersioning'
 
 describe('useRebuildProjection', () => {
   it('seeds the watermark cache with the response watermark on success', async () => {
@@ -75,5 +81,33 @@ describe('useDecideBootstrapDuplicates', () => {
     result.current.mutate({ fingerprint: 'fp_old' })
     await waitFor(() => expect(result.current.isError).toBe(true))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: VERSIONING_KEYS.bootstrap('ws1', 'ds1') })
+  })
+})
+
+describe('usePullLatestDraft', () => {
+  beforeEach(() => vi.mocked(invalidateAggregatedEdges).mockClear())
+
+  const pull = async (res: Record<string, unknown>) => {
+    rebaseDraft.mockResolvedValue(res)
+    const epoch = useBranchStore.getState().mainEpoch
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => usePullLatestDraft('ws1', 'g1'), { wrapper })
+    result.current.mutate({ branchId: 'br_1' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    return useBranchStore.getState().mainEpoch - epoch
+  }
+
+  it('refreshes the canvas after a pull that brought changes in, as publish does', async () => {
+    expect(await pull({ clean: true, conflicts: [], alreadyUpToDate: false })).toBe(1)
+    expect(invalidateAggregatedEdges).toHaveBeenCalled()
+  })
+
+  it('leaves the canvas alone when the pull changed nothing or stopped on conflicts', async () => {
+    expect(await pull({ clean: true, conflicts: [], alreadyUpToDate: true })).toBe(0)
+    expect(await pull({ clean: false, conflicts: [{ entity_id: 'A' }] })).toBe(0)
+    expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
   })
 })

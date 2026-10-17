@@ -139,6 +139,53 @@ def test_versioning_rebase_e2e():
     asyncio.run(_run())
 
 
+async def _run_route_bumps_draft_cache() -> None:
+    """The rebase ROUTE invalidates the draft's canvas read-cache, as /graph/changes does, so the
+    pulled-in state shows on the next read instead of after the cache TTL."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.api.v1.endpoints import versioning as V
+    from backend.app.services.graph_cache import CacheScope
+    from backend.tests.integration.test_api_graph_draft_journey import _build_app
+
+    bumped: list = []
+
+    class _RecordingCache:
+        async def bump_generation(self, scope):
+            bumped.append(scope)
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u_test"))["graph_id"]
+    mine = await _draft(svc, gid, "u_test", "mine", [_node("A")])
+    other = await _draft(svc, gid, "u_test", "other", [_node("B")])
+    await svc.publish(graph_id=gid, branch_id=other, actor="u_test", message="other")   # mine is behind
+
+    app, _G = _build_app()
+    orig = V.get_graph_cache
+    V.get_graph_cache = lambda: _RecordingCache()
+    url = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{mine}/rebase"
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post(url, json={})
+            assert r.status_code == 200 and r.json()["clean"] is True, r.text
+            assert bumped == [CacheScope("ws1", ds, mine)], bumped
+            # An up-to-date pull wrote nothing, so the cache is left alone.
+            bumped.clear()
+            r = await c.post(url, json={})
+            assert r.status_code == 200 and r.json()["alreadyUpToDate"] is True, r.text
+            assert bumped == [], bumped
+    finally:
+        V.get_graph_cache = orig
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_rebase_route_bumps_draft_cache_e2e():
+    asyncio.run(_run_route_bumps_draft_cache())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("versioning rebase + up-to-date gate e2e: OK")

@@ -549,6 +549,7 @@ export function useUpdateBranch(wsId: string, graphId: string) {
  *  open the conflict resolver when `clean === false`; on a clean pull it refreshes the draft views. */
 export function usePullLatestDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
   return useMutation({
     mutationFn: (v: { branchId: string; resolutions?: ResolutionMap }) =>
       api.rebaseDraft(wsId, graphId, v.branchId, { resolutions: v.resolutions }),
@@ -564,6 +565,12 @@ export function usePullLatestDraft(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'mr'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
+      // Main's changes are now in the draft — refetch the canvas as publish does, so they show
+      // without a manual refresh.
+      if (!res.alreadyUpToDate) {
+        bumpMainEpoch()
+        invalidateAggregatedEdges()
+      }
     },
   })
 }

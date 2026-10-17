@@ -1772,9 +1772,17 @@ async def rebase_draft(
     when the draft was already up to date. The model puts the wire back on the camelCase contract
     every other route here follows."""
     with _domain_errors():
-        return await svc.rebase_draft(
+        res = await svc.rebase_draft(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, resolutions=body.resolutions,
         )
+    if res["clean"] and not res.get("already_up_to_date"):
+        # The pull rewrote the draft: invalidate its read-cache, as /graph/changes does, so the
+        # canvas's next read shows main's changes instead of the pre-pull state for the cache TTL.
+        await get_graph_cache().bump_generation(
+            CacheScope(workspace_id=ws_id, data_source_id=str(_meta.get("data_source_id") or ""),
+                       branch_id=branch_id)
+        )
+    return res
 
 
 @router.get("/graphs/{graph_id}/watermark", response_model=WatermarkModel)
