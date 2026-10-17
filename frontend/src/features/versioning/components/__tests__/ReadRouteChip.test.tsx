@@ -44,6 +44,12 @@ describe('ReadRouteChip', () => {
     expect(screen.getByText('Serving from Postgres (unloaded)')).toBeInTheDocument()
   })
 
+  it('says a failed pass waiting for its retry is retrying, not catching up', () => {
+    wm = { ...WM, projected: 10, fresh: false, lastError: 'timeout', readRoute: { main: 'postgres', drafts: 'overlay' } }
+    render(<ReadRouteChip workspaceId="ws1" graphId="g1" isDraft={false} />)
+    expect(screen.getByText('Serving from Postgres (retrying)')).toBeInTheDocument()
+  })
+
   it('names the FalkorDB provider under a draft overlay', () => {
     render(<ReadRouteChip workspaceId="ws1" graphId="g1" isDraft />)
     expect(screen.getByText('Serving from FalkorDB · Falkor West · draft overlay')).toBeInTheDocument()

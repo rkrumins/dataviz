@@ -15,9 +15,16 @@ describe('watermarkPollInterval', () => {
     expect(watermarkPollInterval(behindIdle, false, undefined, 5_000)).toBe(false)
   })
 
-  it('stops on a recorded failure, and never polls a graph that is in sync', () => {
-    expect(watermarkPollInterval({ ...behindIdle, lastError: 'boom' }, false, 1_000, 5_000)).toBe(false)
+  it('keeps a slow poll after a recorded failure, so a retry that lands is seen', () => {
+    // The projector retries a failed pass after its backoff; the read route flips back to
+    // FalkorDB only if the watermark is read again.
+    expect(watermarkPollInterval({ ...behindIdle, lastError: 'boom' }, false, 1_000, 5_000)).toBe(30_000)
+    expect(watermarkPollInterval({ ...behindIdle, lastError: 'boom' }, false, undefined, 5_000)).toBe(30_000)
+  })
+
+  it('never polls a graph that is in sync', () => {
     expect(watermarkPollInterval({ fresh: true, status: 'idle' }, false, 1_000, 5_000)).toBe(false)
+    expect(watermarkPollInterval({ fresh: true, status: 'idle', lastError: 'boom' }, false, 1_000, 5_000)).toBe(false)
   })
 
   it('polls while catching up, rebuilding or waiting for an operator\'s reseed, and always when forced', () => {

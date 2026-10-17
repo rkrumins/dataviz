@@ -5,7 +5,7 @@
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -133,7 +133,9 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
 
 /** How often to re-read the watermark (false = stop): while forced; while catching up,
  *  rebuilding or waiting for an operator's reseed; and, for a short window after main advanced, while merely behind — until the
- *  projection has had its chance to start. A recorded failure ends that window early. */
+ *  projection has had its chance to start. A recorded failure ends that window early, but keeps a
+ *  slow poll while behind: the projector retries after its backoff, and only a fresh read shows
+ *  the route back on FalkorDB. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
 ): number | false {
@@ -141,13 +143,14 @@ export function watermarkPollInterval(
   if (!d || d.fresh !== false) return false
   const active = d.status === 'projecting' || d.status === 'rebuilding' || d.status === 'reseeding'
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
-  return active || (justAdvanced && !d.lastError) ? 3_000 : false
+  if (active || (justAdvanced && !d.lastError)) return 3_000
+  return d.lastError ? 30_000 : false
 }
 
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
- *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up.
+ *  forever; one whose last pass failed is re-read every 30s, so the retry landing is seen. A merge/publish invalidates this query, so a freshly-started projection is picked up.
  *  `opts.force` keeps the poll alive REGARDLESS of status — the Data health rebuild flow needs to
  *  observe the terminal transition (idle + lastError = failed), which the status-gated poll would
  *  stop one tick short of. */
@@ -371,13 +374,30 @@ export function useViewPullRequests(wsId?: string, viewId?: string | null, statu
   })
 }
 
-/** All PRs against a data source (gated — only fetched when the user opts into the wider view). */
+/** The endpoint's largest page. */
+const DS_PRS_PAGE = 500
+
+/** Every open PR (status=open) on a data source, page by page until a short page: an open PR
+ *  awaiting review must not fall off the end of one page. */
+async function listAllOpenDataSourcePrs(wsId: string, dataSourceId: string): Promise<PullRequest[]> {
+  const all: PullRequest[] = []
+  for (let offset = 0; ; offset += DS_PRS_PAGE) {
+    const page = await api.listDataSourcePullRequests(wsId, dataSourceId, { status: 'open', limit: DS_PRS_PAGE, offset })
+    all.push(...page)
+    if (page.length < DS_PRS_PAGE) return all
+  }
+}
+
+/** All PRs against a data source (gated — only fetched when the user opts into the wider view).
+ *  `status='open'` reads every open PR, not just the first page. */
 export function useDataSourcePullRequests(
   wsId?: string, dataSourceId?: string | null, status?: string, enabled = true,
 ) {
   return useQuery({
     queryKey: VERSIONING_KEYS.dataSourcePrs(wsId, dataSourceId, status),
-    queryFn: () => api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
+    queryFn: () => status === 'open'
+      ? listAllOpenDataSourcePrs(wsId!, dataSourceId!)
+      : api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
     // A 404 is terminal (the data source has no versioned graph); the review inbox reads every

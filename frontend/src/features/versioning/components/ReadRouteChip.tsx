@@ -3,8 +3,8 @@
  * `readRoute` (the server's routing rule, not a guess from `fresh`).
  *
  * Published served from FalkorDB is the steady state and renders NOTHING, so the bar keeps its
- * `empty:hidden` on main. Published served from Postgres (the projection is catching up, or the
- * graph was unloaded) is transient and says so. A draft always says it: it is an overlay of the
+ * `empty:hidden` on main. Published served from Postgres (the projection is catching up, a failed
+ * pass is waiting for its retry, or the graph was unloaded) is transient and says so. A draft always says it: it is an overlay of the
  * draft's changes on whatever serves published, and the draft bar is shown anyway.
  */
 import { Database } from 'lucide-react'
@@ -24,7 +24,7 @@ export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
   const onFalkor = route.main === 'falkordb'
   const base = onFalkor
     ? `Serving from FalkorDB · ${wm.providerName ?? wm.providerId ?? 'Default graph store'}`
-    : `Serving from Postgres (${wm.status === 'evicted' ? 'unloaded' : 'catching up'})`
+    : `Serving from Postgres (${wm.status === 'evicted' ? 'unloaded' : wm.status === 'idle' && wm.lastError ? 'retrying' : 'catching up'})`
   return (
     <HoverTip
       className="inline-flex"

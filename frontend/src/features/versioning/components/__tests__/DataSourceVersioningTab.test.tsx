@@ -4,6 +4,8 @@
  * It counts only drafts still in play, and a failed lookup is an error, not "version control is off".
  * With version control off, Enable is offered only for a data source whose graph can be copied into
  * version history (FalkorDB): the server refuses the rest with 422 `provider_unsupported`.
+ * Its Merge requests section reads the data source's open PRs, the inbox's read, so an older open PR
+ * is not hidden behind newer merged or closed ones.
  * The data hooks are stubbed; the card itself has its own spec.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
@@ -15,7 +17,9 @@ let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
 let providerType: string | undefined
+let openPrs: Array<Record<string, unknown>>
 const refetch = vi.fn()
+const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
 
 vi.mock('@/store/auth', () => ({ usePermission: () => canManage }))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
@@ -29,14 +33,16 @@ vi.mock('../../hooks/useVersioning', () => ({
   }),
   useBranches: () => ({ data: branches, isLoading: false }),
   useCommitLog: () => ({ data: { commits: [] } }),
-  useMergeRequests: () => ({ data: [], isLoading: false }),
+  useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
 }))
 vi.mock('../../model/useBootstrapWatch', () => ({
   useBootstrapWatch: () => ({ showReport: false, showProgress: false, job: null, dismissReport: () => {} }),
 }))
 vi.mock('../EnableVersioningFlow', () => ({ EnableVersioningFlow: () => null }))
 vi.mock('../BootstrapProgress', () => ({ BootstrapProgress: () => null }))
-vi.mock('@/features/reviews/components/PrListRow', () => ({ PrListRow: () => null }))
+vi.mock('@/features/reviews/components/PrListRow', () => ({
+  PrListRow: ({ pr }: { pr: { title: string } }) => <div>{pr.title}</div>,
+}))
 vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
 vi.mock('../ProjectionHealthCard', () => ({
   ProjectionHealthCard: ({ graphId, showActions }: { graphId: string; showActions?: boolean }) =>
@@ -58,7 +64,9 @@ beforeEach(() => {
   resolveError = null
   branches = []
   providerType = undefined
+  openPrs = []
   refetch.mockReset()
+  useDataSourcePullRequests.mockClear()
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -97,6 +105,16 @@ describe('DataSourceVersioningTab — status header', () => {
     ]
     renderTab()
     expect(screen.getByText(/main at commit #5 · 2 open drafts/)).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — merge requests', () => {
+  it('lists the data source\'s open PRs from the open read, not the latest page of every status', () => {
+    openPrs = [{ prId: 'pr_old', status: 'mergeable', title: 'Old fix', createdAt: '2025-01-01T00:00:00Z' }]
+    renderTab()
+    expect(screen.getByText('Old fix')).toBeInTheDocument()
+    expect(screen.queryByText('No open merge requests.')).not.toBeInTheDocument()
+    expect(useDataSourcePullRequests).toHaveBeenCalledWith('ws1', 'ds1', 'open', true)
   })
 })
 

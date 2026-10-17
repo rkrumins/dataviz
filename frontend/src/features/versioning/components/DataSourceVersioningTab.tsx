@@ -10,7 +10,7 @@ import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, U
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useCommitLog, useDataSourcePullRequests, useResolveGraph } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import type { Branch } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
@@ -51,7 +51,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const graphId = resolve.data?.graphId ?? null
   const branchesQ = useBranches(wsId, graphId, undefined, ['all'])
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
-  const mrsQ = useMergeRequests(wsId, graphId)
+  // The data source's open PRs (the inbox's read), so newer merged or closed PRs can't push an
+  // older one awaiting review off the page.
+  const mrsQ = useDataSourcePullRequests(wsId, dataSourceId, 'open', !!graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
   // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
@@ -202,7 +204,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           </Link>
         </div>
         {(() => {
-          const active = (mrsQ.data ?? []).filter((p) => !['merged', 'closed'].includes(p.status))
+          const active = mrsQ.data ?? []
           if (mrsQ.isLoading) return <RowSkeleton />
           if (active.length === 0) return <p className="text-xs text-ink-muted px-1 py-2">No open merge requests.</p>
           return (
