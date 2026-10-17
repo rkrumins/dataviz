@@ -111,6 +111,7 @@ tests/test_freshness_source_doc.py
 tests/test_graph_cache.py
 tests/test_graph_cache_deploy_config.py
 tests/test_graph_change_op_contract.py
+tests/test_graph_changes_idempotency.py
 tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py

@@ -3018,9 +3018,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     # ``X-Activity-Reason`` carries the optional "why" a person gives for a
     # manual operation into the activity ledger (``common/activity_context``).
+    # ``Idempotency-Key`` lets a canvas save be retried without landing twice.
     allow_headers=[
         "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
-        "X-Activity-Reason",
+        "X-Activity-Reason", "Idempotency-Key",
     ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.

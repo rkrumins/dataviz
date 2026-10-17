@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -7,7 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Body, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
@@ -3835,7 +3836,25 @@ class GraphChangesResponse(BaseModel):
         populate_by_name = True
 
 
-def _resolve_change_ops(request_ops, mint_id, mint_urn):
+def _replay_minters(scope: str, key: str, mint_urn):
+    """Id minters for a save sent with an Idempotency-Key, so a retry of it names the entities its
+    first attempt created. An op whose client ref is at least 16 characters (every canvas temp ref
+    is) is named by that ref, so a later batch that still carries the same staged create names the
+    same entity rather than a copy; any other op by the key and its turn in the batch, so a script
+    reusing a short ref like ``n1`` under a new key never overwrites what an earlier save created.
+    ``scope`` is graph/branch/actor: two principals never mint each other's ids. The 32-hex tail
+    is 128 bits, make_urn's collision bound. Called with the op's ref (``by_ref``)."""
+    n = itertools.count()
+
+    def slug(ref):
+        seed = f"ref:{ref}" if ref and len(ref) >= 16 else f"key:{key}/{next(n)}"
+        return hashlib.sha256(f"{scope}/{seed}".encode()).hexdigest()[:32]
+
+    return (lambda prefix, ref: f"{prefix}_{slug(ref)}"), (
+        lambda entity_type, ref: mint_urn(entity_type, slug=slug(ref)))
+
+
+def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False):
     """Translate a batch of canvas edit ops into ONE ``apply_ops`` op list. Two passes so creates AND
     the edges/updates/layer-moves that reference those fresh nodes (by a temp ``ref``) commit together
     as a SINGLE atomic commit — instead of one commit per create. Pass 1 assigns a real id to every
@@ -3844,17 +3863,22 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     emits the ops, resolving temp refs in edge endpoints + update/delete target ids and stamping the
     node urn into its payload. Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
     to the client to reconcile its optimistic ids. apply_ops validates same-batch edges against these
-    creates (proved in ``test_versioning_batch_create_edge``)."""
+    creates (proved in ``test_versioning_batch_create_edge``). With ``by_ref`` each minter is also
+    given the op's client ref (``_replay_minters``)."""
+    def _mint(mint, arg, ref):
+        return mint(arg, ref) if by_ref else mint(arg)
+
     endpoint_fields = ("sourceEntityId", "source_entity_id", "targetEntityId", "target_entity_id")
     assigned: dict = {}
     create_eid: dict = {}                      # op index → its assigned real id (reused in pass 2)
     for i, o in enumerate(request_ops):
         if o.op == "create":
             if o.kind == "edge":
-                eid = o.id or mint_id("ent")
+                eid = o.id or _mint(mint_id, "ent", o.ref)
             else:                              # a NODE's entity_id IS its urn (versioned-graph model);
                 pl = o.payload or {}           # mint one when the collapsed save omits it.
-                eid = pl.get("urn") or o.id or mint_urn(str(pl.get("entityType") or "entity"))
+                eid = pl.get("urn") or o.id or _mint(
+                    mint_urn, str(pl.get("entityType") or "entity"), o.ref)
             create_eid[i] = eid
             if o.ref:
                 assigned[o.ref] = eid
@@ -3883,7 +3907,7 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             if not o.id:
                 continue
             p = o.payload or {}
-            edge_id = mint_id("ent")
+            edge_id = _mint(mint_id, "ent", o.ref)
             if o.ref:                          # the client's optimistic link → the real one
                 assigned[o.ref] = edge_id
             ops.append({"op": "move", "entity_kind": "node", "entity_id": _ref(o.id), "payload": {
@@ -3921,6 +3945,7 @@ async def apply_graph_changes(
     request: GraphChangesRequest = Body(...),
     dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
     branchId: str = Query(..., description="Draft branch the changes are committed to."),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key", max_length=128),
     user=Depends(get_current_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -3931,7 +3956,12 @@ async def apply_graph_changes(
     draft state, so the client sends only what changed. Deleting a node cascades to its
     containment subtree + all incident edges (ontology-driven, resolved live). Returns the
     new commit id and a temp-ref→entity-id map for creates so the client can reconcile
-    optimistic ids."""
+    optimistic ids.
+
+    An ``Idempotency-Key`` makes a retry safe: a save on this draft by the same caller with a
+    key that already committed is not applied again, and the answer is the first save's commit
+    with the entities' current values. A reused key returns the first result whatever the body,
+    so send a new key for a new batch."""
     from backend.app.services.versioning.service import (
         GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
     from backend.app.services.versioning.ids import prefixed_id
@@ -3944,7 +3974,11 @@ async def apply_graph_changes(
 
     from backend.app.ontology.urn import make_urn
     try:
-        ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+        if idempotency_key:
+            ops, assigned = _resolve_change_ops(request.ops, *_replay_minters(
+                f"{graph_id}/{branchId}/{actor}", idempotency_key, make_urn), by_ref=True)
+        else:
+            ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
     except InvalidPatch as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 
@@ -3956,6 +3990,7 @@ async def apply_graph_changes(
         result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
+            idempotency_key=f"changes:{actor}:{idempotency_key}" if idempotency_key else None,
             containment_edge_types=await _resolve_containment_types(engine),
             ontology_rules=await _resolve_ontology_rules(
                 engine, fail_closed=(g.get("kind") == "blank")))

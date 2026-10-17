@@ -6010,14 +6010,21 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> ApplyResult:
-        """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
+        """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
+
+        With ``idempotency_key``, a batch whose commit on the branch already carries the key is
+        not applied again: the answer is that commit, with the addressed entities' current values.
+        A replay runs no ``on_commit``, so the two never go together."""
+        assert not (idempotency_key and on_commit), "a replay would skip on_commit"
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main),
+                ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
+                idempotency_key=idempotency_key),
         )
 
     async def _apply_ops_once(
@@ -6027,6 +6034,7 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -6054,6 +6062,23 @@ class GraphVersioningService:
                 branch = await s.get(BranchORM, bid)
             else:
                 branch = await self._lock_branch(s, graph_id, bid)
+
+            # A retry of a save that already landed answers with its commit. After the lock, so a
+            # retry racing its first attempt waits for it and then finds it (uq_commits_idem, which
+            # _retry_seq retries on, is the backstop); before the open check, so a save that
+            # landed on a draft closed since still reports what it did.
+            if idempotency_key:
+                prior = await s.scalar(select(CommitORM.id).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
+                    CommitORM.idempotency_key == idempotency_key))
+                if prior is not None:
+                    kinds = {o["entity_id"]: o.get("entity_kind", "node") for o in ops}
+                    cur = await self._current_values(s, graph_id, bid, list(kinds))
+                    return ApplyResult(
+                        prior, {eid: (k, cur.get(eid)) for eid, k in kinds.items()},
+                        {eid: (v.get("urn") or eid) for eid, v in cur.items()
+                         if v is not None and not _is_edge_payload(v)})
+            if bid != main_id:
                 self._require_open(branch)
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
@@ -6211,6 +6236,7 @@ class GraphVersioningService:
                 # Attribute to the draft's view (NULL on main write-throughs) so the
                 # per-view history filter sees interactive canvas saves too.
                 originating_view_id=branch.originating_view_id,
+                idempotency_key=idempotency_key,
             )
             s.add(commit)
             await s.flush()

@@ -39,6 +39,8 @@ _ON_LIVE_TABLES = {
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
+    # graphver.commits, which every save writes.
+    "20261017_1900_gv_commits_idem.py": ("upgrade", "downgrade"),
 }
 
 

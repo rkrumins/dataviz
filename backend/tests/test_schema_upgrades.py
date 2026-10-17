@@ -379,3 +379,87 @@ async def test_the_fencing_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── uq_commits_idem: one commit per idempotency key on a branch (20261017_1900_gv_commits_idem) ──
+_COMMITS_IDEM = _VERSIONS / "20261017_1900_gv_commits_idem.py"
+
+
+def test_the_commit_key_index_is_migrated():
+    assert _migration(_COMMITS_IDEM).revision == _COMMITS_IDEM.stem
+
+
+async def _commit(conn, gid: str, branch: str, seq: int, key: str) -> str:
+    cid = f"cmt_idem_{os.urandom(4).hex()}"
+    await conn.execute(text(
+        f'INSERT INTO "{models._SCHEMA}".commits (graph_id, id, branch_id, commit_seq, kind, '
+        "created_at, idempotency_key) VALUES (:g, :id, :b, :seq, 'edit', '2026-10-17', :k)"),
+        {"g": gid, "id": cid, "b": branch, "seq": seq, "k": key})
+    return cid
+
+
+async def _key_of(conn, gid: str, cid: str):
+    return (await conn.execute(text(
+        f'SELECT idempotency_key FROM "{models._SCHEMA}".commits WHERE graph_id = :g AND id = :id'),
+        {"g": gid, "id": cid})).scalar_one()
+
+
+@contextlib.asynccontextmanager
+async def _without_commits_idem(engine):
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".uq_commits_idem'))
+            yield conn
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_uq_commits_idem(store):
+    async with _without_commits_idem(store) as conn:
+        gid = "g_idem_" + os.urandom(3).hex()
+        first = await _commit(conn, gid, "br_a", 1, "changes:u:k")
+        repeat = await _commit(conn, gid, "br_a", 2, "changes:u:k")   # raced in before the index
+        other = await _commit(conn, gid, "br_b", 1, "changes:u:k")    # another branch: its own
+        await conn.run_sync(models._ensure_schema_upgrades)
+        assert "uq_commits_idem" in await _indexes(conn, "commits")
+        assert await _key_of(conn, gid, first) == "changes:u:k"
+        assert await _key_of(conn, gid, repeat) is None
+        assert await _key_of(conn, gid, other) == "changes:u:k"
+        await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+
+
+@e2e
+async def test_a_commit_key_index_that_cannot_be_built_never_stops_a_worker(store, monkeypatch):
+    def refuse(conn):
+        raise RuntimeError("lock timeout")
+
+    monkeypatch.setattr(models, "ensure_commits_idem_index", refuse)
+    async with _without_commits_idem(store) as conn:
+        await conn.run_sync(models._ensure_schema_upgrades)        # logs, never raises
+        assert (await conn.execute(text("SELECT 1"))).scalar() == 1
+
+
+@e2e
+async def test_the_commit_key_migration_round_trips(store):
+    migration = _migration(_COMMITS_IDEM)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "uq_commits_idem" not in await _indexes(conn, "commits")
+            assert "ix_commits_idem" in await _indexes(conn, "commits")
+            await conn.run_sync(run("upgrade"))
+            assert "uq_commits_idem" in await _indexes(conn, "commits")
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

@@ -474,6 +474,15 @@ class CommitORM(VersioningBase):
         ),
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
         Index("ix_commits_idem", "graph_id", "idempotency_key"),
+        # One commit per key on a branch: two saves sent with one Idempotency-Key land once.
+        Index(
+            "uq_commits_idem",
+            "graph_id",
+            "branch_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
         CheckConstraint(
             # Existing DBs get 'restore' via migration 20260713_1200_restore_kind and 'pull' via
             # 20260714_1600_pull_commit_kind (create_all never alters live tables); keep the sets in
@@ -705,6 +714,13 @@ def _ensure_schema_upgrades(conn) -> None:
             ensure_ps_fencing_columns(conn)
     except Exception:
         logger.exception("the projection fencing columns were not added; the next start tries again")
+    # 20261017_1900_gv_commits_idem. In a savepoint: a lock it waits too long for leaves the worker
+    # starting without the index rather than not at all.
+    try:
+        with conn.begin_nested():
+            ensure_commits_idem_index(conn)
+    except Exception:
+        logger.exception("uq_commits_idem was not built; the next start tries again")
 
 
 def ensure_ps_fencing_columns(conn) -> None:
@@ -768,6 +784,30 @@ def ensure_ps_key_index(conn, *, strict: bool) -> None:
         f"CREATE UNIQUE INDEX IF NOT EXISTS uq_ps_key ON {ps} "
         "(coalesce(falkor_provider, 'default'), falkor_graph_name) "
         "WHERE falkor_graph_name IS NOT NULL"))
+
+
+def ensure_commits_idem_index(conn) -> None:
+    """Build ``uq_commits_idem``: one commit per idempotency key on a branch, so a save retried
+    with its key lands once. A later commit sharing its key with an earlier one on the branch
+    (bulk, sync and bootstrap look before they insert, so two could race in) has the key cleared
+    first; every lookup returns one row anyway. A no-op once the index exists: on the partitioned
+    ``commits`` even ``CREATE INDEX IF NOT EXISTS`` locks every partition, and every worker start
+    runs this. ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("commits", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"), {"i": f'"{_SCHEMA}".uq_commits_idem'}).scalar():
+        return
+    commits = f'"{_SCHEMA}"."commits"'
+    cleared = conn.execute(text(
+        f"UPDATE {commits} c SET idempotency_key = NULL FROM ("
+        "SELECT graph_id, id, row_number() OVER (PARTITION BY graph_id, branch_id, idempotency_key "
+        f"ORDER BY commit_seq) AS rn FROM {commits} WHERE idempotency_key IS NOT NULL) d "
+        "WHERE c.graph_id = d.graph_id AND c.id = d.id AND d.rn > 1")).rowcount
+    if cleared:
+        logger.warning("uq_commits_idem: cleared the repeated idempotency key of %d commits", cleared)
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_commits_idem ON {commits} "
+        "(graph_id, branch_id, idempotency_key) WHERE idempotency_key IS NOT NULL"))
 
 
 def widen_job_type_check(conn, required) -> None:
