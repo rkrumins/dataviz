@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { BrandLogo } from '@/components/brand/BrandLogo'
@@ -344,6 +344,14 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                 >
                   <KeySquare className="w-4 h-4" />
                   <span>API keys</span>
+                </DropdownMenu.Item>
+
+                <DropdownMenu.Item
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  onSelect={() => navigate('/me/preferences')}
+                >
+                  <SlidersHorizontal className="w-4 h-4" />
+                  <span>Preferences</span>
                 </DropdownMenu.Item>
 
                 {/* "Change Avatar" used to sit here. The picker is still two

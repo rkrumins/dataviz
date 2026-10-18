@@ -182,9 +182,10 @@ marks a view up to date with its template; `PUT /api/v1/admin/workspaces/{id}` t
   day by day, a shared graph counted once). A click opens what is behind the number: sources ranked
   by size, with their status and **Refresh stats** for those who run them; the most favorited,
   recently updated and your recent views; workspaces; semantic layers.
-- **Needs attention.** For people who can read profiling, the Dashboard lists the worst open
-  findings — a source far outside its usual movement, a vanished type, a silent source — with
-  **Open** and **Mark seen**.
+- **Needs attention.** For people who can read profiling and turn it on, the Dashboard lists the
+  worst open findings — a source far outside its usual movement, a vanished type, a silent source —
+  with **Open** and **Mark seen**. It's off by default, because the Dashboard is where business
+  users land: **Preferences**, a new page in the profile menu, turns it on for that browser.
 
 ### Fixed
 

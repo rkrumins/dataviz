@@ -210,6 +210,13 @@ interface PreferencesState {
   gettingStartedHidden: boolean
   setGettingStartedHidden: (hidden: boolean) => void
 
+  /** The Dashboard's "Needs attention" strip — open profiling findings. Off
+   *  by default, the user's ruling (2026-10-18): the Dashboard is where
+   *  business users land, and findings are for the people who look after data
+   *  sources, who turn it on under Preferences. */
+  showNeedsAttention: boolean
+  setShowNeedsAttention: (show: boolean) => void
+
   /**
    * Per-VIEW, per-layer node-sort overrides for read-only viewers, keyed
    * `viewId -> layerId -> mode`. Device-local by design: a viewer's Z→A must
@@ -463,6 +470,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       }),
       gettingStartedHidden: false,
       setGettingStartedHidden: (gettingStartedHidden) => set({ gettingStartedHidden }),
+      showNeedsAttention: false,
+      setShowNeedsAttention: (showNeedsAttention) => set({ showNeedsAttention }),
       dismissOnboarding: () => set({ onboardingDismissedAt: new Date().toISOString() }),
       resetOnboarding: () => set({ onboardingCompletedSteps: [], onboardingDismissedAt: null }),
 

@@ -58,6 +58,7 @@ const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m =
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m => ({ default: m.MyApiKeysPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
+const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
@@ -219,6 +220,8 @@ export const router = createBrowserRouter([
       // the apiKeysEnabled switch: with keys off you can still see and revoke
       // yours — the page says so and offers nothing new.
       { path: 'me/api-keys', element: <Lazy><MyApiKeysPage /></Lazy> },
+      // How the app works for you — kept in this browser, ungated like its siblings.
+      { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context

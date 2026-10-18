@@ -11,9 +11,9 @@
  * Deliberately NOT an operator console: provider health, broken/stale sweeps and
  * pipeline internals belong to an admin persona and live in Ingestion/Admin. The
  * one exception is NeedsAttention: open profiling findings (a source that moved
- * far beyond its usual range, lost a type, or went quiet), shown only to people
- * who can read profiling, because a Dashboard that says "All sources active"
- * while a graph lost half its entities is worse than one that says nothing.
+ * far beyond its usual range, lost a type, or went quiet), for people who can
+ * read profiling and turn it on under Preferences — off by default, because this
+ * page is where business users land.
  *
  * Everything is now wired to real endpoints. This page previously shipped
  * several placeholders that LOOKED like data:

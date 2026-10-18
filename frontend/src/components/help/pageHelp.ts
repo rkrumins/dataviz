@@ -26,6 +26,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/me/account', slugs: ['users-access', 'sso-operations'] },
   { path: '/me/identities', slugs: ['sso-operations'] },
   { path: '/me/api-keys', slugs: ['api-keys'] },
+  { path: '/me/preferences', slugs: ['users-access', 'quick-start'] },
   { path: '/admin/overview', slugs: ['governance-ops', 'admin-setup'] },
   { path: '/admin/infrastructure', slugs: ['governance-ops', 'rollup-capacity'] },
   { path: '/admin/redis', slugs: ['governance-ops'] },

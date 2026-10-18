@@ -7,8 +7,9 @@
  * Dashboard's numbers can read "All sources active" while a graph lost half its
  * entities on Tuesday; this strip is where that reaches the people who can look.
  *
- * Shown only to readers of profiling (the same gate as the Ingestion tab) and
- * only while something is open. The worst three, then a way to the rest.
+ * Shown only to readers of profiling (the same gate as the Ingestion tab) who
+ * turned it on under Preferences — the Dashboard is for business users first —
+ * and only while something is open. The worst three, then a way to the rest.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -20,6 +21,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { PROFILING_KEY, useProfilingFindings } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { profilingService } from '@/services/profilingService'
+import { usePreferencesStore } from '@/store/preferences'
 import { useWorkspacesStore } from '@/store/workspaces'
 import type { Finding } from '@/types/profiling'
 import { metricNoun, significanceMeta } from '@/components/ingestion/profiling/shared'
@@ -46,14 +48,15 @@ function rankFindings(findings: readonly Finding[]): Finding[] {
 }
 
 export function NeedsAttention() {
+    const wanted = usePreferencesStore(s => s.showNeedsAttention)
     const canRead = useCanReadProfiling()
-    const { data } = useProfilingFindings({ openOnly: true, limit: 50 }, { enabled: canRead })
+    const { data } = useProfilingFindings({ openOnly: true, limit: 50 }, { enabled: wanted && canRead })
     const workspaces = useWorkspacesStore(s => s.workspaces)
     const queryClient = useQueryClient()
     const [busy, setBusy] = useState<string | null>(null)
 
     const open = data?.alerts.filter(f => !f.acknowledged_at) ?? []
-    if (!canRead || open.length === 0) return null
+    if (!wanted || !canRead || open.length === 0) return null
     const shown = rankFindings(open).slice(0, SHOWN)
     const total = data?.openCount ?? open.length
 

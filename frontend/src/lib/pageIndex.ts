@@ -294,6 +294,15 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/me/api-keys',
         gate: { kind: 'always' },
     },
+    {
+        id: 'preferences',
+        category: 'Setting',
+        title: 'Preferences',
+        description: 'How the app works for you, such as what your Dashboard shows',
+        keywords: ['preferences', 'settings', 'dashboard', 'needs attention', 'profiling', 'findings'],
+        path: '/me/preferences',
+        gate: { kind: 'always' },
+    },
 
     // Admin sections. Titles mirror the nav catalogue's labels
     // (`backend/app/services/nav_catalogue.py`) so a search for what the

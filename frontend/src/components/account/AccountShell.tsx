@@ -25,7 +25,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { NavLink } from 'react-router-dom'
 import {
     AlertCircle, ChevronRight, Fingerprint, KeyRound, KeySquare, Link2, Mail,
-    PencilLine, ShieldCheck, UserCog,
+    PencilLine, ShieldCheck, SlidersHorizontal, UserCog,
 } from 'lucide-react'
 
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -61,6 +61,7 @@ const NAV = [
     { to: '/me/identities', label: 'Connected identities', icon: Link2, end: true },
     { to: '/me/api-keys', label: 'API keys', icon: KeySquare, end: true },
     { to: '/my/access', label: 'My access', icon: ShieldCheck, end: true },
+    { to: '/me/preferences', label: 'Preferences', icon: SlidersHorizontal, end: true },
 ]
 
 export function AccountShell({

@@ -1,6 +1,7 @@
 /**
  * The Dashboard's "Needs attention": open profiling findings, worst first, for
- * the people who can read profiling — and nothing at all for everyone else.
+ * the people who can read profiling and turned it on under Preferences — and
+ * nothing at all for everyone else.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -15,6 +16,7 @@ const { service, access } = vi.hoisted(() => ({
 vi.mock('@/services/profilingService', () => ({ profilingService: service }))
 vi.mock('@/hooks/useProfilingAccess', () => ({ useCanReadProfiling: () => access.canRead }))
 
+import { usePreferencesStore } from '@/store/preferences'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { NeedsAttention } from './NeedsAttention'
 
@@ -47,6 +49,7 @@ function renderStrip() {
 beforeEach(() => {
     vi.clearAllMocks()
     access.canRead = true
+    usePreferencesStore.setState({ showNeedsAttention: true })
     service.getFindings.mockResolvedValue({
         alerts: FINDINGS, total: 4, openCount: 4, offset: 0, limit: 50, platform_wide: false,
     })
@@ -90,5 +93,16 @@ describe('NeedsAttention', () => {
         const again = renderStrip()
         expect(again.container).toBeEmptyDOMElement()
         expect(service.getFindings).not.toHaveBeenCalled()
+    })
+
+    it('stays away, without asking, until it is turned on under Preferences', () => {
+        usePreferencesStore.setState({ showNeedsAttention: false })
+        const { container } = renderStrip()
+        expect(container).toBeEmptyDOMElement()
+        expect(service.getFindings).not.toHaveBeenCalled()
+    })
+
+    it('is off for everyone who has not chosen it', () => {
+        expect(usePreferencesStore.getInitialState().showNeedsAttention).toBe(false)
     })
 })
