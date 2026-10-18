@@ -90,6 +90,19 @@ class SelfReview(_HttpMapped, AccessDenied):
                          {"type": "access_denied", "code": "self_review", "prId": pr_id})
 
 
+class PublishRequired(_HttpMapped, AccessDenied):
+    """A person without ``workspace:datasource:publish`` wrote a versioned graph's main directly
+    (a graph route with no draft, or a bulk ingest). API keys keep direct main writes."""
+
+    status_code = 403
+
+    def __init__(self):
+        super().__init__("editing the published version needs publish permission; "
+                         "start a draft to make these edits and send them for review",
+                         {"type": "access_denied", "code": "publish_required",
+                          "required": "workspace:datasource:publish"})
+
+
 class GroupsUnavailable(_HttpMapped, RuntimeError):
     """The actor's groups could not be looked up, and a group decides their
     role on the draft. Never read as "no groups": that would refuse a member."""
@@ -258,4 +271,4 @@ class ProjectionKeyInvalid(_HttpMapped, RuntimeError):
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
                MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved,
-               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid)
+               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid, PublishRequired)

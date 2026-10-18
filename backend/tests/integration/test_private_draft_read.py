@@ -34,6 +34,8 @@ def _app():
         perms = ("workspace:datasource:read",)
         if request.headers.get("X-Manage") == "1":
             perms += ("workspace:datasource:manage",)
+        if request.headers.get("X-Publish") == "1":      # the setup's import writes main
+            perms += ("workspace:datasource:publish",)
         return PermissionClaims(sid="", global_perms=(), ws_perms={"ws1": perms})
     app.dependency_overrides[get_current_user] = header_user
     app.dependency_overrides[get_optional_user] = header_user
@@ -51,7 +53,7 @@ async def _run() -> None:
     G.get_graph_cache = lambda: _StubCache()
     ds = "ds_" + os.urandom(4).hex()
     V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
-    setup = {"X-User": "alice", "X-Manage": "1"}
+    setup = {"X-User": "alice", "X-Manage": "1", "X-Publish": "1"}
     try:
         c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         async with c:

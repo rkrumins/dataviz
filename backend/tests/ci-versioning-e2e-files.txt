@@ -97,6 +97,7 @@ tests/integration/test_versioning_foreign_key_guards.py
 tests/integration/test_versioning_fork.py
 tests/integration/test_versioning_lost_update.py
 tests/integration/test_versioning_main_lock.py
+tests/integration/test_versioning_main_write_publish.py
 tests/integration/test_versioning_merge_visibility.py
 tests/integration/test_versioning_merkle.py
 tests/integration/test_versioning_migration_recovery.py

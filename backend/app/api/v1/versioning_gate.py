@@ -17,7 +17,8 @@ Two flavours:
   draft (409 branch_closed) the caller can edit (403); main is never written (409).
 
 ``sync_override_gate`` is unrelated to the flag: it lets only a workspace admin pass the
-sync safety overrides (``force``, ``allowMassDelete``) on both sync routes.
+sync safety overrides (``force``, ``allowMassDelete``) on both sync routes. Nor is
+``require_publish_for_main``: a person writes a versioned graph's main directly only with publish.
 
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
@@ -38,7 +39,7 @@ from backend.app.db.models import ViewORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.versioning.errors import MainWriteForbidden
+from backend.app.services.versioning.errors import MainWriteForbidden, PublishRequired
 from backend.app.services.versioning.service import Viewer
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,19 @@ async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch
         viewer = Viewer(actor=actor, can_manage=has_permission(
             claims, "workspace:datasource:manage", workspace_id=view.workspace_id))
         await svc.check_view_branch(data_source_id=ds_id, branch_id=branch_id, viewer=viewer, write=write)
+
+
+def require_publish_for_main(claims: PermissionClaims, ws_id: str) -> None:
+    """403 ``publish_required`` when a person without ``workspace:datasource:publish`` writes a
+    versioned graph's main directly: the graph routes with no draft, and bulk ingest. API keys keep
+    those writes (automation); none can hold publish. A denial decided against a workspace map
+    nothing could supply is a 503, as in ``requires()``."""
+    if claims.key_scope is not None or has_permission(
+            claims, "workspace:datasource:publish", workspace_id=ws_id):
+        return
+    if not claims.ws_available:
+        raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")
+    raise PublishRequired()
 
 
 class SyncOverrides(NamedTuple):

@@ -43,8 +43,8 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import (SyncOverrides, require_versioning_enabled,
-                                                sync_override_gate)
+from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
+                                                require_versioning_enabled, sync_override_gate)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -201,6 +201,18 @@ async def get_context_engine(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
     )
+
+
+async def require_main_writer(
+    ws_id: Optional[str] = None,
+    engine: ContextEngine = Depends(get_context_engine),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> None:
+    """A write with no draft on a versioned data source commits to its main, and a person needs
+    publish for that (``require_publish_for_main``). A draft write, and any write to a data source
+    without version control, is left to the route's other gates."""
+    if engine._writes_main:
+        require_publish_for_main(claims, ws_id)
 
 
 async def get_engine_session(
@@ -3267,6 +3279,7 @@ async def save_graph(
     request: SaveGraphRequest,
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Save custom graph nodes and edges."""
     success = await engine.save_custom_graph(request.nodes, request.edges)
@@ -3701,6 +3714,7 @@ async def create_node(
     request: CreateNodeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Create a new node with optional containment edge.
@@ -3719,6 +3733,7 @@ async def create_edge(
     request: CreateEdgeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Create a directed edge between two existing nodes.
@@ -3737,6 +3752,7 @@ async def update_edge(
     request: UpdateEdgeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Update mutable properties of an existing edge — a PATCH: ``properties`` sets the
     named keys, ``unsetProperties`` removes keys, the rest are kept. Edge type is immutable."""
@@ -3753,6 +3769,7 @@ async def delete_edge(
     edge_id: str,
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Delete an edge by ID."""
     success = await engine.delete_edge(edge_id)
@@ -4105,6 +4122,7 @@ async def batch_commands(
     request: BatchCommandRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Execute a batch of graph mutation commands.

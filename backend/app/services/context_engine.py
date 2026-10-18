@@ -82,6 +82,8 @@ class ContextEngine:
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
+        # Writes commit to a versioned graph's main (no draft named): the routes need publish.
+        self._writes_main = False
         # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
@@ -208,6 +210,7 @@ class ContextEngine:
                     engine._data_source_id = data_source_id
                     engine._db_session = session
                     engine._branch_id = read_branch
+                    engine._writes_main = not is_draft
                     try:
                         await engine._resolve_ontology()
                     except Exception as exc:
@@ -250,6 +253,7 @@ class ContextEngine:
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
+        engine._writes_main = bool(data_source_id) and graph is not None
 
         # Eagerly resolve ontology so the provider is configured before
         # any request handler touches ``engine.provider`` directly.

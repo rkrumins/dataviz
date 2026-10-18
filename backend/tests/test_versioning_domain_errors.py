@@ -96,6 +96,34 @@ def test_a_shared_draft_refusal_names_the_role_it_needs():
         "type": "access_denied", "code": "not_owner_or_member", "required": "editor", "branchId": "br_1"}
 
 
+def test_a_person_writing_main_without_publish_is_403_publish_required():
+    from backend.app.services.versioning.errors import PublishRequired
+    exc = PublishRequired()
+    assert isinstance(exc, AccessDenied) and type(exc) in HTTP_MAPPED
+    err = _raised(exc)
+    assert err.status_code == 403
+    assert {k: err.detail[k] for k in ("type", "code", "required")} == {
+        "type": "access_denied", "code": "publish_required", "required": "workspace:datasource:publish"}
+    assert "draft" in err.detail["message"]
+
+
+def test_writing_main_directly_spares_api_keys_and_publishers():
+    from backend.app.api.v1.versioning_gate import require_publish_for_main
+    from backend.app.services.versioning.errors import PublishRequired
+    from backend.app.services.permission_service import KeyScope, PermissionClaims
+    manage = ("workspace:datasource:read", "workspace:datasource:manage")
+    person = PermissionClaims(sid="s", ws_perms={"ws1": manage})
+    with pytest.raises(PublishRequired):
+        require_publish_for_main(person, "ws1")
+    require_publish_for_main(PermissionClaims(
+        sid="s", ws_perms={"ws1": manage + ("workspace:datasource:publish",)}), "ws1")
+    require_publish_for_main(PermissionClaims(
+        sid="", ws_perms={"ws1": manage}, key_scope=KeyScope(key_id="k", data="write")), "ws1")
+    with pytest.raises(HTTPException) as unknown:     # no grants could be read: ask again, not 403
+        require_publish_for_main(PermissionClaims(sid="s", ws_available=False), "ws1")
+    assert unknown.value.status_code == 503
+
+
 def test_approving_your_own_draft_or_review_is_403_self_review():
     exc = SelfReview("pr_1")
     assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)

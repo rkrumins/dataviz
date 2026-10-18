@@ -41,7 +41,8 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
-from backend.app.api.v1.versioning_gate import SyncOverrides, sync_override_gate
+from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
+                                                sync_override_gate)
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
@@ -2469,13 +2470,15 @@ async def bulk_ingest(
     background: BackgroundTasks,
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
     ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
-    very large loads plugs in here.)"""
+    very large loads plugs in here.) It writes main, so a person needs publish; a key does not."""
+    require_publish_for_main(claims, ws_id)
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():

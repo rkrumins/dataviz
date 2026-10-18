@@ -62,7 +62,7 @@ Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLIS
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
 | `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**, and delete or restore a fork; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
-| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, and the graph router's `/resync`. A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission` |
+| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, and the graph router's `/resync`. A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission`. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; API keys keep those writes |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
 > changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
@@ -112,6 +112,7 @@ that backs `dataSourceId`.
 | `NotDraftOwner` | **403** | `{type: "access_denied", code: "not_draft_owner", branchId, owner, message}` — a write to someone else's private draft; only its owner writes it. Also a change of a draft's visibility by anyone but its owner |
 | `DraftRoleRequired` | **403** | `{type: "access_denied", code: "not_owner_or_member", required, branchId, message}` — a shared draft refused the caller: `required` is `editor` to write it, or `maintainer` to publish, abandon or manage its members. A member through a group counts |
 | `SelfReview` | **403** | `{type: "access_denied", code: "self_review", prId, message}` — an approve by the PR's author or its source draft's owner: an approval is someone else's review |
+| `PublishRequired` | **403** | `{type: "access_denied", code: "publish_required", required: "workspace:datasource:publish", message}` — a person without publish wrote a versioned graph's `main` directly (bulk-ingest, or a graph-router write with no draft). Edit in a draft instead. API keys are not refused |
 | `GroupsUnavailable` | **503** | `{type: "groups_unavailable", retryable: true, message}`, `Retry-After: 2` — the caller's role on a shared draft turns on a group, and their groups can't be looked up right now. Retry; it is never read as "no groups" |
 | `IneligibleMember` | **422** | `{type: "ineligible_member", subjectId, reason, message}` — who was to be added to a draft can't be: `reason` is `owner`, `unknown_user`, `unknown_group`, `no_read` (no workspace read) or `no_manage` (an editor or maintainer without workspace manage) |
 | `ApprovalRequired` | **409** | `{type: "approval_required", pending: […], stale: […]}` — `pending` are the requested reviewers without a standing approval; `stale` are those of them who approved an earlier version (a content commit landed on the draft since) and must approve again |
@@ -247,7 +248,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/bulk-ingest` | `_MANAGE` | An NDJSON body (one node or edge per line) → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected`, not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
+| `POST …/bulk-ingest` | `_MANAGE`; a person also `_PUBLISH` | An NDJSON body (one node or edge per line) → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected`, not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
 | `POST …/sync` | `_PUBLISH` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; API keys cannot hold `workspace:admin`, so they get **403 `needs_admin`**). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
 
 ### 2.10 Imports & exports
@@ -402,6 +403,11 @@ it, or pass `main`, for the published graph. A draft the caller can't read (some
 draft, unless they manage the workspace, are a member or take part in its pull request) is a
 **404**, the same answer as a branch that doesn't exist. See
 [04 · Projection & Cache](/docs/versioning-projection-and-cache).
+
+Without a draft, a write to a versioned data source commits to `main`, so a person needs `_PUBLISH`
+for it: `/save`, `/nodes/create`, `POST /edges`, `PATCH`/`DELETE /edges/{id}` and
+`/commands/batch` answer **403** `publish_required` otherwise (`require_main_writer`). API keys keep
+these writes. A draft write, and any write to a data source without version control, is unaffected.
 
 ### Per-branch cache scoping
 
