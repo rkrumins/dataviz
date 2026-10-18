@@ -131,7 +131,7 @@ async def can_manage_view_grants(
     return view
 
 
-async def _hydrate_subject(
+async def hydrate_subject(
     session: AsyncSession, subject_type: str, subject_id: str
 ) -> ViewGrantSubject:
     if subject_type == "user":
@@ -184,7 +184,7 @@ async def list_grants(
     )
     out: list[ViewGrantResponse] = []
     for g in grants:
-        subject = await _hydrate_subject(session, g.subject_type, g.subject_id)
+        subject = await hydrate_subject(session, g.subject_type, g.subject_id)
         out.append(
             ViewGrantResponse(
                 grant_id=g.id,
@@ -261,7 +261,7 @@ async def create_grant(
             "actor_id": user.id,
         },
     )
-    subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
+    subject = await hydrate_subject(session, body.subject_type, body.subject_id)
     subject_label = (
         getattr(subject, "name", None) or getattr(subject, "display_name", None)
         or body.subject_id
@@ -345,7 +345,7 @@ async def update_grant_role(
                 "actor_id": user.id,
             },
         )
-        subject_for_log = await _hydrate_subject(
+        subject_for_log = await hydrate_subject(
             session, target.subject_type, target.subject_id,
         )
         subject_label = subject_for_log.display_name or target.subject_id
@@ -359,7 +359,7 @@ async def update_grant_role(
                 "role": {"from": previous_role, "to": role},
             },
         )
-    subject = await _hydrate_subject(session, target.subject_type, target.subject_id)
+    subject = await hydrate_subject(session, target.subject_type, target.subject_id)
     return ViewGrantResponse(
         grant_id=target.id,
         role=target.role_name,

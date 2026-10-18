@@ -44,6 +44,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     viewExportEnabled: true,
     viewImportEnabled: true,
     blankModelsEnabled: true,
+    layoutTemplatesEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
     // Fail OPEN to "workspaces decide". Guessing the strictest value on a
     // slow network would hide the Enterprise tier for a deployment nobody
@@ -139,6 +140,11 @@ function coerce(values: Record<string, unknown>, key: string): boolean {
     const v = values[key]
     if (v === undefined || v === null) return Boolean(DEFAULT_FEATURES[key])
     return Boolean(v)
+}
+
+/** `useFeature`'s answer from values a caller already holds. */
+export function isFeatureOn(values: Record<string, unknown>, key: string): boolean {
+    return coerce(values, key)
 }
 
 /** Reactive boolean flag read for components. Unknown/missing keys fall back to

@@ -21,6 +21,7 @@
 import type { NavigationTab } from '@/store/navigation'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { checkNavPermission, type PermissionClaims } from '@/store/auth'
+import { featureEnabled } from '@/store/features'
 
 /**
  * How a destination decides who may see it.
@@ -50,6 +51,8 @@ export interface PageEntry {
     keywords: string[]
     path: string
     gate: PageGate
+    /** A switch under Admin → Features the page needs on. */
+    feature?: string
 }
 
 export const PAGE_INDEX: PageEntry[] = [
@@ -71,6 +74,16 @@ export const PAGE_INDEX: PageEntry[] = [
         keywords: ['explore', 'discover', 'lineage', 'search', 'browse', 'views', 'gallery', 'saved', 'diagrams'],
         path: '/explorer',
         gate: { kind: 'sidebar', key: 'explore' },
+    },
+    {
+        id: 'templates',
+        category: 'Page',
+        title: 'Templates',
+        description: 'Reusable layer layouts for Context Views',
+        keywords: ['layout', 'layouts', 'template', 'layers', 'columns', 'quick start', 'starter', 'reuse', 'team'],
+        path: '/templates',
+        gate: { kind: 'sidebar', key: 'templates' },
+        feature: 'layoutTemplatesEnabled',
     },
     {
         id: 'workspaces',
@@ -281,6 +294,15 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/me/api-keys',
         gate: { kind: 'always' },
     },
+    {
+        id: 'preferences',
+        category: 'Setting',
+        title: 'Preferences',
+        description: 'How the app works for you, such as what your Dashboard shows',
+        keywords: ['preferences', 'settings', 'dashboard', 'needs attention', 'profiling', 'findings'],
+        path: '/me/preferences',
+        gate: { kind: 'always' },
+    },
 
     // Admin sections. Titles mirror the nav catalogue's labels
     // (`backend/app/services/nav_catalogue.py`) so a search for what the
@@ -427,6 +449,8 @@ export interface PageAccessContext {
     adminSections: Record<string, NavPermissionSpec>
     /** `useAnalyticsAccess().allowed` — permission OR the public flag. */
     analyticsAllowed: boolean
+    /** Whether a switch under Admin → Features is on; the store's answer by default. */
+    featureOn?: (key: string) => boolean
 }
 
 /**
@@ -441,6 +465,7 @@ const HIDDEN_SPEC: NavPermissionSpec = { kind: 'perm', perm: '__unknown__' }
 
 /** May this reader open this destination? */
 export function pageAllowed(entry: PageEntry, ctx: PageAccessContext): boolean {
+    if (entry.feature && !(ctx.featureOn ?? featureEnabled)(entry.feature)) return false
     switch (entry.gate.kind) {
         case 'always':
             return true

@@ -27,7 +27,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/hooks/useDashboardData', () => ({
-    useDashboardData: () => ({ workspaces: [], templates: [], ontologies: [] }),
+    useDashboardData: () => ({ workspaces: [], ontologies: [] }),
+}))
+
+vi.mock('@/hooks/useLayoutTemplates', () => ({
+    useLayoutTemplates: () => ({ templates: [] }),
 }))
 
 vi.mock('@/services/viewApiService', () => ({ listViews: vi.fn() }))

@@ -75,8 +75,8 @@ ontology (containment, granularity, lineage semantics) that layer grouping and
 lineage aggregation depend on. Context-model **instances** are retired — layers
 and entity assignments now live on the view config
 (`view.config.layout.referenceLayout`). What remains as first-class,
-independently managed objects are the reusable **Quick Start Templates**, exposed
-through the context-model template endpoints below. Turning a view's layer
+independently managed objects are the reusable **layout templates**, exposed
+through the layout-template endpoints below. Turning a view's layer
 configuration into actual per-entity placements is the job of the
 [Assignment Engine](/docs/services-assignments).
 
@@ -105,13 +105,36 @@ graph endpoints. Representative routes (under `/api/v1/{ws_id}/graph`, requiring
 `/nodes/{urn}/children-with-edges`, the lineage walk `/trace/closure` (below),
 and aggregated edges.
 
-Context-model templates (the reusable layer configs behind lenses):
+Layout templates (the reusable layer configs behind lenses) — every signed-in user; what each
+may do with one is decided per template (see [RBAC](/docs/rbac#layout-templates)):
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/v1/{ws_id}/context-models/templates` | List Quick Start Templates available to a workspace (read-only). |
-| GET | `/api/v1/{ws_id}/context-models/templates/{template_id}` | Get a single template. |
-| GET/POST/PUT/DELETE | `/api/v1/admin/context-model-templates[/{id}]` | Full template CRUD (requires `system:admin`). |
+| GET | `/api/v1/layout-templates` | Every template the caller can use (`includeHidden` adds hidden built-ins, for template managers). |
+| POST | `/api/v1/layout-templates` | Keep a new one — personal, for a workspace, or for the organization. |
+| GET/PUT/DELETE | `/api/v1/layout-templates/{template_id}` | Read, edit (partial; also changes who can use it), soft-delete. |
+| POST | `/api/v1/layout-templates/{template_id}/restore` | Undo a delete — same id, same shares. |
+| PUT | `/api/v1/layout-templates/{template_id}/hidden` | Hide or show a built-in for everyone (`system:templates:manage`). |
+| GET | `/api/v1/layout-templates/{template_id}/versions[/{version}]` | Every version of its layers, newest first, or one of them. |
+| POST | `/api/v1/layout-templates/{template_id}/versions/{version}/restore` | Make an old version's layers the newest version (needs edit). |
+| PUT | `/api/v1/layout-templates/{template_id}/featured` | Feature it at the top of the library (`system:templates:manage`; built-in or organization). |
+| POST/DELETE | `/api/v1/layout-templates/{template_id}/favourite` | The caller's favorites. |
+| POST/DELETE | `/api/v1/layout-templates/{template_id}/promotion-request` | Ask, or stop asking, for it to be offered to everyone. |
+| POST | `/api/v1/layout-templates/{template_id}/promotion-request/approve` · `/decline` | A template manager's answer, with an optional note. |
+| GET | `/api/v1/layout-templates/promotion-requests` | The pending requests (`system:templates:manage`). |
+| GET/POST/PUT/DELETE | `/api/v1/layout-templates/{template_id}/grants[/{grant_id}]` | Share with people or groups, as viewer or editor. |
+| PUT | `/api/v1/views/{view_id}/template-version` | Mark a view up to date with its template's version (needs edit on the view). |
+
+A template keeps a view's layer structure — names, colours, icons, entity types, rules, logical
+groups — and never the entities a view placed: `layout_config.strip_placements` drops column
+anchors, legacy `entityAssignments`, exact-URN rules and `templateLayerId` before anything is
+stored.
+
+Changing a template's layers makes a new version (`context_models.version`, and a row in
+`layout_template_versions`); a view records the version it matches (`views.context_model_version`)
+and each of its columns the template layer it came from (`templateLayerId`), which is what lets the
+client merge a newer version into the view three ways — the version the view matched, the newest
+one, and the view's own layers.
 
 ## Lineage walks: `POST /api/v1/{ws_id}/graph/trace/closure`
 

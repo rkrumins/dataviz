@@ -93,7 +93,7 @@ export function ContentTab({
                 <KpiCard
                     label="Semantic layers" metric="semanticLayers" value={totals.ontologies.total} icon={PenLine}
                     changePct={totals.ontologies.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.contextModels.total)} context models`}
+                    sub={`${exact(totals.layoutTemplates.total)} layout templates`}
                     accent="violet"
                 />
             </div>

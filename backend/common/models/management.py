@@ -961,6 +961,9 @@ class WorkspaceUpdateRequest(BaseModel):
     # to the platform default). See ``backend.app.services.node_identity``.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
     name_property: Optional[str] = Field(None, alias="nameProperty")
+    # The layout template new views here start from: a built-in, an
+    # organization template or this workspace's own. None = untouched; "" clears.
+    default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
 
     class Config:
         populate_by_name = True
@@ -978,14 +981,17 @@ class WorkspaceResponse(BaseModel):
     #: People and groups with access. The cards could not show "who works here"
     #: without it, and asking per-workspace would be one request per card.
     member_count: int = Field(0, alias="memberCount")
-    #: Live (non-deleted) views built on this workspace.
-    view_count: int = Field(0, alias="viewCount")
+    #: Live views built on this workspace that the caller can open — set by the
+    #: full list only; None where it was not counted.
+    view_count: Optional[int] = Field(None, alias="viewCount")
     #: Who may publish a view platform-wide here — 'request' | 'open'.
     publish_policy: str = Field("open", alias="publishPolicy")
     #: The workspace's OWN node-identity defaults. None = it sets none; sources
     #: under it may still resolve one from their provider or the platform.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
     name_property: Optional[str] = Field(None, alias="nameProperty")
+    #: The layout template a new view here starts from, if any.
+    default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
 
     class Config:
         populate_by_name = True
@@ -1018,64 +1024,71 @@ class WorkspaceResponse(BaseModel):
 
 
 # ============================================
-# Context Model Models
+# Workspace summary — the estate's numbers, defined once
 # ============================================
 
-class ContextModelCreateRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
-    is_template: bool = Field(False, alias="isTemplate")
-    category: Optional[str] = None
-    layers_config: List[Dict[str, Any]] = Field(default_factory=list, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-
-    class Config:
-        populate_by_name = True
+class WorkspaceSourceSummary(BaseModel):
+    """One data source's share of a workspace row."""
+    nodes: int = 0
+    edges: int = 0
+    #: Its statistics are still being computed: counted as a source, not in the sums.
+    pending: bool = False
+    #: Live views the caller can read that name this source.
+    views: int = 0
 
 
-class ContextModelUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    layers_config: Optional[List[Dict[str, Any]]] = Field(None, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Optional[Dict[str, Any]] = Field(None, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-
-    class Config:
-        populate_by_name = True
-
-
-class ContextModelResponse(BaseModel):
+class WorkspaceSummaryRow(BaseModel):
     id: str
     name: str
-    description: Optional[str] = None
-    workspace_id: Optional[str] = Field(None, alias="workspaceId")
-    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
-    is_template: bool = Field(alias="isTemplate")
-    category: Optional[str] = None
-    layers_config: List[Dict[str, Any]] = Field(default_factory=list, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-    is_active: bool = Field(alias="isActive")
-    created_at: str = Field(alias="createdAt")
-    updated_at: str = Field(alias="updatedAt")
+    is_default: bool = Field(False, alias="isDefault")
+    data_sources: int = Field(0, alias="dataSources")
+    active_data_sources: int = Field(0, alias="activeDataSources")
+    pending_data_sources: int = Field(0, alias="pendingDataSources")
+    nodes: int = 0
+    edges: int = 0
+    entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
+    views: int = 0
+    sources: Dict[str, WorkspaceSourceSummary] = Field(default_factory=dict)
 
     class Config:
         populate_by_name = True
 
 
-class InstantiateTemplateRequest(BaseModel):
-    template_id: str = Field(alias="templateId")
-    name: str
+class WorkspaceSummaryTotals(BaseModel):
+    workspaces: int = 0
+    data_sources: int = Field(0, alias="dataSources")
+    active_data_sources: int = Field(0, alias="activeDataSources")
+    pending_data_sources: int = Field(0, alias="pendingDataSources")
+    #: Each physical graph counted once, however many workspaces mount it.
+    nodes: int = 0
+    edges: int = 0
+    entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
+    #: Live views the caller can read — the Explorer's total.
+    views: int = 0
+    #: Graphs mounted in more than one of the caller's workspaces.
+    shared_graphs: int = Field(0, alias="sharedGraphs")
 
     class Config:
         populate_by_name = True
+
+
+class WorkspaceSummaryResponse(BaseModel):
+    #: 'all' when the caller sees every workspace, 'granted' when only their own.
+    coverage: Literal["all", "granted"]
+    totals: WorkspaceSummaryTotals
+    workspaces: List[WorkspaceSummaryRow] = Field(default_factory=list)
+
+
+class WorkspaceSummaryTrendResponse(BaseModel):
+    """The summary's totals day by day, oldest first — each list one value per
+    entry of ``days`` (UTC dates, today last)."""
+    days: List[str] = Field(default_factory=list)
+    workspaces: List[int] = Field(default_factory=list)
+    data_sources: List[int] = Field(default_factory=list, alias="dataSources")
+    views: List[int] = Field(default_factory=list)
+    #: None for a day before anything was measured — not zero.
+    nodes: List[Optional[int]] = Field(default_factory=list)
+    edges: List[Optional[int]] = Field(default_factory=list)
 
 
 # ============================================
@@ -1086,6 +1099,8 @@ class ViewCreateRequest(BaseModel):
     name: str
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    #: The version of that template whose layers were applied (current when absent).
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     workspace_id: str = Field(alias="workspaceId")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     view_type: str = Field("graph", alias="viewType")
@@ -1098,10 +1113,17 @@ class ViewCreateRequest(BaseModel):
         populate_by_name = True
 
 
+class ViewTemplateVersionRequest(BaseModel):
+    """``PUT /views/{id}/template-version``: the version of the view's layout
+    template its layers now match."""
+    version: int = Field(ge=1)
+
+
 class ViewUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     view_type: Optional[str] = Field(None, alias="viewType")
     config: Optional[Dict[str, Any]] = None
     visibility: Optional[str] = None
@@ -1116,16 +1138,17 @@ class ViewCheckpointRequest(BaseModel):
     """Ask a layout write to record the resulting design as a version.
 
     The wizard sends this on the LAST write of a save, so one save is one version and the
-    version holds exactly what was saved. Only the two sources a client legitimately causes
-    are accepted; import, restore and the rest are recorded by the server itself.
+    version holds exactly what was saved. Only the sources a client legitimately causes are
+    accepted — the wizard's create and save, and applying a layout template's update;
+    import, restore and the rest are recorded by the server itself.
     """
     source: str
     message: Optional[str] = Field(None, max_length=500)
 
     @model_validator(mode="after")
     def _validate_source(self) -> "ViewCheckpointRequest":
-        if self.source not in ("create", "wizard"):
-            raise ValueError("checkpoint.source must be 'create' or 'wizard'")
+        if self.source not in ("create", "wizard", "template"):
+            raise ValueError("checkpoint.source must be 'create', 'wizard' or 'template'")
         return self
 
 
@@ -1259,6 +1282,8 @@ class ViewResponse(BaseModel):
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
     context_model_name: Optional[str] = Field(None, alias="contextModelName")
+    #: The template version this view's layers last matched.
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     workspace_id: str = Field(alias="workspaceId")
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")

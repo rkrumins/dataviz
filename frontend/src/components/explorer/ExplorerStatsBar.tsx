@@ -101,7 +101,8 @@ interface StatTileProps {
   highlight?: boolean
 }
 
-function StatTile({ icon: Icon, iconClass, label, value, loading, onClick, highlight }: StatTileProps) {
+/** One tile of a summary banner — the Templates page's uses it too. */
+export function StatTile({ icon: Icon, iconClass, label, value, loading, onClick, highlight }: StatTileProps) {
   const display = loading ? '—' : value.toLocaleString()
   const content = (
     <>

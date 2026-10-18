@@ -94,6 +94,7 @@ import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
+import { TemplateUpdateChip } from '@/components/templates/TemplateUpdateChip'
 import { invalidateViewVersions, useViewVersionStatus } from '@/hooks/useViewVersions'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
@@ -470,6 +471,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 </span>
                             </HoverTip>
                         ))}
+                        <TemplateUpdateChip view={view} canEdit={canEditDetails} />
                     </div>
 
                     {/* 2 — where it lives. A KIND, a PLACE and a SOURCE are

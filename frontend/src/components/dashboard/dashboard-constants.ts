@@ -74,11 +74,6 @@ export const LAYOUT_COLORS: Record<string, string> = {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Blueprint / Template Categories
-// ───────────────────────────────────────────────────────────────────────────────
-export const TEMPLATE_CATEGORIES = ['All', 'Data Lineage', 'Data Governance', 'Data Quality', 'Business Glossary', 'Impact Analysis']
-
-// ───────────────────────────────────────────────────────────────────────────────
 // Utility: Compact Number Formatting
 // ───────────────────────────────────────────────────────────────────────────────
 /** Format large numbers compactly: 263982 → "264k", 1234567 → "1.2M" */

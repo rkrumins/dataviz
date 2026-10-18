@@ -270,12 +270,11 @@ Routes the explorer marks **deprecated** still answer, but build nothing new on 
 
 - Everything is under `/api/v1`.
 - The data plane is scoped to a workspace: `/api/v1/{ws_id}/graph/…`,
-  `/api/v1/{ws_id}/versioning/…`, `/api/v1/{ws_id}/assets/…`,
-  `/api/v1/{ws_id}/context-models/…`. Add `?dataSourceId=ds_…` to choose a data source —
+  `/api/v1/{ws_id}/versioning/…`, `/api/v1/{ws_id}/assets/…`. Add `?dataSourceId=ds_…` to choose a data source —
   without it, the workspace's primary data source answers — and `?branchId=…` to read or
   write a draft instead of the published graph.
-- Views are not workspace-scoped: `/api/v1/views/…`. Administration is under
-  `/api/v1/admin/…`.
+- Views and layout templates are not workspace-scoped: `/api/v1/views/…`,
+  `/api/v1/layout-templates/…`. Administration is under `/api/v1/admin/…`.
 - Ids carry a prefix: workspaces `ws_…`, data sources `ds_…`, views `view_…`.
   `GET /api/v1/admin/workspaces` lists the workspaces you belong to, each with its
   `dataSources`:
@@ -528,6 +527,35 @@ settings — and is checked against the target's graph before anything is writte
 To update a view that already exists, use `"action": "update"` and `"target": {"viewId": …}`.
 The actions, merge strategy, staging into a draft and the limits are in
 [View portability](/docs/feature-view-portability).
+
+### Move a layout template between environments
+
+**Needs:** a password sign-in in both environments — API keys can't call the template routes.
+Read access to the template; in the target, nothing for a personal template,
+`workspace:view:create` in the workspace for a workspace one, `system:templates:manage` for an
+organization one.
+
+A template's layout travels in the same file the library's **Export as file** saves, so the result
+can also be imported from **Templates → Import**.
+
+1. In the source environment, save the template as a file:
+
+   ```bash
+   api GET "/api/v1/layout-templates/$TID" | jq '{format: "layout-template", formatVersion: 1,
+       exportedAt: (now | todate), template: {name, description, category, layers}}' \
+     > finance-flow.layout-template.json
+   ```
+
+2. Sign in to the target environment, and create it there — here as a personal template:
+
+   ```bash
+   jq '.template + {visibility: "private"}' finance-flow.layout-template.json |
+     api POST /api/v1/layout-templates -d @- | jq '{id, version}'
+   ```
+
+   It starts at version 1. To update one you made before instead, send the layers to
+   `PUT /api/v1/layout-templates/{id}` with a `changeNote`, and `"notifyUsers": true` to tell the
+   people whose views were built from an older version.
 
 ### Find views by when they changed and who changed them
 

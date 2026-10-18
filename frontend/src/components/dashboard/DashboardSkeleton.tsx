@@ -43,8 +43,8 @@ export function DashboardSkeleton() {
         </div>
 
         {/* Workspace card grid (each card self-pulses) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 wide:grid-cols-4 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
+        <div className="grid grid-cols-1 md:grid-cols-2 wide:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
             <WorkspaceCardSkeleton key={i} />
           ))}
         </div>

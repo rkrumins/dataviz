@@ -19,6 +19,8 @@ const createViewMock = vi.fn()
 const updateViewMock = vi.fn()
 const updateViewLayoutMock = vi.fn()
 const navigateMock = vi.fn()
+// The layout template new views in ws1 start from, when a case gives it one.
+const wizardWs = vi.hoisted(() => ({ defaultLayoutTemplateId: null as string | null }))
 
 // The redirect to the new view is the whole point of the success step — assert it
 // directly rather than trusting the router.
@@ -47,7 +49,10 @@ vi.mock('@/store/workspaces', () => {
     activeWorkspaceId: null,
     activeDataSourceId: null,
     workspaces: [
-      { id: 'ws1', name: 'Workspace 1', dataSources: [{ id: 'ds1', label: 'DS1', isPrimary: true, ontologyId: 'onto1' }] },
+      {
+        id: 'ws1', name: 'Workspace 1', dataSources: [{ id: 'ds1', label: 'DS1', isPrimary: true, ontologyId: 'onto1' }],
+        get defaultLayoutTemplateId() { return wizardWs.defaultLayoutTemplateId },
+      },
     ],
     loadWorkspaces: vi.fn().mockResolvedValue(undefined),
   }
@@ -92,9 +97,23 @@ vi.mock('../steps/BasicsStep', () => ({
 // The real step pins entityScope when a rule-driven Quick Start is applied; the
 // stub exposes that one gesture so the pin can be traced to the layout write.
 vi.mock('../steps/LayoutStep', () => ({
-  LayoutStep: ({ updateFormData }: { updateFormData: (u: Record<string, unknown>) => void }) => (
+  LayoutStep: ({ updateFormData, initialTemplateId, onInitialTemplateApplied, workspaceDefault }: {
+    updateFormData: (u: Record<string, unknown>) => void
+    initialTemplateId?: string
+    onInitialTemplateApplied?: () => void
+    workspaceDefault?: { templateId: string; workspaceName: string }
+  }) => (
     <div data-testid="layout-step">
+      <span data-testid="layout-initial-template">{initialTemplateId ?? ''}</span>
+      <span data-testid="layout-workspace-default">
+        {workspaceDefault ? `${workspaceDefault.templateId} in ${workspaceDefault.workspaceName}` : ''}
+      </span>
+      <button onClick={() => onInitialTemplateApplied?.()}>stub-initial-template-applied</button>
       <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
+      <button onClick={() => updateFormData({
+        contextModelId: 'tpl_1', contextModelVersion: 3, layoutTemplateId: 'tpl_1',
+        layers: [{ id: 'fresh', name: 'Bronze', entityTypes: [], order: 0 }],
+      })}>stub-apply-library-template</button>
     </div>
   ),
 }))
@@ -433,6 +452,88 @@ describe('ViewWizard — no hardcoded root types in the saved config', () => {
 
     await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
     expect(createViewMock.mock.calls[0][0].config.content).not.toHaveProperty('rootEntityTypes')
+  })
+})
+
+describe('ViewWizard — started from a layout template', () => {
+  it('hands the template to the Layout step and records it on the new view', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+            initialTemplateId="tpl_1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('layout-step')
+    expect(screen.getByTestId('layout-initial-template')).toHaveTextContent('tpl_1')
+    fireEvent.click(screen.getByRole('button', { name: 'stub-apply-library-template' }))
+    for (const step of ['assignment-step', 'entities-step', 'preview-step']) {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId(step)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
+    expect(createViewMock.mock.calls[0][0].contextModelId).toBe('tpl_1')
+    expect(createViewMock.mock.calls[0][0].contextModelVersion).toBe(3)
+  })
+
+  it("starts a new view from its workspace's default, once — \"Use template\" wins over it", async () => {
+    wizardWs.defaultLayoutTemplateId = 'tpl_default'
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = (initialTemplateId?: string) => (
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+            initialTemplateId={initialTemplateId}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+    const toLayout = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId('basics-step')
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId('layout-step')
+    }
+
+    const { unmount } = render(view())
+    await toLayout()
+    expect(screen.getByTestId('layout-initial-template')).toHaveTextContent('tpl_default')
+    expect(screen.getByTestId('layout-workspace-default')).toHaveTextContent('tpl_default in Workspace 1')
+    fireEvent.click(screen.getByRole('button', { name: 'stub-initial-template-applied' }))
+    expect(screen.getByTestId('layout-initial-template')).toBeEmptyDOMElement()
+    unmount()
+
+    render(view('tpl_1'))
+    await toLayout()
+    expect(screen.getByTestId('layout-initial-template')).toHaveTextContent('tpl_1')
+    expect(screen.getByTestId('layout-workspace-default')).toBeEmptyDOMElement()
+    wizardWs.defaultLayoutTemplateId = null
   })
 })
 

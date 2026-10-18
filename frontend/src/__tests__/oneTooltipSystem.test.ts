@@ -46,6 +46,7 @@ const SCOPE = [
   'components/views/ViewPageHeader.tsx',
   'components/views/ViewUsageBadge.tsx',
   'components/views/ViewBuiltOn.tsx',
+  'components/templates',
   'components/views/EditDetailsPanel.tsx',
   'components/canvas/context-view/ContextViewHeader.tsx',
   'components/canvas/context-view/header',

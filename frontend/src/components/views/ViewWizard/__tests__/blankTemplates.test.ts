@@ -41,10 +41,10 @@ function makeOntology(over: Partial<OntologyDefinitionResponse> = {}): OntologyD
 }
 
 describe('blankQuickStartTemplates', () => {
-  it('offers the ontology, three scaffolds, and an empty template', () => {
+  it('offers the ontology and an empty template — the generic shapes are built-ins in the library', () => {
     const schema = ontologyToWorkspaceSchema(makeOntology())
     const templates = blankQuickStartTemplates(schema)
-    expect(templates.map(t => t.id)).toEqual(['ontology', 'blank-tpl-1', 'blank-tpl-2', 'blank-tpl-3', 'empty'])
+    expect(templates.map(t => t.id)).toEqual(['ontology', 'empty'])
   })
 
   it('marks only the ontology template as recommended', () => {
@@ -83,16 +83,5 @@ describe('blankQuickStartTemplates', () => {
     const schema = ontologyToWorkspaceSchema(makeOntology())
     const empty = blankQuickStartTemplates(schema).find(t => t.id === 'empty')!
     expect(empty.layers).toEqual([])
-  })
-
-  it('scaffold templates carry the expected layer names', () => {
-    const schema = ontologyToWorkspaceSchema(makeOntology())
-    const templates = blankQuickStartTemplates(schema)
-    const byId = (id: string) => templates.find(t => t.id === id)!
-    expect(byId('blank-tpl-1').layers.map(l => l.name)).toEqual(['Sources', 'Transformations', 'Targets'])
-    expect(byId('blank-tpl-2').layers.map(l => l.name)).toEqual(['Bronze', 'Silver', 'Gold'])
-    expect(byId('blank-tpl-3').layers.map(l => l.name)).toEqual(['Producers', 'Pipelines', 'Consumers'])
-    // Scaffolds start with no entity types assigned.
-    expect(byId('blank-tpl-1').layers.every(l => l.entityTypes.length === 0)).toBe(true)
   })
 })

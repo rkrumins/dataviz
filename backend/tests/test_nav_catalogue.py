@@ -236,6 +236,7 @@ async def test_me_nav_returns_catalogue(test_client: AsyncClient):
     assert "sidebar" in body and "adminSections" in body
     # Spot-check the round-trip of each spec kind.
     assert body["sidebar"]["dashboard"]["spec"]["kind"] == "always"
+    assert body["sidebar"]["templates"]["spec"]["kind"] == "always"
     assert body["adminSections"]["groups"]["spec"] == {
         "kind": "perm",
         "perm": "system:groups:manage",

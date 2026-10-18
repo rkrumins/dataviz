@@ -1,19 +1,19 @@
 /**
- * Number formatting for the Analytics dashboard.
+ * Number formatting shared by Analytics, the Explorer, ingestion and the
+ * estate overviews (Dashboard, Workspaces, Administration → Global Overview).
  *
- * Scoped to analytics on purpose. A `compactNum` already exists in four places
- * (AdminInfrastructure/meta.ts, AdminOverview, AdminTelemetry, WorkspaceCard),
- * each rounding slightly differently. Consolidating them means touching six
- * unrelated files, which is a separate change; importing one admin panel's
- * internals into a top-level page is the wrong kind of coupling. This module
- * is the analytics section's own contract.
+ * Those three overviews quote the same totals, so they format them here, once:
+ * each used to carry its own `compactNum` and the same 1,500 nodes read "1.5k",
+ * "2k" and "1,500" on three screens. Other local copies remain
+ * (AdminInfrastructure/meta.ts, AdminTelemetry, WorkspaceCard and others).
  */
 
 /** `1,284` → `1.3k`, `4,200,000` → `4.2M`. `null` renders as an em dash. */
 export function compact(value: number | null | undefined): string {
     if (value === null || value === undefined || Number.isNaN(value)) return '—'
     const abs = Math.abs(value)
-    if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+    // 999,500 and up rounds to a thousand thousands: that is "1.0M", not "1000k".
+    if (abs >= 999_500) return `${(value / 1_000_000).toFixed(1)}M`
     if (abs >= 10_000) return `${Math.round(value / 1_000)}k`
     if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`
     return String(Math.round(value))

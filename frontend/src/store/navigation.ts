@@ -15,11 +15,12 @@
  * Returns `null` for routes that belong to no primary section (account pages,
  * docs, guide) so nothing is highlighted — rather than the wrong thing.
  */
-export type NavigationTab = 'dashboard' | 'explore' | 'workspaces' | 'ingestion' | 'schema' | 'analytics' | 'admin'
+export type NavigationTab = 'dashboard' | 'explore' | 'templates' | 'workspaces' | 'ingestion' | 'schema' | 'analytics' | 'admin'
 
 export function tabForPath(pathname: string): NavigationTab | null {
     if (pathname.startsWith('/dashboard')) return 'dashboard'
     if (pathname.startsWith('/explorer') || pathname.startsWith('/views')) return 'explore'
+    if (pathname.startsWith('/templates')) return 'templates'
     // Data-source ("connection") detail pages belong to Ingestion — their own
     // back link points at /ingestion.
     if (pathname.startsWith('/ingestion') || pathname.startsWith('/datasources')) return 'ingestion'

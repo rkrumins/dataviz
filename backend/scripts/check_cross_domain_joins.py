@@ -57,6 +57,8 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "OntologySourceMappingORM": "ontology",
     # visualization
     "ContextModelORM": "visualization",
+    "LayoutTemplateVersionORM": "visualization",
+    "LayoutTemplateFavouriteORM": "visualization",
     "ViewORM": "visualization",
     "ViewFavouriteORM": "visualization",
     "SavedViewFilterORM": "visualization",

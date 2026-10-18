@@ -66,7 +66,7 @@ sidebar are **Getting started** (your checklist), **User Guide** and
 | The theme button | Cycles between light, dark and your system's theme |
 | The question mark (**Help**, or press `?`) | Searches this guide and the documentation without leaving the page |
 | The cog (**Administration**) | The admin console — Super Admins and Org Admins only |
-| Your avatar | **Account settings**, **My access**, **Identities**, **Reduce motion** and **Sign Out** |
+| Your avatar | **Account settings**, **My access**, **Identities**, **API keys**, **Preferences**, **Reduce motion** and **Sign Out** |
 
 If you can invite people, there's one more bell, **Invite activity**, showing who
 has joined through your invite links.

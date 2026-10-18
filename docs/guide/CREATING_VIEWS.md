@@ -87,6 +87,15 @@ starting points:
 - **Import a view** — bring in a View exported from another environment. See
   [Moving views between environments](/guide/import-export#moving-views-between-environments).
 
+To start from a [layout template](#layout-templates) instead, choose **Use template** on its card
+in **Templates**, in its details, or in the Dashboard's **Layout templates**. The wizard opens with
+the template's layers already applied on the **Layout** step.
+
+In a workspace whose admin chose a [default template](#a-workspaces-default-template), a new View
+starts from it: the **Layout** step says **New views in Finance start from this layout**, and
+**Start empty instead** clears it. Choosing another template, or starting empty, sticks however
+often you come back to the step.
+
 ## Step 2 — Basics: name it and choose who can see it
 
 1. Type a **View Name**. A name that says what the View shows (*Finance data
@@ -122,20 +131,26 @@ question your View answers:
 | Explore how things connect, without a fixed structure | **Graph** | Entities are positioned freely (a force-directed or DAG layout), so relationships stand out |
 | Browse what contains what — domain, schema, table, column | **Hierarchy** | Entities are nested inside their parents as a tree you expand and collapse |
 
-![The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with Quick Start Templates underneath](/docs-assets/guide/creating-views-layout-step.png)
+![The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with the starting templates underneath](/docs-assets/guide/creating-views-layout-step.png)
 
 If you choose **Context View**, the step continues with its layers — the
 columns of the canvas:
 
-1. Under **Choose a starting template**, pick a **Quick Start Templates** card.
-   **One layer per top-level type** (when offered) gives each top-level entity
-   type its own column; **From your schema** gives one column per level of the
-   semantic layer.
-2. Adjust the layers under **Configure Layers**: open a layer to change its
+1. Under **Choose a starting template**, pick a starting arrangement.
+   **Suggested for your data** offers **One layer per top-level type** (when
+   offered), which gives each top-level entity type its own column, and **From
+   your schema**, one column per level of the semantic layer. The **Template
+   library** below offers every [layout template](#layout-templates) you can
+   use, with tabs and a search; each card says how well it fits this data —
+   **Fits your data**, or **Matches 3 of 4 layers**.
+2. A library template's entity types are matched to this data's semantic layer.
+   A note above the layers names any it doesn't have: those layers start empty,
+   so pick types for them, or place entities in them by hand on the next step.
+3. Adjust the layers under **Configure Layers**: open a layer to change its
    **Name**, **Color**, **Description** and **Entity Types**, drag the handle
    to reorder, or choose **Add Layer**. **Switch template** starts over from
-   another template.
-3. Choose **Next**. The **Assignments** step opens.
+   another template; **Save as template** keeps these layers for reuse.
+4. Choose **Next**. The **Assignments** step opens.
 
 For **Graph** or **Hierarchy**, **Next** goes straight to **Entities**.
 
@@ -222,6 +237,132 @@ one.
 
 Sharing, versions and housekeeping are covered in
 [Managing & Sharing Views](/guide/managing-views).
+
+## Layout templates
+
+A **layout template** is a Context View's layer arrangement, kept for reuse: the layers' names,
+order, colours, icons and descriptions, the entity types each column collects, and any rules and
+groups. It never holds the entities a View placed. **Templates** in the sidebar is the library;
+its tabs are **All**, **Favorites**, **Mine**, **Shared with me**, **Workspace**, **Organization**
+and **Built-in** — and, for template managers, **Requests**.
+
+| Template | Who can use it | Who can change it |
+| --- | --- | --- |
+| **Built-in** | Everyone | Nobody: it ships with {brand} and each upgrade refreshes it. Duplicate it to make your own. Template managers can hide it for everyone. |
+| **Organization** | Everyone signed in | People with the **Manage templates** permission |
+| **Workspace** | Everyone in that workspace, and anyone it is shared with | Its owner and the workspace's editors; its owner or a workspace admin decides who can use it |
+| **Personal** | You, and the people and teams you share it with | You, and anyone you share it with as an editor |
+
+> **Note:** If **Templates** isn't in your sidebar, an administrator has turned layout templates
+> off ([Feature Switches](/guide/feature-switches#view-modes)). Views built from a template keep
+> their layers either way.
+
+### Find the right one
+
+- The banner at the top sums up the library, as **Explore** and **Workspaces** do: how many
+  **Templates** you can use, the **Views Using Them**, how many were **Updated This Week**, **Your
+  Favorites** and, for template managers, the requests **Awaiting Your Decision**. Select one to see
+  what it counts — **Views Using Them**, for instance, sorts the library by **Most used**.
+- **Featured** leads the **All** tab: the templates your template managers recommend. **Recently
+  used** follows, with the templates you last built Views from — **Use** starts another.
+- The heart on a card or in a template's details makes it a favorite, kept under **Favorites**.
+  Favorites are yours alone.
+- **Fit for** shows, on every card, how many of a template's layers find their entity types in a
+  workspace's data — a ring reading 100 matches all of them — starting with the active workspace.
+  Sort by **Best match** to put the closest fits first, or by **Recently used by me**.
+- From the keyboard: `/` searches, `n` starts a new template, `i`
+  imports one. Once a card has focus, the arrow keys move between cards, `Enter` opens
+  one, `u` starts a View from it and `f` makes it a favorite. `?` lists
+  them all.
+
+### Make a template
+
+1. On **Templates**, choose **New template**. The studio opens on **Start**: begin **Blank**, from
+   **Another template**, or from **One of my views**.
+2. **Basics** — give it a name and a description people will search and skim. A **Category**
+   groups it in the library.
+3. **Layers** — open a layer to change its **Name**, **Description**, **Entity types**, **Colour**
+   and **Icon**, drag the handle (or press `Alt`+`↑` / `↓`) to reorder,
+   or choose **Add layer**. Entity types are suggestions for any semantic layer: the types of the
+   ones you can read are offered, and any other name is accepted. **Preview with real data** fills
+   each layer with a few real entities from a workspace you can read, placed the way a View built
+   from the template would place them, and names the types that data doesn't have.
+4. **Audience** — **Personal**, **Workspace** (then choose which) or **Organization**. A choice
+   you can't make stays visible and says why.
+5. **Review**, then **Create template**. From there you can **Share with people or teams**, or
+   **Use it for a new view**.
+
+To keep the layers of a View you already have, choose **Save layers as a template…** under **This
+view** in the View's import and export menu, **Save layers as template…** in its Explorer card's
+**⋯** menu, or **Save as template** on the wizard's **Layout** step.
+
+### Share a template with your team
+
+Open a template's **⋯** menu and choose **Share**. Choose who can use it — **Personal** or a
+**Workspace** — and add people or groups as a **Viewer** (uses it) or an **Editor** (also changes
+it). A group is how a team gets its own templates: everyone in it finds the template under
+**Shared with me**, and is told in their inbox. Organization templates are everyone's already, so
+they take no shares.
+
+### Edit, duplicate, hide or delete
+
+- **Edit** reopens the studio. Views already built from a template keep their own layers: changing
+  the template never changes them.
+- **Duplicate** makes a personal copy you can change — the way to adapt a built-in.
+- **Hide for everyone** (template managers, built-ins only) takes a built-in out of everyone's
+  library; **Show hidden built-ins** finds it again.
+- **Delete** says how many Views were built from the template and who loses it; **Undo** brings it
+  back, shares and all, for a few seconds afterwards.
+- **Export as file** saves the layout as `<name>.layout-template.json` — its name, description,
+  category and layers, never who could use it, its shares or its history. **Import** on
+  **Templates** reads such a file, from this library or another installation's: it shows the
+  layers and how they fit your data, renames one your library already has *(imported)*, and asks
+  who it is for.
+
+A View started from a template says so in its **Details**: **Layers started from** names the
+template, for anyone who can open it.
+
+### Versions, and updates to the Views built from them
+
+Changing a template's layers makes a new version; renaming it or changing its description does
+not. On **Review**, say **What changed?** and choose whether to **Tell the people whose views were
+built from it** — they hear about it in their inbox. A template's details list its **Versions**
+with their notes; **Compare with current** shows what changed since, and **Restore** (for its
+editors) makes an old version's layers the newest version.
+
+A View keeps its own copy of the layers, so a new version never changes it by itself. Instead,
+people who can edit the View see **v3 available** on its header and in its **Details**.
+**Review update** lists each layer as **Added**, **Updated**, **Removed** or **Conflict**:
+
+- What only the template changed is taken; what only you changed is kept.
+- Where both changed the same thing, yours is kept unless you choose the template's.
+- A layer the template dropped is removed only if nothing is placed in it and you never edited it.
+
+**Apply** saves the View's layers as a new version of the View (*Template update applied*), with
+**Undo**. **Keep my layers** marks the View as up to date and changes nothing.
+
+### Offer a template to everyone
+
+To make a Personal or Workspace template an Organization one, choose **Offer to everyone…** in its
+**⋯** menu — anyone who may change who can use it can ask — and say why. Template managers hear
+about it and can read the template until one of them answers, in its details or on the
+**Requests** tab: **Approve** makes it an Organization template, which template managers look
+after from then on; **Decline** leaves it as it was. Either way, a note is sent to whoever asked.
+**Withdraw the request** takes it back.
+
+### Featured templates
+
+Template managers choose **Feature it** on a built-in or an Organization template to put it on the
+library's **Featured** shelf and first among the Dashboard's templates. **Stop featuring** takes it
+off.
+
+### A workspace's default template
+
+A workspace admin chooses **Workspace default…** on a template every member of a workspace can use
+— a built-in, an Organization template or that workspace's own — and switches it on for the
+workspace. New Views there start from it (see [Other ways to start](#other-ways-to-start)),
+and its card reads **Default · Finance**. A workspace has one default; choosing another replaces
+it, and switching it off clears it.
 
 ## Builder's checklist
 

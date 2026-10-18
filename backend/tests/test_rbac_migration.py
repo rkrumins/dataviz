@@ -31,6 +31,9 @@ _VIEW_PUBLISH_MIGRATION_PATH = _VERSIONS_DIR / "20260731_1300_view_publish.py"
 # Analytics added system:analytics:read — the dedicated platform privilege for
 # the Analytics section. Same pattern again.
 _ANALYTICS_PERM_MIGRATION_PATH = _VERSIONS_DIR / "20260823_1200_analytics_perm.py"
+# Layout templates added system:templates:manage — curating organization
+# templates and hiding built-ins. Seeded by the layout-templates revision.
+_TEMPLATES_MIGRATION_PATH = _VERSIONS_DIR / "20261018_1200_layout_templates.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -239,6 +242,31 @@ def test_analytics_permission_reaches_an_existing_database():
         f"rbac_seed grants {sorted(seed_grants)} but the migration grants "
         f"{sorted(migration_grants)}"
     )
+
+
+def test_templates_permission_reaches_an_existing_database():
+    """``system:templates:manage`` is seeded by the migration AND ``rbac_seed``,
+    with the same grants — fresh installs and migrated databases must agree on
+    who curates the organization's templates. ``org_admin`` needs its row:
+    ``system:org-admin`` passes workspace checks only, never a system one."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "system:templates:manage"
+    assert _TEMPLATES_MIGRATION_PATH.exists(), f"missing migration: {_TEMPLATES_MIGRATION_PATH}"
+    mod = _load_migration(_TEMPLATES_MIGRATION_PATH, "_layout_templates_migration")
+
+    assert mod._PERMISSION == perm
+    migration_grants = set(mod._ROLE_PERMISSIONS)
+    assert migration_grants == {("org_admin", perm), ("super_admin", perm)}
+
+    assert perm in {p["id"] for p in rbac_seed.PERMISSIONS}
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    assert seed_grants == migration_grants
+    # "Reset to default" re-applies these bundles; without the entry a reset
+    # would quietly take curation away from both roles.
+    for role, _ in migration_grants:
+        assert perm in SYSTEM_ROLE_DEFAULTS[role].permissions, role
 
 
 def test_the_analytics_permission_is_offered_to_the_client():

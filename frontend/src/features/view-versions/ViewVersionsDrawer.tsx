@@ -15,8 +15,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
-  ArrowLeft, ArrowUpFromLine, Camera, FileDown, FileUp, Flag, GitCompareArrows, History, Loader2, RotateCcw,
-  Save, Sparkles, Wand2, X,
+  ArrowLeft, ArrowUpFromLine, Camera, FileDown, FileUp, Flag, GitCompareArrows, History, LayoutTemplate, Loader2,
+  RotateCcw, Save, Sparkles, Wand2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -37,7 +37,7 @@ import { VersionDiffView } from './VersionDiffView'
 
 const SOURCE_ICON: Record<ViewVersionSource, typeof Flag> = {
   baseline: Flag, create: Sparkles, wizard: Wand2, import: FileDown, restore: RotateCcw,
-  promote: ArrowUpFromLine, export: FileUp, manual: Save, snapshot: Camera,
+  promote: ArrowUpFromLine, export: FileUp, manual: Save, snapshot: Camera, template: LayoutTemplate,
 }
 
 type Comparison = { from: number; to: number | 'working'; label: string }
