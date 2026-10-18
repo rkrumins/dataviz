@@ -649,6 +649,9 @@ _EVENT_META.update({
     "workspace.data_source.restored": ("info", _envelope_summary("Restored data source {}")),
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
+    "workspace.data_source.move_incomplete": (
+        "warning", _envelope_summary("Moving {} left its version history in the other workspace"),
+    ),
     "workspace.versioning.enabled": ("info", _envelope_summary("Turned on version control for {}")),
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
@@ -706,6 +709,7 @@ LABELS: dict[str, str] = {
     "workspace.data_source.restored": "Restored a data source",
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
+    "workspace.data_source.move_incomplete": "A data source move did not finish",
     "workspace.datasource.moved": "Moved a data source",
     "workspace.versioning.enabled": "Turned on version control",
     "workspace.versioning.retried": "Retried version control",

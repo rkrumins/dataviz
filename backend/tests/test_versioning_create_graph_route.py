@@ -28,7 +28,7 @@ _DS = {"ds1": SimpleNamespace(id="ds1", workspace_id="ws1", graph_name="ds1_grap
 
 @pytest.fixture(autouse=True)
 def _no_key(monkeypatch):
-    async def get_ds(session, ds_id):
+    async def get_ds(session, ds_id, **_kw):
         return _DS.get(ds_id)
 
     async def no_key(request):

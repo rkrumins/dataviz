@@ -9,6 +9,7 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -854,7 +855,9 @@ async def move_data_source(
     workspace; the target is checked below. Moving a source INTO a workspace you
     don't administer would otherwise be a way to plant data in it.
     """
-    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    # Held until the move commits: a second move, or an enable of version control, waits here
+    # and then finds the source gone from this workspace.
+    ds = await data_source_repo.get_data_source_orm(session, ds_id, lock="update")
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
 
@@ -907,6 +910,7 @@ async def move_data_source(
             )
 
     source_ws_name = (await workspace_repo.get_workspace_orm(session, workspace_id)).name
+    target_fields = recorder.data_source_target(ds)   # read now: a failed commit expires the row
 
     # The versioned graph and its forks move FIRST, so a refusal (a job still running: 409
     # job_active) or an unreachable store changes nothing. The other order would leave the
@@ -915,7 +919,7 @@ async def move_data_source(
     from backend.app.services.versioning.service import GraphVersioningService
     svc = GraphVersioningService()
     try:
-        await svc.move_graph_workspace(ds_id, target_id)
+        await svc.move_graph_workspace(ds_id, target_id, from_workspace_id=workspace_id)
     except HTTP_MAPPED:
         raise
     except Exception:
@@ -950,14 +954,35 @@ async def move_data_source(
         )
         # Committed here, not at request end, so a failure can still put the graph back.
         await session.commit()
-    except Exception:
-        # No two-phase commit across the stores: move the graph back, best effort.
+    except BaseException as exc:
+        # No two-phase commit across the stores: move the graph back. Shielded, and on a
+        # cancellation too (the request's time ran out, the client went away).
+        detail = ("The data source couldn't be moved right now. Nothing has been changed. "
+                  "Try again shortly.")
         try:
-            await svc.move_graph_workspace(ds_id, workspace_id)
+            await asyncio.shield(svc.move_graph_workspace(
+                ds_id, workspace_id, from_workspace_id=target_id))
         except Exception:
             logger.exception("data source %s stayed in %s but its versioned graph could not be "
                              "moved back from %s", ds_id, workspace_id, target_id)
-        raise
+            detail = (f"The data source is still in '{source_ws_name}', but its version history "
+                      f"could not be moved back from '{target.name}'. Move the data source to "
+                      f"'{target.name}' again to finish the move.")
+            try:
+                await session.rollback()
+                await recorder.record_for_request(
+                    session, "workspace.data_source.move_incomplete", **target_fields,
+                    details={"from_workspace_id": workspace_id, "to_workspace_id": target_id},
+                    best_effort=True,
+                )
+                await session.commit()
+            except Exception:
+                logger.exception("could not record the incomplete move of data source %s", ds_id)
+        if not isinstance(exc, Exception):
+            raise
+        logger.exception("moving data source %s from %s to %s failed", ds_id, workspace_id,
+                         target_id)
+        raise HTTPException(status_code=503, detail=detail) from exc
 
     return await data_source_repo.get_data_source(session, ds_id)
 

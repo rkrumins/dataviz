@@ -18,16 +18,28 @@ Soft-deleted views count, because restoring one would recreate exactly that.
 The versioned graph and its forks move with the source, before the management row
 does. The graphver cases need a live Postgres (``GRAPHVER_E2E=1``); without it the
 move finds no versioned graph.
+
+A move races nothing that stamps a workspace: a fork, an import, an export or a publish
+started in the old workspace waits for the move's graph lock and is then refused, a second
+move finds the graph already gone from the workspace it moves from, and enabling version
+control waits for the data source's row, which the move holds. A move whose graph could
+not be put back says so, and how to finish it.
 """
+import asyncio
+import json
 import os
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.models import OutboxEventORM, WorkspaceDataSourceORM
 from backend.app.db.repositories import view_repo
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.models import JobORM
+from backend.app.services.versioning.errors import JobActive
+from backend.app.services.versioning.import_export.service import ImportExportService
+from backend.app.services.versioning.models import GraphORM, JobORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.management import ViewCreateRequest
 
@@ -39,7 +51,7 @@ e2e = pytest.mark.skipif(not _E2E, reason="set GRAPHVER_E2E=1 + a live Postgres"
 async def _graphver(monkeypatch):
     """The version store: a live one under GRAPHVER_E2E, otherwise one with no graphs."""
     if not _E2E:
-        async def _no_graph(_self, _ds, _ws):
+        async def _no_graph(_self, _ds, _ws, **_kw):
             return []
         monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _no_graph)
         yield
@@ -240,7 +252,7 @@ async def test_a_version_store_it_cannot_reach_refuses_the_move(
 ):
     """The graph moves first. If it cannot, nothing moves: no source in B with its
     history stranded in A."""
-    async def _down(_self, _ds, _ws):
+    async def _down(_self, _ds, _ws, **_kw):
         raise OSError("connection refused")
     monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _down)
 
@@ -259,7 +271,7 @@ async def test_a_move_that_fails_to_commit_puts_the_graph_back(
     """The graph has moved when the management commit fails: it is moved back."""
     calls = []
 
-    async def _record(_self, ds_id, ws_id):
+    async def _record(_self, ds_id, ws_id, **_kw):
         calls.append((ds_id, ws_id))
         return ["g_moved"]
     monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
@@ -279,8 +291,121 @@ async def test_a_move_that_fails_to_commit_puts_the_graph_back(
     monkeypatch.setattr(db_session, "commit", _fail_once)
 
     resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 500
+    assert resp.status_code == 503, resp.text
+    assert "Nothing has been changed" in resp.json()["detail"]
     assert calls == [(ds, dst), (ds, src)]
+
+
+async def test_a_move_cancelled_after_the_graph_moved_puts_it_back(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    """A request cancelled once the graph has moved (its time ran out, the client went away)
+    still moves the graph back: the source stays in A, so must its history."""
+    calls = []
+
+    async def _record(_self, ds_id, ws_id, **_kw):
+        calls.append((ds_id, ws_id))
+        return ["g_moved"]
+    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
+
+    src = await _workspace(test_client, "Cancelled")
+    dst = await _workspace(test_client, "Cancelled Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Cut Off"))
+
+    commit = db_session.commit
+    cancelled = []
+
+    async def _cancel_once():
+        if not cancelled:
+            cancelled.append(True)
+            raise asyncio.CancelledError()
+        await commit()
+    monkeypatch.setattr(db_session, "commit", _cancel_once)
+
+    await _move(test_client, src, ds, dst)          # the middleware answers for the cancelled handler
+    assert calls == [(ds, dst), (ds, src)]
+
+
+async def test_a_graph_that_cannot_be_moved_back_is_recorded_and_the_answer_says_how_to_finish(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    """The commit fails and the move back is refused (a job started on the graph in B): the
+    source is in A and its history in B. The answer names both and how to finish the move, and
+    the activity log keeps a record of it."""
+    async def _one_way(_self, ds_id, ws_id, **_kw):
+        if ws_id == src:
+            raise JobActive("job_b", "job job_b is still running")
+        return ["g_moved"]
+    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _one_way)
+
+    src = await _workspace(test_client, "Half Moved")
+    dst = await _workspace(test_client, "Half Moved Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Split"))
+
+    commit = db_session.commit
+    failed = []
+
+    async def _fail_once():
+        if not failed:
+            failed.append(True)
+            raise RuntimeError("commit lost")
+        await commit()
+    monkeypatch.setattr(db_session, "commit", _fail_once)
+
+    resp = await _move(test_client, src, ds, dst)
+    assert resp.status_code == 503, resp.text
+    detail = resp.json()["detail"]
+    assert "Half Moved" in detail and "Half Moved Target" in detail
+    assert "again" in detail
+    assert await _in_workspace(test_client, src, ds)
+
+    rows = (await db_session.execute(select(OutboxEventORM).where(
+        OutboxEventORM.event_type == "workspace.data_source.move_incomplete"))).scalars().all()
+    assert len(rows) == 1
+    payload = json.loads(rows[0].payload)
+    assert payload["data_source_id"] == ds and payload["workspace_id"] == src
+    assert payload["details"] == {"from_workspace_id": src, "to_workspace_id": dst}
+
+
+def _row_locks(session: AsyncSession) -> list:
+    """How each read of a data source row on ``session`` locks it: "update", "share" or None."""
+    seen = []
+
+    def _on(state):
+        if state.is_select and any(d.get("entity") is WorkspaceDataSourceORM
+                                   for d in state.statement.column_descriptions):
+            arg = state.statement._for_update_arg
+            seen.append(None if arg is None else "share" if arg.read else "update")
+    event.listen(session.sync_session, "do_orm_execute", _on)
+    return seen
+
+
+async def test_a_move_holds_the_data_source_row_from_its_first_read(
+    test_client: AsyncClient, db_session: AsyncSession,
+):
+    """A second move, or an enable of version control, waits for this one on the row, and then
+    finds the source gone from the workspace it was asked in."""
+    src = await _workspace(test_client, "Row Held")
+    dst = await _workspace(test_client, "Row Held Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Held"))
+
+    locks = _row_locks(db_session)
+    assert (await _move(test_client, src, ds, dst)).status_code == 200
+    assert locks[0] == "update"
+
+
+async def test_enabling_version_control_holds_the_data_source_row(
+    test_client: AsyncClient, db_session: AsyncSession,
+):
+    """Enable reads the source FOR SHARE and keeps it until its graph and job are committed: a
+    move waits for them and moves them along, or wins and the enable finds no source here."""
+    from backend.app.api.v1.endpoints.graph import _data_source_in_workspace
+    ws = await _workspace(test_client, "Enabling")
+    ds = await _attach(test_client, ws, await _catalog_item(test_client, "To Version"))
+
+    locks = _row_locks(db_session)
+    await _data_source_in_workspace(db_session, ds, ws)
+    assert locks == ["share"]
 
 
 async def _versioned(ds: str, ws: str):
@@ -352,3 +477,75 @@ async def test_impact_in_the_new_workspace_shows_the_versioned_graph(test_client
     versioning = resp.json()["versioning"]
     assert versioning["versioned"] is True
     assert versioning["forks"] == 1
+
+
+async def _write_during_move(gid: str, ws: str, write):
+    """Start ``write`` while a move of ``gid`` into ``ws`` holds the graph's lock, then commit the
+    move. Returns the write, which must have waited for the move."""
+    async with db.graphver_session() as s:
+        await GraphVersioningService._lock_graph(s, gid)
+        await s.execute(update(GraphORM).where(GraphORM.id == gid).values(workspace_id=ws))
+        task = asyncio.ensure_future(write())
+        await asyncio.sleep(0.5)
+        waited = not task.done()
+    assert waited, "the write did not wait for the move"
+    return task
+
+
+async def _graph(ds: str, ws: str):
+    svc = GraphVersioningService()
+    created = await svc.create_graph(data_source_id=ds, workspace_id=ws, actor="u1")
+    return svc, created["graph_id"]
+
+
+@e2e
+async def test_a_fork_started_during_the_move_is_refused_not_left_in_the_old_workspace():
+    ds = "ds_" + os.urandom(4).hex()
+    svc, gid = await _graph(ds, "ws_old")
+    fork = await _write_during_move(gid, "ws_new", lambda: svc.fork_graph(
+        parent_graph_id=gid, workspace_id="ws_old", actor="u1"))
+    with pytest.raises(ValueError):
+        await fork
+    async with db.graphver_session() as s:
+        assert (await s.scalar(select(GraphORM.id).where(
+            GraphORM.fork_parent_graph_id == gid))) is None
+
+
+@e2e
+@pytest.mark.parametrize("kind", ["import", "export", "publish"])
+async def test_a_job_started_during_the_move_is_refused_not_left_in_the_old_workspace(kind):
+    ds = "ds_" + os.urandom(4).hex()
+    svc, gid = await _graph(ds, "ws_old")
+    draft = await svc.open_draft(graph_id=gid, owner="u1")
+    ie = ImportExportService(svc, store=None)
+    start = {
+        "import": lambda: ie.create_import_job(
+            workspace_id="ws_old", data_source_id=ds, graph_id=gid, actor="u1",
+            import_format="ndjson", branch_id=draft),
+        "export": lambda: ie.create_export_job(
+            workspace_id="ws_old", data_source_id=ds, graph_id=gid, actor="u1"),
+        "publish": lambda: ie.create_publish_job(
+            workspace_id="ws_old", data_source_id=ds, graph_id=gid, branch_id=draft,
+            actor="u1", message="big"),
+    }[kind]
+    job = await _write_during_move(gid, "ws_new", start)
+    with pytest.raises(ValueError):
+        await job
+    async with db.graphver_session() as s:
+        assert (await s.scalar(select(JobORM.id).where(JobORM.graph_id == gid))) is None
+
+
+@e2e
+async def test_a_second_move_from_the_old_workspace_finds_the_graph_gone():
+    """Two moves of one source to different workspaces: the second is refused, so the graph
+    cannot end in one workspace and the source in the other. Moving it again to where its graph
+    already is goes through: that finishes a move whose source did not follow."""
+    from backend.app.services.versioning.errors import GraphMoved
+    ds = "ds_" + os.urandom(4).hex()
+    gid, fork = await _versioned(ds, "ws_a")
+    svc = GraphVersioningService()
+    assert await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a") == [gid, fork]
+    with pytest.raises(GraphMoved):
+        await svc.move_graph_workspace(ds, "ws_c", from_workspace_id="ws_a")
+    assert (await svc.get_graph(gid))["workspace_id"] == "ws_b"
+    assert await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a") == [gid, fork]

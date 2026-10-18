@@ -44,9 +44,9 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
-                     DraftRoleRequired, ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, IneligibleMember,
-                     JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork,
-                     NotDraftOwner, SelfReview)
+                     DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GroupsUnavailable, HeadMoved,
+                     IneligibleMember, JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked,
+                     NotAFork, NotDraftOwner, SelfReview)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -2060,7 +2060,9 @@ class GraphVersioningService:
         async with self._session() as s:
             await self._lock_graph(s, parent_graph_id)
             parent = await self._fork_slot(s, parent_graph_id)
-            if parent is None:
+            # Read under the lock a move takes: a parent moved out of the workspace since the
+            # route found it is not forked into the old one.
+            if parent is None or parent.workspace_id != workspace_id:
                 raise ValueError(f"unknown parent graph {parent_graph_id}")
             base_seq = parent.main_head_commit_seq
             parent_main = await self._main_branch_id(s, parent_graph_id)
@@ -4840,15 +4842,19 @@ class GraphVersioningService:
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
 
-    async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str) -> List[str]:
-        """Re-home a data source's versioned graph, and every fork of it, into
-        ``new_workspace_id`` — the graphver half of moving the data source. Returns the moved
-        graph ids; ``[]`` when the source is not versioned.
+    async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str, *,
+                                   from_workspace_id: str) -> List[str]:
+        """Re-home a data source's versioned graph, and every fork of it, from
+        ``from_workspace_id`` into ``new_workspace_id`` — the graphver half of moving the data
+        source. Returns the moved graph ids; ``[]`` when the source is not versioned.
 
-        Each graph is locked before its forks are read: a fork is created under its parent's
-        lock, so none appears unseen. Nothing moves while any of them has a pending or running
-        job (:class:`JobActive`), because a job runs in the workspace it was queued in; the
-        finished ones move with their graph, so lookups scoped by workspace still find them."""
+        Each graph is locked before its forks are read: a fork, or a job, is created under its
+        graph's lock and in the workspace it reads there, so none appears unseen or in the old
+        workspace. A graph found already in ``new_workspace_id`` moves again (a retry that
+        finishes a move); one in any other workspace was moved by another request
+        (:class:`GraphMoved`). Nothing moves while any of them has a pending or running job
+        (:class:`JobActive`), because a job runs in the workspace it was queued in; the finished
+        ones move with their graph, so lookups scoped by workspace still find them."""
         async with self._session() as s:
             root = await s.scalar(
                 select(GraphORM.id).where(GraphORM.data_source_id == data_source_id))
@@ -4858,6 +4864,9 @@ class GraphVersioningService:
             while todo:
                 gid = todo.pop(0)
                 await self._lock_graph(s, gid)
+                if gid == root and await s.scalar(select(GraphORM.workspace_id).where(
+                        GraphORM.id == root)) not in (from_workspace_id, new_workspace_id):
+                    raise GraphMoved(root)
                 ids.append(gid)
                 todo += sorted((await s.execute(select(GraphORM.id).where(
                     GraphORM.fork_parent_graph_id == gid))).scalars().all())

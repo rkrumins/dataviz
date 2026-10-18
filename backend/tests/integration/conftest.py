@@ -100,7 +100,7 @@ def data_sources(monkeypatch):
 
     pins: dict = {}
 
-    async def get_data_source_orm(session, data_source_id):
+    async def get_data_source_orm(session, data_source_id, **_kw):
         return SimpleNamespace(id=data_source_id, workspace_id="ws1",
                                graph_name=pins.get(data_source_id), provider_id=None)
 

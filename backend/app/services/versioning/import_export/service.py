@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import ImportRowORM, JobORM, MergeRequestORM
+from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, Viewer
 from . import stream
 from .export_worker import ExportWorker, example_template_records
@@ -130,6 +130,7 @@ class ImportExportService:
         async def insert() -> Dict[str, str]:
             uri = source_uri
             async with db.graphver_session() as s:
+                await self._lock_in_workspace(s, graph_id, workspace_id)
                 branch = await self._svc._lock_branch(s, graph_id, branch_id)
                 if branch.kind == "main":
                     raise MainWriteForbidden()
@@ -172,6 +173,15 @@ class ImportExportService:
             if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
                 raise JobActive(active, f"Another import is still running on this draft (job "
                                         f"{active}). Wait for it to finish, then import again.") from None
+
+    async def _lock_in_workspace(self, s, graph_id: str, workspace_id: str) -> None:
+        """Take the graph's lock, which a move of its data source holds, and refuse a graph that
+        has moved out of ``workspace_id`` (``ValueError``, the 404 of a graph in no workspace of
+        the caller's): a job is never stamped with the workspace its graph has left."""
+        await self._svc._lock_graph(s, graph_id)
+        if await s.scalar(select(GraphORM.id).where(
+                GraphORM.id == graph_id, GraphORM.workspace_id != workspace_id)) is not None:
+            raise ValueError(f"unknown graph {graph_id}")
 
     @staticmethod
     async def _import_on(s, branch_id: str, idempotency_key: Optional[str]) -> Optional[str]:
@@ -417,6 +427,7 @@ class ImportExportService:
         if select_types:
             options["types"] = select_types
         async with db.graphver_session() as s:
+            await self._lock_in_workspace(s, graph_id, workspace_id)
             job = JobORM(
                 job_type="export", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,
@@ -508,6 +519,7 @@ class ImportExportService:
         if merge_request_id:
             fields["mergeRequestId"] = merge_request_id
         async with db.graphver_session() as s:
+            await self._lock_in_workspace(s, graph_id, workspace_id)
             branch = await self._svc._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise MainWriteForbidden()

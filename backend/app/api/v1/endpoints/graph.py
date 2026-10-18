@@ -472,9 +472,13 @@ async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, 
     ABANDON — i.e. delete — B's versioned graph. The versioning router gets the same
     guarantee from its ``graph_in_workspace`` dependency; these routes live on the graph
     router and must do it themselves. 404, not 403: existence isn't leaked across tenants.
+
+    The row is read FOR SHARE and held to the end of the request, so enabling version control
+    and a move of the data source wait for each other: the graph and job an enable creates are
+    committed before the move looks for them, or the enable finds the source moved away.
     """
     from backend.app.db.repositories import data_source_repo
-    ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    ds = await data_source_repo.get_data_source_orm(session, data_source_id, lock="share")
     if ds is None or getattr(ds, "workspace_id", None) != ws_id:
         raise HTTPException(status_code=404, detail="unknown data source")
     return ds

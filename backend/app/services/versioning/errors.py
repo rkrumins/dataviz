@@ -212,6 +212,16 @@ class ForkNotRestorable(_HttpMapped, RuntimeError):
                          {"type": "fork_not_restorable", "graphId": graph_id, "reason": reason})
 
 
+class GraphMoved(_HttpMapped, RuntimeError):
+    """A data source's move found its versioned graph in neither the workspace it moves from nor
+    the one it moves to: another move of the source got there first."""
+
+    def __init__(self, graph_id: str):
+        self.graph_id = graph_id
+        super().__init__(f"graph {graph_id} has been moved to another workspace by another request",
+                         {"type": "graph_moved", "graphId": graph_id})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
-               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable)
+               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved)
