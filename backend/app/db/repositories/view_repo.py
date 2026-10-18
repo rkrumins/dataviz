@@ -2288,6 +2288,32 @@ async def get_view_stats(
     )
 
 
+async def count_views_grouped(
+    session: AsyncSession,
+    column,
+    *,
+    readable=None,
+    ids: Optional[Sequence[str]] = None,
+) -> Dict[str, int]:
+    """Live views the caller can read, counted per value of ``column``
+    (``ViewORM.workspace_id``, ``.data_source_id`` or ``.context_model_id``).
+
+    Counted through ``_apply_view_filters`` like the Explorer's list, stats and
+    facets, so a count shown on the dashboard or a template card is the total
+    the Explorer would show for the same filter. ``ids`` limits the groups to
+    those values; a view whose ``column`` is NULL is in no group.
+    """
+    query = select(column, func.count(func.distinct(ViewORM.id))).where(column.isnot(None))
+    if ids is not None:
+        if not ids:
+            return {}
+        query = query.where(column.in_(list(ids)))
+    rows = await session.execute(
+        _apply_view_filters(query.group_by(column), readable=readable)
+    )
+    return {value: int(n) for value, n in rows.all()}
+
+
 async def list_popular_views(
     session: AsyncSession,
     *,

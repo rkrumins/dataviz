@@ -213,3 +213,4 @@ tests/test_view_transfer_references.py
 tests/test_view_transfer_staging.py
 tests/test_view_versions.py
 tests/test_worker_lanes.py
+tests/test_workspace_summary.py

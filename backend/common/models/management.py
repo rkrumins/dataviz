@@ -1018,6 +1018,62 @@ class WorkspaceResponse(BaseModel):
 
 
 # ============================================
+# Workspace summary — the estate's numbers, defined once
+# ============================================
+
+class WorkspaceSourceSummary(BaseModel):
+    """One data source's share of a workspace row."""
+    nodes: int = 0
+    edges: int = 0
+    #: Its statistics are still being computed: counted as a source, not in the sums.
+    pending: bool = False
+    #: Live views the caller can read that name this source.
+    views: int = 0
+
+
+class WorkspaceSummaryRow(BaseModel):
+    id: str
+    name: str
+    is_default: bool = Field(False, alias="isDefault")
+    data_sources: int = Field(0, alias="dataSources")
+    active_data_sources: int = Field(0, alias="activeDataSources")
+    pending_data_sources: int = Field(0, alias="pendingDataSources")
+    nodes: int = 0
+    edges: int = 0
+    entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
+    views: int = 0
+    sources: Dict[str, WorkspaceSourceSummary] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class WorkspaceSummaryTotals(BaseModel):
+    workspaces: int = 0
+    data_sources: int = Field(0, alias="dataSources")
+    active_data_sources: int = Field(0, alias="activeDataSources")
+    pending_data_sources: int = Field(0, alias="pendingDataSources")
+    #: Each physical graph counted once, however many workspaces mount it.
+    nodes: int = 0
+    edges: int = 0
+    entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
+    #: Live views the caller can read — the Explorer's total.
+    views: int = 0
+    #: Graphs mounted in more than one of the caller's workspaces.
+    shared_graphs: int = Field(0, alias="sharedGraphs")
+
+    class Config:
+        populate_by_name = True
+
+
+class WorkspaceSummaryResponse(BaseModel):
+    #: 'all' when the caller sees every workspace, 'granted' when only their own.
+    coverage: Literal["all", "granted"]
+    totals: WorkspaceSummaryTotals
+    workspaces: List[WorkspaceSummaryRow] = Field(default_factory=list)
+
+
+# ============================================
 # Context Model Models
 # ============================================
 

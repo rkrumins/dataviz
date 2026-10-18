@@ -30,6 +30,11 @@ from backend.app.api.v1.feature_gate import (
     resolve_enterprise_view_policy,
 )
 from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
+from backend.app.api.v1.view_read_scope import (
+    read_scope as _read_scope,
+    readable_clause as _readable_clause,
+    viewer_context as _viewer_context,
+)
 from backend.app.auth import api_key_errors
 from backend.app.auth.dependencies import (
     get_current_user,
@@ -80,15 +85,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _viewer_context(
-    session: AsyncSession,
-    user: Optional[User],
-    claims: PermissionClaims,
-) -> view_access.ViewerContext:
-    """Build the per-request ViewerContext used by every guarded route."""
-    return await view_access.ViewerContext.build(session, user=user, claims=claims)
-
-
 async def _load_view_orm(
     session: AsyncSession, view_id: str, *, include_deleted: bool = False,
 ) -> ViewORM:
@@ -110,38 +106,6 @@ async def _load_view_orm(
     if view is None:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view
-
-
-async def _read_scope(
-    session: AsyncSession,
-    user: User,
-    claims: PermissionClaims,
-) -> view_access.ViewReadScope:
-    """The caller's read reach for SQL scoping.
-
-    Mirrors the ``requires()`` doctrine on session-store outages: when
-    workspace grants are unavailable we refuse (503) rather than render
-    an empty catalog that looks like revoked access.
-    """
-    if not claims.ws_available and "system:admin" not in claims.global_perms:
-        raise HTTPException(
-            status_code=503, detail="Authorization temporarily unavailable",
-        )
-    ctx = await _viewer_context(session, user, claims)
-    return await view_access.build_read_scope(session, ctx)
-
-
-async def _readable_clause(
-    session: AsyncSession,
-    user: User,
-    claims: PermissionClaims,
-):
-    """(clause, scope) under RBAC enforcement; (None, None) when the
-    kill-switch is off — repo functions treat None as unscoped."""
-    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
-        return None, None
-    scope = await _read_scope(session, user, claims)
-    return view_access.readable_views_clause(scope), scope
 
 
 def _category_filters(
