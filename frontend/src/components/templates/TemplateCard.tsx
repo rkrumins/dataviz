@@ -5,8 +5,8 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import {
-    ArrowRight, Building2, Clock, Copy, Eye, EyeOff, Home, MoreHorizontal, Pencil, Share2, Star, StarOff,
-    Trash2, Undo2,
+    ArrowRight, Building2, Clock, Copy, Download, Eye, EyeOff, Home, MoreHorizontal, Pencil, Share2, Star,
+    StarOff, Trash2, Undo2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
@@ -21,6 +21,7 @@ import { AUDIENCE, audienceOf, categoryLabel, menuActions, type TemplateAction }
 const ACTION_META: Record<Exclude<TemplateAction, 'use'>, { label: string; icon: LucideIcon; danger?: boolean }> = {
     edit: { label: 'Edit', icon: Pencil },
     duplicate: { label: 'Duplicate', icon: Copy },
+    export: { label: 'Export as file', icon: Download },
     share: { label: 'Share', icon: Share2 },
     request: { label: 'Offer to everyone…', icon: Building2 },
     withdraw: { label: 'Withdraw the request', icon: Undo2 },

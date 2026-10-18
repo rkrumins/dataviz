@@ -92,18 +92,19 @@ export function categoryLabel(category: string): string {
 
 /** What a person can do with a template, beyond reading it. */
 export type TemplateAction =
-    | 'use' | 'edit' | 'duplicate' | 'share' | 'request' | 'withdraw' | 'feature' | 'unfeature'
+    | 'use' | 'edit' | 'duplicate' | 'export' | 'share' | 'request' | 'withdraw' | 'feature' | 'unfeature'
     | 'default' | 'hide' | 'show' | 'delete'
 
-/** The menu's actions, in order, as `access` allows them. Duplicating is
- *  always open: it makes a Personal copy of something the caller can read.
+/** The menu's actions, in order, as `access` allows them. Duplicating and
+ *  exporting are always open: a Personal copy, or a file, of something the
+ *  caller can read.
  *  `canSetDefault`: the caller administers a workspace it could start from. */
 export function menuActions(
     t: LayoutTemplate, opts: { canSetDefault?: boolean } = {},
 ): Exclude<TemplateAction, 'use'>[] {
     const out: Exclude<TemplateAction, 'use'>[] = []
     if (t.access.canEdit) out.push('edit')
-    out.push('duplicate')
+    out.push('duplicate', 'export')
     if (t.access.canShare) out.push('share')
     if (t.access.canRequestPromotion) out.push('request')
     if (t.promotionRequest && !t.access.canDecidePromotion) out.push('withdraw')

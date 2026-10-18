@@ -24,6 +24,7 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { AudiencePicker } from './AudiencePicker'
 import { TemplatePreview } from './TemplatePreview'
 import { TemplateLayersEditor } from './TemplateLayersEditor'
+import { TemplateLivePreview } from './TemplateLivePreview'
 import { newTemplateLayer } from './newTemplateLayer'
 import { AUDIENCE, audienceDescription, audienceOf, categoryLabel } from './templateAudience'
 import { layersOfViewConfig, templateLayers } from './fromView'
@@ -395,6 +396,9 @@ export function TemplateStudio({ seed, categories, onClose, onSaved, onShare, on
                         <TemplatePreview layers={layers} />
                     </div>
                     <TemplateLayersEditor layers={layers} onChange={setLayers} />
+                    <div className="mt-5">
+                        <TemplateLivePreview layers={layers} />
+                    </div>
                 </div>
             ) : step === 'audience' ? (
                 <div className="max-w-3xl">
@@ -490,6 +494,9 @@ export function TemplateStudio({ seed, categories, onClose, onSaved, onShare, on
                                 ))}
                             </ul>
                         </div>
+                    </div>
+                    <div className="mt-6">
+                        <TemplateLivePreview layers={layers} />
                     </div>
                 </div>
             )}

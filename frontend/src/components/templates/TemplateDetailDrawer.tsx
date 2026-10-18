@@ -6,7 +6,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
-    ArrowRight, Box, Building2, Copy, Eye, EyeOff, GitBranch, Home, Layers, Pencil, Share2, Star,
+    ArrowRight, Box, Building2, Copy, Download, Eye, EyeOff, GitBranch, Home, Layers, Pencil, Share2, Star,
     StarOff, Trash2, Undo2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -29,6 +29,7 @@ import { audienceDescription, audienceOf, categoryLabel, menuActions, type Templ
 const ACTION_BUTTONS: Record<Exclude<TemplateAction, 'use'>, { label: string; icon: LucideIcon }> = {
     edit: { label: 'Edit', icon: Pencil },
     duplicate: { label: 'Duplicate', icon: Copy },
+    export: { label: 'Export', icon: Download },
     share: { label: 'Share', icon: Share2 },
     request: { label: 'Offer to everyone', icon: Building2 },
     withdraw: { label: 'Withdraw request', icon: Undo2 },

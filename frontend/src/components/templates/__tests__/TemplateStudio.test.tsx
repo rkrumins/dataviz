@@ -9,19 +9,19 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
-const { service, notify } = vi.hoisted(() => ({
+const { service, notify, wsState } = vi.hoisted(() => ({
     service: { list: vi.fn(), create: vi.fn(), update: vi.fn() },
     notify: vi.fn(),
+    wsState: { workspaces: [] as { id: string; name: string; dataSources: unknown[] }[] },
 }))
 
 vi.mock('@/services/layoutTemplateService', () => ({ layoutTemplateService: service }))
 vi.mock('@/services/viewApiService', () => ({ listViews: vi.fn().mockResolvedValue({ items: [], total: 0 }) }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/store/workspaces', () => {
-    const state = { workspaces: [{ id: 'ws_fin', name: 'Finance' }] }
     const useWorkspacesStore = Object.assign(
-        (selector: (s: typeof state) => unknown) => selector(state),
-        { getState: () => state },
+        (selector: (s: typeof wsState) => unknown) => selector(wsState),
+        { getState: () => wsState },
     )
     return { useWorkspacesStore }
 })
@@ -53,6 +53,7 @@ const next = () => fireEvent.click(screen.getByRole('button', { name: /^next/i }
 beforeEach(() => {
     vi.clearAllMocks()
     service.list.mockResolvedValue({ items: [], total: 0 })
+    wsState.workspaces = [{ id: 'ws_fin', name: 'Finance', dataSources: [] }]
     useAuthStore.setState({ permissions: { global: [], ws: { ws_fin: ['workspace:view:create'] } } } as never)
 })
 
@@ -69,6 +70,8 @@ describe('TemplateStudio', () => {
         fireEvent.change(name, { target: { value: '  Orders flow ' } })
         next()
         expect(await screen.findByText('Shape the layers')).toBeInTheDocument()
+        // No data of theirs to read: no preview to offer.
+        expect(screen.queryByRole('button', { name: /preview with real data/i })).not.toBeInTheDocument()
         next()
         expect(await screen.findByText('Who is it for?')).toBeInTheDocument()
         expect(screen.getByRole('radio', { name: /Organization/ })).toBeDisabled()
@@ -85,6 +88,15 @@ describe('TemplateStudio', () => {
         expect(await screen.findByText('"Orders flow" is ready')).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: /use it for a new view/i }))
         expect(onUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'tpl_new' }))
+    })
+
+    it('offers a preview with real data while the layers take shape', async () => {
+        wsState.workspaces = [{ id: 'ws_fin', name: 'Finance', dataSources: [{ id: 'ds_fin', isPrimary: true }] }]
+        useAuthStore.setState({ permissions: { global: [], ws: { ws_fin: ['workspace:datasource:read'] } } } as never)
+        renderStudio({ seed: { template: MINE } })
+        next()
+        expect(await screen.findByText('Shape the layers')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /preview with real data/i })).toHaveAttribute('aria-expanded', 'false')
     })
 
     it('editing moves the template only when its audience changed', async () => {

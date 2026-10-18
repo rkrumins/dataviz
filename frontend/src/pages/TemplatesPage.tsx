@@ -6,13 +6,13 @@
  * Every card offers exactly what the server says its reader may do.
  *
  * `/templates/:templateId` opens one in the drawer; `?new=1` opens the studio;
- * `?tab=requests` lists, for template managers, the requests to offer a team's
- * template to everyone.
+ * `?import=1` imports one from a file; `?tab=requests` lists, for template
+ * managers, the requests to offer a team's template to everyone.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
-    Heart, Inbox, LayoutTemplate as TemplateIcon, Package, Plus, Search, Sparkles, Trash2, Users, X,
+    Heart, Inbox, LayoutTemplate as TemplateIcon, Package, Plus, Search, Sparkles, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -21,6 +21,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { MANAGE_TEMPLATES } from '@/components/templates/AudiencePicker'
+import { ImportTemplateDialog } from '@/components/templates/ImportTemplateDialog'
 import { PromotionRequestsPanel } from '@/components/templates/PromotionRequestsPanel'
 import { RequestPromotionDialog } from '@/components/templates/RequestPromotionDialog'
 import { ShareTemplateDialog } from '@/components/templates/ShareTemplateDialog'
@@ -32,6 +33,7 @@ import { WorkspaceDefaultDialog } from '@/components/templates/WorkspaceDefaultD
 import {
     LIBRARY_TABS, canBeWorkspaceDefault, categoryLabel, type LibraryTab, type TemplateAction,
 } from '@/components/templates/templateAudience'
+import { saveTemplateFile } from '@/components/templates/templateFile'
 import {
     fitShare, useFitWorkspaces, useTemplateFits, type TemplateFitScore,
 } from '@/components/templates/useTemplateFits'
@@ -69,7 +71,7 @@ function sortTemplates(list: LayoutTemplate[], key: SortKey, fits: Map<string, T
 }
 
 /** Drawer actions that change the template in place, so the drawer stays open. */
-const IN_PLACE: ReadonlySet<TemplateAction> = new Set(['hide', 'show', 'feature', 'unfeature', 'withdraw'])
+const IN_PLACE: ReadonlySet<TemplateAction> = new Set(['export', 'hide', 'show', 'feature', 'unfeature', 'withdraw'])
 
 function TabEmptyState({ tab, isManager, onNew, onTab }: {
     tab: LibraryTab
@@ -136,6 +138,7 @@ export function TemplatesPage() {
     const [deleting, setDeleting] = useState<LayoutTemplate | null>(null)
     const [requesting, setRequesting] = useState<LayoutTemplate | null>(null)
     const [defaulting, setDefaulting] = useState<LayoutTemplate | null>(null)
+    const [importing, setImporting] = useState(false)
 
     // "Fit for": how well each template matches a workspace's data. Until
     // someone picks, the active workspace — when its data is theirs to read.
@@ -175,6 +178,18 @@ export function TemplatesPage() {
             setSearchParams(p => { const out = new URLSearchParams(p); out.delete('new'); return out }, { replace: true })
         }
     }, [searchParams, setSearchParams])
+
+    // `?import=1` opens the import dialog the same way; a finished import opens the new template.
+    const importOpen = importing || !!searchParams.get('import')
+    const withoutImport = () => {
+        const out = new URLSearchParams(searchParams)
+        out.delete('import')
+        return out.toString()
+    }
+    const closeImport = () => {
+        setImporting(false)
+        if (searchParams.get('import')) setSearchParams(withoutImport(), { replace: true })
+    }
 
     const counts = useMemo(
         () => Object.fromEntries(LIBRARY_TABS.map(t => [t.id, templates.filter(t.match).length])) as Record<LibraryTab, number>,
@@ -253,6 +268,7 @@ export function TemplatesPage() {
             case 'duplicate': return setStudio({
                 name: `${t.name} (copy)`.slice(0, 80), description: t.description, category: t.category, layers: t.layers,
             })
+            case 'export': return saveTemplateFile(t)
             case 'share': return setSharing(t)
             case 'request': return setRequesting(t)
             case 'withdraw': return run(layoutTemplateService.withdrawPromotion(t.id), `Withdrew the request to offer "${t.name}" to everyone`)
@@ -296,13 +312,22 @@ export function TemplatesPage() {
                             </p>
                         </div>
                     </div>
-                    <button
-                        type="button"
-                        onClick={() => setStudio({})}
-                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200"
-                    >
-                        <Plus className="w-4 h-4" /> New template
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => setImporting(true)}
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-canvas-elevated text-sm font-semibold text-ink-secondary hover:text-ink transition-colors"
+                        >
+                            <Upload className="w-4 h-4" /> Import
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setStudio({})}
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200"
+                        >
+                            <Plus className="w-4 h-4" /> New template
+                        </button>
+                    </div>
                 </div>
 
                 {/* ── Tabs ── */}
@@ -484,6 +509,16 @@ export function TemplatesPage() {
             )}
             {sharing && <ShareTemplateDialog template={sharing} onClose={() => setSharing(null)} />}
             {requesting && <RequestPromotionDialog template={requesting} onClose={() => setRequesting(null)} />}
+            {importOpen && (
+                <ImportTemplateDialog
+                    existingNames={templates.map(t => t.name)}
+                    onClose={closeImport}
+                    onImported={t => {
+                        setImporting(false)
+                        navigate({ pathname: `/templates/${t.id}`, search: withoutImport() })
+                    }}
+                />
+            )}
             {defaulting && (
                 <WorkspaceDefaultDialog template={defaulting} workspaces={defaultTargets(defaulting)} onClose={() => setDefaulting(null)} />
             )}

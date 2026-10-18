@@ -14,7 +14,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
-const { service, notify, openViewEditor, workspaceUpdate, wsState } = vi.hoisted(() => ({
+const { service, notify, openViewEditor, workspaceUpdate, download, wsState } = vi.hoisted(() => ({
     service: {
         list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(),
         remove: vi.fn(), restore: vi.fn(), setHidden: vi.fn(), setFeatured: vi.fn(),
@@ -25,6 +25,7 @@ const { service, notify, openViewEditor, workspaceUpdate, wsState } = vi.hoisted
     notify: vi.fn(),
     openViewEditor: vi.fn(),
     workspaceUpdate: vi.fn(),
+    download: vi.fn(),
     wsState: { workspaces: [] as unknown[], activeWorkspaceId: 'ws_fin', updateWorkspace: vi.fn() },
 }))
 
@@ -42,6 +43,7 @@ vi.mock('@/store/workspaces', () => {
     return { useWorkspacesStore }
 })
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { update: workspaceUpdate } }))
+vi.mock('@/services/importExportApiService', () => ({ triggerBrowserDownload: download }))
 // The data any workspace declares: "table" — spelled its own way — and "Column".
 vi.mock('@/hooks/useWorkspaceEntityTypes', () => ({
     useWorkspaceEntityTypes: (workspaceId?: string | null) => ({
@@ -155,11 +157,12 @@ describe('TemplatesPage', () => {
         await screen.findByRole('button', { name: 'My flow' })
 
         fireEvent.click(within(card('Medallion')).getByRole('button', { name: 'More actions for Medallion' }))
-        expect(screen.getAllByRole('menuitem').map(i => i.textContent)).toEqual(['Duplicate'])
+        expect(screen.getAllByRole('menuitem').map(i => i.textContent)).toEqual(['Duplicate', 'Export as file'])
         fireEvent.keyDown(document, { key: 'Escape' })
 
         fireEvent.click(within(card('My flow')).getByRole('button', { name: 'More actions for My flow' }))
-        expect(screen.getAllByRole('menuitem').map(i => i.textContent)).toEqual(['Edit', 'Duplicate', 'Share', 'Delete'])
+        expect(screen.getAllByRole('menuitem').map(i => i.textContent))
+            .toEqual(['Edit', 'Duplicate', 'Export as file', 'Share', 'Delete'])
     })
 
     it('deletes after saying what happens, with an Undo that restores it', async () => {
@@ -412,5 +415,36 @@ describe('TemplatesPage', () => {
         fireEvent.click(within(dialog).getByRole('switch', { name: 'Default in Finance' }))
         await waitFor(() => expect(workspaceUpdate).toHaveBeenCalledWith('ws_fin', { defaultLayoutTemplateId: 'tpl_house' }))
         expect(wsState.updateWorkspace).toHaveBeenCalledWith(expect.objectContaining({ id: 'ws_fin', defaultLayoutTemplateId: 'tpl_house' }))
+    })
+
+    it('exports a template as a file anyone can import', async () => {
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:tpl')
+        renderAt()
+        await screen.findByRole('button', { name: 'My flow' })
+        fireEvent.click(within(card('My flow')).getByRole('button', { name: 'More actions for My flow' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Export as file' }))
+        expect(download).toHaveBeenCalledWith('blob:tpl', 'my-flow.layout-template.json')
+    })
+
+    it('imports a template from a file and opens it', async () => {
+        const created = t('tpl_imported', 'My flow (imported)')
+        service.create.mockImplementation(async () => {
+            service.list.mockResolvedValue({ items: [...LIBRARY, created], total: LIBRARY.length + 1 })
+            return created
+        })
+        renderAt('/templates?import=1')
+        await screen.findByRole('button', { name: 'My flow' })  // the library it is kept apart from
+        const dialog = screen.getByRole('dialog', { name: 'Import a layout template' })
+        const file = new File([JSON.stringify({
+            format: 'layout-template', formatVersion: 1, exportedAt: '2026-10-18T00:00:00Z',
+            template: { name: 'My flow', layers: [{ id: 'a', name: 'Sources', entityTypes: ['Table'], order: 0 }] },
+        })], 'my-flow.layout-template.json')
+        fireEvent.change(within(dialog).getByLabelText('Template file'), { target: { files: [file] } })
+        expect(await within(dialog).findByDisplayValue('My flow (imported)')).toBeInTheDocument()
+        fireEvent.click(within(dialog).getByRole('button', { name: /import template/i }))
+
+        await waitFor(() => expect(service.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'My flow (imported)' })))
+        expect(await screen.findByRole('dialog', { name: 'Template My flow (imported)' })).toBeInTheDocument()
+        expect(screen.queryByRole('dialog', { name: 'Import a layout template' })).not.toBeInTheDocument()
     })
 })
