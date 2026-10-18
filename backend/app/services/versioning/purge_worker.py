@@ -130,18 +130,28 @@ async def delete_window(s, table: str, pk: str, graph_id: str, *, where: str = "
     return res.rowcount or 0
 
 
+def _minted(g):
+    """A fork :meth:`~.service.GraphVersioningService.fork_graph` minted (its ``dsfork_`` id):
+    trashed and purged on its own, or with its parent. Any other goes with its data source."""
+    return g.data_source_id.startswith("dsfork_", autoescape=True)
+
+
 async def _forks_reading(s, graph: GraphORM) -> int:
     """How many forks still read ``graph``'s history. A graph with nothing past its genesis
     commit (an abandoned enablement) gives its forks nothing, so none hold it back. A trashed
-    fork stops holding its parent back unless forks of its own read through it (a fork's state
-    composes its parent's, recursively)."""
+    minted fork stops holding its parent back unless a live fork, or one bound to a data source,
+    reads through it, at any depth (a fork's state composes its parent's, recursively)."""
     if graph.main_head_commit_seq <= 1:
         return 0
+    # Each fork of ``graph`` (top), and every fork under it reached through trashed minted forks.
+    sub = select(GraphORM.id.label("top"), GraphORM.id, GraphORM.deleted_at,
+                 GraphORM.data_source_id).where(
+        GraphORM.fork_parent_graph_id == graph.id).cte("sub", recursive=True)
     child = aliased(GraphORM)
-    return int(await s.scalar(select(func.count()).select_from(GraphORM).where(
-        GraphORM.fork_parent_graph_id == graph.id,
-        or_(GraphORM.deleted_at.is_(None),
-            select(child.id).where(child.fork_parent_graph_id == GraphORM.id).exists()))) or 0)
+    sub = sub.union_all(select(sub.c.top, child.id, child.deleted_at, child.data_source_id).where(
+        child.fork_parent_graph_id == sub.c.id, sub.c.deleted_at.isnot(None), _minted(sub.c)))
+    return int(await s.scalar(select(func.count(sub.c.top.distinct())).where(
+        or_(sub.c.deleted_at.is_(None), ~_minted(sub.c)))) or 0)
 
 
 async def graph_key_readers(provider_id: Optional[str], graph_name: str,
@@ -437,8 +447,8 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
     trash — a restore that took the graph row first wins — and re-queues only a purge that failed
     on infrastructure, or was refused for forks that no longer read the graph, never one refused
     for anything else. A graph that forks still read is not purged: the reaper leaves it (None);
-    anyone else is refused (:class:`PurgeRefused` ``live_forks``). A trashed fork with no forks of
-    its own is no reader: it is purged with its parent (:func:`_queue_trashed_forks`).
+    anyone else is refused (:class:`PurgeRefused` ``live_forks``). A trashed minted fork that no
+    fork reads through is no reader: it is purged with its parent (:func:`_queue_trashed_forks`).
     """
     sf = session_factory or db.graphver_session
     async with (contextlib.nullcontext(session) if session is not None else sf()) as s:
@@ -518,16 +528,22 @@ def _new_purge_job(graph, *, actor: str, workspace_id: Optional[str] = None,
 
 
 async def _queue_trashed_forks(s, graph_id: str, actor: str) -> None:
-    """Queue a purge, in the caller's transaction, for each trashed fork of ``graph_id`` that has
-    no forks of its own and no purge job: a fork cannot outlive the history it reads, and once
-    queued it is past its undo. The caller holds the fork rows (FOR KEY SHARE)."""
-    child = aliased(GraphORM)
-    forks = (await s.execute(select(GraphORM).where(
+    """Queue a purge, in the caller's transaction, for each trashed minted fork under ``graph_id``,
+    at any depth through trashed minted forks, that no fork reads (:func:`_forks_reading`) and
+    has no purge job: a fork cannot outlive the history it reads, and once queued it is past its
+    undo. The caller holds the direct fork rows (FOR KEY SHARE); a deeper one's restore is
+    refused while its parent is trashed."""
+    tree = select(GraphORM.id).where(
         GraphORM.fork_parent_graph_id == graph_id, GraphORM.deleted_at.isnot(None),
-        ~select(child.id).where(child.fork_parent_graph_id == GraphORM.id).exists(),
+        _minted(GraphORM)).cte("tree", recursive=True)
+    child = aliased(GraphORM)
+    tree = tree.union_all(select(child.id).where(
+        child.fork_parent_graph_id == tree.c.id, child.deleted_at.isnot(None), _minted(child)))
+    forks = [f for f in (await s.execute(select(GraphORM).where(
+        GraphORM.id.in_(select(tree.c.id)),
         ~select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                  JobORM.graph_id == GraphORM.id).exists(),
-    ))).scalars().all()
+    ))).scalars().all() if not await _forks_reading(s, f)]
     for f in forks:
         s.add(_new_purge_job(f, actor=actor, summary={"actor": actor, "parentGraphId": graph_id}))
     if forks:
@@ -588,12 +604,14 @@ async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id:
     (below) is what eventually acts on it — which is precisely what leaves room for an undo.
     """
     async with db.graphver_session() as s:
+        # FOR UPDATE, not the UPDATE's own FOR NO KEY UPDATE: a fork or fork restore reads the
+        # parent FOR KEY SHARE, so it waits for this and sees the graph trashed, or we wait for it.
         graphs = (await s.execute(
             select(GraphORM).where(
                 GraphORM.data_source_id == data_source_id,
                 GraphORM.workspace_id == workspace_id,
                 GraphORM.deleted_at.is_(None),
-            ))).scalars().all()
+            ).with_for_update())).scalars().all()
         for g in graphs:
             g.deleted_at = _now()
             g.deleted_by = actor

@@ -6,12 +6,14 @@
 * the purge cancels the graph's other jobs as it starts, and leaves no row of the graph behind;
 * a purge that "Delete permanently" queued is revived although its data source row is gone;
 * a graph that forks still read is never purged, whoever asks;
-* a trashed fork is no reader, unless a fork of its own reads through it; the parent's purge
-  takes it along, and a purge refused for forks is retried once they are gone;
+* a trashed fork is no reader, unless a live fork reads through it at any depth, or it is bound
+  to a data source of its own; the parent's purge takes the rest along, a whole trashed chain at
+  once, and a purge refused for forks is retried once they are gone;
 * a trashed fork past its grace is purged by the reaper, which drops the fork's own key and
   never its parent's — a customer's;
 * a restore that wins the race with the reaper keeps its graph, and so does a fork's restore
-  that wins the race with its parent's purge; a fork made during a parent's purge loses;
+  that wins the race with its parent's purge; a fork, or a fork's restore, made while its parent
+  is being purged or trashed loses;
 * a trashed data source whose purge completed is not restorable, in the trash or by the route.
 
 The data-source rows the reaper reads live in the management database; they are faked here,
@@ -21,6 +23,7 @@ Unit level: ``test_purge_reaper_unit.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from types import SimpleNamespace
 
@@ -414,6 +417,54 @@ async def test_a_trashed_fork_that_another_fork_reads_still_holds_its_parent():
     assert f1_job.summary["parentGraphId"] == gid
 
 
+async def test_a_chain_of_trashed_forks_holds_its_parent_only_while_a_live_fork_reads_through_it():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    f1, _ = await _fork(svc, gid)
+    f2, _ = await _fork(svc, f1)
+    for f in (f2, f1):
+        await svc.delete_fork(graph_id=f, workspace_id=WS, actor="bob")
+    await _trash(ds)
+
+    assert await purge_state_for_data_source(data_source_id=ds) == PurgeState()
+    job_id = await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    (f1_job,), (f2_job,) = await _purges(f1), await _purges(f2)
+    for jid in (job_id, f1_job.id, f2_job.id):
+        assert (await _runner().run_job(await _take(jid)))["status"] == "completed"
+    assert await _row(gid) is None and await _row(f1) is None and await _row(f2) is None
+
+    # Two trashed forks deep, a live fork still reads the parent through both.
+    ds, gid = await _graph(svc)
+    f1, f1ds = await _fork(svc, gid)
+    f2, f2ds = await _fork(svc, f1)
+    await _fork(svc, f2)
+    await _trash(f2ds)                       # trashed under their live forks: the legacy path
+    await _trash(f1ds)
+    await _trash(ds)
+    with pytest.raises(PurgeRefused) as exc:
+        await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    assert exc.value.code == "live_forks"
+    assert await _purges(f1) == [] and await _purges(f2) == []
+
+
+async def test_a_trashed_fork_bound_to_a_data_source_holds_its_parent_until_that_source_goes():
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    fid, _ = await _fork(svc, gid)
+    own = "ds_purge_" + os.urandom(4).hex()
+    async with db.graphver_session() as s:   # bound to a data source of its own, as a fork could be
+        (await s.get(GraphORM, fid)).data_source_id = own
+    await _trash(own)
+    await _trash(ds)
+
+    assert (await purge_state_for_data_source(data_source_id=ds)).state == "blocked"
+    with pytest.raises(PurgeRefused) as exc:
+        await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+    assert exc.value.code == "live_forks"
+    assert await _purges(fid) == [], "its data source is still in its undo window"
+    assert not (await purge_state_for_data_source(data_source_id=own)).final
+
+
 async def test_a_fork_row_held_by_a_restore_wins_against_the_parent_purge():
     svc = GraphVersioningService()
     ds, gid = await _graph(svc)
@@ -518,6 +569,45 @@ async def test_a_fork_waits_for_and_loses_to_a_parent_purge_being_queued():
     async with db.graphver_session() as s:
         assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.fork_parent_graph_id == gid))) == 0
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_a_fork_or_its_restore_waits_for_and_loses_to_a_parent_being_trashed(
+        monkeypatch, restore):
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    if restore:
+        fid, _ = await _fork(svc, gid)
+        await svc.delete_fork(graph_id=fid, workspace_id=WS, actor="bob")
+    flushed, release = asyncio.Event(), asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def held():                         # the trash's transaction, kept open once flushed
+        async with db.graphver_session() as s:
+            yield s
+            await s.flush()
+            flushed.set()
+            await release.wait()
+
+    monkeypatch.setattr(purge_worker, "db", SimpleNamespace(graphver_session=held))
+    trash = asyncio.create_task(tombstone_graphs_for_data_source(
+        data_source_id=ds, workspace_id=WS, actor="alice"))
+    try:
+        await flushed.wait()
+        fork = asyncio.create_task(
+            svc.restore_fork(graph_id=fid, workspace_id=WS) if restore
+            else svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob"))
+        await asyncio.sleep(0.3)
+        assert not fork.done(), "a fork must wait for the parent row the trash holds"
+    finally:
+        release.set()
+    assert await trash == 1
+
+    with pytest.raises(ForkNotRestorable if restore else ValueError):
+        await fork
+    async with db.graphver_session() as s:
+        assert int(await s.scalar(select(func.count()).select_from(GraphORM).where(
+            GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None)))) == 0
 
 
 async def test_a_trashed_source_whose_purge_completed_cannot_be_restored(test_client, db_session):

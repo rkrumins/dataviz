@@ -5,8 +5,9 @@
 * a graph restored while the reaper looked is left standing, and so is its data source;
 * a graph that forks still read is never purged: a person's "delete permanently" is refused, the
   reaper skips it, and the purge itself refuses at its count;
-* a trashed fork reads its parent only while forks of its own read through it; the parent's purge
-  locks its forks before counting them, and takes its trashed leaf forks along;
+* a trashed fork reads its parent only while a live fork, or one bound to a data source, reads
+  through it; the parent's purge locks its forks before counting them, and takes the trashed forks
+  it minted along, at any depth;
 * once a purge starts, the graph's other queued and running jobs are cancelled with it;
 * the reaper re-queues a purge that failed on infrastructure, or was refused for forks since
   gone, never one refused for anything else;
@@ -250,7 +251,7 @@ async def test_the_purge_job_is_locked_before_the_graph():
         "jobs then graphs, both FOR UPDATE (15 §8)"
 
 
-async def test_a_trashed_fork_holds_its_parent_only_while_forks_of_its_own_read_through_it():
+async def test_a_trashed_fork_holds_its_parent_only_while_a_live_or_bound_fork_reads_through_it():
     seen = []
 
     class _S:
@@ -261,9 +262,12 @@ async def test_a_trashed_fork_holds_its_parent_only_while_forks_of_its_own_read_
     assert await purge_worker._forks_reading(_S(), _graph(head=5)) == 0
     (sql,) = seen
     assert "graphs.fork_parent_graph_id = 'g1'" in sql
-    assert "graphs.deleted_at IS NULL OR (EXISTS" in sql, sql
-    assert "graphs_1.fork_parent_graph_id = graphver.graphs.id" in sql, \
-        "a fork of a trashed fork still reads the parent through it"
+    assert "graphs_1.fork_parent_graph_id = sub.id AND sub.deleted_at IS NOT NULL AND " \
+        "(sub.data_source_id LIKE 'dsfork/_'" in sql, \
+        "a fork of a trashed minted fork still reads the parent through it, at any depth"
+    assert "count(DISTINCT sub.top)" in sql
+    assert "WHERE sub.deleted_at IS NULL OR (sub.data_source_id NOT LIKE 'dsfork/_'" in sql, \
+        "a trashed fork bound to a data source goes with that source, so it still reads"
 
 
 async def test_a_purge_locks_the_graphs_forks_before_counting_them():
@@ -280,10 +284,10 @@ async def test_a_purge_locks_the_graphs_forks_before_counting_them():
     assert "count" in str(s.statements[3]), "the lock comes before the count"
 
 
-async def test_a_parent_purge_queues_its_trashed_leaf_forks():
+async def test_a_parent_purge_queues_its_trashed_forks():
     def fork():
         return SimpleNamespace(id="f1", deleted_at="t", workspace_id="ws1",
-                               data_source_id="dsfork_1")
+                               data_source_id="dsfork_1", main_head_commit_seq=5)
 
     s = _PurgeSession(_graph(head=5, deleted_at="t"), fork_rows=[fork()])
     await purge_worker.create_purge_job(graph_id="g1", workspace_id=None, actor="u", session=s)
@@ -292,9 +296,12 @@ async def test_a_parent_purge_queues_its_trashed_leaf_forks():
     assert (jobs["purge:f1"].graph_id, jobs["purge:f1"].workspace_id,
             jobs["purge:f1"].data_source_id) == ("f1", "ws1", "dsfork_1")
     assert jobs["purge:f1"].summary == {"actor": "u", "parentGraphId": "g1"}
-    cascade = _sql(s.statements[-1])
+    (cascade,) = [_sql(st) for st in s.statements if "RECURSIVE tree" in _sql(st)]
     assert "graphs.deleted_at IS NOT NULL" in cascade and "'purge'" in cascade
     assert "NOT (EXISTS" in cascade, cascade
+    assert "graphs_1.fork_parent_graph_id = tree.id" in cascade, "at any depth"
+    assert cascade.count("data_source_id LIKE 'dsfork/_'") == 2, \
+        "a fork bound to a data source goes with that source, not its parent"
 
     # The re-queue of a purge that failed on infrastructure goes ahead too, and so cascades.
     s = _PurgeSession(_graph(head=5, deleted_at="t"), existing=_failed("infrastructure"),
