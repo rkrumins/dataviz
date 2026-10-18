@@ -24,9 +24,12 @@ const sc = (over: Partial<StagedChange>): StagedChange => ({
 })
 
 describe('saveStagedChangesToDraft — one atomic commit (creates + edges + updates + layers)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockApply.mockReset()
     mockApply.mockResolvedValue({ commitId: 'x', assigned: {} } as any)
+    // A save a previous test left unanswered is settled before any other; settle it here.
+    await saveStagedChangesToDraft([sc({ type: 'rename_entity', targetId: 'urn:reset', targetUrn: 'urn:reset', after: { label: 'r' } })], target)
+    mockApply.mockClear()
   })
 
   it('produces ZERO graph ops for an assign_layer change (view config, not graph data)', async () => {

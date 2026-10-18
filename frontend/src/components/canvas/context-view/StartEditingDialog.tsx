@@ -15,9 +15,10 @@ import { useQueryClient } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
+import { useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useBranches, useOpenDraft, VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
-import { BRANCH_VOCAB, ownerName } from '@/features/versioning/model/branchVocab'
+import { BRANCH_VOCAB, canWriteDraft, ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
 
 export interface StartEditingDialogProps {
@@ -33,8 +34,10 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
   const switchToDraft = useBranchStore((s) => s.switchToDraft)
   const qc = useQueryClient()
   const [name, setName] = useState('')
+  const me = useAuthStore((s) => s.user?.id)
 
-  const drafts = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open')
+  // Only drafts the user can write: someone else's would refuse the save after the editing is done.
+  const drafts = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open' && canWriteDraft(b, me))
 
   const enter = (branchId: string, originatingViewId?: string | null) => {
     switchToDraft(branchId, originatingViewId ?? viewId)

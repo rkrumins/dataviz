@@ -14,7 +14,7 @@ import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type ForkSummary } from '@/services/versioningApiService'
+import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
@@ -42,6 +42,8 @@ function timeAgo(iso?: string): string {
 // control is off; anything else (a 5xx, a timeout, a refused request) says nothing either way.
 const NOT_VERSIONED = /404|not found|no versioned graph/i
 
+const ARCHIVED: BranchStatusFilter[] = ['merged', 'abandoned']
+
 export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   wsId: string
   dataSourceId: string
@@ -51,7 +53,10 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
-  const branchesQ = useBranches(wsId, graphId, undefined, ['all'])
+  // The drafts in play; merged and abandoned ones are read only once the Archived tab opens.
+  const [showArchived, setShowArchived] = useState(false)
+  const branchesQ = useBranches(wsId, graphId)
+  const archivedQ = useBranches(wsId, showArchived ? graphId : null, undefined, ARCHIVED)
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
   // The data source's open PRs (the inbox's read), so newer merged or closed PRs can't push an
   // older one awaiting review off the page.
@@ -161,7 +166,6 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   }
 
   const branches = branchesQ.data ?? []
-  // Merged and abandoned drafts are still listed; only those not yet closed count as open.
   const drafts = branches.filter((b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
   const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
   const forks = forksQ.data ?? []
@@ -186,14 +190,30 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
 
       {/* Branches */}
       <section>
-        <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
-          <GitMerge className="w-3.5 h-3.5" /> Branches
-        </h4>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+            <GitMerge className="w-3.5 h-3.5" /> Branches
+          </h4>
+          <div className="inline-flex rounded-lg border border-glass-border overflow-hidden text-[11px]">
+            {([false, true] as const).map((archived) => (
+              <button
+                key={String(archived)}
+                onClick={() => setShowArchived(archived)}
+                className={cn(
+                  'px-2 py-0.5 font-medium first:border-0 border-l border-glass-border',
+                  showArchived === archived ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+                )}
+              >
+                {archived ? 'Archived' : 'Active'}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="space-y-1.5">
-          {branches.map((b) => (
+          {(showArchived ? archivedQ.data ?? [] : branches).map((b) => (
             <BranchRow key={b.branchId} branch={b} />
           ))}
-          {branchesQ.isLoading && <RowSkeleton />}
+          {(showArchived ? archivedQ : branchesQ).isLoading && <RowSkeleton />}
         </div>
       </section>
 

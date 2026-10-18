@@ -32,7 +32,7 @@ describe('stagedDraftPersistence — reconcileSnapshot (double-create guard)', (
   })
 
   it('restores a snapshot marked committing (the save may have been refused; its retry reuses the key)', () => {
-    expect(reconcileSnapshot(snap({ phase: 'committing', pendingSave: { body: 'b', key: 'k' } }), 'br1')).toBe('restore')
+    expect(reconcileSnapshot(snap({ phase: 'committing', pendingSave: { body: 'b', key: 'k', ids: ['c1'] } }), 'br1')).toBe('restore')
   })
 
   it('discards a snapshot from a different branch (no cross-branch contamination)', () => {

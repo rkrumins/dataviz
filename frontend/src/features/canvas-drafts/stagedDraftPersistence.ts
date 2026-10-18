@@ -18,9 +18,10 @@
  * - `phase` marks the one dangerous window: a crash while a save is in
  *   flight, when the server may or may not have committed it. The snapshot is
  *   then 'committing' and carries the save's Idempotency-Key (`pendingSave`);
- *   on restore the work comes back and saving the same batch again reuses that
- *   key, so the server answers with what the first save did instead of
- *   applying it twice — and applies it if the first save was refused.
+ *   on restore the work comes back and the next save first sends that batch
+ *   again, exactly, under that key, so the server answers with what the first
+ *   save did instead of applying it twice — and applies it if it never arrived.
+ *   Edits made since go after it, under a key of their own.
  */
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 import type { StagedChange } from '@/store/stagedChangesStore'
@@ -30,6 +31,14 @@ const KEY_PREFIX = 'synodic:staged-draft:'
 const SNAPSHOT_VERSION = 1
 
 /** The serializable fields of a StagedChange (closures dropped). */
+/** A save that may have reached the server: its request body, its Idempotency-Key, and the ids of
+ *  the staged changes it carried. */
+export interface PendingSave {
+  body: string
+  key: string
+  ids: string[]
+}
+
 export type SerializableChange = Pick<
   StagedChange,
   'id' | 'type' | 'targetId' | 'targetUrn' | 'before' | 'after' | 'summary' | 'timestamp'
@@ -43,7 +52,7 @@ export interface StagedDraftSnapshot {
   /** 'staged' = no save in flight; 'committing' = a save was in flight (see `pendingSave`). */
   phase: 'staged' | 'committing'
   /** The save that may have reached the server — its retry reuses the key (saveStagedChangesToDraft). */
-  pendingSave?: { body: string; key: string }
+  pendingSave?: PendingSave
   savedAt: number
   changes: SerializableChange[]
   /** The canvas copies of every node / edge the unsaved work touches — new ones AND existing ones
@@ -107,7 +116,7 @@ export function clearSnapshot(scopeKey: string): void {
 /** Flip an existing snapshot to 'committing' (called when a save starts, and again with the save's
  *  key before it is sent) so a crash mid-commit restores work that retries under that key. No-op if
  *  absent. */
-export function markSnapshotCommitting(scopeKey: string, pendingSave?: { body: string; key: string }): void {
+export function markSnapshotCommitting(scopeKey: string, pendingSave?: PendingSave): void {
   const snap = readSnapshot(scopeKey)
   if (!snap) return
   writeSnapshot({ ...snap, phase: 'committing', ...(pendingSave && { pendingSave }) })

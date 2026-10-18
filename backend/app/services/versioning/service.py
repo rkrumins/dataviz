@@ -5067,7 +5067,9 @@ class GraphVersioningService:
         to that view's own branches (``main`` carries no view, so it drops out). ``status`` keeps
         those statuses (``"all"`` keeps every one). A ``viewer`` who isn't a manager gets only the
         branches :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so
-        others' private drafts can't crowd theirs off a page. ``ValueError`` on a malformed cursor."""
+        others' private drafts can't crowd theirs off a page. With a ``viewer`` each row carries
+        ``my_role``: theirs on it, as :meth:`my_branch_role` answers (``None`` on ``main``), so a
+        client offers changes only on the drafts that take them. ``ValueError`` on a malformed cursor."""
         rank = case((BranchORM.kind == "main", 0), else_=1)       # main first
         stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
         if originating_view_id is not None:
@@ -5098,11 +5100,47 @@ class GraphVersioningService:
             rows = (await s.execute(
                 stmt.order_by(rank, BranchORM.created_at.desc(), BranchORM.id.desc()).limit(limit + 1)
             )).scalars().all()
+            out = [self._branch_meta(b) for b in rows[:limit]]
+            if viewer is not None:
+                roles = await self._my_roles(s, rows[:limit], viewer.actor)
+                for m in out:
+                    m["my_role"] = roles.get(m["branch_id"])
         nxt = None
         if len(rows) > limit:
             last = rows[limit - 1]
             nxt = f"{0 if last.kind == 'main' else 1}|{last.created_at}|{last.id}"
-        return [self._branch_meta(b) for b in rows[:limit]], nxt
+        return out, nxt
+
+    @staticmethod
+    async def _my_roles(s, branches: Sequence[BranchORM], actor: str) -> Dict[str, str]:
+        """*actor*'s role on each of *branches* that gives one — :meth:`_branch_role` for a page,
+        in one query for the shared drafts' member rows. The actor's groups are looked up once,
+        and only when a group row could raise a role; when that lookup fails a row keeps its
+        user role, so a groups outage never takes the whole list down."""
+        roles = {b.id: "owner" for b in branches if b.kind != "main" and b.owner == actor}
+        shared = [b.id for b in branches if b.is_shared and b.id not in roles]
+        if not shared:
+            return roles
+        rows = (await s.execute(select(BranchMemberORM).where(
+            BranchMemberORM.branch_id.in_(shared)))).scalars().all()
+        groups = None
+        for bid in shared:
+            mine = [r for r in rows if r.branch_id == bid]
+            best = max((r.role for r in mine if r.subject_type == "user" and r.subject_id == actor),
+                       key=ROLE_RANK.__getitem__, default=None)
+            higher = [r for r in mine if r.subject_type == "group"
+                      and ROLE_RANK[r.role] > ROLE_RANK.get(best, 0)]
+            if higher:
+                if groups is None:
+                    try:
+                        groups = set(await _load_actor_groups(actor))
+                    except GroupsUnavailable:
+                        groups = set()
+                best = max([r.role for r in higher if r.subject_id in groups] + ([best] if best else []),
+                           key=ROLE_RANK.__getitem__, default=None)
+            if best:
+                roles[bid] = best
+        return roles
 
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:
@@ -5225,6 +5263,7 @@ class GraphVersioningService:
                 "behind_by": behind_by,
                 "main_head_commit_seq": main_head,
                 "base_commit_seq": base,
+                "status": branch.status,      # a closed draft says so without listing every draft
             }
 
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:

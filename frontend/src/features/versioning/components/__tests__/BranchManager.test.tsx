@@ -3,7 +3,8 @@
  *   • lists open drafts by name;
  *   • Archive on a card opens a confirm, and confirming calls the abandon mutation with the id;
  *   • a draft being published stays listed, badged 'Publishing…';
- *   • the Archived tab lists merged and abandoned drafts.
+ *   • the Archived tab lists merged and abandoned drafts;
+ *   • Pull latest, Publish, Settings and Archive only on drafts the user can write.
  * Child sub-flows (settings/publish/pull) are stubbed so the test stays focused on the manager.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
@@ -22,7 +23,12 @@ const useBranchesMock = vi.fn(
 )
 
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
-vi.mock('../PullLatestButton', () => ({ PullLatestButton: () => null }))
+vi.mock('@/store/auth', () => ({
+  useAuthStore: (sel: (s: unknown) => unknown) => sel({ user: { id: 'ana@acme.com' } }),
+}))
+vi.mock('../PullLatestButton', () => ({
+  PullLatestButton: ({ branchId }: { branchId: string }) => <span data-testid={`pull-${branchId}`} />,
+}))
 vi.mock('../BranchSettingsModal', () => ({ BranchSettingsModal: () => null }))
 vi.mock('../CommitDialog', () => ({ CommitDialog: () => null }))
 vi.mock('../../hooks/useVersioning', () => ({
@@ -139,5 +145,23 @@ describe('BranchManager', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Active' }))
     expect(useBranchesMock).toHaveBeenLastCalledWith('ws1', 'g1', 'v1', undefined)
     expect(screen.getByText('Q3 pricing')).toBeInTheDocument()
+  })
+
+  it('offers Pull latest, Publish, Settings and Archive only on drafts the user can write', () => {
+    branchesData = [
+      draft({ branchId: 'br_own', name: 'Mine', updatedAt: '2026-06-14T00:00:04Z' }),
+      draft({ branchId: 'br_bob', name: 'Bob private', owner: 'bob', updatedAt: '2026-06-14T00:00:03Z' }),
+      draft({ branchId: 'br_ed', name: 'Shared, maintainer', owner: 'bob', isShared: true, myRole: 'maintainer',
+              updatedAt: '2026-06-14T00:00:02Z' }),
+      draft({ branchId: 'br_view', name: 'Shared, viewer', owner: 'bob', isShared: true, myRole: 'viewer',
+              updatedAt: '2026-06-14T00:00:01Z' }),
+    ]
+    renderManager()
+    expect(screen.queryAllByTestId(/^pull-/).map((el) => el.dataset.testid)).toEqual(['pull-br_own', 'pull-br_ed'])
+    expect(screen.getAllByRole('button', { name: /^Publish$/ })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Draft settings' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Archive this draft' })).toHaveLength(2)
+    // Someone else's draft still opens, to look at.
+    expect(screen.getAllByRole('button', { name: /^View$/ })).toHaveLength(2)
   })
 })

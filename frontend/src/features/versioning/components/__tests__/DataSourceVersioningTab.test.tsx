@@ -2,6 +2,7 @@
  * DataSourceVersioningTab — the data source's versioning hub shows where its versioned graph lives
  * (ProjectionHealthCard) once version control is on, with Rebuild and Check sync for managers only.
  * It counts only drafts still in play, and a failed lookup is an error, not "version control is off".
+ * It reads the open and publishing drafts; merged and abandoned ones only once its Archived tab opens.
  * With version control off, Enable is offered only for a data source whose graph can be copied into
  * version history (FalkorDB): the server refuses the rest with 422 `provider_unsupported`.
  * Its Merge requests section reads the data source's open PRs, the inbox's read, so an older open PR
@@ -18,6 +19,9 @@ let canManage = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
+let archived: Array<Record<string, unknown>>
+const useBranches = vi.fn((_ws?: string, gid?: string | null, _view?: string | null, status?: string[]) =>
+  ({ data: !gid ? undefined : status ? archived : branches, isLoading: false }))
 let providerType: string | undefined
 let openPrs: Array<Record<string, unknown>>
 let forks: Array<Record<string, unknown>>
@@ -37,7 +41,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({
     data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
   }),
-  useBranches: () => ({ data: branches, isLoading: false }),
+  useBranches: (...args: [string, string | null, string | null, string[]]) => useBranches(...args),
   useCommitLog: () => ({ data: { commits: [] } }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
@@ -76,6 +80,8 @@ beforeEach(() => {
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
   branches = []
+  archived = []
+  useBranches.mockClear()
   providerType = undefined
   openPrs = []
   forks = []
@@ -122,6 +128,25 @@ describe('DataSourceVersioningTab — status header', () => {
     ]
     renderTab()
     expect(screen.getByText(/main at commit #5 · 2 open drafts/)).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — branches', () => {
+  const branch = (id: string, name: string, status: string) =>
+    ({ branchId: id, kind: 'draft', name, status, createdAt: '', updatedAt: '' })
+
+  it('reads only the drafts in play, and the archived ones only when that tab opens', () => {
+    branches = [branch('d1', 'Live work', 'open')]
+    archived = [branch('d3', 'Shipped', 'merged')]
+    renderTab()
+    expect(useBranches.mock.calls.every(([, gid, , status]) => !status || !gid)).toBe(true)
+    expect(screen.getByText('Live work')).toBeInTheDocument()
+    expect(screen.queryByText('Shipped')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archived' }))
+    expect(useBranches).toHaveBeenLastCalledWith('ws1', 'g1', undefined, ['merged', 'abandoned'])
+    expect(screen.getByText('Shipped')).toBeInTheDocument()
+    expect(screen.queryByText('Live work')).not.toBeInTheDocument()
   })
 })
 

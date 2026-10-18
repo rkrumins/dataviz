@@ -72,6 +72,8 @@ export interface Branch {
   updatedAt: string
   /** owner/createdBy id → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** The caller's role on the draft (the branch list sets it); null when they hold none. */
+  myRole?: 'owner' | DraftRole | null
 }
 
 export interface Graph {
@@ -1064,6 +1066,8 @@ export interface BranchFreshness {
   behindBy: number
   mainHeadCommitSeq: number
   baseCommitSeq: number
+  /** The draft's own status — how a client learns it was published or discarded. */
+  status: string
 }
 
 /** Live "is this draft behind main?" — O(1), safe to poll while editing so a branch owner learns a

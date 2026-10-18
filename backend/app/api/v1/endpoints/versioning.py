@@ -820,6 +820,8 @@ class BranchResponse(_ApiModel):
     updated_at: str = Field(alias="updatedAt")
     # id → display name for every actor id this item references (see _attach_user_names).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    # The caller's role on the draft (the list sets it): 'owner', a member role, or null.
+    my_role: Optional[str] = Field(default=None, alias="myRole")
 
 
 class OpenDraftResponse(_ApiModel):
@@ -908,6 +910,7 @@ class BranchFreshnessModel(_ApiModel):
     behind_by: int = Field(alias="behindBy")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     base_commit_seq: int = Field(alias="baseCommitSeq")
+    status: str
 
 
 class RebuildResponse(_ApiModel):
@@ -1877,7 +1880,7 @@ async def get_branch_freshness(
         f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
                                 main_head_commit_seq=f["main_head_commit_seq"],
-                                base_commit_seq=f["base_commit_seq"])
+                                base_commit_seq=f["base_commit_seq"], status=f["status"])
 
 
 async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:

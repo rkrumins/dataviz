@@ -14,32 +14,26 @@
  * eject to Published. One rule, every path. A `publishing` draft stays active: a failed publish hands
  * it back as `open`, and saves made meanwhile get branch_closed, which the save path handles.
  *
- * Two deliberate constraints:
- *  • ACT ONLY ON AN EXPLICIT NON-OPEN STATUS. `list_branches` returns merged/abandoned branches (it
- *    filters by permission, not status), so a dead branch is *present* and says so. A branch that is
- *    merely ABSENT is ambiguous — a stale list, a view-scoped slice, a permission edge — and
- *    ejecting on absence would throw people out of drafts they had just opened.
- *  • WAIT FOR A SETTLED LIST. React-Query serves the stale list during a refetch, and a
- *    just-opened draft isn't in it yet. Same lesson `useBranchDeepLink` learned.
+ * ACT ONLY ON AN EXPLICIT NON-OPEN STATUS. The status is the active branch's own, read from that one
+ * branch (its freshness) — not from a list of every draft ever made, which grows without bound. A
+ * status not known yet (unread, a read that failed) is ambiguous, and ejecting on it would throw
+ * people out of drafts they had just opened.
  */
 import { useEffect, useRef } from 'react'
 import { useBranchStore } from '@/store/branchStore'
-import type { Branch } from '@/services/versioningApiService'
 
 export type BranchEviction = { branchId: string; status: string; hadUnsavedEdits: boolean }
 
 export function useActiveBranchGuard({
   enabled,
-  branches,
-  listRefreshing = false,
+  status,
   currentBranchId,
   unsavedCount,
   onEvict,
 }: {
   enabled: boolean
-  branches: Branch[] | undefined
-  /** True while the branches list is being (re)fetched — never evict on a stale list. */
-  listRefreshing?: boolean
+  /** The active branch's status, read from that branch; undefined while unknown. */
+  status: string | undefined
   currentBranchId: string | null
   /** Staged (unsaved, optimistic) edits on the canvas right now. */
   unsavedCount: number
@@ -55,12 +49,11 @@ export function useActiveBranchGuard({
   useEffect(() => { unsavedRef.current = unsavedCount }, [unsavedCount])
 
   useEffect(() => {
-    if (!enabled || !currentBranchId || !branches || listRefreshing) return
+    if (!enabled || !currentBranchId) return
     if (evictedRef.current === currentBranchId) return
 
-    const active = branches.find((b) => b.branchId === currentBranchId)
-    // absent ⇒ ambiguous; open ⇒ healthy; publishing ⇒ may come back open
-    if (!active || active.status === 'open' || active.status === 'publishing') return
+    // unknown ⇒ ambiguous; open ⇒ healthy; publishing ⇒ may come back open
+    if (!status || status === 'open' || status === 'publishing') return
 
     // Latched per-branch: merged/abandoned are terminal, so a branch we evict from can never become
     // active again — the latch only stops a double-fire if the effect re-runs before the store's
@@ -69,8 +62,8 @@ export function useActiveBranchGuard({
     useBranchStore.getState().switchToMain()
     onEvict?.({
       branchId: currentBranchId,
-      status: active.status,
+      status,
       hadUnsavedEdits: unsavedRef.current > 0,
     })
-  }, [enabled, branches, listRefreshing, currentBranchId, onEvict])
+  }, [enabled, status, currentBranchId, onEvict])
 }

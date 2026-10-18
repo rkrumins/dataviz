@@ -25,7 +25,7 @@ import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, Layo
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { usePermission } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
@@ -36,7 +36,7 @@ import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBra
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import { BRANCH_VOCAB } from '../model/branchVocab'
+import { BRANCH_VOCAB, canWriteDraft, ownerName } from '../model/branchVocab'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -132,9 +132,14 @@ export function CanvasVersioningBar({
   // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
   // viewId) while the switcher fetched the view-scoped one — two cache entries and two requests for
   // the same data, with `behindMain` derived from the wrong (graph-wide) one.
-  // Every status, so the guard below sees a merged or abandoned draft (shares BranchSwitcher's query).
-  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId, ['all'])
+  // Open and publishing drafts only (shares BranchSwitcher's query): the guard below reads the
+  // active draft's status from that draft alone.
+  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId)
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
+  // Someone else's draft is open to look at: no Publish or Discard on it. Unlisted ⇒ left to the server.
+  const me = useAuthStore((s) => s.user?.id)
+  const activeDraft = branchesQ.data?.find((b) => b.branchId === branchId)
+  const readOnlyDraft = activeDraft && !canWriteDraft(activeDraft, me) ? activeDraft : null
 
   // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate
   // publishing under you shows up promptly instead of whenever the bar happens to re-render. This
@@ -146,7 +151,8 @@ export function CanvasVersioningBar({
   // A draft can die under you — you published it, its review was merged (possibly from the Reviews
   // inbox, with no canvas mounted), a teammate merged the shared draft, someone discarded it. The
   // server marks the branch merged/abandoned; without this the client kept editing that dead scope.
-  // Deriving liveness from the branches list self-heals every one of those paths at once.
+  // Deriving liveness from the draft's own status (its freshness) self-heals every one of those
+  // paths at once.
   const onBranchEvicted = useCallback(
     ({ status, hadUnsavedEdits }: BranchEviction) => {
       const merged = status === 'merged'
@@ -169,8 +175,7 @@ export function CanvasVersioningBar({
   )
   useActiveBranchGuard({
     enabled: !!graphId,
-    branches: branchesQ.data,
-    listRefreshing: branchesQ.isFetching,
+    status: freshness.data?.status,
     currentBranchId: branchId,
     unsavedCount: uncommitted,
     onEvict: onBranchEvicted,
@@ -357,6 +362,12 @@ export function CanvasVersioningBar({
             which read as a dead strip. It now sits under the actions it points
             at, and this row is empty again on main. */}
 
+        {isDraft && branchId && readOnlyDraft && (
+          <span className="text-xs text-ink-muted">
+            {ownerName(readOnlyDraft.owner, readOnlyDraft.userNames)}’s {BRANCH_VOCAB.draft.toLowerCase()} · {BRANCH_VOCAB.viewOnly}
+          </span>
+        )}
+
         {isDraft && branchId && (
           <>
             <ChangeHighlightControl
@@ -367,6 +378,7 @@ export function CanvasVersioningBar({
 
             {/* The most consequential control in the bar, and the only one in
                 its cluster that said nothing on hover. */}
+            {!readOnlyDraft && (
             <HoverTip
               className="inline-flex"
               label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
@@ -380,9 +392,11 @@ export function CanvasVersioningBar({
                 Publish
               </button>
             </HoverTip>
+            )}
 
             {/* Destructive AND icon-only, so the `title` was also its only
                 accessible name — the conversion has to hand that back. */}
+            {!readOnlyDraft && (
             <HoverTip
               className="inline-flex"
               label="Throw this draft away"
@@ -397,6 +411,7 @@ export function CanvasVersioningBar({
                 {abandon.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               </button>
             </HoverTip>
+            )}
           </>
         )}
       </div>

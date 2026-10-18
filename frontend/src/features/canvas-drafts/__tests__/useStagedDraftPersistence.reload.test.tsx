@@ -65,4 +65,48 @@ describe('useStagedDraftPersistence — a reload while a save runs', () => {
     await p2.saveStagedChangesToDraft(restored, target)
     expect(apply.mock.calls[1][5]).toBe('key-1')
   })
+
+  it('an edit after the reload goes in its own save: the restored save is replayed first, exactly, under its key', async () => {
+    const TEMP = 'urn:staged:Dataset:0123456789abcdef'
+    // Page 1: stage a create, start saving it; the server commits it, but the answer is lost to the reload.
+    const p1 = await load()
+    const h1 = renderHook(() => p1.useStagedDraftPersistence(KEY, 'br1', false))
+    act(() => {
+      p1.useStagedChangesStore.getState().stage({
+        type: 'create_entity', targetId: TEMP, targetUrn: TEMP,
+        after: { displayName: 'A', entityType: 'Dataset' }, summary: 'Create A',
+      })
+    })
+    act(() => { vi.advanceTimersByTime(1000) })
+    apply.mockReturnValueOnce(new Promise(() => {}))
+    act(() => { p1.useStagedChangesStore.setState({ applyStatus: 'applying' }) })
+    void p1.saveStagedChangesToDraft(p1.useStagedChangesStore.getState().changes, target)
+    const firstSave = apply.mock.calls[0]
+    h1.unmount()
+
+    // Page 2: the work comes back, and the user edits something else before saving again.
+    const p2 = await load()
+    renderHook(() => p2.useStagedDraftPersistence(KEY, 'br1', true))
+    act(() => {
+      p2.useStagedChangesStore.getState().stage({
+        type: 'update_entity', targetId: 'urn:b', targetUrn: 'urn:b',
+        before: { description: '' }, after: { description: 'B' }, summary: 'Edit B',
+      })
+    })
+    apply.mockResolvedValueOnce({ commitId: 'c1', assigned: { [TEMP]: 'urn:real:a' } })   // the replay
+    apply.mockRejectedValueOnce(new Error('The request timed out.'))                     // Edit B's save
+    await expect(p2.saveStagedChangesToDraft(p2.useStagedChangesStore.getState().changes, {
+      ...target, message: 'Canvas edits (2)',
+    })).rejects.toThrow('timed out')
+
+    // The create went again only as the replay of the first save — same body, same key.
+    expect(apply.mock.calls[1]).toEqual(firstSave)
+    const creates = apply.mock.calls.slice(1).flatMap((c) => (c[3] as Array<{ op: string; kind: string }>)
+      .filter((o) => o.op === 'create' && o.kind === 'node').map(() => c[5]))
+    expect(creates).toEqual([firstSave[5]])
+    expect(apply.mock.calls[2][3]).toEqual([expect.objectContaining({ op: 'update', id: 'urn:b' })])
+    expect(apply.mock.calls[2][5]).not.toBe(firstSave[5])
+    // The settled create leaves the staged list even though Edit B's save failed, so no later save sends it.
+    expect(p2.useStagedChangesStore.getState().changes.map((c) => c.summary)).toEqual(['Edit B'])
+  })
 })

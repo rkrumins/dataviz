@@ -20,9 +20,13 @@ const branchState = {
 }
 
 let branchesData: unknown[] = []
+const useBranchesArgs = vi.fn()
 
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
-vi.mock('@/store/auth', () => ({ usePermission: () => true }))
+vi.mock('@/store/auth', () => ({
+  usePermission: () => true,
+  useAuthStore: (sel: (s: unknown) => unknown) => sel({ user: { id: 'ana' } }),
+}))
 vi.mock('@/store/schema', () => ({ useActiveView: () => ({ id: 'v1' }) }))
 vi.mock('@/store/branchStore', () => ({
   useBranchStore: (sel: (s: unknown) => unknown) => sel(branchState),
@@ -30,11 +34,16 @@ vi.mock('@/store/branchStore', () => ({
 vi.mock('../../hooks/useBranchDeepLink', () => ({ useBranchDeepLink: () => {} }))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5 }, isLoading: false, isError: false }),
-  useBranches: () => ({ data: branchesData, isLoading: false, isFetching: false }),
+  useBranches: (...args: unknown[]) => {
+    useBranchesArgs(...args)
+    return { data: branchesData, isLoading: false, isFetching: false }
+  },
   useMergeRequests: () => ({ data: [{ sourceBranchId: 'br_1', status: 'open' }] }),
   useOpenDraft: () => ({ mutate: vi.fn(), isPending: false }),
 }))
-vi.mock('../PullLatestButton', () => ({ PullLatestButton: () => null }))
+vi.mock('../PullLatestButton', () => ({
+  PullLatestButton: ({ branchId }: { branchId: string }) => <span data-testid={`pull-${branchId}`} />,
+}))
 vi.mock('../BranchSettingsModal', () => ({ BranchSettingsModal: () => null }))
 vi.mock('../BranchManager', () => ({ BranchManager: () => null }))
 
@@ -42,7 +51,7 @@ import { BranchSwitcher } from '../BranchSwitcher'
 
 const draft = (over: Record<string, unknown> = {}) => ({
   branchId: 'br_1', kind: 'draft', status: 'open', name: 'Q3 pricing',
-  owner: 'ana@acme.com', baseCommitSeq: 5, originatingViewId: 'v1',
+  owner: 'ana', baseCommitSeq: 5, originatingViewId: 'v1',
   createdAt: '2026-06-10T00:00:00Z', updatedAt: '2026-06-14T00:00:00Z',
   ...over,
 })
@@ -66,6 +75,7 @@ describe('BranchSwitcher menu', () => {
     switchToMain.mockClear()
     switchToDraft.mockClear()
     branchState.currentBranchId = null
+    useBranchesArgs.mockClear()
   })
 
   it('renders the menu OUTSIDE the blurred header (portals to the body)', () => {
@@ -131,5 +141,25 @@ describe('BranchSwitcher menu', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: 'Version' })).not.toBeInTheDocument()
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /Published/ }))
+  })
+
+  it('asks for the open and publishing drafts only, never every draft ever made', () => {
+    renderInBlurredHeader()
+    expect(useBranchesArgs).toHaveBeenCalledWith('ws1', 'g1', 'v1')
+  })
+
+  it('offers Pull latest and Settings only on drafts the user can write; others\' read-only, named', () => {
+    branchesData = [
+      draft({ branchId: 'br_own', name: 'Mine' }),
+      draft({ branchId: 'br_bob', name: 'Bob private', owner: 'bob', userNames: { bob: 'Bob Stone' } }),
+      draft({ branchId: 'br_ed', name: 'Shared, editor', owner: 'bob', isShared: true, myRole: 'editor' }),
+      draft({ branchId: 'br_view', name: 'Shared, viewer', owner: 'bob', isShared: true, myRole: 'viewer' }),
+    ]
+    renderInBlurredHeader()
+    openMenu()
+    expect(screen.queryAllByTestId(/^pull-/).map((el) => el.dataset.testid)).toEqual(['pull-br_own', 'pull-br_ed'])
+    expect(screen.getAllByRole('button', { name: 'Draft settings' })).toHaveLength(2)
+    expect(screen.getByText(/Bob Stone · .*view only/)).toBeInTheDocument()
+    expect(screen.getAllByText(/view only/)).toHaveLength(2)
   })
 })

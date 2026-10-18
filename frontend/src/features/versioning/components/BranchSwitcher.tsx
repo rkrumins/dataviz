@@ -15,13 +15,13 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { usePermission } from '@/store/auth'
+import { useAuthStore, usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useActiveView } from '@/store/schema'
 import { useBranches, useMergeRequests, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
-import { BRANCH_VOCAB, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
+import { BRANCH_VOCAB, canWriteDraft, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
 import { isLivePr } from '../model/prStatus'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
@@ -66,6 +66,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const popoverRef = useRef<HTMLDivElement>(null)
   const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
+  const me = useAuthStore((s) => s.user?.id)
 
   // The active view — attributes a newly-created draft's commits to it (so the view's History
   // ("This view") and the per-draft timeline populate) AND scopes the resolve below to this
@@ -80,9 +81,9 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Passing graphId=null when originatingViewId hasn't resolved yet disables the query (its own
   // `enabled: !!graphId` check) — a momentary null activeView mid-switch pauses the list rather
   // than falling back to graph-wide for a tick.
-  // Every status: the deep-link and the active-branch guard below need a merged or abandoned
-  // draft to be present and say so (an absent one is ambiguous).
-  const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId, ['all'])
+  // Open and publishing drafts only: the deep-link takes only an open one, and the active-branch
+  // guard reads its own draft's status from that draft (CanvasVersioningBar).
+  const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
   // Which drafts already have an OPEN review (PR)? Badge them in the list so it's clear at a glance.
@@ -268,12 +269,14 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
             )}
             {drafts.map((b) => {
               const status = draftStatus(b.baseCommitSeq, mainHead)
+              // Someone else's draft opens to look at; what would change it is offered to writers only.
+              const canWrite = canWriteDraft(b, me)
               return (
                 <BranchRow
                   key={b.branchId}
                   icon={<OwnerAvatar owner={b.owner} userNames={b.userNames} size="sm" />}
                   title={b.name || BRANCH_VOCAB.untitled}
-                  subtitle={draftSubtitle(b)}
+                  subtitle={draftSubtitle(b, canWrite)}
                   active={b.branchId === currentBranchId}
                   statusPill={status}
                   prBadge={b.status === 'publishing' ? <PublishingBadge /> : openPrBranchIds.has(b.branchId) ? (
@@ -287,13 +290,13 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                       </span>
                     </HoverTip>
                   ) : undefined}
-                  pullSlot={canManage && b.status === 'open' ? (
+                  pullSlot={canManage && canWrite && b.status === 'open' ? (
                     <PullLatestButton
                       variant="row" wsId={workspaceId} graphId={graphId ?? ''}
                       branchId={b.branchId} behind={status.behind}
                     />
                   ) : undefined}
-                  settingsSlot={canManage ? (
+                  settingsSlot={canManage && canWrite ? (
                     <HoverTip
                       className="inline-flex shrink-0"
                       label="Rename this draft, describe it, or copy a link to it"
@@ -391,8 +394,9 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   )
 }
 
-function draftSubtitle(b: Branch): string {
-  return [ownerName(b.owner, b.userNames), `edited ${timeAgo(b.updatedAt)}`].join(' · ')
+function draftSubtitle(b: Branch, canWrite: boolean): string {
+  return [ownerName(b.owner, b.userNames), `edited ${timeAgo(b.updatedAt)}`, ...(canWrite ? [] : [BRANCH_VOCAB.viewOnly])]
+    .join(' · ')
 }
 
 function BranchRow({

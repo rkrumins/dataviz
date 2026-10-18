@@ -20,11 +20,12 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useAuthStore } from '@/store/auth'
 import type { Branch, BranchStatusFilter } from '@/services/versioningApiService'
 import {
   useBranches, useOpenDraft, useAbandonDraft,
 } from '../hooks/useVersioning'
-import { BRANCH_VOCAB, draftStatus, ownerName } from '../model/branchVocab'
+import { BRANCH_VOCAB, canWriteDraft, draftStatus, ownerName } from '../model/branchVocab'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
@@ -315,6 +316,9 @@ function DraftCard({
   onArchive: () => void
 }) {
   const status = draftStatus(branch.baseCommitSeq, mainHead)
+  // Someone else's draft opens to look at; what would change it is offered to writers only.
+  const me = useAuthStore((s) => s.user?.id)
+  const canWrite = canWriteDraft(branch, me)
   const live = branch.status === 'open'
   const closed = branch.status === 'merged' || branch.status === 'abandoned'
   return (
@@ -367,10 +371,11 @@ function DraftCard({
               : 'text-accent-lineage hover:bg-accent-lineage/10',
           )}
         >
-          {isCurrent ? <><Eye className="w-3.5 h-3.5" /> Viewing</> : <><ArrowRight className="w-3.5 h-3.5" /> Open</>}
+          {isCurrent ? <><Eye className="w-3.5 h-3.5" /> Viewing</>
+            : canWrite ? <><ArrowRight className="w-3.5 h-3.5" /> Open</> : <><Eye className="w-3.5 h-3.5" /> View</>}
         </button>
 
-        {live && (
+        {canWrite && live && (
           <PullLatestButton
             variant="manager" wsId={wsId} graphId={graphId}
             branchId={branch.branchId} behind={status.behind}
@@ -379,7 +384,7 @@ function DraftCard({
 
         <div className="flex-1" />
 
-        {canManage && live && (
+        {canManage && canWrite && live && (
           <HoverTip
             className="inline-flex"
             label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
@@ -392,6 +397,7 @@ function DraftCard({
             </button>
           </HoverTip>
         )}
+        {canWrite && (
         <HoverTip className="inline-flex" label="Rename this draft, describe it, or copy a link to it">
           <button
             onClick={onSettings}
@@ -401,7 +407,8 @@ function DraftCard({
             <Settings2 className="w-3.5 h-3.5" />
           </button>
         </HoverTip>
-        {canManage && live && (
+        )}
+        {canManage && canWrite && live && (
           <HoverTip
             className="inline-flex"
             label={`${BRANCH_VOCAB.archive} this draft`}

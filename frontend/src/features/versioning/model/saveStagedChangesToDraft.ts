@@ -11,12 +11,16 @@
  * one (via its `reconcile` hook, childCount-safe), layer assignments are re-keyed temp→real, and
  * user-drawn edges are re-pointed at the real endpoints.
  */
-import { applyGraphChanges, type EntityView, type GraphChangeOp } from '@/services/versioningApiService'
+import {
+  applyGraphChanges, BranchClosedError, DraftRoleRequiredError, IntegrityError, MainWriteForbiddenError,
+  MergeConflictError, NotDraftOwnerError, OntologyViolationError,
+  type EntityView, type GraphChangeOp, type GraphChangesResult,
+} from '@/services/versioningApiService'
 import { newRequestId } from '@/services/viewTransferApiService'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useCanvasStore } from '@/store/canvas'
-import { markSnapshotCommitting } from '@/features/canvas-drafts/stagedDraftPersistence'
+import { markSnapshotCommitting, type PendingSave } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { stagedChangesToOps, unsavedNodeFields } from './stagedChangesToOps'
 
 export interface DraftSaveTarget {
@@ -38,17 +42,39 @@ export interface DraftSaveTarget {
 }
 
 /** A save that may have reached the server: a retry of the very same batch reuses its key, so the
- *  server answers with what that save did instead of applying it twice. */
-let pendingSave: { body: string; key: string } | null = null
+ *  server answers with what that save did instead of applying it twice. Any other batch first sends
+ *  this one again, exactly, under its key (see `settle`). */
+let pendingSave: PendingSave | null = null
 
 /** The save that may have reached the server, for the staged-draft snapshot to carry over a reload. */
-export function getPendingSave(): { body: string; key: string } | null {
+export function getPendingSave(): PendingSave | null {
   return pendingSave
 }
 
-/** After a reload, take back the save the snapshot carried, so saving that batch again reuses its key. */
-export function resumePendingSave(save: { body: string; key: string }): void {
+/** After a reload, take back the save the snapshot carried, so it is settled before anything else. */
+export function resumePendingSave(save: PendingSave): void {
   pendingSave = save
+}
+
+/** The server answered and applied nothing: a save is all or nothing. */
+const refused = (e: unknown) =>
+  [MergeConflictError, IntegrityError, OntologyViolationError, BranchClosedError, NotDraftOwnerError,
+    DraftRoleRequiredError, MainWriteForbiddenError].some((cls) => e instanceof cls)
+
+/** Send a save that may have reached the server again, exactly as it went, under its key: the server
+ *  answers with what it did if it committed, and applies it if it never arrived — never twice. A
+ *  refusal means it was not applied, so there is nothing to settle; any other failure keeps the key. */
+async function settle(save: PendingSave): Promise<{ res: GraphChangesResult; ids: Set<string> } | null> {
+  const [wsId, dsId, branchId, ops, message] = JSON.parse(save.body) as [string, string, string, GraphChangeOp[], string | null]
+  try {
+    const res = await applyGraphChanges(wsId, dsId, branchId, ops, message ?? undefined, save.key)
+    pendingSave = null
+    return { res, ids: new Set(save.ids ?? []) }   // a snapshot written before ids were kept has none
+  } catch (e) {
+    if (!refused(e)) throw e
+    pendingSave = null
+    return null
+  }
 }
 
 export async function saveStagedChangesToDraft(
@@ -64,7 +90,9 @@ export async function saveStagedChangesToDraft(
   // Layer placement (assign_layer / move_to_layer / reorder_nodes) is VIEW config, not graph data — it produces
   // ZERO graph ops. It persists to the view's referenceLayout.assignments via persistReferenceLayout;
   // on save, `remapEntityId` re-keys a created entity's assignment temp→real (see the canvas caller).
-  const ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
+  const bodyOf = (batch: GraphChangeOp[]) =>
+    JSON.stringify([target.wsId, target.dataSourceId, target.branchId, batch, target.message])
+  let ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
 
   if (ops.length === 0) {
     // No graph ops (e.g. a layer-only save), but a discarded create may still have left an inert
@@ -73,17 +101,53 @@ export async function saveStagedChangesToDraft(
     return { commitId: null, unsaved }
   }
 
+  // ── An earlier save that may have committed (no answer came back, or a reload cut it off) ────
+  // Unless this is that very batch again, it is settled first, exactly as it went, under its key —
+  // so a committed create is never sent a second time under a new key. Only the changes it did not
+  // carry go next, their references to what it created resolved to the real ids.
+  const settled = pendingSave && pendingSave.body !== bodyOf(ops) ? await settle(pendingSave) : null
+  let rest = changes
+  if (settled) {
+    const resolve = (id: string) => settled.res.assigned?.[id] ?? id
+    rest = changes.filter((c) => !settled.ids.has(c.id))
+    ops = stagedChangesToOps(rest, resolve).map((op) => (op.id ? { ...op, id: resolve(op.id) } : op))
+  }
+
   // ── One atomic commit ───────────────────────────────────────────────────────────────────────
   // On any failure NOTHING is persisted (no partial state). The error propagates to the caller,
   // which surfaces it; the staged changes stay put for a clean retry.
-  const body = JSON.stringify([target.wsId, target.dataSourceId, target.branchId, ops, target.message])
-  const key = pendingSave?.body === body ? pendingSave.key : newRequestId()
-  pendingSave = { body, key }
-  // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
-  const scope = useStagedChangesStore.getState()._scopeKey
-  if (scope) markSnapshotCommitting(scope, pendingSave)
-  const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
-  pendingSave = null
+  let res: GraphChangesResult = settled?.res ?? { assigned: {} }
+  if (ops.length > 0) {
+    const body = bodyOf(ops)
+    const key = pendingSave?.body === body ? pendingSave.key : newRequestId()
+    pendingSave = { body, key, ids: rest.map((c) => c.id) }
+    // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
+    const scope = useStagedChangesStore.getState()._scopeKey
+    if (scope) markSnapshotCommitting(scope, pendingSave)
+    let next: GraphChangesResult
+    try {
+      next = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
+    } catch (e) {
+      // The settled save did commit: its changes leave the staged list, so no later save resends them.
+      if (settled) {
+        reconcileSaved(changes.filter((c) => settled.ids.has(c.id)), settled.res, target)
+        useStagedChangesStore.getState().clearSaved(settled.ids)
+      }
+      throw e
+    }
+    pendingSave = null
+    res = {
+      ...next,
+      assigned: { ...res.assigned, ...next.assigned },
+      entities: { ...res.entities, ...next.entities },
+    }
+  }
+  reconcileSaved(changes, res, target)
+  return { commitId: res.commitId ?? null, unsaved }
+}
+
+/** The optimistic canvas, reconciled in place with what a save stored (there is no post-save reload). */
+function reconcileSaved(changes: StagedChange[], res: GraphChangesResult, target: DraftSaveTarget): void {
   const assigned = res.assigned ?? {}
   const resolveRef = (id: string) => assigned[id] ?? id
 
@@ -134,8 +198,6 @@ export async function saveStagedChangesToDraft(
   // edit of an entity just saved three-way-merged against the value it was READ at, and
   // conflicted with the user's own save.
   applyServerEntities(res.entities)
-
-  return { commitId: res.commitId ?? null, unsaved }
 }
 
 /** The save's answer (`entities`: each addressed entity as it is now) onto the canvas. */

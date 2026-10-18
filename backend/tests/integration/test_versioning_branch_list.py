@@ -82,6 +82,34 @@ async def _run() -> None:
     assert got == [main, bob["newest"], bob["publishing"], bob["reviewing"], bob["shared"], bob["oldest"]], got
     assert cursor is None
     assert not set(hidden.values()) & set(got)
+    # Each row names bob's own role on it, so the UI offers changes only where the server takes them.
+    roles = {b["branch_id"]: b["my_role"] for b in page}
+    assert roles == {main: None, bob["newest"]: "owner", bob["publishing"]: "owner", bob["reviewing"]: None,
+                     bob["shared"]: "editor", bob["oldest"]: "owner"}, roles
+    # A group row counts when bob is in the group; when groups can't be read, his own row still does.
+    from backend.app.services.versioning import service as svc_mod
+    from backend.app.services.versioning.errors import GroupsUnavailable
+    async with db.graphver_session() as s:
+        s.add(BranchMemberORM(branch_id=bob["shared"], subject_type="group", subject_id="eng", role="maintainer"))
+        await s.commit()
+
+    async def in_eng(actor):
+        return ("eng",)
+
+    async def unavailable(actor):
+        raise GroupsUnavailable()
+
+    real = svc_mod._load_actor_groups
+    try:
+        for groups, role in ((in_eng, "maintainer"), (unavailable, "editor")):
+            svc_mod._load_actor_groups = groups
+            page, _ = await svc.list_branches(graph_id=gid, viewer=viewer_bob)
+            assert {b["branch_id"]: b["my_role"] for b in page}[bob["shared"]] == role
+    finally:
+        svc_mod._load_actor_groups = real
+    # A manager reads every draft but holds no role on anyone else's.
+    page, _ = await svc.list_branches(graph_id=gid, viewer=mgr, limit=500)
+    assert len(page) > 100 and all(b["my_role"] is None for b in page)
 
     # ── status filter: default is open + publishing; any other set by name; "all" lifts it ──
     page, _ = await svc.list_branches(graph_id=gid, viewer=viewer_bob, status=["merged", "abandoned"])
@@ -133,12 +161,16 @@ async def _run_http() -> None:
 
         r = await c.get(f"{ws1}/graphs/{gid}/branches", params={"limit": 2})
         assert r.status_code == 200 and len(r.json()) == 2
+        assert [b["myRole"] for b in r.json()] == [None, "owner"]
         nxt = r.headers["X-Next-Cursor"]
         r = await c.get(f"{ws1}/graphs/{gid}/branches", params={"limit": 2, "cursor": nxt})
         assert [b["branchId"] for b in r.json()] == [drafts[1]] and "X-Next-Cursor" not in r.headers
 
         r = await c.get(f"{ws1}/graphs/{gid}/branches", params=[("status", "merged"), ("status", "abandoned")])
         assert [b["branchId"] for b in r.json()] == [drafts[0]]
+        # One draft's status without its list: how the canvas learns its draft was closed.
+        r = await c.get(f"{ws1}/graphs/{gid}/branches/{drafts[0]}/freshness")
+        assert r.status_code == 200 and r.json()["status"] == "abandoned", r.json()
         assert (await c.get(f"{ws1}/graphs/{gid}/branches", params={"status": "closed"})).status_code == 422
         assert (await c.get(f"{ws1}/graphs/{gid}/branches", params={"cursor": "junk"})).status_code == 422
 
