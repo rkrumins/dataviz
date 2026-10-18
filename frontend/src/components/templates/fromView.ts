@@ -2,7 +2,8 @@
  * A Context View's layers as a template keeps them: every structural field, and
  * nothing that names an entity of that view's graph — a column's `anchorUrn`,
  * legacy `entityAssignments`, and exact-URN rules (placements in all but name)
- * on layers and logical nodes. The server strips the same fields
+ * on layers and logical nodes — nor the `templateLayerId` the view's own history
+ * gave a column. The server strips the same fields
  * (`layout_config.strip_placements`); doing it here too keeps the preview honest.
  */
 import type { LayerAssignmentRuleConfig, LogicalNodeConfig, ViewLayerConfig } from '@/types/schema'
@@ -29,6 +30,7 @@ export function templateLayers(layers: readonly ViewLayerConfig[]): ViewLayerCon
         const out: ViewLayerConfig = { ...layer }
         delete out.anchorUrn
         delete out.entityAssignments
+        delete out.templateLayerId
         if (layer.rules) out.rules = keepRules(layer.rules)
         if (layer.logicalNodes) out.logicalNodes = stripNodes(layer.logicalNodes)
         return out

@@ -231,6 +231,9 @@ export interface WizardFormData {
      *  the new view as where it started. Unlike `layoutTemplateId`, never a
      *  suggestion computed in the browser. */
     contextModelId?: string
+    /** That template's version whose layers were applied — what its later
+     *  versions are compared with. */
+    contextModelVersion?: number
 }
 
 export type WizardStep =
@@ -1660,6 +1663,7 @@ function ViewWizardBody({
                         // Where the layers came from; the server keeps it only when the
                         // creator can use that template.
                         contextModelId: formData.layoutType === 'reference' ? formData.contextModelId : undefined,
+                        contextModelVersion: formData.layoutType === 'reference' ? formData.contextModelVersion : undefined,
                     })
                     if (!result.success || !result.data) {
                         setStageStates(s => ({ ...s, create: 'failed' }))
@@ -1751,6 +1755,12 @@ function ViewWizardBody({
                     // not overwrite tags set elsewhere since the form loaded, nor
                     // write a draft's staged import's tags to the view.
                     tags: tagsChanged ? formData.tags : undefined,
+                    // A library template applied in this edit: the view now starts from it.
+                    // Edits leave the form's template unset otherwise, so the view keeps its own.
+                    ...(formData.layoutType === 'reference' && formData.contextModelId && {
+                        contextModelId: formData.contextModelId,
+                        contextModelVersion: formData.contextModelVersion,
+                    }),
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {

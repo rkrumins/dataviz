@@ -45,7 +45,7 @@ from backend.app.auth.dependencies import (
 )
 from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import ViewORM
+from backend.app.db.models import ContextModelORM, ViewORM
 from backend.app.db.repositories import data_source_repo, grant_repo, view_repo
 from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
@@ -70,6 +70,7 @@ from backend.common.models.management import (
     ViewAudience,
     ViewPublishRequest,
     ViewCreateRequest,
+    ViewTemplateVersionRequest,
     ViewUpdateRequest,
     ViewLayoutUpdateRequest,
     ViewResponse,
@@ -792,6 +793,18 @@ async def authorize_view_create(
                     )
 
 
+async def _template_version(
+    session: AsyncSession, template_id: Optional[str], version: Optional[int],
+) -> Optional[int]:
+    """The version of ``template_id`` a view's layers match: the one the client
+    applied, when that version exists, else the current one. None without a
+    template."""
+    template = await session.get(ContextModelORM, template_id) if template_id else None
+    if template is None:
+        return None
+    return version if version is not None and 1 <= version <= template.version else template.version
+
+
 @router.post("/", response_model=ViewResponse, status_code=201)
 async def create_view(
     req: ViewCreateRequest = Body(...),
@@ -836,6 +849,9 @@ async def create_view(
         req.context_model_id = await template_access.usable_template_id(
             session, user=user, claims=claims, template_id=req.context_model_id,
         )
+    req.context_model_version = await _template_version(
+        session, req.context_model_id, req.context_model_version,
+    )
 
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
@@ -971,9 +987,17 @@ async def update_view(
 
     # As on create: only a layout template the editor can use is recorded;
     # any other id leaves the view's provenance as it was.
-    if req.context_model_id and req.context_model_id != existing.context_model_id:
+    switching = bool(req.context_model_id) and req.context_model_id != existing.context_model_id
+    if switching:
         req.context_model_id = await template_access.usable_template_id(
             session, user=user, claims=claims, template_id=req.context_model_id,
+        )
+        if req.context_model_id is None:
+            req.context_model_version = None  # refused: provenance stays as it was
+    # The version belongs to whichever template the view ends up naming.
+    if req.context_model_version is not None or (switching and req.context_model_id):
+        req.context_model_version = await _template_version(
+            session, req.context_model_id or existing.context_model_id, req.context_model_version,
         )
 
     # Layer rules are not checked here but where they are authored (create and PUT /layout):
@@ -995,6 +1019,41 @@ async def update_view(
             summary=_update_summary(changes), changes=changes,
         )
     return view
+
+
+@router.put("/{view_id}/template-version", response_model=ViewResponse)
+async def set_view_template_version(
+    view_id: str = Path(...),
+    req: ViewTemplateVersionRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Record the version of its layout template a view's layers now match —
+    after applying that version's changes, or choosing to keep the view's own.
+    It is what the next update is measured against; the view itself is not
+    edited."""
+    existing = await view_repo.get_view(session, view_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_edit_view(session, ctx, view_orm):
+            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+    template = (
+        await session.get(ContextModelORM, existing.context_model_id)
+        if existing.context_model_id else None
+    )
+    if template is None:
+        raise HTTPException(status_code=422, detail="This view was not built from a layout template.")
+    if req.version > template.version:
+        raise HTTPException(
+            status_code=422, detail=f"The template has no version {req.version} yet.",
+        )
+    return await view_repo.set_context_model_version(
+        session, view_id, req.version, user_id=_user_id(user),
+    )
 
 
 @router.put("/{view_id}/layout", response_model=ViewResponse)

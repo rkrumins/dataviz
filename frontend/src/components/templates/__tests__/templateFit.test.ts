@@ -51,6 +51,11 @@ describe('fitTemplate', () => {
         expect(new Set(fit.layers.map(l => l.id)).size).toBe(3)
     })
 
+    it('remembers the template layer each column came from, for its later versions', () => {
+        const fit = fitTemplate(LAYERS, null)
+        expect(fit.layers.map(l => l.templateLayerId)).toEqual(LAYERS.map(l => l.id))
+    })
+
     it('keeps the types as they are when the semantic layer is not known', () => {
         const fit = fitTemplate(LAYERS, null)
         expect(fit.layers[0].entityTypes).toEqual(['domain', 'bounded-context'])

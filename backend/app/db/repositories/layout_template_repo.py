@@ -2,7 +2,8 @@
 
 Rows only: who may see and change one is ``services/template_access.py``.
 Deleting is a soft delete (``deleted_at``), so a restore brings back the same
-id with its shares and the views that name it.
+id with its shares and the views that name it. Every version of a template's
+layers is kept in ``layout_template_versions``; ``version`` names the newest.
 """
 import json
 from datetime import datetime, timezone
@@ -12,15 +13,20 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from ..models import ContextModelORM
+from ..models import ContextModelORM, LayoutTemplateVersionORM
 
 
-def layers_of(row: ContextModelORM) -> list:
+def _json_list(text: Optional[str]) -> list:
     try:
-        layers = json.loads(row.layers_config or "[]")
+        layers = json.loads(text or "[]")
     except ValueError:
         return []
     return layers if isinstance(layers, list) else []
+
+
+def layers_of(row: ContextModelORM | LayoutTemplateVersionORM) -> list:
+    """A template's layers, or one version's."""
+    return _json_list(row.layers_config if isinstance(row, ContextModelORM) else row.layers)
 
 
 async def list_templates(
@@ -65,6 +71,7 @@ async def create_template(
     )
     session.add(row)
     await session.flush()
+    await add_version(session, row, created_by=created_by)
     return row
 
 
@@ -89,3 +96,39 @@ async def set_deleted(
     row.deleted_by = deleted_by
     await session.flush()
     return row
+
+
+async def add_version(
+    session: AsyncSession, row: ContextModelORM, *,
+    created_by: Optional[str], change_note: Optional[str] = None,
+) -> LayoutTemplateVersionORM:
+    """Keep ``row``'s layers as its version ``row.version`` — called when a
+    template is made and whenever its layers change."""
+    version = LayoutTemplateVersionORM(
+        template_id=row.id, version=row.version, name=row.name,
+        layers=row.layers_config or "[]", change_note=change_note, created_by=created_by,
+    )
+    session.add(version)
+    await session.flush()
+    return version
+
+
+async def list_versions(session: AsyncSession, template_id: str) -> List[LayoutTemplateVersionORM]:
+    """Every version of a template, newest first."""
+    rows = await session.execute(
+        select(LayoutTemplateVersionORM)
+        .where(LayoutTemplateVersionORM.template_id == template_id)
+        .order_by(LayoutTemplateVersionORM.version.desc())
+    )
+    return list(rows.scalars().all())
+
+
+async def get_version(
+    session: AsyncSession, template_id: str, version: int,
+) -> Optional[LayoutTemplateVersionORM]:
+    return await session.scalar(
+        select(LayoutTemplateVersionORM).where(
+            LayoutTemplateVersionORM.template_id == template_id,
+            LayoutTemplateVersionORM.version == version,
+        )
+    )

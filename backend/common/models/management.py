@@ -1094,6 +1094,8 @@ class ViewCreateRequest(BaseModel):
     name: str
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    #: The version of that template whose layers were applied (current when absent).
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     workspace_id: str = Field(alias="workspaceId")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     view_type: str = Field("graph", alias="viewType")
@@ -1106,10 +1108,17 @@ class ViewCreateRequest(BaseModel):
         populate_by_name = True
 
 
+class ViewTemplateVersionRequest(BaseModel):
+    """``PUT /views/{id}/template-version``: the version of the view's layout
+    template its layers now match."""
+    version: int = Field(ge=1)
+
+
 class ViewUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     view_type: Optional[str] = Field(None, alias="viewType")
     config: Optional[Dict[str, Any]] = None
     visibility: Optional[str] = None
@@ -1124,16 +1133,17 @@ class ViewCheckpointRequest(BaseModel):
     """Ask a layout write to record the resulting design as a version.
 
     The wizard sends this on the LAST write of a save, so one save is one version and the
-    version holds exactly what was saved. Only the two sources a client legitimately causes
-    are accepted; import, restore and the rest are recorded by the server itself.
+    version holds exactly what was saved. Only the sources a client legitimately causes are
+    accepted — the wizard's create and save, and applying a layout template's update;
+    import, restore and the rest are recorded by the server itself.
     """
     source: str
     message: Optional[str] = Field(None, max_length=500)
 
     @model_validator(mode="after")
     def _validate_source(self) -> "ViewCheckpointRequest":
-        if self.source not in ("create", "wizard"):
-            raise ValueError("checkpoint.source must be 'create' or 'wizard'")
+        if self.source not in ("create", "wizard", "template"):
+            raise ValueError("checkpoint.source must be 'create', 'wizard' or 'template'")
         return self
 
 
@@ -1267,6 +1277,8 @@ class ViewResponse(BaseModel):
     description: Optional[str] = None
     context_model_id: Optional[str] = Field(None, alias="contextModelId")
     context_model_name: Optional[str] = Field(None, alias="contextModelName")
+    #: The template version this view's layers last matched.
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
     workspace_id: str = Field(alias="workspaceId")
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")

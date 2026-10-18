@@ -653,6 +653,10 @@ class WorkspaceORM(Base):
     # ``backend.app.services.node_identity``.
     identity_property = Column(Text, nullable=True)
     name_property = Column(Text, nullable=True)
+    # The layout template a new view in this workspace starts from (a built-in,
+    # an Organization template, or this workspace's own). A plain id: templates
+    # belong to the visualization domain. NULL = start from the suggestions.
+    default_layout_template_id = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -846,6 +850,15 @@ class ContextModelORM(Base):
     # "Undo" puts back exactly what was there.
     deleted_at = Column(Text, nullable=True, default=None)
     deleted_by = Column(Text, nullable=True, default=None)
+    # The layers' version: bumped only when ``layers_config`` changes, every one
+    # kept in ``layout_template_versions``, so a view built from an older one
+    # (``views.context_model_version``) can be offered the difference.
+    version = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    # A pending request to offer this template to the whole organization. A
+    # template manager answers it, and may read the template meanwhile.
+    promotion_requested_by = Column(Text, nullable=True)
+    promotion_requested_at = Column(Text, nullable=True)
+    promotion_request_note = Column(Text, nullable=True)
     layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
@@ -858,6 +871,8 @@ class ContextModelORM(Base):
     visibility = Column(Text, nullable=False, default="private")        # private | workspace | enterprise
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
+    # Layout templates: featured at the top of the library (Organization and
+    # built-in templates, set by a template manager).
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
@@ -884,6 +899,46 @@ class ContextModelORM(Base):
     )
 
 
+class LayoutTemplateVersionORM(Base):
+    """One version of a layout template's layers — written when the template is
+    made and whenever its layers change, never edited afterwards."""
+
+    __tablename__ = "layout_template_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ltv_{uuid.uuid4().hex[:12]}")
+    template_id = Column(
+        Text, ForeignKey("context_models.id", ondelete="CASCADE"), nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    name = Column(Text, nullable=False)                    # the template's name then
+    layers = Column(Text, nullable=False, default="[]")    # JSON: ViewLayerConfig[]
+    change_note = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="uq_ltv_template_version"),
+    )
+
+
+class LayoutTemplateFavouriteORM(Base):
+    """A person's favourite layout template — theirs alone, like a view's."""
+
+    __tablename__ = "layout_template_favourites"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ltf_{uuid.uuid4().hex[:12]}")
+    template_id = Column(
+        Text, ForeignKey("context_models.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "user_id", name="uq_ltf_template_user"),
+        Index("idx_ltf_user", "user_id"),
+    )
+
+
 # ------------------------------------------------------------------ #
 # views (Visual rendering of context models)                           #
 # ------------------------------------------------------------------ #
@@ -899,6 +954,9 @@ class ViewORM(Base):
         ForeignKey("context_models.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The version of that layout template the view's layers last matched: what
+    # an update is measured against (``layout_template_versions``).
+    context_model_version = Column(Integer, nullable=True)
     workspace_id = Column(
         Text,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
@@ -1189,7 +1247,7 @@ class ViewVersionORM(Base):
               sqlite_where=text("request_id IS NOT NULL")),
         CheckConstraint(
             "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
-            "'promote', 'export', 'manual', 'snapshot')",
+            "'promote', 'export', 'manual', 'snapshot', 'template')",
             name="ck_view_versions_source",
         ),
     )

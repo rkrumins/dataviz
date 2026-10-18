@@ -335,6 +335,7 @@ def _to_response(
         description=label.get("description") if label_override else row.description,
         contextModelId=row.context_model_id,
         contextModelName=context_model_name,
+        contextModelVersion=row.context_model_version,
         workspaceId=row.workspace_id,
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
@@ -630,6 +631,7 @@ async def create_view(
         name=req.name,
         description=req.description,
         context_model_id=req.context_model_id,
+        context_model_version=req.context_model_version,
         workspace_id=req.workspace_id,
         data_source_id=req.data_source_id,
         view_type=req.view_type or "graph",
@@ -716,6 +718,8 @@ async def update_view(
         row.description = req.description
     if req.context_model_id is not None:
         row.context_model_id = req.context_model_id
+    if req.context_model_version is not None:
+        row.context_model_version = req.context_model_version
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
@@ -2325,6 +2329,37 @@ async def count_views_grouped(
     )
     return {value: int(n) for value, n in rows.all()}
 
+
+
+async def set_context_model_version(
+    session: AsyncSession, view_id: str, version: int, *, user_id: Optional[str] = None,
+) -> Optional[ViewResponse]:
+    """Record the layout-template version a view's layers now match — after an
+    update was applied, or declined. Not an edit of the view, so ``updated_at``
+    stays as it was."""
+    await session.execute(
+        update(ViewORM).where(ViewORM.id == view_id)
+        .values(context_model_version=version, updated_at=ViewORM.updated_at)
+    )
+    row = await session.get(ViewORM, view_id)
+    if row is None:
+        return None
+    await session.refresh(row)
+    return await _to_enriched_response(session, row, user_id)
+
+
+async def template_owners_behind(session: AsyncSession, template_id: str, version: int) -> set:
+    """Who made a live view from ``template_id`` that matches a version older
+    than ``version`` — the people a new version is news to."""
+    rows = await session.execute(
+        select(ViewORM.created_by).distinct().where(
+            ViewORM.context_model_id == template_id,
+            ViewORM.context_model_version < version,
+            ViewORM.created_by.isnot(None),
+            view_is_live(),
+        )
+    )
+    return {owner for (owner,) in rows.all()}
 
 async def list_popular_views(
     session: AsyncSession,

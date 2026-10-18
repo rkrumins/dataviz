@@ -44,7 +44,32 @@ export interface LayoutTemplate {
     usageCount: number
     /** People and groups it is shared with — only for those who may share it. */
     grantCount?: number | null
+    /** Its layers' version: changing the layers makes a new one. */
+    version: number
     access: LayoutTemplateAccess
+}
+
+/** One version of a template's layers. */
+export interface LayoutTemplateVersionSummary {
+    version: number
+    /** The template's name when this version was kept. */
+    name: string
+    changeNote?: string | null
+    layerCount: number
+    createdBy?: string | null
+    createdAt: string
+}
+
+export interface LayoutTemplateVersion extends LayoutTemplateVersionSummary {
+    layers: ViewLayerConfig[]
+}
+
+/** An edit: a new version is kept only when the layers actually change. */
+export interface LayoutTemplatePatch extends Partial<LayoutTemplateInput> {
+    /** What changed — kept with the new version. */
+    changeNote?: string | null
+    /** Tell the people whose views were built from an older version. */
+    notifyUsers?: boolean
 }
 
 export interface LayoutTemplateInput {
@@ -77,8 +102,22 @@ export const layoutTemplateService = {
     },
 
     /** Partial: absent fields stay as they are. */
-    update(id: string, patch: Partial<LayoutTemplateInput>): Promise<LayoutTemplate> {
+    update(id: string, patch: LayoutTemplatePatch): Promise<LayoutTemplate> {
         return authFetch<LayoutTemplate>(url(id), { method: 'PUT', body: JSON.stringify(patch) })
+    },
+
+    /** Every version of its layers, newest first. */
+    versions(id: string): Promise<LayoutTemplateVersionSummary[]> {
+        return authFetch<{ items: LayoutTemplateVersionSummary[] }>(url(id, '/versions')).then(r => r.items)
+    },
+
+    version(id: string, version: number): Promise<LayoutTemplateVersion> {
+        return authFetch<LayoutTemplateVersion>(url(id, `/versions/${version}`))
+    },
+
+    /** Make an earlier version's layers the newest version. */
+    restoreVersion(id: string, version: number): Promise<LayoutTemplate> {
+        return authFetch<LayoutTemplate>(url(id, `/versions/${version}/restore`), { method: 'POST' })
     },
 
     /** A soft delete: `restore` brings back the same template, shares and all. */

@@ -287,17 +287,18 @@ def derive_entity_scope(config: Optional[dict]) -> str:
 
 # ── Layout templates: the structure without the placements ────────────────
 #: What only one view's graph can mean: the entity a column IS, and entities
-#: placed by hand (legacy per-layer spelling).
-_PLACEMENT_KEYS = ("anchorUrn", "entityAssignments")
+#: placed by hand (legacy per-layer spelling). Plus the template layer a
+#: view's column was made from — that view's history, not a template's.
+_PLACEMENT_KEYS = ("anchorUrn", "entityAssignments", "templateLayerId")
 
 
 def strip_placements(layers: list) -> list:
     """``layers`` as a layout template keeps them: every structural field, but
     nothing that names an entity of one graph — a column's ``anchorUrn``,
     legacy ``entityAssignments``, and exact-URN rules (which ``_normalize``
-    turns into placements) on layers and logical nodes at any depth. A rule
-    with a wildcard pattern matches by shape, so it stays. Never mutates its
-    input."""
+    turns into placements) on layers and logical nodes at any depth — nor the
+    ``templateLayerId`` a view's column carries. A rule with a wildcard pattern
+    matches by shape, so it stays. Never mutates its input."""
     def strip(item: dict) -> dict:
         out = {k: v for k, v in item.items() if k not in _PLACEMENT_KEYS}
         if isinstance(out.get("rules"), list):

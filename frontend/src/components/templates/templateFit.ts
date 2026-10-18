@@ -12,9 +12,12 @@
  * rather than left to place nothing — or worse, to match every entity once its
  * type list empties; the view's save refuses such a rule anyway.
  *
- * Pure. Layers get fresh ids: the new view owns them.
+ * Pure. Layers get fresh ids — the new view owns them — and remember the
+ * template layer each came from (`templateLayerId`), so a later version of the
+ * template can be matched to them.
  */
 import { caseFold } from '@/features/ontology/lib/caseFold'
+import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
 import { generateId } from '@/lib/utils'
 import type { LayerAssignmentRuleConfig, LogicalNodeConfig, ViewLayerConfig } from '@/types/schema'
 
@@ -75,6 +78,7 @@ export function fitTemplate(layers: readonly ViewLayerConfig[], declared: readon
         return {
             ...layer,
             id: generateId(),
+            templateLayerId: layer.id,
             order: i,
             entityTypes,
             ...(layer.rules && { rules: fitRules(layer.rules) }),
@@ -88,4 +92,18 @@ export function fitTemplate(layers: readonly ViewLayerConfig[], declared: readon
         matchedLayers,
         unmatchedTypes: [...unmatched.values()].sort((a, b) => a.localeCompare(b)),
     }
+}
+
+/**
+ * A template's layers exactly as a new view gets them: fitted, with the
+ * description and the colour the view fills in where the template has none.
+ * One definition for the wizard and for matching a template's later versions
+ * to the view (`templateUpdate.ts`).
+ */
+export function layersForView(layers: readonly ViewLayerConfig[], declared: readonly string[] | null): ViewLayerConfig[] {
+    return fitTemplate(layers, declared).layers.map((l, i) => ({
+        ...l,
+        description: l.description ?? '',
+        color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
+    }))
 }

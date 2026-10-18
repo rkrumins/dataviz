@@ -100,7 +100,7 @@ vi.mock('../steps/LayoutStep', () => ({
       <span data-testid="layout-initial-template">{initialTemplateId ?? ''}</span>
       <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
       <button onClick={() => updateFormData({
-        contextModelId: 'tpl_1', layoutTemplateId: 'tpl_1',
+        contextModelId: 'tpl_1', contextModelVersion: 3, layoutTemplateId: 'tpl_1',
         layers: [{ id: 'fresh', name: 'Bronze', entityTypes: [], order: 0 }],
       })}>stub-apply-library-template</button>
     </div>
@@ -481,6 +481,7 @@ describe('ViewWizard — started from a layout template', () => {
 
     await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
     expect(createViewMock.mock.calls[0][0].contextModelId).toBe('tpl_1')
+    expect(createViewMock.mock.calls[0][0].contextModelVersion).toBe(3)
   })
 })
 

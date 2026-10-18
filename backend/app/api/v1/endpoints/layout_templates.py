@@ -11,8 +11,13 @@ personal, plus shares with people and groups.
   PUT    /{id}                    edit, or change who can use it
   DELETE /{id}                    soft delete — ``POST /{id}/restore`` undoes it
   PUT    /{id}/hidden             hide or show a built-in for everyone
+  GET    /{id}/versions[/{v}]     every version of its layers (newest first), or one
+  POST   /{id}/versions/{v}/restore   make version v's layers the newest version
   GET|POST /{id}/grants           shares (owner or workspace admin)
   PUT|DELETE /{id}/grants/{gid}
+
+A template's layers are versioned: changing them makes a new version, and a view
+built from an older one is offered the difference (``views.context_model_version``).
 
 Duplicating is a client-side GET then POST. API keys never reach these routes
 (``auth/api_key_surface.py`` is deny-by-default).
@@ -46,6 +51,9 @@ from backend.common.models.layout_templates import (
     LayoutTemplateListResponse,
     LayoutTemplateResponse,
     LayoutTemplateUpdateRequest,
+    LayoutTemplateVersionListResponse,
+    LayoutTemplateVersionResponse,
+    LayoutTemplateVersionSummary,
 )
 from backend.common.models.rbac import ViewGrantCreateRequest, ViewGrantResponse
 
@@ -144,6 +152,7 @@ async def _responses(
             updatedAt=r.updated_at,
             usageCount=usage.get(r.id, 0),
             grantCount=grants.get(r.id, 0) if r.id in shareable else None,
+            version=r.version,
             access=template_access.access_envelope(ctx, r),
         )
         for r in rows
@@ -176,6 +185,43 @@ async def _grant_on(session: AsyncSession, template_id: str, grant_id: str):
         # A grant id from another template the caller manages is not reachable here.
         raise HTTPException(status_code=404, detail="Grant not found on this template")
     return target
+
+
+def _version_summary(v) -> dict:
+    return dict(
+        version=v.version, name=v.name, changeNote=v.change_note,
+        layerCount=len(layout_template_repo.layers_of(v)),
+        createdBy=v.created_by, createdAt=v.created_at,
+    )
+
+
+async def _new_layers_version(
+    session: AsyncSession, row: ContextModelORM, layers: list, *, user: User, note: Optional[str],
+) -> None:
+    """Make ``layers`` the template's newest version."""
+    await layout_template_repo.update_template(
+        session, row, {"layers": layers, "version": row.version + 1},
+    )
+    await layout_template_repo.add_version(session, row, created_by=user.id, change_note=note)
+
+
+async def _tell_view_owners(session: AsyncSession, row: ContextModelORM, user: User, note: Optional[str]) -> None:
+    """Whoever built a live view from an older version hears there is a new one
+    — once until they read it, and never the person who made the change."""
+    owners = await view_repo.template_owners_behind(session, row.id, row.version)
+    if owners:
+        await notification_repo.notify(
+            session,
+            user_ids=sorted(owners),
+            kind="layout_template.updated",
+            title=f'"{row.name}" has a new version',
+            body=note or "See what changed and apply it to the views you built from it.",
+            link=f"/templates/{row.id}",
+            actor_id=user.id,
+            resource_type=RESOURCE,
+            resource_id=row.id,
+            dedupe_unread=True,
+        )
 
 
 # ── Templates ────────────────────────────────────────────────────────
@@ -278,16 +324,88 @@ async def update_layout_template(
     for column in ("description", "category"):
         if column in sent:
             changes[column] = getattr(req, column)
+    new_layers = None
     if req.layers is not None:
-        changes["layers"] = await _checked_layers(
-            session, req.layers, layout_template_repo.layers_of(row),
-        )
+        # Locked, so two editors saving at once make versions n+1 and n+2.
+        await session.refresh(row, with_for_update=True)
+        current = layout_template_repo.layers_of(row)
+        checked = await _checked_layers(session, req.layers, current)
+        # The studio sends every layer back; only a real change is a new version.
+        if checked != current:
+            new_layers = checked
 
-    if changes:
+    if changes or new_layers is not None:
         await layout_template_repo.update_template(session, row, changes)
+        details: dict = {"changed": sorted(changes) + (["layers"] if new_layers is not None else [])}
+        if new_layers is not None:
+            await _new_layers_version(session, row, new_layers, user=user, note=req.change_note)
+            details["version"] = row.version
+            if req.notify_users and row.visibility != "private":
+                await _tell_view_owners(session, row, user, req.change_note)
         await recorder.record_for_request(
-            session, "visualization.layout_template.updated", **_target(row),
-            details={"changed": sorted(changes)},
+            session, "visualization.layout_template.updated", **_target(row), details=details,
+        )
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.get("/{template_id}/versions", response_model=LayoutTemplateVersionListResponse)
+async def list_layout_template_versions(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    versions = await layout_template_repo.list_versions(session, row.id)
+    return LayoutTemplateVersionListResponse(
+        items=[LayoutTemplateVersionSummary(**_version_summary(v)) for v in versions],
+    )
+
+
+@router.get("/{template_id}/versions/{version}", response_model=LayoutTemplateVersionResponse)
+async def get_layout_template_version(
+    template_id: str,
+    version: int,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    found = await layout_template_repo.get_version(session, row.id, version)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return LayoutTemplateVersionResponse(
+        **_version_summary(found), layers=layout_template_repo.layers_of(found),
+    )
+
+
+@router.post("/{template_id}/versions/{version}/restore", response_model=LayoutTemplateResponse)
+async def restore_layout_template_version(
+    template_id: str,
+    version: int,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Make version ``version``'s layers the newest version — a new version, so
+    the history keeps what it replaced. Nothing changes when they already are."""
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    if not template_access.can_edit(ctx, row):
+        raise HTTPException(status_code=403, detail="You can't edit this template.")
+    found = await layout_template_repo.get_version(session, row.id, version)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    await session.refresh(row, with_for_update=True)
+    current = layout_template_repo.layers_of(row)
+    layers = await _checked_layers(session, layout_template_repo.layers_of(found), current)
+    if layers != current:
+        await _new_layers_version(session, row, layers, user=user, note=f"Restored version {version}")
+        await recorder.record_for_request(
+            session, "visualization.layout_template.version_restored", **_target(row),
+            details={"restoredFrom": version, "version": row.version},
         )
     return await _response(session, ctx, row, user=user, claims=claims)
 

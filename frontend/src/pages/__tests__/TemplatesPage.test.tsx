@@ -46,7 +46,7 @@ const OWN = { canEdit: true, canDelete: true, canShare: true, canHide: false }
 function t(id: string, name: string, over: Partial<LayoutTemplate> = {}): LayoutTemplate {
     return {
         id, name, description: '', category: null, visibility: 'private', builtIn: false, hidden: false,
-        workspaceId: null, workspaceName: null, createdBy: 'usr_me', usageCount: 0, grantCount: 0,
+        workspaceId: null, workspaceName: null, createdBy: 'usr_me', usageCount: 0, grantCount: 0, version: 1,
         createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z',
         layers: [{ id: `${id}-1`, name: 'Sources', entityTypes: ['Table'], order: 0, color: '#3b82f6' }],
         access: { via: 'owner', ...OWN },

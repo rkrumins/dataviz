@@ -33,7 +33,8 @@ import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import type { LayoutTemplate as LibraryTemplate } from '@/services/layoutTemplateService'
 import { TemplatePreview } from '@/components/templates/TemplatePreview'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
-import { fitTemplate, type TemplateFit } from '@/components/templates/templateFit'
+import { fitTemplate, layersForView, type TemplateFit } from '@/components/templates/templateFit'
+import { LAYER_COLORS } from '../layerColors'
 import { AUDIENCE, LIBRARY_TABS, audienceOf, type LibraryTab, type TemplateAudience } from '@/components/templates/templateAudience'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
@@ -66,9 +67,7 @@ interface LayoutStepProps {
     initialTemplateId?: string
 }
 
-/** Shared layer palette — also used by the Layer Studio's in-step "Add layer"
- *  so colours never drift between the two places layers can be created. */
-export const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
+export { LAYER_COLORS } from '../layerColors'
 
 // ============================================
 // Quick Start template gallery
@@ -352,6 +351,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             assignments: {},
             layoutTemplateId: template.id,
             contextModelId: undefined,
+            contextModelVersion: undefined,
             entityScope: template.entityScope,
         })
         setGalleryOpen(false)
@@ -360,24 +360,21 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // A library template: every structural field kept, types resolved against
     // this data's semantic layer (unknown ones reported, never silently empty),
     // fresh layer ids, and the template recorded as where the view started.
-    const libraryTemplateUpdate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers'>): Partial<WizardFormData> => {
-        const layers = fitTemplate(template.layers, declaredTypes).layers.map((l, i) => ({
-            ...l,
-            description: l.description ?? '',
-            color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
-        }))
+    const libraryTemplateUpdate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers' | 'version'>): Partial<WizardFormData> => {
+        const layers = layersForView(template.layers, declaredTypes)
         return {
             layoutType: 'reference',
             layers,
             assignments: {},
             layoutTemplateId: template.id,
             contextModelId: template.id,
+            contextModelVersion: template.version,
             // Layers that place by rule resolve only in open scope (see GalleryTemplate.entityScope).
             entityScope: layers.some(l => l.entityTypes.length > 0 || (l.rules?.length ?? 0) > 0) ? 'all' : undefined,
         }
     }, [declaredTypes])
 
-    const handleApplyLibraryTemplate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers'>) => {
+    const handleApplyLibraryTemplate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers' | 'version'>) => {
         updateFormData(libraryTemplateUpdate(template))
         setDismissedFitFor(null)
         setGalleryOpen(false)

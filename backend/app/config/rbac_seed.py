@@ -83,7 +83,7 @@ PERMISSIONS: tuple[dict[str, str | None], ...] = (
         "id": "system:templates:manage",
         "category": "system",
         "description": "Curate the organization's layout templates and the built-in ones.",
-        "long_description": "Lets you publish, edit and delete layout templates offered to everyone in the organization, and hide or show the built-in starter templates for everyone. Deliberately SEPARATE from system:admin so curating the template library can be delegated to the people who own the house style, without handing them the platform. Workspace and personal templates follow their own rules: this grants no access to anyone's personal templates or to a workspace you are not otherwise in.",
+        "long_description": "Lets you publish, edit and delete layout templates offered to everyone in the organization, feature them, hide or show the built-in starter templates for everyone, and answer requests to offer a team's template to everyone. Deliberately SEPARATE from system:admin so curating the template library can be delegated to the people who own the house style, without handing them the platform. Workspace and personal templates follow their own rules: this reaches someone's personal or workspace template only while its owner has asked for it to be offered to everyone, so it can be reviewed.",
         "examples": "[\"Publish a team's medallion layout as an organization template.\", \"Hide a built-in template your organization does not use.\"]",
     },
     {

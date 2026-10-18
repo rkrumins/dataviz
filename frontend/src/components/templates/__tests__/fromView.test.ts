@@ -11,6 +11,7 @@ describe('templateLayers', () => {
         const layers = [{
             id: 'l1', name: 'Domains', entityTypes: ['domain'], order: 0, color: '#111111', showUnassigned: true,
             anchorUrn: 'urn:li:domain:finance',
+            templateLayerId: 'medallion-bronze',
             entityAssignments: [{ entityId: 'urn:li:dataset:1', layerId: 'l1' }],
             rules: [
                 { id: 'exact', urnPattern: 'urn:li:dataset:1', priority: 1 },
@@ -27,6 +28,7 @@ describe('templateLayers', () => {
         const [kept] = templateLayers(layers)
         expect(kept).not.toHaveProperty('anchorUrn')
         expect(kept).not.toHaveProperty('entityAssignments')
+        expect(kept).not.toHaveProperty('templateLayerId')
         expect(kept.rules?.map(r => r.id)).toEqual(['shape', 'typed'])
         expect(kept.logicalNodes?.[0].rules).toEqual([])
         expect(kept.logicalNodes?.[0].children?.[0].rules).toEqual([])

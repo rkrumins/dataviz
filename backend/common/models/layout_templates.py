@@ -68,6 +68,8 @@ class LayoutTemplateResponse(BaseModel):
     usage_count: int = Field(0, alias="usageCount")
     #: People and groups it is shared with; only for those who may share it.
     grant_count: Optional[int] = Field(None, alias="grantCount")
+    #: Its layers' version — bumped only when the layers change.
+    version: int = 1
     access: LayoutTemplateAccess
 
 
@@ -109,6 +111,10 @@ class LayoutTemplateUpdateRequest(BaseModel):
     visibility: Optional[TemplateVisibility] = None
     workspace_id: Optional[str] = Field(None, alias="workspaceId")
     layers: Optional[List[Dict[str, Any]]] = Field(None, min_length=1, max_length=MAX_LAYERS)
+    #: What changed — kept with the new version when the layers change.
+    change_note: Optional[str] = Field(None, alias="changeNote", max_length=500)
+    #: Tell the people whose views were built from an older version.
+    notify_users: bool = Field(False, alias="notifyUsers")
 
     @field_validator("name")
     @classmethod
@@ -125,3 +131,25 @@ class LayoutTemplateUpdateRequest(BaseModel):
 
 class LayoutTemplateHiddenRequest(BaseModel):
     hidden: bool
+
+
+class LayoutTemplateVersionSummary(BaseModel):
+    """One version of a template's layers, without them."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    version: int
+    #: The template's name when this version was kept.
+    name: str
+    change_note: Optional[str] = Field(None, alias="changeNote")
+    layer_count: int = Field(alias="layerCount")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    created_at: str = Field(alias="createdAt")
+
+
+class LayoutTemplateVersionResponse(LayoutTemplateVersionSummary):
+    layers: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class LayoutTemplateVersionListResponse(BaseModel):
+    """Newest first."""
+    items: List[LayoutTemplateVersionSummary] = Field(default_factory=list)

@@ -32,7 +32,7 @@ import { TemplateStudio } from '../TemplateStudio'
 const MINE: LayoutTemplate = {
     id: 'tpl_mine', name: 'My flow', description: 'Orders', category: 'finance', visibility: 'private',
     builtIn: false, hidden: false, workspaceId: null, workspaceName: null, createdBy: 'usr_me',
-    createdAt: '', updatedAt: '', usageCount: 0, grantCount: 0,
+    createdAt: '', updatedAt: '', usageCount: 0, grantCount: 0, version: 1,
     layers: [{ id: 'l1', name: 'Sources', entityTypes: ['Table'], order: 0, color: '#3b82f6' }],
     access: { via: 'owner', canEdit: true, canDelete: true, canShare: true, canHide: false },
 }
@@ -123,5 +123,27 @@ describe('TemplateStudio', () => {
         const body = service.update.mock.calls[0][1]
         expect(body.name).toBe('Our flow')
         expect(body).not.toHaveProperty('visibility')
+        // The layers did not change: no new version, so nothing to say about one.
+        expect(body).not.toHaveProperty('changeNote')
+        expect(screen.queryByText(/This saves version/)).not.toBeInTheDocument()
+    })
+
+    it('new layers are a new version: say what changed, and tell the people using it', async () => {
+        const shared = { ...MINE, visibility: 'workspace' as const, workspaceId: 'ws_fin', usageCount: 3 }
+        service.update.mockResolvedValue({ ...shared, version: 2 })
+        renderStudio({ seed: { template: shared } })
+        next()
+        await screen.findByText('Shape the layers')
+        fireEvent.change(screen.getByDisplayValue('Sources'), { target: { value: 'Raw sources' } })
+        next()
+        await screen.findByText('Who is it for?')
+        next()
+        expect(await screen.findByText('This saves version 2')).toBeInTheDocument()
+        fireEvent.change(screen.getByPlaceholderText(/Added a Gold layer/), { target: { value: 'Renamed Sources' } })
+        expect(screen.getByRole('checkbox', { name: /Tell the people/ })).toBeChecked()
+        fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(service.update).toHaveBeenCalledTimes(1))
+        expect(service.update.mock.calls[0][1]).toMatchObject({ changeNote: 'Renamed Sources', notifyUsers: true })
     })
 })

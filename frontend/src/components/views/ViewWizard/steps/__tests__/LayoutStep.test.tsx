@@ -53,7 +53,7 @@ function template(over: Partial<LayoutTemplate>): LayoutTemplate {
   return {
     id: 'tpl', name: 'Template', description: '', category: null, visibility: 'enterprise',
     builtIn: true, hidden: false, workspaceId: null, workspaceName: null, layers: [],
-    createdBy: null, createdAt: '', updatedAt: '', usageCount: 0, grantCount: null,
+    createdBy: null, createdAt: '', updatedAt: '', usageCount: 0, grantCount: null, version: 1,
     access: { via: 'builtin', canEdit: false, canDelete: false, canShare: false, canHide: false },
     ...over,
   }
@@ -132,7 +132,10 @@ describe('LayoutStep — the template library', () => {
     expect(call.layers.map((l: { id: string }) => l.id)).not.toContain('bronze')
     expect(call.assignments).toEqual({})
     expect(call.contextModelId).toBe('tpl_medallion')
+    expect(call.contextModelVersion).toBe(1)
     expect(call.layoutTemplateId).toBe('tpl_medallion')
+    // Each column remembers the template layer it came from, for later versions.
+    expect(call.layers.map((l: { templateLayerId: string }) => l.templateLayerId)).toEqual(['bronze', 'silver', 'gold'])
   })
 
   it("resolves a template's types against the data source and names what didn't match", () => {
@@ -184,6 +187,7 @@ describe('LayoutStep — the template library', () => {
 
     fireEvent.click(screen.getByText('From your schema'))
     expect(spy.mock.calls[0][0].contextModelId).toBeUndefined()
+    expect(spy.mock.calls[0][0].contextModelVersion).toBeUndefined()
     expect(spy.mock.calls[0][0].assignments).toEqual({})
   })
 })

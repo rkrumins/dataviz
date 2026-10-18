@@ -333,6 +333,8 @@ async def test_a_template_keeps_structure_never_placements(test_client, db_sessi
     layer = {
         "id": "domains", "name": "Domains", "entityTypes": ["Domain"], "order": 0,
         "anchorUrn": "urn:li:domain:finance",
+        # Saved from a view built from another template: that is the view's history.
+        "templateLayerId": "medallion-bronze",
         "entityAssignments": [{"entityId": "urn:li:dataset:1", "layerId": "domains"}],
         "rules": [
             {"id": "r-exact", "urnPattern": "urn:li:dataset:1", "priority": 1},
@@ -352,6 +354,7 @@ async def test_a_template_keeps_structure_never_placements(test_client, db_sessi
     assert resp.status_code == 201, resp.text
     kept = resp.json()["layers"][0]
     assert "anchorUrn" not in kept and "entityAssignments" not in kept
+    assert "templateLayerId" not in kept
     assert [r["id"] for r in kept["rules"]] == ["r-shape"]
     assert kept["logicalNodes"][0]["rules"] == []
     assert kept["logicalNodes"][0]["children"][0]["rules"] == []

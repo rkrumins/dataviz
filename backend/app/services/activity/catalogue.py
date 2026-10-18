@@ -766,6 +766,7 @@ LABELS: dict[str, str] = {
     "visualization.layout_template.updated": "Edited a layout template",
     "visualization.layout_template.deleted": "Deleted a layout template",
     "visualization.layout_template.restored": "Restored a layout template",
+    "visualization.layout_template.version_restored": "Restored an earlier version of a layout template",
     "visualization.layout_template.hidden": "Hid a built-in layout template",
     "visualization.layout_template.shown": "Showed a built-in layout template",
     "visualization.layout_template.grant_added": "Shared a layout template",

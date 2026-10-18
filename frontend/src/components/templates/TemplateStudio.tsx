@@ -201,6 +201,10 @@ export function TemplateStudio({ seed, categories, onClose, onSaved, onShare, on
     })
     const [submitting, setSubmitting] = useState(false)
     const [created, setCreated] = useState<LayoutTemplate | null>(null)
+    // A change to an existing template's layers is a new version: say what
+    // changed, and whether to tell the people whose views were built from it.
+    const [changeNote, setChangeNote] = useState('')
+    const [notifyUsers, setNotifyUsers] = useState(() => !!editing && editing.usageCount > 0 && editing.visibility !== 'private')
 
     const canChangeAudience = !editing || editing.access.canShare
         || (editing.visibility === 'enterprise' && editing.access.canEdit)
@@ -217,20 +221,25 @@ export function TemplateStudio({ seed, categories, onClose, onSaved, onShare, on
         [categories, category],
     )
 
+    const body = {
+        name: name.trim(),
+        description: description.trim() || null,
+        category: category.trim() || null,
+        layers: layers.map((l, i) => ({ ...l, name: l.name.trim(), order: i })),
+    }
+    const newVersion = !!editing
+        && JSON.stringify(body.layers) !== JSON.stringify(editing.layers.map((l, i) => ({ ...l, order: i })))
+    const tellsPeople = newVersion && audience.visibility !== 'private'
+
     const submit = async () => {
         setSubmitting(true)
-        const body = {
-            name: name.trim(),
-            description: description.trim() || null,
-            category: category.trim() || null,
-            layers: layers.map((l, i) => ({ ...l, name: l.name.trim(), order: i })),
-        }
         try {
             if (editing) {
                 const moved = audience.visibility !== editing.visibility
                     || (audience.workspaceId ?? null) !== (editing.workspaceId ?? null)
                 const saved = await layoutTemplateService.update(editing.id, {
                     ...body, ...(moved && canChangeAudience ? audience : {}),
+                    ...(newVersion && { changeNote: changeNote.trim() || null, notifyUsers: tellsPeople && notifyUsers }),
                 })
                 notify('success', `Saved "${saved.name}"`)
                 void invalidate()
@@ -406,6 +415,36 @@ export function TemplateStudio({ seed, categories, onClose, onSaved, onShare, on
             ) : (
                 <div>
                     <StepHeading title="One last look" subtitle="This is how it will appear in the library." />
+                    {newVersion && (
+                        <div className="mb-6 rounded-2xl border border-fuchsia-500/25 bg-fuchsia-500/[0.04] p-4">
+                            <p className="text-sm font-semibold text-ink">This saves version {editing!.version + 1}</p>
+                            <p className="text-xs text-ink-muted mt-0.5">
+                                Views built from it keep their layers; the people who can edit them are offered the changes.
+                            </p>
+                            <label className="block mt-3">
+                                <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">What changed?</span>
+                                <textarea
+                                    value={changeNote}
+                                    maxLength={500}
+                                    rows={2}
+                                    onChange={e => setChangeNote(e.target.value)}
+                                    placeholder="Added a Gold layer for curated tables"
+                                    className="input border-slate-200 dark:border-slate-700 mt-1.5 w-full py-2 bg-glass-base/40 resize-none"
+                                />
+                            </label>
+                            {tellsPeople && (
+                                <label className="mt-2 flex items-center gap-2 text-xs text-ink-secondary">
+                                    <input
+                                        type="checkbox"
+                                        checked={notifyUsers}
+                                        onChange={e => setNotifyUsers(e.target.checked)}
+                                        className="rounded border-slate-300 text-fuchsia-600 focus:ring-fuchsia-500"
+                                    />
+                                    Tell the people whose views were built from it
+                                </label>
+                            )}
+                        </div>
+                    )}
                     <div className="grid gap-6 lg:grid-cols-[1fr_1.2fr]">
                         <dl className="space-y-4 text-sm">
                             <div>

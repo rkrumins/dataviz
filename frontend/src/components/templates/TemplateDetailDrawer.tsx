@@ -19,6 +19,8 @@ import type { LayoutTemplate } from '@/services/layoutTemplateService'
 import { useBrand } from '@/store/branding'
 import type { LogicalNodeConfig, ViewLayerConfig } from '@/types/schema'
 import { AudienceBadge } from './TemplateCard'
+import { TemplateUpdateChip } from './TemplateUpdateChip'
+import { TemplateVersionHistory } from './TemplateVersionHistory'
 import { audienceDescription, audienceOf, categoryLabel, menuActions, type TemplateAction } from './templateAudience'
 
 const ACTION_BUTTONS: Record<Exclude<TemplateAction, 'use'>, { label: string; icon: LucideIcon }> = {
@@ -200,16 +202,20 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                                 ) : (
                                     <ul className="rounded-xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700">
                                         {(usedBy.data?.items ?? []).map(view => (
-                                            <li key={view.id}>
+                                            <li key={view.id} className="flex items-center gap-2 pr-3">
                                                 <Link
                                                     to={`/views/${view.id}`}
-                                                    className="flex items-center gap-2 px-3 py-2 text-sm text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                                                    className="flex flex-1 min-w-0 items-center gap-2 px-3 py-2 text-sm text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
                                                 >
                                                     <span className="truncate flex-1">{view.name}</span>
                                                     {view.workspaceName && (
                                                         <span className="text-[11px] text-ink-muted truncate max-w-[40%]">{view.workspaceName}</span>
                                                     )}
                                                 </Link>
+                                                {view.contextModelVersion != null && (
+                                                    <span className="text-[10px] text-ink-muted tabular-nums shrink-0">v{view.contextModelVersion}</span>
+                                                )}
+                                                <TemplateUpdateChip view={view} canEdit={view.access?.canEdit ?? false} variant="inline" />
                                             </li>
                                         ))}
                                         {usedBy.isLoading && <li className="px-3 py-2 text-xs text-ink-muted">Loading…</li>}
@@ -222,8 +228,11 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                                 )}
                                 <p className="text-[11px] text-ink-muted mt-2">
                                     A view keeps its own copy of the layers: editing or deleting the template never changes it.
+                                    When the template has a new version, the people who can edit a view built from it are offered the changes.
                                 </p>
                             </section>
+
+                            <TemplateVersionHistory template={template} open={open} />
                         </div>
 
                         <footer className="px-6 py-3 border-t border-slate-200 dark:border-slate-700 text-[11px] text-ink-muted flex items-center gap-2 shrink-0">

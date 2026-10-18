@@ -27,6 +27,7 @@ import {
     Megaphone,
     Share2,
     ShieldAlert,
+    Sparkles,
     XCircle,
     type LucideIcon,
 } from 'lucide-react'
@@ -54,6 +55,11 @@ const KIND_VISUALS: Record<string, KindVisual> = {
     },
     'layout_template.shared': {
         Icon: LayoutTemplate,
+        icon: 'text-fuchsia-500',
+        tile: 'bg-fuchsia-500/10',
+    },
+    'layout_template.updated': {
+        Icon: Sparkles,
         icon: 'text-fuchsia-500',
         tile: 'bg-fuchsia-500/10',
     },

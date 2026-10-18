@@ -38,7 +38,7 @@ import { ShareTemplateDialog } from '../ShareTemplateDialog'
 const MINE: LayoutTemplate = {
     id: 'tpl_mine', name: 'My flow', description: null, category: null, visibility: 'private',
     builtIn: false, hidden: false, workspaceId: null, workspaceName: null, createdBy: 'usr_me',
-    createdAt: '', updatedAt: '', usageCount: 0, grantCount: 1,
+    createdAt: '', updatedAt: '', usageCount: 0, grantCount: 1, version: 1,
     layers: [{ id: 'l1', name: 'Sources', entityTypes: [], order: 0 }],
     access: { via: 'owner', canEdit: true, canDelete: true, canShare: true, canHide: false },
 }

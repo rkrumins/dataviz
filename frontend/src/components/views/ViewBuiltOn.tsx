@@ -66,6 +66,7 @@ import { useFeature } from '@/store/features'
 import { KIND_TEXT } from '@/features/sync-status/deriveSync'
 import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
 import { useLayoutTemplate } from '@/hooks/useLayoutTemplates'
+import { TemplateUpdateChip } from '@/components/templates/TemplateUpdateChip'
 import { PROVIDER_HEALTH_META, useProviderHealth } from '@/store/providerHealthModel'
 import { useAnyWorkspacePermission, useNavPermission } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
@@ -261,17 +262,20 @@ export function ViewBuiltOn({ view }: { view: View }) {
             </ol>
 
             {template && (
-                <Link
-                    to={`/templates/${template.id}`}
-                    className="group/tpl flex items-center gap-2 rounded-xl border border-black/[0.07] dark:border-white/[0.08] px-3 py-2 text-xs hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-                >
-                    <LayoutTemplate aria-hidden className="h-3.5 w-3.5 shrink-0 text-fuchsia-500" />
-                    <span className="text-ink-muted shrink-0">Layers started from</span>
-                    <span className="truncate font-semibold text-ink group-hover/tpl:text-indigo-600 dark:group-hover/tpl:text-indigo-400">
-                        {template.name}
-                    </span>
-                    <ChevronRight aria-hidden className="ml-auto h-3.5 w-3.5 shrink-0 text-ink-muted" />
-                </Link>
+                <div className="flex items-center gap-2 rounded-xl border border-black/[0.07] dark:border-white/[0.08] pr-3 text-xs">
+                    <Link
+                        to={`/templates/${template.id}`}
+                        className="group/tpl flex flex-1 min-w-0 items-center gap-2 rounded-xl px-3 py-2 hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                    >
+                        <LayoutTemplate aria-hidden className="h-3.5 w-3.5 shrink-0 text-fuchsia-500" />
+                        <span className="text-ink-muted shrink-0">Layers started from</span>
+                        <span className="truncate font-semibold text-ink group-hover/tpl:text-indigo-600 dark:group-hover/tpl:text-indigo-400">
+                            {template.name}
+                        </span>
+                        <ChevronRight aria-hidden className="ml-auto h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                    </Link>
+                    <TemplateUpdateChip view={view} canEdit={view.access?.canEdit ?? false} variant="inline" />
+                </div>
             )}
 
             {/* Every explanation the rows used to carry inline, in one place a

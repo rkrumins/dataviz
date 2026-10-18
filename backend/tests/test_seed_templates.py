@@ -8,7 +8,8 @@ import json
 
 from sqlalchemy import select
 
-from backend.app.db.models import ContextModelORM
+from backend.app.db.models import ContextModelORM, LayoutTemplateVersionORM
+from backend.app.db.repositories import layout_template_repo
 from backend.app.db.seed_templates import BUILTIN_TEMPLATES, seed_templates
 
 
@@ -34,6 +35,9 @@ async def test_seeding_again_changes_nothing(db_session):
         select(ContextModelORM).where(ContextModelORM.is_template.is_(True))
     )).scalars().all())
     assert count == len(BUILTIN_TEMPLATES)
+    # Each its v1, and no second version for layers that did not change.
+    versions = (await db_session.execute(select(LayoutTemplateVersionORM))).scalars().all()
+    assert sorted(v.version for v in versions) == [1] * len(BUILTIN_TEMPLATES)
 
 
 async def test_an_upgrade_refreshes_content_but_keeps_an_admins_choices(db_session):
@@ -53,6 +57,12 @@ async def test_an_upgrade_refreshes_content_but_keeps_an_admins_choices(db_sessi
     assert json.loads(rows["medallion"].layers_config) == seed["layers"]
     assert rows["data-mesh"].is_active is False
     assert rows["data-mesh"].deleted_at == "2026-10-01T00:00:00Z"
+    # New layers are a new version — views built from v1 are offered the change.
+    assert rows["medallion"].version == 2
+    kept = await layout_template_repo.list_versions(db_session, rows["medallion"].id)
+    assert [v.version for v in kept] == [2, 1]
+    assert kept[0].change_note == "Updated with this release." and kept[0].created_by is None
+    assert rows["data-mesh"].version == 1
 
 
 async def test_builtin_logical_nodes_carry_the_type_the_canvas_needs():

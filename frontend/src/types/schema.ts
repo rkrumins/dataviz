@@ -359,6 +359,14 @@ export interface ViewLayerConfig {
 
   // Scope configuration - which edge types define containment hierarchy
   scopeEdges?: ScopeEdgeConfig;
+
+  /**
+   * The layout-template layer this column was made from, when the view was
+   * built from a template. It is how a later version of that template is
+   * matched to the view's columns (`templates/templateUpdate.ts`). One view's
+   * history: templates never keep it.
+   */
+  templateLayerId?: string;
 }
 
 /**

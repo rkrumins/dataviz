@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ContextModelORM
+from .repositories import layout_template_repo
 
 logger = logging.getLogger(__name__)
 
@@ -376,8 +377,10 @@ async def seed_templates(session: AsyncSession) -> None:
     """Insert missing built-ins and refresh the content of existing ones.
 
     Never touches ``is_active`` (an administrator hid it) or ``deleted_at``.
-    Each insert gets its own savepoint: two workers starting together race on
-    the unique ``system_key`` and the loser simply finds the row already there.
+    New layers are a new version, so views built from a built-in are offered
+    the change like any other template's. Each insert and each new version gets
+    its own savepoint: two workers starting together race on the unique
+    ``system_key`` (or version), and the loser finds the work already done.
     """
     existing = {
         row.system_key: row
@@ -392,7 +395,7 @@ async def seed_templates(session: AsyncSession) -> None:
         if row is None:
             try:
                 async with session.begin_nested():
-                    session.add(ContextModelORM(
+                    row = ContextModelORM(
                         system_key=tmpl["system_key"],
                         name=tmpl["name"],
                         description=tmpl["description"],
@@ -400,18 +403,30 @@ async def seed_templates(session: AsyncSession) -> None:
                         layers_config=layers,
                         is_template=True,
                         visibility="enterprise",
-                    ))
+                    )
+                    session.add(row)
+                    await session.flush()
+                    await layout_template_repo.add_version(session, row, created_by=None)
                 inserted += 1
             except IntegrityError:
                 logger.debug("Built-in template %s was seeded concurrently", tmpl["system_key"])
             continue
-        if (row.name, row.description, row.category, row.layers_config) != (
+        stale = (row.name, row.description, row.category, row.layers_config) != (
             tmpl["name"], tmpl["description"], tmpl["category"], layers,
-        ):
-            row.name = tmpl["name"]
-            row.description = tmpl["description"]
-            row.category = tmpl["category"]
-            row.layers_config = layers
-            refreshed += 1
+        )
+        row.name = tmpl["name"]
+        row.description = tmpl["description"]
+        row.category = tmpl["category"]
+        if row.layers_config != layers:
+            try:
+                async with session.begin_nested():
+                    row.layers_config = layers
+                    row.version += 1
+                    await layout_template_repo.add_version(
+                        session, row, created_by=None, change_note="Updated with this release.",
+                    )
+            except IntegrityError:
+                logger.debug("Built-in template %s was refreshed concurrently", tmpl["system_key"])
+        refreshed += 1 if stale else 0
     if inserted or refreshed:
         logger.info("Built-in layout templates: %d added, %d refreshed", inserted, refreshed)
