@@ -120,8 +120,9 @@ built-in, and manages shares. Every change is recorded in the activity log
   "· 1 active" is gone.
 - **"Data Assets" is now "Data Sources"**, with its entities and relationships beneath — the same
   figures as Administration's.
-- **Large numbers read the same everywhere**: 1,500 is "1.5k" on every page, and 999,999 is "1.0M",
-  not "1000k".
+- **Large numbers read the same everywhere**: 1,500 is "1.5k" on every page (the Workspaces list
+  said "2k"), and 999,999 is "1.0M", not "1000k". A real zero reads "0"; a dash now means a source
+  is still being counted.
 - **When the overview can't be loaded**, Administration says its counts are unknown instead of
   showing zeros.
 

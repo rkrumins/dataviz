@@ -304,7 +304,10 @@ function WorkspaceCard({ ws, index, row, isActive, activeDataSourceId, onSelect 
                                     ? 'text-violet-500'
                                     : s.val > 0 ? (isActive ? 'text-accent-business' : palette.label) : 'text-ink-muted/30'
                             )}>
-                                {s.val > 0 ? compact(s.val) : '—'}
+                                {/* A dash only while sources are still being counted:
+                                    the summary's zero is a real zero. */}
+                                {s.val > 0 ? compact(s.val)
+                                    : pendingCount > 0 && (s.lbl === 'Nodes' || s.lbl === 'Edges') ? '—' : '0'}
                             </span>
                             <span className="text-[10px] text-ink-muted/60">{s.sub}</span>
                         </div>

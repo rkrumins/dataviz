@@ -75,6 +75,14 @@ describe('WorkspaceGrid', () => {
         expect(screen.getByText('· counting…')).toBeInTheDocument()
     })
 
+    it('a known zero reads as 0; a dash means still being counted', () => {
+        const noViews = SUMMARY.workspaces.map(w => ({ ...w, views: 0 }))
+        renderGrid({ ...SUMMARY, workspaces: noViews })
+        // Both cards: Views is a real zero, not "unknown".
+        expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(2)
+        expect(screen.queryByText('—')).not.toBeInTheDocument()
+    })
+
     it('waits for the numbers rather than inventing them', () => {
         renderGrid(undefined)
         expect(screen.getByText('Counting your workspaces…')).toBeInTheDocument()
