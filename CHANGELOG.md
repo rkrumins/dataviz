@@ -220,6 +220,8 @@ marks a view up to date with its template; `PUT /api/v1/admin/workspaces/{id}` t
 - **Org Admins and Org Auditors see every workspace** — in the workspace list, on
   workspace pages and in the totals — not only the ones they are bound to, matching what their roles
   already let them do there.
+- **Your business areas shows four workspaces at a time** — one full row on a wide screen, two rows
+  of two on a laptop — instead of six that left the last row half empty.
 
 ### Upgrading
 

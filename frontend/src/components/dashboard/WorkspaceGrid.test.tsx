@@ -3,7 +3,7 @@
  * workspace summary. They used to add up a workspace list loaded once at
  * sign-in and count views from whichever workspace happened to be open.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 
@@ -86,5 +86,16 @@ describe('WorkspaceGrid', () => {
     it('waits for the numbers rather than inventing them', () => {
         renderGrid(undefined)
         expect(screen.getByText('Counting your workspaces…')).toBeInTheDocument()
+    })
+
+    it('pages four at a time, so a wide screen shows one full row', () => {
+        const six = ['Finance', 'Operations', 'Sales', 'Marketing', 'People', 'Legal']
+            .map((name, i) => ws(`ws_${i}`, name, []))
+        render(<MemoryRouter><WorkspaceGrid workspaces={six} /></MemoryRouter>)
+        const shown = () => six.map(w => w.name).filter(name => screen.queryByText(name))
+        expect(shown()).toEqual(['Finance', 'Operations', 'Sales', 'Marketing'])
+
+        fireEvent.click(screen.getByRole('button', { name: /Next/ }))
+        expect(shown()).toEqual(['People', 'Legal'])
     })
 })

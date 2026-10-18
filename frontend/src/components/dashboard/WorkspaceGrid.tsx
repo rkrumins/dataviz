@@ -398,7 +398,9 @@ export function WorkspaceGrid({ workspaces, summary }: {
         [summary],
     )
 
-    const PAGE_SIZE = 6
+    // One full row of four on a wide screen, two rows of two below it: the grid's
+    // column counts (1, 2, 4) all divide the page, so no page ends half empty.
+    const PAGE_SIZE = 4
 
     const filteredWorkspaces = useMemo(() => {
         const sorted = [...workspaces].sort((a, b) =>
@@ -489,7 +491,7 @@ export function WorkspaceGrid({ workspaces, summary }: {
                     <p className="text-xs text-ink-muted">Try a different search term</p>
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 wide:grid-cols-4 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 wide:grid-cols-4 gap-6">
                     {visibleWorkspaces.map((ws, i) => (
                         <WorkspaceCard
                             key={ws.id}
