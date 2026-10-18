@@ -3,8 +3,9 @@
  * just the projection panel's worst eight. It names each graph and its key,
  * marks forks, orphans and platform-owned keys, pages by cursor, filters on
  * the server, and lets an administrator rebuild a graph's cache, check it
- * against Postgres, open its data source, or move a fork to the trash. The
- * projection panel links to it.
+ * against Postgres, open its data source, move a fork to the trash, or move
+ * a platform copy to another FalkorDB provider or key, and shows the old key
+ * a moved graph is still retiring. The projection panel links to it.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -12,8 +13,9 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { versionedGraphs, rebuildProjection, reconcileProjection, deleteFork } = vi.hoisted(() => ({
+const { versionedGraphs, moveProjection, rebuildProjection, reconcileProjection, deleteFork } = vi.hoisted(() => ({
     versionedGraphs: vi.fn(),
+    moveProjection: vi.fn(),
     rebuildProjection: vi.fn(),
     reconcileProjection: vi.fn(),
     deleteFork: vi.fn(),
@@ -21,7 +23,7 @@ const { versionedGraphs, rebuildProjection, reconcileProjection, deleteFork } = 
 
 vi.mock('@/services/systemStatusService', async () => {
     const actual = await vi.importActual<typeof import('@/services/systemStatusService')>('@/services/systemStatusService')
-    return { ...actual, systemStatusService: { ...actual.systemStatusService, versionedGraphs } }
+    return { ...actual, systemStatusService: { ...actual.systemStatusService, versionedGraphs, moveProjection } }
 })
 vi.mock('@/services/versioningApiService', () => ({ rebuildProjection, reconcileProjection, deleteFork }))
 
@@ -39,7 +41,7 @@ function row(over: Partial<VersionedGraphRow>): VersionedGraphRow {
         dataSourceLabel: 'Customer 360', providerName: 'Primary', providerType: 'falkordb', kind: 'manual',
         falkorGraphName: 'customer_360', falkorProvider: 'falkor-eu', committed: 3, projected: 3, target: 3,
         lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
-        updatedAt: null, owned: false, forkParentGraphId: null, orphan: false,
+        updatedAt: null, owned: false, forkParentGraphId: null, orphan: false, retiredKeys: [],
         ...over,
     }
 }
@@ -75,6 +77,7 @@ function renderPanel() {
 
 beforeEach(() => {
     versionedGraphs.mockReset()
+    moveProjection.mockReset()
     rebuildProjection.mockReset()
     reconcileProjection.mockReset()
     deleteFork.mockReset()
@@ -201,6 +204,56 @@ describe('VersionedGraphsPanel', () => {
         await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
         expect(await screen.findByText('Forks were made from this fork. Delete its forks first.')).toBeInTheDocument()
         expect(versionedGraphs).toHaveBeenCalledTimes(1)
+    })
+
+    it('offers Move… on platform copies only, never on the customer\'s graph or an orphan', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, FORK, { ...ORPHAN, owned: true }], nextCursor: null })
+        renderPanel()
+        await screen.findByText('Customer 360')
+
+        const move = screen.getAllByRole('button', { name: 'Move…' }) as HTMLButtonElement[]
+        expect(move.map(b => b.disabled)).toEqual([true, false, true])
+        expect(move[0]).toHaveAttribute('title', "Only platform copies can be moved; this is the customer's graph")
+        await userEvent.click(move[1])
+        expect(screen.getByRole('dialog')).toHaveTextContent('dsfork_1')
+    })
+
+    it('moves a graph from its row, says where to, and reloads the list', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
+        moveProjection.mockResolvedValue({
+            graphId: 'graph_b', changed: true, from: { providerId: 'falkor-eu', key: 'gv_fork_b' },
+            to: { providerId: 'falkor-eu', key: 'gvp_graph_b{graph_b.1}' }, retiring: null, watermark: {},
+        })
+        renderPanel()
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Move…' }))
+        await userEvent.selectOptions(screen.getByLabelText('Target provider'), 'falkor-eu')
+        await userEvent.click(screen.getByRole('button', { name: 'Move' }))
+        expect(moveProjection).toHaveBeenCalledWith('graph_b', { providerId: 'falkor-eu' })
+        expect(await screen.findByText('Moving to gvp_graph_b{graph_b.1} — reads come from Postgres until it catches up')).toBeInTheDocument()
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+        await waitFor(() => expect(versionedGraphs).toHaveBeenCalledTimes(2))
+    })
+
+    it('says so when the graph already was there', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
+        const here = { providerId: 'falkor-eu', key: 'gvp_graph_b{graph_b.1}' }
+        moveProjection.mockResolvedValue({ graphId: 'graph_b', changed: false, from: here, to: here, retiring: null, watermark: {} })
+        renderPanel()
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Move…' }))
+        await userEvent.selectOptions(screen.getByLabelText('Target provider'), 'falkor-eu')
+        await userEvent.click(screen.getByRole('button', { name: 'Move' }))
+        expect(await screen.findByText('Already there')).toBeInTheDocument()
+    })
+
+    it('shows the old key a moved graph is still retiring', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [{
+            ...FORK, retiredKeys: [{ name: 'gv_fork_old', provider: 'falkor-eu', retireAfter: '2026-10-18T12:15:00Z', afterSeq: 5 }],
+        }], nextCursor: null })
+        renderPanel()
+
+        expect(await screen.findByText('old key gv_fork_old on EU graph store — removed after it catches up')).toBeInTheDocument()
     })
 })
 

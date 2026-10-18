@@ -7,7 +7,9 @@
  * FalkorDB provider and key it projects into and whether the platform owns
  * that key. Filters run on the server. Each row can rebuild the graph's
  * cache, check it against Postgres, or open its data source; a fork's row
- * can also move the fork to the trash.
+ * can also move the fork to the trash. A platform copy can be moved to
+ * another FalkorDB provider or key, and the old key a move left behind is
+ * listed under the key until it is dropped.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -22,6 +24,7 @@ import {
 } from '@/services/systemStatusService'
 import { deleteFork, rebuildProjection, reconcileProjection } from '@/services/versioningApiService'
 import { formatSince } from './meta'
+import { MoveProjectionDialog } from './MoveProjectionDialog'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
     { value: 'fresh', label: 'In sync' },
@@ -66,6 +69,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
     const [search, setSearch] = useState('')
     const [busy, setBusy] = useState<string | null>(null)
     const [notes, setNotes] = useState<Record<string, RowNote>>({})
+    const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
     const providerName = new Map((providers ?? []).map(p => [p.id, p.name]))
 
     const query = useInfiniteQuery({
@@ -207,6 +211,11 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                             <span className="ml-1.5 text-[10px] text-ink-muted">{row.owned ? 'Platform copy' : 'Customer graph'}</span>
                                             <br />
                                             <span className="font-mono text-[10px] text-ink-muted">{row.falkorGraphName ?? 'not yet projected'}</span>
+                                            {row.retiredKeys.map(k => (
+                                                <span key={`${k.provider}:${k.name}`} className="block text-[10px] text-ink-muted">
+                                                    old key {k.name} on {k.provider ? (providerName.get(k.provider) ?? k.provider) : 'default'} — removed after it catches up
+                                                </span>
+                                            ))}
                                         </td>
                                         <td className="px-3 py-2.5">
                                             <span className="font-medium text-ink-secondary">{stateLabel(row)}</span>
@@ -231,6 +240,15 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 {row.forkParentGraphId && (
                                                     <button className={ACTION_CLS} disabled={busy !== null} onClick={() => act(row, 'delete')}>Delete</button>
                                                 )}
+                                                <button
+                                                    className={ACTION_CLS}
+                                                    disabled={!row.owned || row.orphan || busy !== null}
+                                                    title={!row.owned ? "Only platform copies can be moved; this is the customer's graph"
+                                                        : row.orphan ? 'Its data source no longer exists' : undefined}
+                                                    onClick={() => setMoving(row)}
+                                                >
+                                                    Move…
+                                                </button>
                                             </div>
                                             {busy?.startsWith(`${row.graphId}:`) && <Loader2 className="mt-1 w-3 h-3 animate-spin text-ink-muted" />}
                                             {note && <p className={cn('mt-1 text-[11px]', NOTE_CLS[note.tone])}>{note.text}</p>}
@@ -249,6 +267,24 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         {query.isFetchingNextPage ? 'Loading…' : 'Load more'}
                     </button>
                 </div>
+            )}
+
+            {moving && (
+                <MoveProjectionDialog
+                    row={moving}
+                    providers={providers ?? []}
+                    onClose={() => setMoving(null)}
+                    onMoved={res => {
+                        setMoving(null)
+                        setNotes(prev => ({
+                            ...prev,
+                            [res.graphId]: res.changed
+                                ? { tone: 'ok', text: `Moving to ${res.to.key} — reads come from Postgres until it catches up` }
+                                : { tone: 'ok', text: 'Already there' },
+                        }))
+                        void query.refetch()
+                    }}
+                />
             )}
         </div>
     )
