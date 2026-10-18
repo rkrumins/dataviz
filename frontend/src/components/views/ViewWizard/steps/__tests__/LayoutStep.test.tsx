@@ -17,7 +17,7 @@ import type { LayoutTemplate } from '@/services/layoutTemplateService'
 // The data source's ontology, as useDataSourceSchema reports it — mutable so a
 // case can give the source an ontology, or hold it loading.
 const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], isLoading: false }))
-const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false }))
+const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false, enabled: true }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
   useDataSourceSchema: () => ({ entityTypes: ds.entityTypes, isLoading: ds.isLoading, isError: false }),
@@ -27,6 +27,7 @@ vi.mock('@/hooks/useLayoutTemplates', () => ({
   useLayoutTemplates: () => ({ templates: lib.templates, isLoading: lib.isLoading, error: null }),
   useLayoutTemplate: () => ({ data: undefined }),
   useInvalidateLayoutTemplates: () => () => undefined,
+  useLayoutTemplatesEnabled: () => lib.enabled,
 }))
 
 // The workspaces store transitively imports @/main (createRoot) — mock it so the module graph
@@ -114,6 +115,7 @@ afterEach(() => {
   ds.isLoading = false
   lib.templates = []
   lib.isLoading = false
+  lib.enabled = true
 })
 
 describe('LayoutStep — the template library', () => {
@@ -197,6 +199,19 @@ describe('LayoutStep — the template library', () => {
     expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ layers: [], contextModelId: undefined }))
     expect(screen.queryByText(/start from this layout/)).not.toBeInTheDocument()
     expect(screen.getByText('Choose a starting template')).toBeInTheDocument()
+  })
+
+  it('offers only what the data suggests while an admin has templates off', () => {
+    lib.enabled = false
+    lib.templates = [MEDALLION]
+    ds.entityTypes = [
+      { id: 'Domain', name: 'Domain', pluralName: 'Domains', hierarchy: { level: 0, canContain: [] }, visual: { color: '#000' } },
+    ]
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+    expect(screen.getByText('Suggested for your data')).toBeInTheDocument()
+    expect(screen.queryByText('Template library')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('From your schema'))
+    expect(screen.queryByRole('button', { name: 'Save as template' })).not.toBeInTheDocument()
   })
 
   it('a suggestion from the data itself is not recorded as a library template', () => {

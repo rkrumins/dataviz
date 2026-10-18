@@ -128,6 +128,7 @@ tests/test_label_cache_warmup.py
 tests/test_layout_config.py
 tests/test_layout_promote.py
 tests/test_layout_template_library.py
+tests/test_layout_templates_switch.py
 tests/test_layout_template_versions.py
 tests/test_layout_templates.py
 tests/test_lease_keeper.py

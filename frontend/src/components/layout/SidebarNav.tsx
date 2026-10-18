@@ -28,6 +28,7 @@ import { useAnalyticsAccess } from '@/hooks/useAnalyticsAccess'
 import { useSidebarSpec } from '@/store/navCatalogue'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -543,7 +544,8 @@ export function SidebarNav() {
   // renders. ``useSidebarSpec`` resolves the live spec from the store.
   const dashboardVisible  = useNavPermission(useSidebarSpec('dashboard'))
   const exploreVisible    = useNavPermission(useSidebarSpec('explore'))
-  const templatesVisible  = useNavPermission(useSidebarSpec('templates'))
+  const templatesAllowed  = useNavPermission(useSidebarSpec('templates'))
+  const templatesOn       = useLayoutTemplatesEnabled()
   const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
   const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
   const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
@@ -555,7 +557,7 @@ export function SidebarNav() {
   const visibility: Record<NavigationTab, boolean> = {
     dashboard:  dashboardVisible,
     explore:    exploreVisible,
-    templates:  templatesVisible,
+    templates:  templatesAllowed && templatesOn,
     workspaces: workspacesVisible,
     ingestion:  ingestionVisible,
     schema:     schemaVisible,

@@ -21,6 +21,7 @@ import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import type { ViewLayerConfig } from '@/types/schema'
 
 interface ViewCardOverflowMenuProps {
@@ -65,6 +66,7 @@ export function ViewCardOverflowMenu({
   const [exportOpen, setExportOpen] = useState(false)
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [savingAsTemplate, setSavingAsTemplate] = useState(false)
+  const templatesOn = useLayoutTemplatesEnabled()
   const portability = useViewPortability()
   const exportEnabled = portability.canExport
   // Updating a view from a file runs in the wizard, which only exists inside the app layout.
@@ -251,7 +253,7 @@ export function ViewCardOverflowMenu({
                   Export…
                 </button>
               )}
-              {templateLayers && templateLayers.length > 0 && (
+              {templatesOn && templateLayers && templateLayers.length > 0 && (
                 <button
                   onClick={() => { setSavingAsTemplate(true); setIsOpen(false) }}
                   className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"

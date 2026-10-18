@@ -253,6 +253,10 @@ and **Built-in** — and, for template managers, **Requests**.
 | **Workspace** | Everyone in that workspace, and anyone it is shared with | Its owner and the workspace's editors; its owner or a workspace admin decides who can use it |
 | **Personal** | You, and the people and teams you share it with | You, and anyone you share it with as an editor |
 
+> **Note:** If **Templates** isn't in your sidebar, an administrator has turned layout templates
+> off ([Feature Switches](/guide/feature-switches#view-modes)). Views built from a template keep
+> their layers either way.
+
 ### Find the right one
 
 - **Featured** leads the **All** tab: the templates your template managers recommend. **Recently

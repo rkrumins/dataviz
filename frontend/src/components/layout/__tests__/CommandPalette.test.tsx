@@ -15,6 +15,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATEGORY_ORDER, type GlobalSearchResult } from '@/hooks/useGlobalSearch'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 const { globalSearch, recentViews } = vi.hoisted(() => ({
   globalSearch: vi.fn(),
@@ -252,6 +253,18 @@ describe('CommandPalette — where a hit takes you', () => {
     renderPalette(true)
     clickRow('Import a layout template')
     expect(locationNow()).toBe('/templates?import=1')
+  })
+
+  it('offers no template actions while an admin has layout templates off', () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, layoutTemplatesEnabled: false } })
+    try {
+      renderPalette(true)
+      const rows = Array.from(document.querySelectorAll('[cmdk-item]')).map(r => r.textContent ?? '')
+      expect(rows.some(r => /template/i.test(r))).toBe(false)
+      expect(rows.some(r => r.includes('Browse Views'))).toBe(true)
+    } finally {
+      useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
+    }
   })
 
   it('sends Open Settings to the account page', () => {

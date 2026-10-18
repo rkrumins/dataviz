@@ -28,7 +28,7 @@ import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
-import { useLayoutTemplate, useLayoutTemplates } from '@/hooks/useLayoutTemplates'
+import { useLayoutTemplate, useLayoutTemplates, useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import type { LayoutTemplate as LibraryTemplate } from '@/services/layoutTemplateService'
@@ -262,6 +262,7 @@ export function LayoutStep({
     // cached list shared with the Templates page. Each is matched to THIS data's
     // semantic layer before it is offered, so the card can say how well it fits.
     const { templates: library, isLoading: libraryLoading } = useLayoutTemplates()
+    const templatesOn = useLayoutTemplatesEnabled()
     const [libraryTab, setLibraryTab] = useState<LibraryTab>('all')
     const [libraryQuery, setLibraryQuery] = useState('')
     const [dismissedFitFor, setDismissedFitFor] = useState<string | null>(null)
@@ -584,7 +585,7 @@ export function LayoutStep({
                                 </p>
                             </div>
                             <div className="flex items-center gap-2">
-                                {!showGallery && formData.layers.length > 0 && (
+                                {templatesOn && !showGallery && formData.layers.length > 0 && (
                                     <button
                                         type="button"
                                         onClick={() => setSavingAsTemplate(true)}
@@ -650,59 +651,61 @@ export function LayoutStep({
                                         />
                                     </div>
                                 )}
-                                <div>
-                                    <div className="flex flex-wrap items-center gap-2 mb-3">
-                                        <LayoutTemplate className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                                        <span className="font-semibold text-slate-800 dark:text-slate-200">Template library</span>
-                                        <span className="text-xs text-slate-500">Yours, your teams' and your organization's</span>
-                                        <div className="relative ml-auto">
-                                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-                                            <input
-                                                type="search"
-                                                value={libraryQuery}
-                                                onChange={e => setLibraryQuery(e.target.value)}
-                                                placeholder="Search templates"
-                                                aria-label="Search templates"
-                                                className="h-8 w-52 pl-8 pr-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
-                                            />
+                                {templatesOn && (
+                                    <div>
+                                        <div className="flex flex-wrap items-center gap-2 mb-3">
+                                            <LayoutTemplate className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                                            <span className="font-semibold text-slate-800 dark:text-slate-200">Template library</span>
+                                            <span className="text-xs text-slate-500">Yours, your teams' and your organization's</span>
+                                            <div className="relative ml-auto">
+                                                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                                                <input
+                                                    type="search"
+                                                    value={libraryQuery}
+                                                    onChange={e => setLibraryQuery(e.target.value)}
+                                                    placeholder="Search templates"
+                                                    aria-label="Search templates"
+                                                    className="h-8 w-52 pl-8 pr-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                                />
+                                            </div>
                                         </div>
+                                        {libraryTabs.length > 1 && (
+                                            <div role="tablist" aria-label="Template collections" className="flex flex-wrap gap-1 mb-3">
+                                                {libraryTabs.map(tab => (
+                                                    <button
+                                                        key={tab.id}
+                                                        type="button"
+                                                        role="tab"
+                                                        aria-selected={libraryTab === tab.id}
+                                                        onClick={() => setLibraryTab(tab.id)}
+                                                        className={cn(
+                                                            'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
+                                                            libraryTab === tab.id
+                                                                ? 'bg-indigo-600 text-white'
+                                                                : 'text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800',
+                                                        )}
+                                                    >
+                                                        {tab.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <TemplateGallery
+                                            templates={libraryTemplates}
+                                            activeId={formData.layoutTemplateId}
+                                            loading={libraryLoading || (!blank && dsSchemaLoading)}
+                                            onApply={item => {
+                                                const template = library.find(t => t.id === item.id)
+                                                if (template) handleApplyLibraryTemplate(template)
+                                            }}
+                                        />
+                                        {!libraryLoading && !(!blank && dsSchemaLoading) && libraryTemplates.length === 0 && (
+                                            <p className="text-xs text-slate-500 py-2">
+                                                {libraryQuery ? `No template matches "${libraryQuery}".` : 'No templates in this collection yet.'}
+                                            </p>
+                                        )}
                                     </div>
-                                    {libraryTabs.length > 1 && (
-                                        <div role="tablist" aria-label="Template collections" className="flex flex-wrap gap-1 mb-3">
-                                            {libraryTabs.map(tab => (
-                                                <button
-                                                    key={tab.id}
-                                                    type="button"
-                                                    role="tab"
-                                                    aria-selected={libraryTab === tab.id}
-                                                    onClick={() => setLibraryTab(tab.id)}
-                                                    className={cn(
-                                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
-                                                        libraryTab === tab.id
-                                                            ? 'bg-indigo-600 text-white'
-                                                            : 'text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800',
-                                                    )}
-                                                >
-                                                    {tab.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    )}
-                                    <TemplateGallery
-                                        templates={libraryTemplates}
-                                        activeId={formData.layoutTemplateId}
-                                        loading={libraryLoading || (!blank && dsSchemaLoading)}
-                                        onApply={item => {
-                                            const template = library.find(t => t.id === item.id)
-                                            if (template) handleApplyLibraryTemplate(template)
-                                        }}
-                                    />
-                                    {!libraryLoading && !(!blank && dsSchemaLoading) && libraryTemplates.length === 0 && (
-                                        <p className="text-xs text-slate-500 py-2">
-                                            {libraryQuery ? `No template matches "${libraryQuery}".` : 'No templates in this collection yet.'}
-                                        </p>
-                                    )}
-                                </div>
+                                )}
                             </motion.div>
                         )}
 

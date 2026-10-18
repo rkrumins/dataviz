@@ -4,10 +4,15 @@
  *
  * The server returns the caller's whole readable set (it is small — layouts,
  * not data), so tabs, search, categories and sorting all run client-side.
+ *
+ * Admin → Features → Layout templates switches all of it off for everyone: the
+ * reads below stop asking, and answer nothing even from what was cached before
+ * the switch went off, so every surface built on them falls quiet.
  */
 import { useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useFeature } from '@/store/features'
 import {
     layoutTemplateService,
     type LayoutTemplate,
@@ -15,18 +20,26 @@ import {
 
 export const LAYOUT_TEMPLATES_KEY = ['layout-templates'] as const
 
+/** Admin → Features → Layout templates. */
+export const LAYOUT_TEMPLATES_FEATURE = 'layoutTemplatesEnabled'
+
+export function useLayoutTemplatesEnabled(): boolean {
+    return useFeature(LAYOUT_TEMPLATES_FEATURE)
+}
+
 const EMPTY: LayoutTemplate[] = []
 
 export function useLayoutTemplates(opts: { includeHidden?: boolean; enabled?: boolean } = {}) {
     const includeHidden = !!opts.includeHidden
+    const on = useLayoutTemplatesEnabled()
     const query = useQuery({
         queryKey: [...LAYOUT_TEMPLATES_KEY, 'list', { includeHidden }],
         queryFn: () => layoutTemplateService.list({ includeHidden }),
-        enabled: opts.enabled ?? true,
+        enabled: (opts.enabled ?? true) && on,
         staleTime: 60_000,
     })
     return {
-        templates: query.data?.items ?? EMPTY,
+        templates: on ? query.data?.items ?? EMPTY : EMPTY,
         isLoading: query.isLoading,
         error: query.error as Error | null,
         refetch: query.refetch,
@@ -34,10 +47,11 @@ export function useLayoutTemplates(opts: { includeHidden?: boolean; enabled?: bo
 }
 
 export function useLayoutTemplate(id: string | null | undefined) {
+    const on = useLayoutTemplatesEnabled()
     return useQuery({
-        queryKey: [...LAYOUT_TEMPLATES_KEY, 'one', id ?? ''],
+        queryKey: [...LAYOUT_TEMPLATES_KEY, 'one', on ? id ?? '' : ''],
         queryFn: () => layoutTemplateService.get(id!),
-        enabled: !!id,
+        enabled: !!id && on,
         retry: false,
     })
 }
@@ -141,10 +155,11 @@ export function useToggleTemplateFavourite() {
 
 /** Requests to offer a team's template to everyone — for the template managers who answer them. */
 export function usePromotionRequests(enabled: boolean) {
+    const on = useLayoutTemplatesEnabled()
     return useQuery({
         queryKey: [...LAYOUT_TEMPLATES_KEY, 'promotion-requests'],
         queryFn: () => layoutTemplateService.promotionRequests(),
-        enabled,
+        enabled: enabled && on,
         staleTime: 30_000,
     })
 }

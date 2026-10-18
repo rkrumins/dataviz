@@ -13,7 +13,8 @@ import { useBrand } from '@/store/branding'
 interface DashboardOnboardingProps {
     completedSteps: string[]
     onCreateWorkspace: () => void
-    onBrowseTemplates: () => void
+    /** Absent when layout templates are switched off: the template step goes too. */
+    onBrowseTemplates?: () => void
     onDismiss: () => void
 }
 
@@ -47,15 +48,16 @@ export function DashboardOnboarding({
     onDismiss,
 }: DashboardOnboardingProps) {
     const { appName } = useBrand()
-    const completedCount = ONBOARDING_STEPS.filter(s =>
+    const steps = onBrowseTemplates ? ONBOARDING_STEPS : ONBOARDING_STEPS.filter(s => s.id !== 'template_deployed')
+    const completedCount = steps.filter(s =>
         completedSteps.includes(s.id)
     ).length
-    const progressPercent = (completedCount / ONBOARDING_STEPS.length) * 100
+    const progressPercent = (completedCount / steps.length) * 100
 
     const isStepDisabled = (step: (typeof ONBOARDING_STEPS)[number], index: number) => {
         if (completedSteps.includes(step.id)) return false
         if ('requiresPrevious' in step && step.requiresPrevious && index > 0) {
-            return !completedSteps.includes(ONBOARDING_STEPS[index - 1].id)
+            return !completedSteps.includes(steps[index - 1].id)
         }
         return false
     }
@@ -108,7 +110,7 @@ export function DashboardOnboarding({
                             Setup Progress
                         </span>
                         <span className="text-xs font-semibold text-ink-muted">
-                            {completedCount}/{ONBOARDING_STEPS.length}
+                            {completedCount}/{steps.length}
                         </span>
                     </div>
                     <div className="h-1.5 w-full rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">
@@ -123,7 +125,7 @@ export function DashboardOnboarding({
 
                 {/* Steps */}
                 <div className="px-2 pb-2">
-                    {ONBOARDING_STEPS.map((step, i) => {
+                    {steps.map((step, i) => {
                         const completed = completedSteps.includes(step.id)
                         const disabled = isStepDisabled(step, i)
                         const Icon = step.icon
@@ -142,7 +144,7 @@ export function DashboardOnboarding({
                                 onClick={() => {
                                     if (completed) return
                                     if (step.id === 'workspace_created') onCreateWorkspace()
-                                    if (step.id === 'template_deployed') onBrowseTemplates()
+                                    if (step.id === 'template_deployed') onBrowseTemplates?.()
                                 }}
                                 className={cn(
                                     'w-full flex items-center gap-3.5 px-3 py-3.5 rounded-xl text-left transition-all group/step',
@@ -203,7 +205,7 @@ export function DashboardOnboarding({
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.25, ease: 'easeOut', delay: 0.2 }}
-                className="relative z-10 w-full max-w-lg grid grid-cols-2 gap-3 mb-6"
+                className={cn('relative z-10 w-full max-w-lg grid gap-3 mb-6', onBrowseTemplates ? 'grid-cols-2' : 'grid-cols-1 max-w-[16rem]')}
             >
                 {/* Import from Provider */}
                 <button
@@ -222,20 +224,22 @@ export function DashboardOnboarding({
                 </button>
 
                 {/* Start from Template */}
-                <button
-                    onClick={onBrowseTemplates}
-                    className="group glass-panel border border-glass-border rounded-xl p-5 text-left hover:border-accent-business/40 hover:bg-accent-business/5 transition-all"
-                >
-                    <div className="w-10 h-10 rounded-xl border border-accent-business/30 bg-accent-business/10 text-accent-business flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
-                        <LayoutTemplate className="w-5 h-5" />
-                    </div>
-                    <span className="text-sm font-semibold text-ink block mb-1 group-hover:text-accent-business transition-colors">
-                        Start from a Template
-                    </span>
-                    <span className="text-xs text-ink-muted">
-                        Use a proven layer layout to get started fast.
-                    </span>
-                </button>
+                {onBrowseTemplates && (
+                    <button
+                        onClick={onBrowseTemplates}
+                        className="group glass-panel border border-glass-border rounded-xl p-5 text-left hover:border-accent-business/40 hover:bg-accent-business/5 transition-all"
+                    >
+                        <div className="w-10 h-10 rounded-xl border border-accent-business/30 bg-accent-business/10 text-accent-business flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                            <LayoutTemplate className="w-5 h-5" />
+                        </div>
+                        <span className="text-sm font-semibold text-ink block mb-1 group-hover:text-accent-business transition-colors">
+                            Start from a Template
+                        </span>
+                        <span className="text-xs text-ink-muted">
+                            Use a proven layer layout to get started fast.
+                        </span>
+                    </button>
+                )}
             </motion.div>
 
             {/* Skip link */}

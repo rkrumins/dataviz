@@ -149,6 +149,7 @@ describe('fail-open seeds', () => {
     'semanticLayerExportEnabled',
     'semanticLayerAutoSuggest',
     'semanticLayerVersionHistory',
+    'layoutTemplatesEnabled',
   ]
 
   it('keeps every capability available when the flag fetch fails', async () => {

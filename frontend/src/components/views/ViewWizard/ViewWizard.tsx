@@ -70,6 +70,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature, useFeatureList } from '@/store/features'
 import { usePermission } from '@/store/auth'
@@ -1128,7 +1129,8 @@ function ViewWizardBody({
     const workspaceDefaultId = useWorkspacesStore(
         s => s.workspaces.find(w => w.id === resolvedWorkspaceId)?.defaultLayoutTemplateId ?? undefined,
     )
-    const workspaceDefault = mode === 'create' && !isImport && !isBlank && !initialTemplateId && workspaceDefaultId
+    const templatesOn = useLayoutTemplatesEnabled()
+    const workspaceDefault = templatesOn && mode === 'create' && !isImport && !isBlank && !initialTemplateId && workspaceDefaultId
         ? { templateId: workspaceDefaultId, workspaceName: scopeContext.workspaceName }
         : undefined
     const startTemplateId = mode === 'create' && !isImport ? (initialTemplateId ?? workspaceDefault?.templateId) : undefined

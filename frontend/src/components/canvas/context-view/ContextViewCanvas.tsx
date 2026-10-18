@@ -316,6 +316,7 @@ import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -960,14 +961,15 @@ export function ContextViewCanvas({
   // Saving its layers as a template is open to anyone reading it: the layout is what they see.
   const viewEditor = useContext(ViewEditorContext)
   const activeViewId = activeView?.id ?? null
+  const templatesOn = useLayoutTemplatesEnabled()
   const thisView = useMemo(() => activeViewId ? {
     onExport: () => setViewExport('view'),
     onExportWithData: () => setViewExport('data'),
     onUpdateFromFile: viewCaps.canEdit && viewEditor
       ? () => viewEditor.openViewEditor(undefined, { journey: 'import', importIntoViewId: activeViewId })
       : undefined,
-    onSaveAsTemplate: () => setSavingAsTemplate(true),
-  } : undefined, [activeViewId, viewCaps.canEdit, viewEditor])
+    onSaveAsTemplate: templatesOn ? () => setSavingAsTemplate(true) : undefined,
+  } : undefined, [activeViewId, viewCaps.canEdit, viewEditor, templatesOn])
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.

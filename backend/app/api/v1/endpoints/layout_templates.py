@@ -36,6 +36,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.view_grants import hydrate_subject
+from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.view_read_scope import readable_clause
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
 from backend.app.db.engine import get_db_session
@@ -64,7 +65,8 @@ from backend.common.models.layout_templates import (
 )
 from backend.common.models.rbac import ViewGrantCreateRequest, ViewGrantResponse
 
-router = APIRouter()
+# Admin → Features → Layout templates: every route answers to it first.
+router = APIRouter(dependencies=[Depends(require_feature("layoutTemplatesEnabled"))])
 
 _NOT_FOUND = "Template not found"
 

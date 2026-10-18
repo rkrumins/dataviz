@@ -13,6 +13,7 @@ import { interpolateBrand } from '@/lib/brandText'
 import { PAGE_INDEX, pageAllowed, type PageEntry } from '@/lib/pageIndex'
 import { usePermissionClaims } from '@/store/auth'
 import { useBrand } from '@/store/branding'
+import { isFeatureOn, useFeaturesStore } from '@/store/features'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
 
 export type SearchCategory =
@@ -198,6 +199,8 @@ export function useGlobalSearch(
     const sidebar = useNavCatalogueStore(s => s.sidebar)
     const adminSections = useNavCatalogueStore(s => s.adminSections)
     const analyticsAllowed = useAnalyticsAccess().allowed
+    // A page behind a switch leaves search the moment an admin turns it off.
+    const featureValues = useFeaturesStore(s => s.values)
     const brand = useBrand()
 
     // The palette must offer no door that then slams: same catalogue
@@ -206,10 +209,13 @@ export function useGlobalSearch(
         () =>
             appWide
                 ? PAGE_INDEX.filter(entry =>
-                    pageAllowed(entry, { claims, sidebar, adminSections, analyticsAllowed })
+                    pageAllowed(entry, {
+                        claims, sidebar, adminSections, analyticsAllowed,
+                        featureOn: key => isFeatureOn(featureValues, key),
+                    })
                 )
                 : [],
-        [appWide, claims, sidebar, adminSections, analyticsAllowed]
+        [appWide, claims, sidebar, adminSections, analyticsAllowed, featureValues]
     )
 
     const viewsQuery = useQuery({

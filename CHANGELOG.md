@@ -100,6 +100,14 @@ a favorite and `?` lists them all. In the studio a layer moves by its handle —
 `Alt`+`↑`/`↓`. The command palette offers **New layout template**, **Import a layout template**
 and **Browse templates**.
 
+**One switch for all of it.** **Layout templates** (`layoutTemplatesEnabled`), under
+**Administration → Features → View Modes**, turns templates on or off for everyone. It ships on.
+Off, **Templates** leaves the sidebar, the Dashboard, search and the command palette, the View
+wizard offers only the layouts the data suggests, **Save layers as a template** and template updates
+disappear from views, and the server refuses every template route and
+`PUT /api/v1/views/{id}/template-version` (`403`, `feature_disabled`). Nothing is deleted: views built
+from a template keep their layers, and turning it back on brings every template back as it was.
+
 **The API.** `/api/v1/layout-templates` lists the templates you can use (`includeHidden` adds the
 hidden built-ins, for managers), reads, creates, edits (partially; changing who can use one needs
 rights over its current audience and the new one), deletes and restores them, hides or shows a

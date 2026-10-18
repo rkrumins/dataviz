@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.feature_gate import (
     ensure_view_mode_allowed,
     feature_disabled,
+    require_feature,
     resolve_enterprise_view_policy,
 )
 from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
@@ -1021,7 +1022,10 @@ async def update_view(
     return view
 
 
-@router.put("/{view_id}/template-version", response_model=ViewResponse)
+@router.put(
+    "/{view_id}/template-version", response_model=ViewResponse,
+    dependencies=[Depends(require_feature("layoutTemplatesEnabled"))],
+)
 async def set_view_template_version(
     view_id: str = Path(...),
     req: ViewTemplateVersionRequest = Body(...),

@@ -146,6 +146,12 @@ describe('pageAllowed', () => {
         expect(pageAllowed(entry('/docs/faq'), ctx({}))).toBe(true)
     })
 
+    it('leaves out a page whose switch an admin turned off', () => {
+        const templates = entry('/templates')
+        expect(pageAllowed(templates, { ...ctx({}), featureOn: () => true })).toBe(true)
+        expect(pageAllowed(templates, { ...ctx({}), featureOn: key => key !== 'layoutTemplatesEnabled' })).toBe(false)
+    })
+
     it('hides the audit log from a user holding nothing', () => {
         expect(pageAllowed(entry('/admin/audit'), ctx({}))).toBe(false)
     })

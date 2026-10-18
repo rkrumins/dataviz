@@ -30,7 +30,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
-import { useLayoutTemplates } from '@/hooks/useLayoutTemplates'
+import { useLayoutTemplates, useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 import { useWorkspaceSummary, useWorkspaceSummaryTrend } from '@/hooks/useWorkspaceSummary'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
@@ -66,6 +66,7 @@ export function Dashboard() {
         isLoadingWorkspaces,
     } = useDashboardData()
     const { templates } = useLayoutTemplates()
+    const templatesOn = useLayoutTemplatesEnabled()
 
     // Every number on the page comes from the server's workspace summary — the
     // same figures Administration and the Workspaces page show. The workspace
@@ -186,12 +187,12 @@ export function Dashboard() {
                     <DashboardOnboarding
                         completedSteps={onboardingCompletedSteps}
                         onCreateWorkspace={() => navigate('/workspaces')}
-                        onBrowseTemplates={() => navigate('/templates')}
+                        onBrowseTemplates={templatesOn ? () => navigate('/templates') : undefined}
                         onDismiss={dismissOnboarding}
                     />
 
                     {/* Still show templates during onboarding — they're relevant */}
-                    {templates.length > 0 && (
+                    {templatesOn && templates.length > 0 && (
                         <motion.div
                             initial={{ opacity: 0, y: MOTION.sectionY }}
                             animate={{ opacity: 1, y: 0 }}
@@ -284,14 +285,16 @@ export function Dashboard() {
                     <NeedsAttention />
                 </motion.div>
 
-                {/* 6. Layout templates */}
-                <motion.div
-                    initial={{ opacity: 0, y: MOTION.sectionY }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: MOTION.sectionStagger * 5, ...MOTION.sectionEntry }}
-                >
-                    <TemplateGrid {...templateGridProps} />
-                </motion.div>
+                {/* 6. Layout templates — when an admin has them on */}
+                {templatesOn && (
+                    <motion.div
+                        initial={{ opacity: 0, y: MOTION.sectionY }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: MOTION.sectionStagger * 5, ...MOTION.sectionEntry }}
+                    >
+                        <TemplateGrid {...templateGridProps} />
+                    </motion.div>
+                )}
 
                 {/* 7. Semantic layers — the REAL ones, from the same cache the
                        Semantic Layers page reads, each card opening its layer.

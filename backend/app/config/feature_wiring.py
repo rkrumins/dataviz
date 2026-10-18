@@ -254,6 +254,28 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=("Reading every view", "Exporting data"),
     ),
     # ── View modes ─────────────────────────────────────────────────────────────
+    "layoutTemplatesEnabled": FeatureWiring(
+        key="layoutTemplatesEnabled",
+        posture="capability",
+        server_gates=(
+            "Every /layout-templates route — the library, saves, shares, versions, favorites, "
+            "featuring and requests to offer a template to everyone",
+            "PUT /views/{id}/template-version — marking a view up to date with its template",
+        ),
+        ui_surfaces=(
+            "Templates in the sidebar, its page, and the Dashboard's Layout templates",
+            "The template library, Save as template and a workspace's default template on the "
+            "View wizard's Layout step",
+            "Save layers as a template in the view card menu and the canvas Import / Export menu",
+            "Template update offers on a view's header and details",
+            "Templates in search and the command palette",
+        ),
+        still_allowed=(
+            "Views built from a template keep their layers and keep working",
+            "Templates, shares, versions and favorites are kept — turning this on brings them back",
+            "The layouts the View wizard suggests from the data itself",
+        ),
+    ),
     "allowedViewModes": FeatureWiring(
         key="allowedViewModes",
         posture="capability",
