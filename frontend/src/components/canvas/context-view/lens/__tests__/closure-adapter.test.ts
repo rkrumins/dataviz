@@ -522,6 +522,57 @@ describe('partiality is derived, never sticky', () => {
   })
 })
 
+/**
+ * `unresolvedEdges` — lineage edges the server left out because the entity
+ * at their other end has no URN. Counted PER RESPONSE, so two pages of one
+ * walk can count the same edge: the model keeps the max, never the sum.
+ */
+describe('unresolvedEdges — a quiet count, the max over fine pages', () => {
+  const base = (over: Partial<TraceV2Result & LensClosureExtras> = {}): TraceV2Result & LensClosureExtras => ({
+    nodes: [], edges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    focus: { urn: 'F', level: 0, entityType: 'dataset' },
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    ...over,
+  })
+
+  it('reads as 0 from a server that predates it', () => {
+    expect(toLensClosure(base(), 'F').unresolvedEdges).toBe(0)
+  })
+
+  it('takes the max across fine pages, never the sum', () => {
+    let m = toLensClosure(base({ unresolvedEdges: 3 }), 'F')
+    m = mergeClosures(m, base({ unresolvedEdges: 2 }), { rootUrn: 'F', direction: 'both' })
+    expect(m.unresolvedEdges).toBe(3)
+    m = mergeClosures(m, base({ unresolvedEdges: 5 }), { rootUrn: 'c', direction: 'down' })
+    expect(m.unresolvedEdges).toBe(5)
+  })
+
+  it('a coarse page contributes 0', () => {
+    expect(toLensClosure(base({ grain: 'coarse', unresolvedEdges: 4 }), 'F').unresolvedEdges).toBe(0)
+    const m = mergeClosures(toLensClosure(base({ unresolvedEdges: 1 }), 'F'), base({ grain: 'coarse', unresolvedEdges: 4 }), {
+      rootUrn: 'F', direction: 'both', authoritative: false,
+    })
+    expect(m.unresolvedEdges).toBe(1)
+  })
+
+  it('is never partiality', () => {
+    const m = mergeClosures(emptyWalkModel('F'), base({ unresolvedEdges: 7 }), { rootUrn: 'F', direction: 'both' })
+    expect(m.unresolvedEdges).toBe(7)
+    expect(m.truncated).toBe(false)
+    expect(m.truncationReason).toBeNull()
+  })
+
+  it('merging the same page twice deep-equals merging it once', () => {
+    const response = base({ unresolvedEdges: 2 })
+    const ctx = { rootUrn: 'F', direction: 'both' as const }
+    const once = mergeClosures(emptyWalkModel('F'), response, ctx)
+    expect(mergeClosures(once, response, ctx)).toEqual(once)
+  })
+})
+
 
 // ---------------------------------------------------------------------------
 // unionWalkModels — several seeds, one overlay
@@ -600,6 +651,11 @@ describe('unionWalkModels', () => {
             model('b', { frontierUp: [{ urn: 'f2', totalCount: 1, nextCursor: null }] }),
         ])!
         expect(u.frontierUp.map(f => f.urn).sort()).toEqual(['f1', 'f2'])
+    })
+
+    it('carries the largest unresolved-edge count of any seed, and none when every seed has none', () => {
+        expect(unionWalkModels([model('a', { unresolvedEdges: 2 }), model('b', { unresolvedEdges: 5 })])!.unresolvedEdges).toBe(5)
+        expect(unionWalkModels([model('a'), model('b', { unresolvedEdges: 0 })])!.unresolvedEdges).toBeUndefined()
     })
 })
 

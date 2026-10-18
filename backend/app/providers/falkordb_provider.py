@@ -2117,6 +2117,35 @@ def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[
     )
 
 
+def _is_urn(value: Any) -> bool:
+    """A value an edge endpoint can carry: non-empty text. ``None`` (a node
+    with no ``urn``) and a non-text urn (an integer id stamped as-is) are
+    not — no urn lookup can ever match them, so nothing can draw, search or
+    trace the node, and ``GraphEdge`` refuses them with a validation error."""
+    return isinstance(value, str) and value != ""
+
+
+def _has_urn(var: str) -> str:
+    """Cypher twin of :func:`_is_urn` for the node bound to ``var``.
+
+    A lineage read applies it to the FAR end before any LIMIT: a row the
+    database never returns cannot shorten a cursor or make a full page look
+    drained. Every reader of one walk (expand, page and the degree probes)
+    uses this same text, so ``degree == rows`` holds.
+
+    Filter the far end BEHIND A ``WITH`` (``… WITH f, r, o WHERE
+    _has_urn('o') RETURN …``), or count with it inside an aggregate — never
+    in the anchoring MATCH's own WHERE. Measured on FalkorDB 4.18: a
+    predicate on the unlabeled far end there flips the plan to an All Node
+    Scan of that end, abandoning the anchor's (:Label).urn index seek."""
+    return f"(typeOf({var}.urn) = 'String' AND {var}.urn <> '')"
+
+
+#: Physical graphs (``_cache_ns``) already warned about edges that touch a
+#: node with no usable urn — once per graph per process, not per request.
+_unaddressable_warned: Set[str] = set()
+
+
 @dataclass
 class _ClosureWalk:
     """Mutable state of one ``trace_closure`` request's degree-exact walk —
@@ -2142,9 +2171,19 @@ class _ClosureWalk:
     ring_up: List[Tuple[str, str]] = field(default_factory=list)          # partners found this hop
     ring_down: List[Tuple[str, str]] = field(default_factory=list)
     progress: int = 0                                                     # anchors walked this request
+    unaddressable: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # urn -> (in, out) edges to a node with no urn
+    unresolved: Dict[Tuple[str, int], int] = field(default_factory=dict)     # (walked urn, 0 in | 1 out) -> those edges
 
     def query_timeout(self) -> float:
         return max(0.6, min(CLOSURE_QUERY_CAP_SECS, self.walk_deadline - time.monotonic()))
+
+    def credit_unresolved(self, urn: str, key: int) -> None:
+        """An anchor WALKED in direction ``key`` left out the edges whose far
+        end has no urn: count them for this response. Keyed and assigned, so
+        an anchor walked twice in one request still counts once."""
+        n = self.unaddressable.get(urn, (0, 0))[key]
+        if n:
+            self.unresolved[(urn, key)] = n
 
     def record_edge(self, rec: Dict[str, Any]) -> None:
         eid = rec["edgeId"]
@@ -5181,6 +5220,9 @@ class FalkorDBProvider(GraphDataProvider):
         #   RE-POINT — we filled it before from a DIFFERENT property (the marker says so),
         #              so the mapping changed under us and the old value is stale.
         # A node with no marker and a value present is native data: excluded by both.
+        # The urn is always written as TEXT: every urn lookup binds a string, so an integer
+        # id copied as-is could never be found again — and a urn an earlier run stamped
+        # that way is re-pointed (the marker says it is ours to rewrite).
         #
         # The two properties are stamped in ONE pass (these are full scans; two passes would
         # double the cost on a multi-million-node graph), which means the WHERE matches a node
@@ -5190,11 +5232,12 @@ class FalkorDBProvider(GraphDataProvider):
         sets, wheres = [], []
         if stamp_urn:
             urn_cond = (
-                f"((n.`urn` IS NULL OR (n.`urnSource` IS NOT NULL AND n.`urnSource` <> $ident)) "
+                f"((n.`urn` IS NULL OR (n.`urnSource` IS NOT NULL AND n.`urnSource` <> $ident) "
+                f"OR (n.`urnSource` = $ident AND typeOf(n.`urn`) <> 'String')) "
                 f"AND n.`{ident}` IS NOT NULL)"
             )
             sets.append(
-                f"n.`urn` = CASE WHEN {urn_cond} THEN n.`{ident}` ELSE n.`urn` END, "
+                f"n.`urn` = CASE WHEN {urn_cond} THEN toString(n.`{ident}`) ELSE n.`urn` END, "
                 f"n.`urnSource` = CASE WHEN {urn_cond} THEN $ident ELSE n.`urnSource` END"
             )
             wheres.append(urn_cond)
@@ -5952,6 +5995,25 @@ class FalkorDBProvider(GraphDataProvider):
         cache keys by physical graph without duplicating the host/port/
         graph_name plumbing here."""
         return self._cache_ns
+
+    def _warn_unaddressable(self, op: str, detail: str) -> None:
+        """Say ONCE per physical graph that lineage was left out because a
+        node at one end has no usable urn — and what fixes it. Such an edge
+        is dropped by every read (it could never be drawn, searched or
+        traced); this is the one place an operator hears about it."""
+        if self._cache_ns in _unaddressable_warned:
+            return
+        _unaddressable_warned.add(self._cache_ns)
+        logger.warning(
+            "FalkorDB %s: %s (%s) — edges touching a node with no usable `urn` "
+            "are left out; such a node cannot be drawn, searched or traced. "
+            "Set the data source's Node Identity Property to the property that "
+            "holds the node id (now `%s`) and re-aggregate; the run's "
+            "'lineage_identity_gaps' advisory counts them per label. "
+            "(Logged once per graph.)",
+            self._graph_name, detail, op,
+            getattr(self, "_node_identity_property", None) or "urn",
+        )
 
     def _urn_label_key(self) -> str:
         return f"{self._cache_ns}:urn_labels"
@@ -6723,6 +6785,10 @@ class FalkorDBProvider(GraphDataProvider):
         if query.min_confidence is not None:
             extra_params["minConf"] = query.min_confidence
             extra_conditions.append("r.confidence >= $minConf")
+        # An edge only ships when both ends have a usable urn — in the query,
+        # before SKIP/LIMIT, so a page is never short a row it could hold.
+        # The pair path binds both ends by a list of urns and needs none.
+        addressable = f"WITH a, r, b WHERE {_has_urn('a')} AND {_has_urn('b')} "
 
         is_between = bool(query.source_urns and query.target_urns)
         op = "edges.between" if is_between else "edges.query"
@@ -6771,7 +6837,7 @@ class FalkorDBProvider(GraphDataProvider):
                 where = " AND ".join([f"{var}.urn IN $anchorUrns"] + conditions)
                 try:
                     res = await self._ro_query(
-                        f"{pattern} WHERE {where} "
+                        f"{pattern} WHERE {where} {addressable}"
                         "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
                         "properties(r) AS rprops LIMIT $limit",
                         params={**params, "anchorUrns": bucket},
@@ -6821,7 +6887,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher += " WHERE " + " AND ".join(conditions)
         params["skip"] = offset
         params["limit"] = limit
-        cypher += " RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
+        cypher += f" {addressable}RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
 
         result = await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         edges = []
@@ -6922,8 +6988,15 @@ class FalkorDBProvider(GraphDataProvider):
                     params={"lo": lo, "hi": lo + page_size, "skip": skip, "limit": page_size},
                     op="export.edges")
                 rows = res.result_set or []
-                page = [_edge_from_row(r[0], r[1], r[2], r[3] or {}) for r in rows
-                        if not is_derived_edge_type(r[2])]
+                # Filtered here, not in the query: the window pages by the raw
+                # row count (`skip`, the short-page stop) and must keep doing so.
+                kept = [r for r in rows if not is_derived_edge_type(r[2])]
+                page = [_edge_from_row(r[0], r[1], r[2], r[3] or {}) for r in kept
+                        if _is_urn(r[0]) and _is_urn(r[1])]
+                if len(page) < len(kept):
+                    self._warn_unaddressable(
+                        "export.edges", f"{len(kept) - len(page)} edge(s) left out of the export",
+                    )
                 if page:
                     yield page
                 if len(rows) < page_size:
@@ -7293,14 +7366,22 @@ class FalkorDBProvider(GraphDataProvider):
             # An edge between two children of this page matches both directional
             # sibling queries; keep one.
             seen_lineage: Set[Tuple[str, str, str, str]] = set()
+            unaddressable = 0
             for rows in lineage_rows:
                 for row in rows:
+                    if not (_is_urn(row[0]) and _is_urn(row[1])):
+                        unaddressable += 1
+                        continue
                     props = row[3] or {}
                     key = (row[0], row[1], str(row[2]).upper(), str(props.get("id", "")))
                     if key in seen_lineage:
                         continue
                     seen_lineage.add(key)
                     lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], props))
+            if unaddressable:
+                self._warn_unaddressable(
+                    "children.lineage", f"{unaddressable} edge(s) left out of the children of {parent_urn}",
+                )
 
         next_cursor = (
             _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
@@ -10559,8 +10640,12 @@ class FalkorDBProvider(GraphDataProvider):
         from ..config.resilience import AGGREGATED_EDGE_RESULT_CAP
         aggregated = []
         total_edges = 0
+        unaddressable = 0
         for row in rows:
             s_urn, t_urn, weight, types = row[0], row[1], row[2], row[3]
+            if not (_is_urn(s_urn) and _is_urn(t_urn)):
+                unaddressable += 1
+                continue
             w = int(weight) if weight else 1
             edge_types = types if isinstance(types, list) else [str(types)] if types else []
             aggregated.append(AggregatedEdgeInfo(
@@ -10573,10 +10658,13 @@ class FalkorDBProvider(GraphDataProvider):
                 sourceEdgeIds=[],
             ))
             total_edges += w
+        if unaddressable:
+            self._warn_unaddressable("aggregated", f"{unaddressable} rollup cell(s) left out")
         return AggregatedEdgeResult(
             aggregatedEdges=aggregated,
             totalSourceEdges=total_edges,
-            truncated=degraded or len(aggregated) >= AGGREGATED_EDGE_RESULT_CAP,
+            # The raw row count: a capped read that dropped a cell is still capped.
+            truncated=degraded or len(rows) >= AGGREGATED_EDGE_RESULT_CAP,
             lastMaterializedAt=last_materialized_at,
             stale=stale or bool(stale_reason),
             staleReason=stale_reason,
@@ -11646,6 +11734,7 @@ class FalkorDBProvider(GraphDataProvider):
                     try:
                         degrees = await self.get_node_degrees(
                             list(dict.fromkeys([*probe_up, *probe_down])), ltypes,
+                            addressable_only=True,
                         )
                     except Exception as exc:
                         logger.warning("trace_closure: frontier probe failed: %s", exc)
@@ -11760,6 +11849,15 @@ class FalkorDBProvider(GraphDataProvider):
         if truncation_reason is None and ("max_nodes" in st.reasons or seed_truncated):
             truncation_reason = "max_nodes"
 
+        # Lineage the walk left out because the far end has no usable urn.
+        # Not a truncation: the page is complete for every partner that can
+        # be addressed, and a reason here would read as a failure.
+        unresolved_edges = sum(st.unresolved.values())
+        if unresolved_edges:
+            self._warn_unaddressable(
+                "trace.closure", f"{unresolved_edges} edge(s) left out of the closure of {urn}",
+            )
+
         return TraceClosureResult(
             nodes=list(nodes_by_urn.values()),
             edges=list(edges_by_id.values()),
@@ -11780,6 +11878,7 @@ class FalkorDBProvider(GraphDataProvider):
             frontierDown=frontier_down,
             seedTruncated=seed_truncated,
             seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
+            unresolvedEdges=unresolved_edges,
         )
 
     async def trace_closure_coarse(
@@ -11853,7 +11952,10 @@ class FalkorDBProvider(GraphDataProvider):
                 continue
             remaining = deadline - time.monotonic()
             try:
-                res = await self._ro_query(
+                # The cells live where aggregation writes them: the projection
+                # graph (``{graph}_proj`` in dedicated mode, the source graph
+                # otherwise) — the source graph alone reads zero cells there.
+                res = await self._proj_ro_query(
                     _query(incoming),
                     {"urn": urn, "cap": cap + 1},
                     timeout=max(0.6, min(CLOSURE_QUERY_CAP_SECS, remaining)),
@@ -11868,7 +11970,7 @@ class FalkorDBProvider(GraphDataProvider):
                 reasons.append("max_nodes")
             for row in rows:
                 partner, _label, weight, sd, td, lu, types = (list(row) + [None] * 7)[:7]
-                if not partner or partner == urn:
+                if not _is_urn(partner) or partner == urn:
                     continue
                 src, tgt = (partner, urn) if incoming else (urn, partner)
                 eid = f"agg:{src}>{tgt}"
@@ -12458,7 +12560,13 @@ class FalkorDBProvider(GraphDataProvider):
             # predicate; when F_LABEL is empty, this still pays exactly
             # one scan rather than N.
             extended = ["f.urn IN $frontier"] + where_parts
-            where = "WHERE " + " AND ".join(extended) + " "
+            # A far end with no usable urn could never ship: filtered before
+            # the LIMIT (behind a WITH — see ``_has_urn``), so it never takes
+            # a row a real partner needed.
+            where = (
+                "WHERE " + " AND ".join(extended) + " "
+                + f"WITH f, r, other WHERE {_has_urn('other')} "
+            )
             # For AGGREGATED edges, ORDER BY r.weight DESC ensures the
             # per-source LIMIT keeps the highest-confidence edges first
             # (top-N by edge count). Without it, a super-hub Domain would
@@ -12648,21 +12756,34 @@ class FalkorDBProvider(GraphDataProvider):
         up: bool,
         down: bool,
         timeout: float,
-    ) -> Optional[Dict[str, Tuple[int, int]]]:
-        """``urn -> (in, out)`` raw-lineage degree for the given anchors, one
-        index-seeking query per label bucket per requested direction.
-        Labels come with the anchors (the seed/expansion rows carry
-        ``labels(x)[0]``), so no URN→label round trip is paid here. Returns
-        None when ANY bucket failed — the caller treats that as "cannot
-        estimate", never as zero. A direction that was not requested is
-        reported as 0 (it is never walked)."""
+    ) -> Optional[Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[int, int]]]]:
+        """``(degrees, unaddressable)`` for the given anchors, each
+        ``urn -> (in, out)``, one index-seeking query per label bucket per
+        requested direction. Labels come with the anchors (the seed/expansion
+        rows carry ``labels(x)[0]``), so no URN→label round trip is paid here.
+
+        ``degrees`` counts only edges whose far end has a usable urn — the
+        exact rows ``_expand_raw_lineage_set`` can return, same predicate
+        (``_has_urn``) — so the walk's estimates and its drift tripwire hold.
+        ``unaddressable`` carries the rest (nonzero entries only): edges the
+        walk will leave out, reported as ``unresolvedEdges``.
+
+        Returns None when ANY bucket failed — the caller treats that as
+        "cannot estimate", never as zero. A direction that was not requested
+        is reported as 0 (it is never walked)."""
         if not anchors:
-            return {}
+            return {}, {}
         rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
         by_label: Dict[str, List[str]] = {}
         for urn, label in anchors:
             by_label.setdefault(label or "", []).append(urn)
 
+        # The far end is bound but unlabeled and unfiltered in the WHERE, so
+        # the plan still enters from the anchor's (:Label).urn index.
+        ret = (
+            f"RETURN n.urn AS urn, sum(CASE WHEN {_has_urn('o')} THEN 1 ELSE 0 END) AS degree, "
+            "count(r) AS edges"
+        )
         queries: List[Tuple[str, str, List[str]]] = []
         for label, urns in by_label.items():
             sl = _sanitize_label(label) if label else ""
@@ -12670,15 +12791,13 @@ class FalkorDBProvider(GraphDataProvider):
             if up:
                 queries.append((
                     "in",
-                    f"MATCH (n{lbl})<-[r:{rel_alt}]-() WHERE n.urn IN $urns "
-                    "RETURN n.urn AS urn, count(r) AS degree",
+                    f"MATCH (n{lbl})<-[r:{rel_alt}]-(o) WHERE n.urn IN $urns {ret}",
                     urns,
                 ))
             if down:
                 queries.append((
                     "out",
-                    f"MATCH (n{lbl})-[r:{rel_alt}]->() WHERE n.urn IN $urns "
-                    "RETURN n.urn AS urn, count(r) AS degree",
+                    f"MATCH (n{lbl})-[r:{rel_alt}]->(o) WHERE n.urn IN $urns {ret}",
                     urns,
                 ))
 
@@ -12694,12 +12813,20 @@ class FalkorDBProvider(GraphDataProvider):
             return None
 
         out: Dict[str, List[int]] = {urn: [0, 0] for urn, _ in anchors}
+        hidden: Dict[str, List[int]] = {}
         for (direction, _c, _u), result in zip(queries, results):
+            i = 0 if direction == "in" else 1
             for row in (result.result_set or []):
                 urn = str(row[0])
                 if urn in out:
-                    out[urn][0 if direction == "in" else 1] = int(row[1] or 0)
-        return {urn: (io[0], io[1]) for urn, io in out.items()}
+                    out[urn][i] = int(row[1] or 0)
+                    total = int(row[2] or 0)
+                    if total > out[urn][i]:
+                        hidden.setdefault(urn, [0, 0])[i] = total - out[urn][i]
+        return (
+            {urn: (io[0], io[1]) for urn, io in out.items()},
+            {urn: (io[0], io[1]) for urn, io in hidden.items()},
+        )
 
     async def _walk_anchors(
         self,
@@ -12753,7 +12880,8 @@ class FalkorDBProvider(GraphDataProvider):
                     self._file_cut(st, chunk, up=up, down=down)
                     idx += len(chunk)
                     continue
-                st.degrees.update(deg)
+                st.degrees.update(deg[0])
+                st.unaddressable.update(deg[1])
 
             pos = 0
             while pos < len(chunk):
@@ -12846,6 +12974,8 @@ class FalkorDBProvider(GraphDataProvider):
         for direction, active, key in (("incoming", up, 0), ("outgoing", down, 1)):
             if not active:
                 continue
+            for urn in labels:
+                st.credit_unresolved(urn, key)
             wanted = [(urn, lbl) for urn, lbl in labels.items() if st.degrees.get(urn, (0, 0))[key] > 0]
             if not wanted:
                 continue
@@ -12951,6 +13081,9 @@ class FalkorDBProvider(GraphDataProvider):
                 st.reasons.append("timeout")
                 (st.cut_up if side == "up" else st.cut_down)[urn] = None
                 continue
+            # Its first page is where the hub's unaddressable edges are told;
+            # the afterCursor pages that drain it never repeat them.
+            st.credit_unresolved(urn, 0 if side == "up" else 1)
             new = self._commit_rows(rows, st, direction)
             spent += new
             budget -= new
@@ -12999,6 +13132,9 @@ class FalkorDBProvider(GraphDataProvider):
         set is applied in Python AFTER the row is recorded, so an edge into a
         known node still ships while the node itself does not — see the note
         at the call site in ``trace_closure`` for the diamond this protects.
+        The ONE far-end condition is addressability (``_has_urn``): a far end
+        with no usable urn could never ship, and it is filtered here, before
+        the LIMIT, with the same text ``_lineage_degrees`` counts by.
         """
         if not frontier or limit <= 0 or not ltypes:
             return [], set()
@@ -13020,7 +13156,7 @@ class FalkorDBProvider(GraphDataProvider):
         for f_label, urns in by_label.items():
             sl = _sanitize_label(f_label) if f_label else ""
             label_clause = f":{sl}" if sl else ""
-            where_clause = "WHERE f.urn IN $frontier "
+            where_clause = f"WHERE f.urn IN $frontier WITH f, r, o WHERE {_has_urn('o')} "
             params: Dict[str, Any] = {"frontier": urns, "limit": limit}
             cypher = (
                 f"MATCH (f{label_clause}){arrow.format(rel=rel_alt)}(o) "
@@ -13148,7 +13284,7 @@ class FalkorDBProvider(GraphDataProvider):
             after_clause = "AND d.urn >= $after " if after_urn else ""
             queries.append((
                 f"MATCH (f{label_clause} {{urn: $urn}})-[c:{ct_alt}*1..{hops}]->(d) "
-                f"WHERE (d)-[:{rel_alt}]-() {after_clause}"
+                f"WHERE (d)-[:{rel_alt}]-() AND {_has_urn('d')} {after_clause}"
                 "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label "
                 "ORDER BY urn LIMIT $cap",
                 {"urn": focus_urn, "cap": cap, **({"after": after_urn} if after_urn else {})},
@@ -13238,7 +13374,7 @@ class FalkorDBProvider(GraphDataProvider):
             label_clause = f":{sl}" if sl else ""
             cypher = (
                 f"MATCH (f{label_clause})-[c:{ct_alt}*1..{hops}]->(d) "
-                f"WHERE f.urn IN $seeds AND (d)-[:{rel_alt}]-() {after_clause}"
+                f"WHERE f.urn IN $seeds AND (d)-[:{rel_alt}]-() AND {_has_urn('d')} {after_clause}"
                 "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label "
                 "ORDER BY urn LIMIT $cap"
             )
@@ -13327,7 +13463,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         cypher = (
             f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
-            "WHERE id(r) >= $after "
+            f"WHERE id(r) >= $after WITH f, r, o WHERE {_has_urn('o')} "
             f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
             "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
             "ORDER BY id(r) "
@@ -14753,7 +14889,7 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_node_degrees(
         self, urns: List[str], edge_types: Optional[List[str]] = None,
-        *, include_rollups: bool = False,
+        *, include_rollups: bool = False, addressable_only: bool = False,
     ) -> Dict[str, Dict[str, int]]:
         """TOTAL lineage degree (in/out) per URN over the FULL graph.
 
@@ -14778,6 +14914,12 @@ class FalkorDBProvider(GraphDataProvider):
         source graph, which in dedicated mode holds no cells. Presence only:
         a count of cells is not a count of flows, and an anchor's cells run
         to thousands.
+
+        ``addressable_only`` counts only edges whose far end has a usable urn
+        (``_has_urn``) — what a closure can actually ship. The trace_closure
+        frontier compares its totals against the edges it shipped, so they
+        must count alike, or a "+N more" would promise edges no page can
+        ever bring.
         """
         out: Dict[str, Dict[str, int]] = {}
         if not urns:
@@ -14789,15 +14931,17 @@ class FalkorDBProvider(GraphDataProvider):
         rel_alt = "|".join(_sanitize_label(t) for t in types)
         rel_frag = f":{rel_alt}" if rel_alt else ""
         zero = {"in": 0, "out": 0, **({"rollupIn": 0, "rollupOut": 0} if include_rollups else {})}
+        far = "(o)" if addressable_only else "()"
+        tally = f"sum(CASE WHEN {_has_urn('o')} THEN 1 ELSE 0 END)" if addressable_only else "count(r)"
         for label, bucket_urns in await self._label_buckets(urns):
             lbl_frag = f":{label}" if label else ""
             bucket_ok = True
             lost: List[str] = []
             counts: Dict[str, Dict[str, int]] = {}
-            count = "WHERE n.urn IN $urns RETURN n.urn AS urn, count(r) AS c"
+            count = f"WHERE n.urn IN $urns RETURN n.urn AS urn, {tally} AS c"
             asks = [
-                ("out", self._ro_query, f"MATCH (n{lbl_frag})-[r{rel_frag}]->() {count}"),
-                ("in", self._ro_query, f"MATCH (n{lbl_frag})<-[r{rel_frag}]-() {count}"),
+                ("out", self._ro_query, f"MATCH (n{lbl_frag})-[r{rel_frag}]->{far} {count}"),
+                ("in", self._ro_query, f"MATCH (n{lbl_frag})<-[r{rel_frag}]-{far} {count}"),
             ]
             if include_rollups:
                 # A pattern predicate stops at the first cell (a Semi Apply).

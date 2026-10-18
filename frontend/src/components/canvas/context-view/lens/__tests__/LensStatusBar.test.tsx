@@ -79,4 +79,16 @@ describe('LensStatusBar', () => {
     expect(screen.getByRole('note', { name: /on the board/i })).toHaveTextContent('1 card · 1 wire')
     expect(screen.getByRole('note', { name: /on the board/i })).not.toHaveTextContent('%')
   })
+
+  it('says, quietly, how many flows the server left out for a missing URN — and nothing at 0', () => {
+    const { rerender } = render(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} unresolvedFlows={3} />)
+    expect(screen.getByRole('note', { name: /on the board/i })).toHaveTextContent('4 cards · 2 wires · at least 3 underlying flows not shown')
+    expect(screen.getByTitle("At least 3 underlying flows aren't shown — the entities at their other ends have no URN.")).toBeInTheDocument()
+    rerender(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} unresolvedFlows={1} />)
+    expect(screen.getByRole('note', { name: /on the board/i })).toHaveTextContent('· at least 1 underlying flow not shown')
+    expect(screen.getByTitle("At least 1 underlying flow isn't shown — the entity at its other end has no URN.")).toBeInTheDocument()
+    rerender(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} unresolvedFlows={0} />)
+    expect(screen.getByRole('note', { name: /on the board/i })).toHaveTextContent(/^4 cards · 2 wires$/)
+    expect(screen.queryByTitle(/no URN/)).toBeNull()
+  })
 })

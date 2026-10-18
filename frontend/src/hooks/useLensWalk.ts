@@ -109,8 +109,8 @@ export interface WalkEntry {
     model: LensWalkModel
     status: LensWalkStatus
     error: string | null
-    /** Key `${dir}:${urn}` (or `seed:<urn>` / `bulk:<dir>:<urn>`) — per-op
-     *  spinners; absent = idle. */
+    /** Key `${dir}:${urn}` (or `seed:<urn>` / `bulk:<dir>:<urn>` /
+     *  `fine:<urn>`, the first page) — per-op spinners; absent = idle. */
     extendStatus: ReadonlyMap<string, 'loading' | 'error'>
     /** The upstream/downstream depth THIS entry's own model was fetched at
      *  (the hook's own `initialDepth` param, escalated to
@@ -122,7 +122,7 @@ export interface WalkEntry {
 export interface LensWalkData {
     /** This session's entry for `urn`'s walk, or null if never touched. */
     walkFor: (urn: string) => WalkEntry | null
-    /** Re-kick a failed (or unsupported, harmlessly) initial fetch. */
+    /** Re-kick a failed (status 'error') or unsupported (harmlessly) initial fetch. A first page that failed behind kept coarse cells is retried by `retryWalk`. */
     retry: (focusUrn: string) => void
     /** Fetch one further hop from `cardUrn` (up or down), seeded from the
      *  lineage-participating leaves the view found under it. PRECONDITION:
@@ -148,7 +148,8 @@ export interface LensWalkData {
     walkProgressFor: (urn: string) => WalkProgress | null
     /** Lift the one-time memory checkpoint for `urn`'s walk. */
     continuePastCheckpoint: (urn: string) => void
-    /** Give every failed step of `urn`'s walk one more attempt. */
+    /** Give every failed step of `urn`'s walk one more attempt — a failed
+     *  first page behind a kept coarse picture included. */
     retryWalk: (urn: string) => void
 }
 
@@ -200,6 +201,11 @@ function knownUrns(model: LensWalkModel): string[] {
  *  depth is explicitly 0 (not omitted) per the closure request contract. */
 function depthFields(dir: LensWalkDir, value: number): Pick<TraceClosureRequest, 'upstreamDepth' | 'downstreamDepth'> {
     return dir === 'up' ? { upstreamDepth: value, downstreamDepth: 0 } : { upstreamDepth: 0, downstreamDepth: value }
+}
+
+/** The walk's fine first page — the initial fetch's, and its retry's. */
+function firstPageRequest(urn: string, depth: number): TraceClosureRequest {
+    return { urn, direction: 'both', upstreamDepth: depth, downstreamDepth: depth, maxNodes: WALK_FIRST_PAGE_NODES }
 }
 
 /** The frontier entries this mode still has to drain, per direction. */
@@ -332,7 +338,9 @@ export function useLensWalk(
         // coarse leg is an accelerator only: a failure is ignored, and a
         // server without a rollup lane answers with the fine page labelled
         // `grain: 'fine'` — the same page the fine leg brings — so it is
-        // skipped rather than merged twice.
+        // skipped rather than merged twice. Once its cells have drawn, a
+        // failed fine leg no longer wipes them: the first page stays owed
+        // (its marker turns 'error') and `retryWalk` re-runs it.
         const fineKey = `fine:${urn}`
         const fineLoading = new Map<string, 'loading' | 'error'>([[fineKey, 'loading']])
         setState(prev => setEntry(prev, cacheKey, {
@@ -340,10 +348,12 @@ export function useLensWalk(
             depth: initialDepth,
         }))
         bumpRequests(cacheKey, 2)
+        let cellsLanded = false
         const coarseLeg = provider.traceClosure({
             urn, direction: 'both', upstreamDepth: 1, downstreamDepth: 1, grain: 'coarse',
         }, { signal }).then(res => {
             if (session !== sessionRef.current || res.grain !== 'coarse') return
+            cellsLanded = res.edges.length > 0
             setState(prev => {
                 const entry = prev.get(cacheKey)
                 if (!entry || entry.status === 'error') return prev
@@ -361,10 +371,7 @@ export function useLensWalk(
             })
         }, () => undefined)
         try {
-            const res = await provider.traceClosure({
-                urn, direction: 'both', upstreamDepth: effectiveDepth, downstreamDepth: effectiveDepth,
-                maxNodes: WALK_FIRST_PAGE_NODES,
-            }, { signal })
+            const res = await provider.traceClosure(firstPageRequest(urn, effectiveDepth), { signal })
             if (session !== sessionRef.current) return   // lens closed mid-flight
             setState(prev => {
                 const entry = prev.get(cacheKey)
@@ -381,12 +388,21 @@ export function useLensWalk(
             })
         } catch (e) {
             if (session !== sessionRef.current) return
-            startedRef.current.delete(cacheKey)   // allow retry
-            setState(prev => setEntry(prev, cacheKey, {
-                model: emptyWalkModel(urn), status: 'error',
-                error: e instanceof Error ? e.message : String(e), extendStatus: EMPTY_EXTEND_STATUS,
-                depth: effectiveDepth,
-            }))
+            // Cells already drawn stay (the coarse updater, queued before
+            // this one, made the entry 'done'): the first page is marked
+            // 'error' for `retryWalk`, and the entry stays started.
+            if (!cellsLanded) startedRef.current.delete(cacheKey)   // allow retry
+            setState(prev => {
+                const entry = prev.get(cacheKey)
+                if (cellsLanded && entry?.status === 'done') {
+                    return setEntry(prev, cacheKey, { ...withExtendStatus(entry, fineKey, 'error'), depth: effectiveDepth })
+                }
+                return setEntry(prev, cacheKey, {
+                    model: emptyWalkModel(urn), status: 'error',
+                    error: e instanceof Error ? e.message : String(e), extendStatus: EMPTY_EXTEND_STATUS,
+                    depth: effectiveDepth,
+                })
+            })
         }
         await coarseLeg
     }, [provider, initialDepth, fullWalk, bumpRequests, releaseStaleFocals])
@@ -623,6 +639,7 @@ export function useLensWalk(
         if (entry.status === 'unsupported') return { ...base, phase: 'done', pending: 0 }
         const owed = owedEntries(entry.model, 'up', fullWalk).length + owedEntries(entry.model, 'down', fullWalk).length
             + (entry.model.seedCursor ? 1 : 0)
+            + (entry.extendStatus.get(`fine:${urn}`) === 'error' ? 1 : 0)
         let anyLoading = false
         let anyError = false
         for (const v of entry.extendStatus.values()) {
@@ -675,6 +692,13 @@ export function useLensWalk(
 
     const retryWalk = useCallback((urn: string) => {
         const cacheKey = cacheKeyFor(provider, urn)
+        // A first page that failed behind kept coarse cells goes out again,
+        // single-flight; its marker turns 'loading' before the sweep below.
+        const fineKey = `fine:${urn}`
+        const current = stateRef.current.get(cacheKey)
+        if (current?.extendStatus.get(fineKey) === 'error') {
+            void runFrontierOp(urn, urn, 'both', () => firstPageRequest(urn, current.depth), fineKey, { rootUrn: urn, direction: 'both' })
+        }
         // Failed steps get one more attempt: clearing the 'error' markers
         // makes them candidates for the driver again.
         setState(prev => {
@@ -688,7 +712,7 @@ export function useLensWalk(
             if (!cleared) return prev
             return setEntry(prev, cacheKey, { ...entry, extendStatus: nextStatus })
         })
-    }, [provider])
+    }, [provider, runFrontierOp])
 
     const continuePastCheckpoint = useCallback((urn: string) => {
         const cacheKey = cacheKeyFor(provider, urn)

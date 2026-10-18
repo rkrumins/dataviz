@@ -58,6 +58,17 @@ describe('deriveSync — an external graph', () => {
     expect(v.lanes[1].next).toBe('Rebuilt automatically when the source changes')
   })
 
+  it('says how many entities have lineage no read can show, without turning "In sync" amber', () => {
+    const summaries = { aggregationStatus: 'ready', driftState: 'inSync', autoRefresh: true, lastJobStatus: 'completed', lastSuccessAt: '2026-08-15T21:00:00Z' }
+    const many = deriveSync(external({ changedSinceRefresh: false }, { ...summaries, identityGaps: 1204 }), NOW)
+    expect(many).toMatchObject({ tone: 'ok', headline: 'In sync with the source' })
+    expect(many.lanes[1].lines).toContain("1,204 entities have lineage but no usable URN, so it isn't shown — see the last rebuild's advisory")
+    const one = deriveSync(external({ changedSinceRefresh: false }, { ...summaries, identityGaps: 1 }), NOW)
+    expect(one.lanes[1].lines.join(' ')).toMatch(/^.*1 entity has lineage but no usable URN/)
+    const none = deriveSync(external({ changedSinceRefresh: false }, summaries), NOW)
+    expect(none.lanes[1].lines.join(' ')).not.toMatch(/URN/)
+  })
+
   it('never claims "no changes" from a stored verdict — a stale "inSync" with moved counts is a change', () => {
     const v = deriveSync(external({ changedSinceRefresh: true }, { aggregationStatus: 'ready', driftState: 'inSync', autoRefresh: true, lastJobStatus: 'completed' }), NOW)
     expect(v.tone).toBe('warn')

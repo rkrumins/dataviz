@@ -51,6 +51,9 @@ export interface SyncSummaries {
   lastJobAt?: string | null
   /** When the summaries were last built successfully. */
   lastSuccessAt?: string | null
+  /** Lineage-bearing entities the last completed build found with no usable URN — every read
+   *  leaves their lineage out. Absent when there were none, or nothing reported it. */
+  identityGaps?: number | null
 }
 
 export interface SyncCounts {

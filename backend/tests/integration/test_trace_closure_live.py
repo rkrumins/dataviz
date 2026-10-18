@@ -1480,3 +1480,128 @@ async def test_coarse_on_a_provider_without_the_lane_is_served_fine_and_says_so(
     assert r.grain == "fine"
     assert not any(e.edge_type.upper() == "AGGREGATED" for e in r.edges)
 
+
+
+# ── Partners with no usable urn (2026-10-09) ──────────────────────────
+#
+# Reported live: every Focus-lens / Trace fine page answered 500 —
+# "1 validation error for GraphEdge sourceUrn" — on a graph where some
+# lineage neighbours carry no `urn` (or an integer one, stamped as-is). The
+# walk's queries now leave such far ends out IN THE QUERY, with the same
+# `typeOf` predicate in the degree probe, so the page is complete for every
+# partner that can be addressed and says how many edges it left out. Only a
+# live engine proves the predicate means on FalkorDB what the fakes assume.
+
+UNUSABLE_SEED = """
+CREATE
+ (t:Table  {urn:'t', displayName:'orders'}),
+ (c:Column {urn:'c', displayName:'order_id'}),
+ (u:Column {urn:'u', displayName:'src_id'}),
+ (x:Column {name:'x_no_urn'}),
+ (y:Column {urn:7, displayName:'int_urn'}),
+ (e:Column {urn:'', displayName:'empty_urn'}),
+ (d:Column {urn:'d', displayName:'dst_id'}),
+ (t)-[:CONTAINS]->(c),
+ (u)-[:FLOWS_TO]->(c), (x)-[:FLOWS_TO]->(c), (y)-[:FLOWS_TO]->(c), (e)-[:FLOWS_TO]->(c),
+ (c)-[:FLOWS_TO]->(d), (c)-[:FLOWS_TO]->(x)
+"""
+
+
+async def test_partners_with_no_usable_urn_are_left_out_and_counted_live(estate):
+    p = await estate("unusable", UNUSABLE_SEED)
+
+    r = await p.trace_closure(
+        urn="c", upstream_depth=1, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=600, timeout_ms=30000,
+    )
+
+    assert _hops(r) == [("c", "d", "FLOWS_TO"), ("u", "c", "FLOWS_TO")]
+    assert r.unresolved_edges == 4                 # x, 7, '' upstream; x downstream
+    assert r.truncated is False and r.truncation_reason is None
+    assert {"c", "u", "d", "t"} <= set(_urns(r))
+
+
+async def test_the_container_seed_and_the_edge_reads_skip_unusable_ends_live(estate):
+    from backend.common.models.graph import EdgeQuery
+
+    p = await estate("unusable_seed", UNUSABLE_SEED + ", (t)-[:CONTAINS]->(y)")
+
+    # `t`'s lineage-bearing descendants are `c` and `7`: only `c` is an anchor.
+    r = await p.trace_closure(
+        urn="t", upstream_depth=0, downstream_depth=1,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=600, timeout_ms=30000,
+    )
+    assert _hops(r) == [("c", "d", "FLOWS_TO")]
+    assert r.seed_cursor is None and r.truncation_reason is None
+
+    edges = await p.get_edges(EdgeQuery(target_urns=["c"], edge_types=["FLOWS_TO"]))
+    assert [(e.source_urn, e.target_urn) for e in edges] == [("u", "c")]
+
+
+async def test_a_hub_pages_past_unusable_partners_with_real_cursors_live(estate):
+    seed = ["CREATE (hub:Column {urn:'hub', displayName:'hub'})"]
+    for i in range(30):
+        seed.append(f", (p{i}:Column {{urn:'p{i:02d}'}}), (p{i})-[:FLOWS_TO]->(hub)")
+        if i % 3 == 0:
+            seed.append(f", (n{i}:Column {{name:'n{i}'}}), (n{i})-[:FLOWS_TO]->(hub)")
+    p = await estate("unusable_hub", "".join(seed))
+
+    first = await p.trace_closure(
+        urn="hub", upstream_depth=1, downstream_depth=0,
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+        max_nodes=8, timeout_ms=30000,
+    )
+    got = {e.source_urn for e in first.edges}
+    assert first.unresolved_edges == 10
+    cursor = next(f.next_cursor for f in first.frontier_up if f.urn == "hub")
+    seen = [int(cursor[2:])]
+    for _ in range(20):
+        page = await p.trace_closure(
+            urn="hub", upstream_depth=1, downstream_depth=0,
+            lineage_edge_types=LTYPES, containment_edge_types=CTYPES,
+            max_nodes=8, timeout_ms=30000, after_cursor=cursor,
+        )
+        got |= {e.source_urn for e in page.edges}
+        assert page.unresolved_edges == 0
+        cursor = next((f.next_cursor for f in page.frontier_up if f.urn == "hub" and f.next_cursor), None)
+        if cursor is None:
+            break
+        assert int(cursor[2:]) > seen[-1]
+        seen.append(int(cursor[2:]))
+    assert got == {f"p{i:02d}" for i in range(30)}
+
+
+async def test_the_walk_queries_still_enter_by_the_anchor_index_live(estate):
+    """The far end is filtered behind a WITH (or counted in an aggregate),
+    never in the anchoring MATCH's own WHERE: the planner must still seek the
+    anchor through its (:Label).urn index. A predicate there flips FalkorDB
+    to an All Node Scan of the far end — measured, not assumed."""
+    from backend.common.models.graph import EdgeQuery
+
+    p = await estate("unusable_plan", UNUSABLE_SEED)
+    await p._query("CREATE INDEX FOR (n:Column) ON (n.urn)")
+    asked = []
+    orig = p._ro_query
+
+    async def _spy(cypher, params=None, **kw):
+        asked.append((cypher, params))
+        return await orig(cypher, params=params, **kw)
+
+    p._ro_query = _spy
+    walk = dict(
+        lineage_edge_types=LTYPES, containment_edge_types=CTYPES, timeout_ms=30000,
+    )
+    await p.trace_closure(urn="c", upstream_depth=1, downstream_depth=1, max_nodes=600, **walk)
+    await p.trace_closure(urn="c", upstream_depth=1, downstream_depth=0, max_nodes=2,
+                          after_cursor="e:0", **walk)
+    await p.get_node_degrees(["c"], LTYPES, addressable_only=True)
+    await p.get_edges(EdgeQuery(target_urns=["c"], edge_types=["FLOWS_TO"]))
+
+    filtered = [(c, prm) for c, prm in asked if "typeOf(" in c and "Column" in c]
+    shapes = {"AS degree", "AS otherUrn", "WHERE id(r) >= $after", "AS c", "AS src"}
+    assert {s for s in shapes if any(s in c for c, _ in filtered)} == shapes
+    for cypher, params in filtered:
+        plan = str(await p._graph.explain(cypher, params))
+        assert "Index Scan" in plan and "All Node Scan" not in plan, f"{cypher}\n{plan}"
