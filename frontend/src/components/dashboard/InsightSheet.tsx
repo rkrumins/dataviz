@@ -151,7 +151,9 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 function TrendChart({ trend, measure }: { trend: WorkspaceSummaryTrend; measure: 'nodes' | 'edges' }) {
     const values = trend[measure]
     const start = values.findIndex(v => v !== null)
-    if (start < 0 || values.length - start < 3) return null
+    if (start < 0 || values.length - start < 3) {
+        return <p className="text-xs text-ink-muted">The trend appears after a few days of measurements.</p>
+    }
     const days = trend.days.slice(start)
     return (
         <TimeSeriesChart

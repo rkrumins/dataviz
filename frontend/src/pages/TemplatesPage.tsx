@@ -9,15 +9,18 @@
  * `?import=1` imports one from a file; `?tab=requests` lists, for template
  * managers, the requests to offer a team's template to everyone.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import {
-    Heart, Inbox, LayoutTemplate as TemplateIcon, Package, Plus, Search, Sparkles, Trash2, Upload, Users, X,
+    Heart, Inbox, Keyboard, LayoutTemplate as TemplateIcon, Package, Plus, Search, Sparkles, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
+import { KeyboardShortcutsDialog } from '@/components/explorer/KeyboardShortcutsDialog'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { useViewEditorModal } from '@/components/layout/viewEditorContext'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { MANAGE_TEMPLATES } from '@/components/templates/AudiencePicker'
@@ -37,6 +40,7 @@ import { saveTemplateFile } from '@/components/templates/templateFile'
 import {
     fitShare, useFitWorkspaces, useTemplateFits, type TemplateFitScore,
 } from '@/components/templates/useTemplateFits'
+import { TEMPLATE_SHORTCUTS, useTemplateKeys } from '@/components/templates/useTemplateKeys'
 import {
     useDeleteLayoutTemplate, useInvalidateLayoutTemplates, useLayoutTemplate, useLayoutTemplates,
     usePromotionRequests, useSetLayoutTemplateHidden, useToggleTemplateFavourite,
@@ -139,6 +143,9 @@ export function TemplatesPage() {
     const [requesting, setRequesting] = useState<LayoutTemplate | null>(null)
     const [defaulting, setDefaulting] = useState<LayoutTemplate | null>(null)
     const [importing, setImporting] = useState(false)
+    const [shortcutsOpen, setShortcutsOpen] = useState(false)
+    const rootRef = useRef<HTMLDivElement>(null)
+    const searchRef = useRef<HTMLInputElement>(null)
 
     // "Fit for": how well each template matches a workspace's data. Until
     // someone picks, the active workspace — when its data is theirs to read.
@@ -281,6 +288,25 @@ export function TemplatesPage() {
         }
     }, [use, setHidden, run])
 
+    // `/` `n` `i` `?`, and the arrows, Enter, `u` and `f` on a focused card.
+    const withTemplate = useCallback(
+        (fn: (t: LayoutTemplate) => void) => (id: string) => {
+            const t = templates.find(x => x.id === id)
+            if (t) fn(t)
+        },
+        [templates],
+    )
+    useTemplateKeys({
+        rootRef,
+        onSearch: useCallback(() => searchRef.current?.focus(), []),
+        onNew: useCallback(() => setStudio({}), []),
+        onImport: useCallback(() => setImporting(true), []),
+        onHelp: useCallback(() => setShortcutsOpen(true), []),
+        onOpen: useMemo(() => withTemplate(openTemplate), [withTemplate, openTemplate]),
+        onUse: useMemo(() => withTemplate(use), [withTemplate, use]),
+        onFavourite: useMemo(() => withTemplate(t => void toggleFavourite(t)), [withTemplate, toggleFavourite]),
+    })
+
     const renderCard = (t: LayoutTemplate) => {
         const score = fits?.get(t.id)
         return (
@@ -297,7 +323,7 @@ export function TemplatesPage() {
     }
 
     return (
-        <div className="absolute inset-0 overflow-y-auto bg-canvas">
+        <div ref={rootRef} className="absolute inset-0 overflow-y-auto bg-canvas">
             <PageContainer className="py-8 space-y-6 animate-in fade-in duration-500">
                 {/* ── Header ── */}
                 <div className="flex flex-wrap items-center justify-between gap-4">
@@ -345,12 +371,18 @@ export function TemplatesPage() {
                                 aria-selected={selected}
                                 onClick={() => setTab(t.id)}
                                 className={cn(
-                                    'relative -mb-px flex items-center gap-1.5 px-3.5 py-2.5 text-sm font-medium border-b-2 transition-colors',
-                                    selected
-                                        ? 'border-indigo-500 text-ink'
-                                        : 'border-transparent text-ink-muted hover:text-ink',
+                                    'relative -mb-px flex items-center gap-1.5 px-3.5 py-2.5 text-sm font-medium transition-colors',
+                                    selected ? 'text-ink' : 'text-ink-muted hover:text-ink',
                                 )}
                             >
+                                {selected && (
+                                    // Glides from the tab left to the one chosen.
+                                    <motion.span
+                                        layoutId="template-tab-indicator"
+                                        transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+                                        className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-indigo-500"
+                                    />
+                                )}
                                 {t.label}
                                 <span className={cn(
                                     'px-1.5 py-px rounded-full text-[10px] font-semibold tabular-nums',
@@ -373,6 +405,7 @@ export function TemplatesPage() {
                             <div className="relative w-full sm:w-72">
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
                                 <input
+                                    ref={searchRef}
                                     type="search"
                                     value={query}
                                     onChange={e => setQuery(e.target.value)}
@@ -409,7 +442,7 @@ export function TemplatesPage() {
                                             value={fitWorkspace?.id ?? ''}
                                             onChange={e => setFitFor(e.target.value || null)}
                                             aria-label="Show how well templates fit a workspace's data"
-                                            className="input border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
+                                            className="input w-auto border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
                                         >
                                             <option value="">No workspace</option>
                                             {fitChoices.map(ws => <option key={ws.id} value={ws.id}>{ws.name}</option>)}
@@ -427,11 +460,21 @@ export function TemplatesPage() {
                                         Show hidden built-ins
                                     </label>
                                 )}
+                                <HoverTip label="Keyboard shortcuts" detail="Press ? on this page">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShortcutsOpen(true)}
+                                        aria-label="Keyboard shortcuts"
+                                        className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-canvas-elevated text-ink-muted hover:text-ink"
+                                    >
+                                        <Keyboard className="w-4 h-4" />
+                                    </button>
+                                </HoverTip>
                                 <select
                                     value={sortBy}
                                     onChange={e => setSort(e.target.value as SortKey)}
                                     aria-label="Sort templates"
-                                    className="input border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
+                                    className="input w-auto border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
                                 >
                                     {SORTS.filter(s => s.id !== 'match' || fits).map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
                                 </select>
@@ -476,7 +519,7 @@ export function TemplatesPage() {
                                 {showShelves && (featured.length > 0 || recent.length > 0) && (
                                     <h2 className="text-sm font-bold text-ink">All templates</h2>
                                 )}
-                                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 wide:grid-cols-4">
+                                <div data-template-grid className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 wide:grid-cols-4">
                                     {shown.map(renderCard)}
                                 </div>
                             </section>
@@ -508,6 +551,7 @@ export function TemplatesPage() {
                 />
             )}
             {sharing && <ShareTemplateDialog template={sharing} onClose={() => setSharing(null)} />}
+            <KeyboardShortcutsDialog isOpen={shortcutsOpen} onClose={() => setShortcutsOpen(false)} sections={TEMPLATE_SHORTCUTS} />
             {requesting && <RequestPromotionDialog template={requesting} onClose={() => setRequesting(null)} />}
             {importOpen && (
                 <ImportTemplateDialog

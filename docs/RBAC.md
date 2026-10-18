@@ -273,7 +273,16 @@ edit it):
 
 Creating a workspace template needs `workspace:view:create` there; an organization one needs
 `system:templates:manage`. Changing a template's audience needs rights over the one it has and the
-right to create in the new one. Unlike a private view, a personal template is **not** readable by
+right to create in the new one.
+
+Whoever may share a personal or workspace template can ask for it to be offered to everyone.
+Until a template manager answers, every `system:templates:manage` holder can **read** it (they
+can't approve what they can't see; its access reads `via: "request"`); approving moves it to the
+organization — no rights over its old audience needed — and declining or withdrawing ends that
+read. Featuring a template takes `system:templates:manage`, and only for a built-in or an
+organization template. A workspace's default template is set with `workspace:admin` there, and
+must be one every member can use: a shown built-in, an organization template, or that
+workspace's own. Unlike a private view, a personal template is **not** readable by
 administrators: a template is a layout, not data, so there is nothing behind it to audit. API keys
 cannot call these routes.
 

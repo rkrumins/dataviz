@@ -75,7 +75,7 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
         <div className="border-t border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-black/[0.015] dark:bg-white/[0.02]">
             <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
                 {choices.length > 1 ? (
-                    <label className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 whitespace-nowrap">
                         Data from
                         <select
                             value={workspace.id}

@@ -33,7 +33,7 @@ export function FeaturedShelf({ templates, renderCard }: {
                     </div>
                 )}
             </div>
-            <div ref={track} className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2 custom-scrollbar">
+            <div ref={track} data-template-grid className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2 custom-scrollbar">
                 {templates.map(t => (
                     <div key={t.id} className="snap-start shrink-0 w-[320px] rounded-2xl ring-1 ring-amber-400/30">
                         {renderCard(t)}

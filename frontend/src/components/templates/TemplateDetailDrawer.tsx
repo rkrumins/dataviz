@@ -3,7 +3,9 @@
  * its types, rules and logical nodes, who can use it, the views built from it,
  * and the actions this person may take.
  */
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { motion } from 'framer-motion'
 import { Link } from 'react-router-dom'
 import {
     ArrowRight, Box, Building2, Copy, Download, Eye, EyeOff, GitBranch, Home, Layers, Pencil, Share2, Star,
@@ -84,7 +86,14 @@ function LayerRow({ layer, index }: { layer: ViewLayerConfig; index: number }) {
     )
 }
 
-export function TemplateDetailDrawer({ template, open, onClose, onAction, onToggleFavourite, canSetDefault }: {
+/** Each section enters a beat after the one above it — entrance only. */
+const enter = (i: number) => ({
+    initial: { opacity: 0, y: 6 },
+    animate: { opacity: 1, y: 0 },
+    transition: { delay: 0.04 * i, duration: 0.2, ease: 'easeOut' as const },
+})
+
+export function TemplateDetailDrawer({ template: current, open, onClose, onAction, onToggleFavourite, canSetDefault }: {
     template: LayoutTemplate | null
     open: boolean
     onClose: () => void
@@ -92,6 +101,11 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction, onTogg
     onToggleFavourite?: (template: LayoutTemplate) => void
     canSetDefault?: boolean
 }) {
+    // The last template shown, kept while the drawer slides away so it never
+    // empties on its way out.
+    const [last, setLast] = useState(current)
+    if (current && current !== last) setLast(current)
+    const template = current ?? last
     const ref = useModalA11y(open, onClose)
     const { appName } = useBrand()
     const usedBy = useQuery({
@@ -176,11 +190,13 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction, onTogg
                             </div>
                         </header>
 
-                        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                        <div key={template.id} className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
                             {template.promotionRequest && template.access.canDecidePromotion && (
-                                <PromotionDecision template={template} onDone={stillReadable => { if (!stillReadable) onClose() }} />
+                                <motion.div {...enter(0)}>
+                                    <PromotionDecision template={template} onDone={stillReadable => { if (!stillReadable) onClose() }} />
+                                </motion.div>
                             )}
-                            <section>
+                            <motion.section {...enter(1)}>
                                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-2">Who can use it</h3>
                                 <p className="text-sm text-ink-secondary">
                                     {audienceDescription(audienceOf(template), { workspaceName: template.workspaceName, appName })}
@@ -205,9 +221,9 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction, onTogg
                                         New views in {(template.defaultFor ?? []).map(d => d.workspaceName ?? d.workspaceId).join(', ')} start from it.
                                     </p>
                                 )}
-                            </section>
+                            </motion.section>
 
-                            <section>
+                            <motion.section {...enter(2)}>
                                 <h3 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-3">
                                     <Layers className="w-3.5 h-3.5" /> {template.layers.length} layer{template.layers.length === 1 ? '' : 's'}
                                 </h3>
@@ -219,9 +235,9 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction, onTogg
                                 <p className="text-[11px] text-ink-muted mt-3">
                                     Entity types are matched to each view's semantic layer when the template is used.
                                 </p>
-                            </section>
+                            </motion.section>
 
-                            <section>
+                            <motion.section {...enter(3)}>
                                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-2">
                                     Views built from it
                                 </h3>
@@ -258,9 +274,11 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction, onTogg
                                     A view keeps its own copy of the layers: editing or deleting the template never changes it.
                                     When the template has a new version, the people who can edit a view built from it are offered the changes.
                                 </p>
-                            </section>
+                            </motion.section>
 
-                            <TemplateVersionHistory template={template} open={open} />
+                            <motion.div {...enter(4)}>
+                                <TemplateVersionHistory template={template} open={open} />
+                            </motion.div>
                         </div>
 
                         <footer className="px-6 py-3 border-t border-slate-200 dark:border-slate-700 text-[11px] text-ink-muted flex items-center gap-2 shrink-0">

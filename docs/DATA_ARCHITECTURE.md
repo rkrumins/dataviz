@@ -25,7 +25,7 @@ The management database is accessed through the SQLAlchemy 2.0 async ORM, and it
 
 ## Where every table belongs
 
-The ORM maps 92 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+The ORM maps 94 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
 
 | Area | Schema | Tables | Examples |
 |---|---|---|---|
@@ -35,7 +35,7 @@ The ORM maps 92 tables across four PostgreSQL schemas. This page details the cor
 | Workspaces and data sources | `public` | 3 | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` |
 | Providers and catalog | `public` | 5 | `providers`, `catalog_items`, `provider_admission_config`, `asset_discovery_cache` |
 | Semantic layer | `public` | 3 | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` |
-| Views | `public` | 11 | `views`, `view_versions`, `view_favourites`, `saved_view_filters`, `context_models`, `object_store_objects` |
+| Views | `public` | 13 | `views`, `view_versions`, `view_favourites`, `saved_view_filters`, `context_models`, `layout_template_versions`, `layout_template_favourites`, `object_store_objects` |
 | Stats and profiling | `public` | 4 | `data_source_stats`, `data_source_count_snapshots`, `data_source_count_rollups`, `data_source_count_alerts` |
 | Aggregation and freshness | `public` | 2 | `data_source_polling_configs`, `refresh_events` |
 | Platform settings | `public` | 11 | `feature_flags`, `feature_definitions`, `platform_settings`, `application_branding`, `announcements` |
@@ -68,6 +68,8 @@ erDiagram
     workspace_data_sources ||--o| data_source_polling_configs : "polling"
     workspace_data_sources ||--o| ontology_source_mappings : "type mapping"
     context_models ||--o{ views : "templates"
+    context_models ||--o{ layout_template_versions : "versions of its layers"
+    context_models ||--o{ layout_template_favourites : "favourited by"
     views ||--o{ view_favourites : "bookmarked by"
     users ||--o{ user_roles : "has roles"
     users ||--o{ user_approvals : "approval trail"
@@ -116,6 +118,7 @@ erDiagram
         text description
         bool is_default
         bool is_active
+        text default_layout_template_id "no FK, new views start from it"
         datetime created_at
         datetime updated_at
     }
@@ -169,6 +172,7 @@ erDiagram
         text workspace_id FK
         text data_source_id FK "nullable"
         text context_model_id FK "nullable"
+        int context_model_version "the template version it matches"
         text visibility "private|workspace|enterprise"
         text created_by
         text updated_by
@@ -203,6 +207,11 @@ erDiagram
         text category
         text visibility "private | workspace | enterprise"
         text system_key UK "built-ins only"
+        int version "the version of its layers"
+        bool is_pinned "featured"
+        text promotion_requested_by "asked to offer it to everyone"
+        text promotion_requested_at
+        text promotion_request_note
         text created_by
         text deleted_at "soft delete"
         json layers_config

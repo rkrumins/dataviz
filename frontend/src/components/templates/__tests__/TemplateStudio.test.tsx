@@ -99,6 +99,26 @@ describe('TemplateStudio', () => {
         expect(screen.getByRole('button', { name: /preview with real data/i })).toHaveAttribute('aria-expanded', 'false')
     })
 
+    it('moves a layer with Alt+arrows, keeping the focus on it', async () => {
+        service.update.mockImplementation(async (_id: string, body: Record<string, unknown>) => ({ ...MINE, ...body }))
+        const layers = ['Sources', 'Staging', 'Marts'].map((name, order) => ({ id: name, name, entityTypes: [], order }))
+        renderStudio({ seed: { template: { ...MINE, layers } } })
+        next()
+        expect(await screen.findByText('Shape the layers')).toBeInTheDocument()
+
+        const handle = screen.getByRole('button', { name: 'Reorder Staging' })
+        handle.focus()
+        fireEvent.keyDown(handle, { key: 'ArrowUp', altKey: true })
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Reorder Staging' })).toHaveFocus())
+        fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder Marts' }), { key: 'ArrowDown', altKey: true })  // already last
+
+        next()
+        next()
+        fireEvent.click(await screen.findByRole('button', { name: /save changes/i }))
+        await waitFor(() => expect(service.update).toHaveBeenCalledTimes(1))
+        expect(service.update.mock.calls[0][1].layers.map((l: { name: string }) => l.name)).toEqual(['Staging', 'Sources', 'Marts'])
+    })
+
     it('editing moves the template only when its audience changed', async () => {
         service.update.mockResolvedValue({ ...MINE, visibility: 'workspace', workspaceId: 'ws_fin' })
         const onClose = vi.fn()

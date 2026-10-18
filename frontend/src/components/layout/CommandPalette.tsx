@@ -18,6 +18,7 @@ import {
   LayoutTemplate,
   BookOpen,
   Loader2,
+  Upload,
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
@@ -397,6 +398,18 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   shortcut="⌘/"
                   onSelect={() => handleAction('toggle-persona')}
                 />
+                <CommandItem
+                  icon={LayoutTemplate}
+                  label="New layout template"
+                  description="Shape layers to start Context Views from"
+                  onSelect={() => handleAction('navigate:/templates?new=1')}
+                />
+                <CommandItem
+                  icon={Upload}
+                  label="Import a layout template"
+                  description="From a .layout-template.json file"
+                  onSelect={() => handleAction('navigate:/templates?import=1')}
+                />
               </Command.Group>
 
               {/* Navigation — always shown */}
@@ -412,6 +425,12 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   label="Browse Views"
                   description="Discover and explore all views"
                   onSelect={() => handleAction('navigate:/explorer')}
+                />
+                <CommandItem
+                  icon={LayoutTemplate}
+                  label="Browse templates"
+                  description="Every layer layout you can start a view from"
+                  onSelect={() => handleAction('navigate:/templates')}
                 />
               </Command.Group>
 

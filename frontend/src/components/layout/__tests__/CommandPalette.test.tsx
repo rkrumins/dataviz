@@ -242,6 +242,18 @@ describe('CommandPalette — where a hit takes you', () => {
     expect(locationNow()).toBe('/workspaces/ws-1')
   })
 
+  it('starts a new layout template, or imports one, from anywhere', () => {
+    renderPalette(true)
+    clickRow('New layout template')
+    expect(locationNow()).toBe('/templates?new=1')
+  })
+
+  it('imports a layout template from a file', () => {
+    renderPalette(true)
+    clickRow('Import a layout template')
+    expect(locationNow()).toBe('/templates?import=1')
+  })
+
   it('sends Open Settings to the account page', () => {
     renderPalette(true)
     clickRow('Open Settings')

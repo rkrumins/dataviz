@@ -42,12 +42,12 @@ const SUMMARY: WorkspaceSummary = {
     ],
 }
 
-function renderSheet(kind: 'sources' | 'workspaces') {
+function renderSheet(kind: 'sources' | 'workspaces', trend?: Parameters<typeof InsightSheet>[0]['trend']) {
     return render(
         <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
             <MotionConfig reducedMotion="always">
                 <MemoryRouter>
-                    <InsightSheet kind={kind} onClose={vi.fn()} summary={SUMMARY} ontologies={[]} />
+                    <InsightSheet kind={kind} onClose={vi.fn()} summary={SUMMARY} trend={trend} ontologies={[]} />
                 </MemoryRouter>
             </MotionConfig>
         </QueryClientProvider>,
@@ -87,6 +87,12 @@ describe('InsightSheet', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Refresh the numbers for Warehouse' }))
         await waitFor(() => expect(refreshSource).toHaveBeenCalledWith('ds_big', expect.objectContaining({ scope: 'read-caches' })))
         expect(notify).toHaveBeenCalledWith('success', 'Refreshing the numbers for Warehouse')
+    })
+
+    it('says when there are too few measurements to draw a trend', () => {
+        const days = ['2026-10-16', '2026-10-17', '2026-10-18']
+        renderSheet('sources', { days, workspaces: [2, 2, 2], dataSources: [3, 3, 3], views: [1, 1, 1], nodes: [null, null, 1200], edges: [null, null, 300] })
+        expect(screen.getByText('The trend appears after a few days of measurements.')).toBeInTheDocument()
     })
 
     it('ranks workspaces by size and links to each', () => {

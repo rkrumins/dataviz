@@ -151,51 +151,57 @@ export function TemplateCard({ template, onOpen, onAction, onToggleFavourite, fi
     return (
         <div
             onClick={onOpen}
+            // Focused by the library's arrow keys (useTemplateKeys), not a tab stop of its own.
+            data-template-card={template.id}
+            tabIndex={-1}
             className={cn(
                 'group relative flex flex-col rounded-2xl border bg-canvas-elevated p-4 cursor-pointer',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60',
                 'transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-indigo-500/5',
                 template.hidden
                     ? 'border-dashed border-slate-300 dark:border-slate-600 opacity-75'
                     : 'border-glass-border hover:border-indigo-300/60 dark:hover:border-indigo-500/40',
             )}
         >
-            <div className="flex items-center gap-1.5 mb-2.5 min-h-[28px]">
-                <AudienceBadge template={template} />
-                {template.category && (
-                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 truncate">
-                        {categoryLabel(template.category)}
-                    </span>
-                )}
-                {template.hidden && (
-                    <HoverTip label="Hidden from everyone but template managers" detail="Show it to put it back in everyone's library.">
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-slate-500/10 text-slate-500">
-                            <EyeOff className="w-3 h-3" /> Hidden
+            <div className="flex items-start gap-1.5 mb-2.5 min-h-[28px]">
+                <div className="flex flex-1 min-w-0 flex-wrap items-center gap-1.5">
+                    <AudienceBadge template={template} />
+                    {template.category && (
+                        <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 truncate max-w-[10rem]">
+                            {categoryLabel(template.category)}
                         </span>
-                    </HoverTip>
-                )}
-                {template.featured && (
-                    <HoverTip label="Featured by your template managers">
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                            <Star className="w-3 h-3" fill="currentColor" /> Featured
-                        </span>
-                    </HoverTip>
-                )}
-                {template.promotionRequest && (
-                    <HoverTip label="Asked to be offered to everyone" detail="A template manager will answer.">
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400">
-                            <Clock className="w-3 h-3" /> Requested
-                        </span>
-                    </HoverTip>
-                )}
-                {defaults.length > 0 && (
-                    <HoverTip label={`New views in ${defaults.map(d => d.workspaceName ?? d.workspaceId).join(', ')} start from it`}>
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 max-w-[9rem]">
-                            <Home className="w-3 h-3 shrink-0" />
-                            <span className="truncate">Default{defaults.length === 1 ? ` · ${defaults[0].workspaceName ?? ''}` : ` · ${defaults.length}`}</span>
-                        </span>
-                    </HoverTip>
-                )}
-                <div className="ml-auto flex items-center">
+                    )}
+                    {template.hidden && (
+                        <HoverTip label="Hidden from everyone but template managers" detail="Show it to put it back in everyone's library.">
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-slate-500/10 text-slate-500">
+                                <EyeOff className="w-3 h-3" /> Hidden
+                            </span>
+                        </HoverTip>
+                    )}
+                    {template.featured && (
+                        <HoverTip label="Featured by your template managers">
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                                <Star className="w-3 h-3" fill="currentColor" /> Featured
+                            </span>
+                        </HoverTip>
+                    )}
+                    {template.promotionRequest && (
+                        <HoverTip label="Asked to be offered to everyone" detail="A template manager will answer.">
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                                <Clock className="w-3 h-3" /> Requested
+                            </span>
+                        </HoverTip>
+                    )}
+                    {defaults.length > 0 && (
+                        <HoverTip label={`New views in ${defaults.map(d => d.workspaceName ?? d.workspaceId).join(', ')} start from it`}>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 max-w-[9rem]">
+                                <Home className="w-3 h-3 shrink-0" />
+                                <span className="truncate">Default{defaults.length === 1 ? ` · ${defaults[0].workspaceName ?? ''}` : ` · ${defaults.length}`}</span>
+                            </span>
+                        </HoverTip>
+                    )}
+                </div>
+                <div className="flex items-center shrink-0">
                     {onToggleFavourite && (
                         <HeartBurstButton favourited={!!template.isFavourite} onToggle={onToggleFavourite} />
                     )}

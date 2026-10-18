@@ -447,4 +447,53 @@ describe('TemplatesPage', () => {
         expect(await screen.findByRole('dialog', { name: 'Template My flow (imported)' })).toBeInTheDocument()
         expect(screen.queryByRole('dialog', { name: 'Import a layout template' })).not.toBeInTheDocument()
     })
+
+    it('answers the keyboard: search, new, open, use, favorite and move between cards', async () => {
+        service.favourite.mockResolvedValue(undefined)
+        renderAt()
+        await screen.findByRole('button', { name: 'My flow' })
+
+        fireEvent.keyDown(document, { key: '/' })
+        expect(screen.getByRole('searchbox', { name: 'Search templates' })).toHaveFocus()
+        fireEvent.keyDown(screen.getByRole('searchbox', { name: 'Search templates' }), { key: 'n' })  // typing, not a command
+        expect(screen.queryByText('New layout template')).not.toBeInTheDocument()
+
+        // From a card's own button, the arrows walk the cards.
+        within(card('Medallion')).getByRole('button', { name: 'Medallion' }).focus()
+        fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' })
+        expect(card('House style')).toHaveFocus()
+        fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' })
+        expect(card('Medallion')).toHaveFocus()
+
+        fireEvent.keyDown(document.activeElement!, { key: 'u' })
+        expect(openViewEditor).toHaveBeenCalledWith(undefined, { templateId: 'tpl_medallion' })
+        fireEvent.keyDown(document.activeElement!, { key: 'f' })
+        expect(service.favourite).toHaveBeenCalledWith('tpl_medallion')
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' })
+        expect(await screen.findByRole('dialog', { name: 'Template Medallion' })).toBeInTheDocument()
+    })
+
+    it('lists its shortcuts on "?", instead of opening Help', async () => {
+        const help = vi.fn()
+        window.addEventListener('keydown', help)
+        renderAt()
+        await screen.findByRole('button', { name: 'My flow' })
+        fireEvent.keyDown(document, { key: '?' })
+        const dialog = screen.getByRole('dialog', { name: 'Keyboard shortcuts' })
+        expect(within(dialog).getByText('Move between templates')).toBeInTheDocument()
+        expect(help).not.toHaveBeenCalled()
+        window.removeEventListener('keydown', help)
+
+        fireEvent.keyDown(document, { key: 'Escape' })
+        fireEvent.keyDown(document, { key: 'n' })
+        expect(await screen.findByText('New layout template')).toBeInTheDocument()
+    })
+
+    it('keeps the template in the drawer while it slides away', async () => {
+        renderAt('/templates/tpl_medallion')
+        const drawer = await screen.findByRole('dialog', { name: 'Template Medallion' })
+        fireEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+        await waitFor(() => expect(drawer).toHaveAttribute('aria-hidden', 'true'))
+        expect(within(drawer).getByText('Bronze')).toBeInTheDocument()
+    })
 })

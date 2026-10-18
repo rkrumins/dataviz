@@ -115,11 +115,26 @@ may do with one is decided per template (see [RBAC](/docs/rbac#layout-templates)
 | GET/PUT/DELETE | `/api/v1/layout-templates/{template_id}` | Read, edit (partial; also changes who can use it), soft-delete. |
 | POST | `/api/v1/layout-templates/{template_id}/restore` | Undo a delete — same id, same shares. |
 | PUT | `/api/v1/layout-templates/{template_id}/hidden` | Hide or show a built-in for everyone (`system:templates:manage`). |
+| GET | `/api/v1/layout-templates/{template_id}/versions[/{version}]` | Every version of its layers, newest first, or one of them. |
+| POST | `/api/v1/layout-templates/{template_id}/versions/{version}/restore` | Make an old version's layers the newest version (needs edit). |
+| PUT | `/api/v1/layout-templates/{template_id}/featured` | Feature it at the top of the library (`system:templates:manage`; built-in or organization). |
+| POST/DELETE | `/api/v1/layout-templates/{template_id}/favourite` | The caller's favorites. |
+| POST/DELETE | `/api/v1/layout-templates/{template_id}/promotion-request` | Ask, or stop asking, for it to be offered to everyone. |
+| POST | `/api/v1/layout-templates/{template_id}/promotion-request/approve` · `/decline` | A template manager's answer, with an optional note. |
+| GET | `/api/v1/layout-templates/promotion-requests` | The pending requests (`system:templates:manage`). |
 | GET/POST/PUT/DELETE | `/api/v1/layout-templates/{template_id}/grants[/{grant_id}]` | Share with people or groups, as viewer or editor. |
+| PUT | `/api/v1/views/{view_id}/template-version` | Mark a view up to date with its template's version (needs edit on the view). |
 
 A template keeps a view's layer structure — names, colours, icons, entity types, rules, logical
 groups — and never the entities a view placed: `layout_config.strip_placements` drops column
-anchors, legacy `entityAssignments` and exact-URN rules before anything is stored.
+anchors, legacy `entityAssignments`, exact-URN rules and `templateLayerId` before anything is
+stored.
+
+Changing a template's layers makes a new version (`context_models.version`, and a row in
+`layout_template_versions`); a view records the version it matches (`views.context_model_version`)
+and each of its columns the template layer it came from (`templateLayerId`), which is what lets the
+client merge a newer version into the view three ways — the version the view matched, the newest
+one, and the view's own layers.
 
 ## Lineage walks: `POST /api/v1/{ws_id}/graph/trace/closure`
 

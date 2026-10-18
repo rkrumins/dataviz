@@ -528,6 +528,35 @@ To update a view that already exists, use `"action": "update"` and `"target": {"
 The actions, merge strategy, staging into a draft and the limits are in
 [View portability](/docs/feature-view-portability).
 
+### Move a layout template between environments
+
+**Needs:** a password sign-in in both environments — API keys can't call the template routes.
+Read access to the template; in the target, nothing for a personal template,
+`workspace:view:create` in the workspace for a workspace one, `system:templates:manage` for an
+organization one.
+
+A template's layout travels in the same file the library's **Export as file** saves, so the result
+can also be imported from **Templates → Import**.
+
+1. In the source environment, save the template as a file:
+
+   ```bash
+   api GET "/api/v1/layout-templates/$TID" | jq '{format: "layout-template", formatVersion: 1,
+       exportedAt: (now | todate), template: {name, description, category, layers}}' \
+     > finance-flow.layout-template.json
+   ```
+
+2. Sign in to the target environment, and create it there — here as a personal template:
+
+   ```bash
+   jq '.template + {visibility: "private"}' finance-flow.layout-template.json |
+     api POST /api/v1/layout-templates -d @- | jq '{id, version}'
+   ```
+
+   It starts at version 1. To update one you made before instead, send the layers to
+   `PUT /api/v1/layout-templates/{id}` with a `changeNote`, and `"notifyUsers": true` to tell the
+   people whose views were built from an older version.
+
 ### Find views by when they changed and who changed them
 
 **Needs:** only to be signed in. Every answer counts only the views you can open.

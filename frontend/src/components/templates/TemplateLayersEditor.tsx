@@ -7,14 +7,15 @@
  * Entity types are suggestions for SOME semantic layer: the picker offers the
  * types of every semantic layer this person can read, and accepts any other.
  */
-import { useMemo, useState } from 'react'
-import { Reorder } from 'framer-motion'
+import { useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Reorder, useDragControls } from 'framer-motion'
 import { useQuery } from '@tanstack/react-query'
 import {
     ChevronDown, ChevronRight, GitBranch, GripVertical, Plus, Trash2, X,
 } from 'lucide-react'
 import { ColorInput } from '@/components/ui/ColorInput'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { IconPicker } from '@/components/ui/IconPicker'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/steps/LayoutStep'
 import { caseFold } from '@/features/ontology/lib/caseFold'
@@ -218,6 +219,51 @@ function LayerEditor({ layer, onChange, suggestions }: {
     )
 }
 
+/** One layer's row. It moves by its handle — dragged, or Alt+↑/↓ from anywhere
+ *  in its header — never by a drag that starts in the fields being edited. */
+function LayerItem({ layer, name, onMove, body, children }: {
+    layer: ViewLayerConfig
+    name: string
+    onMove: (by: -1 | 1) => void
+    /** Below the header: the layer's editor, when open. */
+    body?: ReactNode
+    /** The rest of the header. */
+    children: ReactNode
+}) {
+    const controls = useDragControls()
+    const onKeyDown = (e: KeyboardEvent) => {
+        if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return
+        e.preventDefault()
+        // The row's DOM node moves, which drops focus: hand it back after.
+        const focused = document.activeElement as HTMLElement | null
+        onMove(e.key === 'ArrowUp' ? -1 : 1)
+        requestAnimationFrame(() => focused?.focus())
+    }
+    return (
+        <Reorder.Item
+            value={layer}
+            dragListener={false}
+            dragControls={controls}
+            className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-canvas-elevated overflow-hidden"
+        >
+            <div onKeyDown={onKeyDown} className="flex items-center gap-3 px-3 py-2.5">
+                <HoverTip label="Drag to reorder" detail="Or Alt+↑ / Alt+↓">
+                    <button
+                        type="button"
+                        aria-label={`Reorder ${name}`}
+                        onPointerDown={e => controls.start(e)}
+                        className="p-0.5 -m-0.5 rounded text-ink-muted hover:text-ink cursor-grab active:cursor-grabbing touch-none shrink-0"
+                    >
+                        <GripVertical className="w-4 h-4" aria-hidden />
+                    </button>
+                </HoverTip>
+                {children}
+            </div>
+            {body}
+        </Reorder.Item>
+    )
+}
+
 export function TemplateLayersEditor({ layers, onChange }: {
     layers: ViewLayerConfig[]
     onChange: (layers: ViewLayerConfig[]) => void
@@ -226,6 +272,13 @@ export function TemplateLayersEditor({ layers, onChange }: {
     const [expanded, setExpanded] = useState<string | null>(layers[0]?.id ?? null)
     const commit = (next: ViewLayerConfig[]) => onChange(next.map((l, i) => ({ ...l, order: i })))
     const patch = (id: string, p: Partial<ViewLayerConfig>) => commit(layers.map(l => (l.id === id ? { ...l, ...p } : l)))
+    const move = (from: number, by: -1 | 1) => {
+        const to = from + by
+        if (to < 0 || to >= layers.length) return
+        const next = [...layers]
+        next.splice(to, 0, next.splice(from, 1)[0])
+        commit(next)
+    }
 
     return (
         <div className="space-y-3">
@@ -233,45 +286,43 @@ export function TemplateLayersEditor({ layers, onChange }: {
                 {layers.map((layer, i) => {
                     const open = expanded === layer.id
                     return (
-                        <Reorder.Item
+                        <LayerItem
                             key={layer.id}
-                            value={layer}
-                            className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-canvas-elevated overflow-hidden"
+                            layer={layer}
+                            name={layer.name || 'layer'}
+                            onMove={by => move(i, by)}
+                            body={open && <LayerEditor layer={layer} onChange={p => patch(layer.id, p)} suggestions={suggestions} />}
                         >
-                            <div className="flex items-center gap-3 px-3 py-2.5">
-                                <GripVertical className="w-4 h-4 text-ink-muted cursor-grab shrink-0" aria-hidden />
-                                <span className="text-[10px] font-semibold text-ink-muted tabular-nums w-4">{i + 1}</span>
-                                <span className="w-3.5 h-3.5 rounded-full shrink-0" style={{ backgroundColor: layer.color }} />
-                                <button
-                                    type="button"
-                                    aria-expanded={open}
-                                    onClick={() => setExpanded(open ? null : layer.id)}
-                                    className="flex-1 min-w-0 flex items-center gap-2 text-left"
-                                >
-                                    <span className={cn('truncate text-sm font-semibold', layer.name.trim() ? 'text-ink' : 'text-red-500')}>
-                                        {layer.name.trim() || 'Needs a name'}
-                                    </span>
-                                    <span className="text-[11px] text-ink-muted shrink-0">
-                                        {(layer.entityTypes ?? []).length
-                                            ? `${layer.entityTypes.length} type${layer.entityTypes.length === 1 ? '' : 's'}`
-                                            : 'filled by hand'}
-                                    </span>
-                                    {open
-                                        ? <ChevronDown className="w-4 h-4 text-ink-muted ml-auto shrink-0" />
-                                        : <ChevronRight className="w-4 h-4 text-ink-muted ml-auto shrink-0" />}
-                                </button>
-                                <button
-                                    type="button"
-                                    aria-label={`Remove ${layer.name || 'layer'}`}
-                                    disabled={layers.length === 1}
-                                    onClick={() => commit(layers.filter(l => l.id !== layer.id))}
-                                    className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
-                                >
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
-                            </div>
-                            {open && <LayerEditor layer={layer} onChange={p => patch(layer.id, p)} suggestions={suggestions} />}
-                        </Reorder.Item>
+                            <span className="text-[10px] font-semibold text-ink-muted tabular-nums w-4">{i + 1}</span>
+                            <span className="w-3.5 h-3.5 rounded-full shrink-0" style={{ backgroundColor: layer.color }} />
+                            <button
+                                type="button"
+                                aria-expanded={open}
+                                onClick={() => setExpanded(open ? null : layer.id)}
+                                className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                            >
+                                <span className={cn('truncate text-sm font-semibold', layer.name.trim() ? 'text-ink' : 'text-red-500')}>
+                                    {layer.name.trim() || 'Needs a name'}
+                                </span>
+                                <span className="text-[11px] text-ink-muted shrink-0">
+                                    {(layer.entityTypes ?? []).length
+                                        ? `${layer.entityTypes.length} type${layer.entityTypes.length === 1 ? '' : 's'}`
+                                        : 'filled by hand'}
+                                </span>
+                                {open
+                                    ? <ChevronDown className="w-4 h-4 text-ink-muted ml-auto shrink-0" />
+                                    : <ChevronRight className="w-4 h-4 text-ink-muted ml-auto shrink-0" />}
+                            </button>
+                            <button
+                                type="button"
+                                aria-label={`Remove ${layer.name || 'layer'}`}
+                                disabled={layers.length === 1}
+                                onClick={() => commit(layers.filter(l => l.id !== layer.id))}
+                                className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-muted"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </LayerItem>
                     )
                 })}
             </Reorder.Group>
