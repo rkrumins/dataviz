@@ -268,7 +268,36 @@ class ProjectionKeyInvalid(_HttpMapped, RuntimeError):
                          {"type": "invalid_target_key", "key": key})
 
 
+class GraphNotWritable(_HttpMapped, RuntimeError):
+    """A content write reached a graph that is not live: editing is paused (``frozen``), or it is
+    in the trash (``trashed``) or being permanently deleted (``purging``). Not a
+    ``ConcurrencyError``, which answers 'integrity', nor a ``ValueError``, which answers 404."""
+
+    _MESSAGES = {
+        "frozen": "Editing is paused on this graph. A publisher can resume it from the data "
+                  "source's Version control tab. Your change was not saved.",
+        "trashed": "This graph is in the trash. Restore its data source to change it.",
+        "purging": "This graph is being permanently deleted.",
+    }
+
+    def __init__(self, state: str):
+        self.state = state
+        super().__init__(self._MESSAGES[state], {"type": "graph_not_writable", "state": state,
+                                                 "reason": state, "retryable": False})
+
+
+class VersionConflict(_HttpMapped, RuntimeError):
+    """A compare-and-set named a version of ``resource`` that is no longer current."""
+
+    def __init__(self, resource: str, current: int):
+        self.resource, self.current = resource, current
+        super().__init__(f"the {resource} has changed since you loaded it; reload and try again",
+                         {"type": "version_conflict", "resource": resource,
+                          "currentVersion": current})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
                MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved,
-               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid, PublishRequired)
+               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid, PublishRequired,
+               GraphNotWritable, VersionConflict)

@@ -20,6 +20,7 @@ from backend.app.services.versioning.errors import (
     CurationAtRisk,
     DraftRoleRequired,
     ForkNotRestorable,
+    GraphNotWritable,
     GroupsUnavailable,
     IneligibleMember,
     JobActive,
@@ -33,8 +34,10 @@ from backend.app.services.versioning.errors import (
     ProjectionKeyInvalid,
     ProjectionNotAdopted,
     SelfReview,
+    VersionConflict,
 )
-from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
+from backend.app.services.versioning.service import (
+    AccessDenied, ConcurrencyError, GraphVersioningService, Viewer)
 
 
 def _raised(exc: Exception) -> HTTPException:
@@ -207,6 +210,26 @@ def test_a_refused_move_answers_with_its_reason():
         err = _raised(exc)
         assert err.status_code == status
         assert {k: err.detail[k] for k in detail} == detail and err.detail["message"]
+
+
+def test_graph_not_writable_is_409_with_state_reason_retryable():
+    exc = GraphNotWritable("frozen")
+    assert type(exc) in HTTP_MAPPED
+    assert not isinstance(exc, (ConcurrencyError, ValueError))   # neither 'integrity' nor 404
+    err = _raised(exc)
+    assert err.status_code == 409
+    assert {k: err.detail[k] for k in ("type", "state", "reason", "retryable")} == {
+        "type": "graph_not_writable", "state": "frozen", "reason": "frozen", "retryable": False}
+    assert "paused" in err.detail["message"]
+
+
+def test_version_conflict_names_the_resource_and_current_version():
+    exc = VersionConflict("lifecycle", 3)
+    assert type(exc) in HTTP_MAPPED
+    err = _raised(exc)
+    assert err.status_code == 409
+    assert {k: err.detail[k] for k in ("type", "resource", "currentVersion")} == {
+        "type": "version_conflict", "resource": "lifecycle", "currentVersion": 3}
 
 
 @pytest.mark.parametrize("status", ["merged", "abandoned", "publishing"])

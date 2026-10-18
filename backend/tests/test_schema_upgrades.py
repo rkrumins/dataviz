@@ -472,18 +472,21 @@ async def test_a_busy_table_never_stalls_a_worker_start(store):
 
 
 @e2e
-@pytest.mark.parametrize("table", ["jobs", "merge_requests"])
+@pytest.mark.parametrize("table", ["jobs", "merge_requests", "graphs"])
 async def test_a_busy_table_stops_a_worker_start_that_needs_its_step(store, table):
-    """``ck_jobs_type`` and ``merge_requests.approvals`` are steps the running code needs: without
-    them a new job type fails its INSERT and every merge request query its SELECT. Their wait is
-    bounded too, but then the start fails, so the worker's restart tries again, rather than run
-    without them."""
+    """``ck_jobs_type``, ``merge_requests.approvals`` and the graphs' lifecycle columns are steps
+    the running code needs: without them a new job type fails its INSERT and every merge request
+    or graph query its SELECT. Their wait is bounded too, but then the start fails, so the
+    worker's restart tries again, rather than run without them."""
     async with store.begin() as conn:
         if table == "jobs":
             await _set_check(conn, _PUBLISH_ERA)
-        else:
+        elif table == "merge_requests":
             await conn.execute(text(
                 f'ALTER TABLE "{models._SCHEMA}".merge_requests DROP COLUMN approvals'))
+        else:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".graphs DROP COLUMN lifecycle_rev'))
     async with store.connect() as holder, store.connect() as conn:
         held = await holder.begin()
         try:
@@ -798,6 +801,96 @@ async def test_the_retired_keys_migration_round_trips(store):
             assert "retired_keys" not in await _ps_columns(conn)
             await conn.run_sync(run("upgrade"))
             assert "retired_keys" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── graphs.lifecycle_*: a graph's freeze and its revision (20261018_1200_gv_lifecycle) ──
+_GV_LIFECYCLE = _VERSIONS / "20261018_1200_gv_lifecycle.py"
+_GRAPHS = f'"{models._SCHEMA}"."graphs"'
+_LIFECYCLE_COLUMNS = {"lifecycle_state", "lifecycle_rev", "lifecycle_changed_at"}
+
+
+def test_the_lifecycle_columns_are_declared_and_migrated():
+    """A store ``create_all`` builds must equal the migrated one: the NOT NULL columns carry their
+    default on the server too, and only live and frozen are ever stored."""
+    table = models.GraphORM.__table__
+    assert not table.c.lifecycle_state.nullable
+    assert str(table.c.lifecycle_state.server_default.arg) == "'live'"
+    assert not table.c.lifecycle_rev.nullable and str(table.c.lifecycle_rev.server_default.arg) == "0"
+    assert table.c.lifecycle_changed_at.nullable
+    check = next(c for c in table.constraints if getattr(c, "name", "") == "ck_graphs_lifecycle_state")
+    assert str(check.sqltext) == "lifecycle_state IN ('live','frozen')"
+    migration = _migration(_GV_LIFECYCLE)
+    assert migration.revision == _GV_LIFECYCLE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261018_1100_gv_ps_retired"
+    assert "ensure_graph_lifecycle_columns" in _GV_LIFECYCLE.read_text()
+
+
+async def _graphs_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'graphs'"),
+        {"s": models._SCHEMA})).all()}
+
+
+async def _insert_graph(conn, graph_id: str, state: str = None) -> None:
+    columns, values = "", ""
+    if state is not None:
+        columns, values = ", lifecycle_state", f", '{state}'"
+    await conn.execute(text(
+        f"INSERT INTO {_GRAPHS} (id, data_source_id, workspace_id, kind, ontology_enforcement, "
+        f"audit_tier, main_head_commit_seq, created_at, updated_at{columns}) "
+        f"VALUES (:id, :id, 'ws_schema', 'manual', 'permissive', 'commit_only', 0, "
+        f"'2026-10-18', '2026-10-18'{values})"), {"id": graph_id})
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_lifecycle_columns(store):
+    """An existing graph reads live at rev 0, and a trashed state is never stored: trash is
+    ``deleted_at``."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _insert_graph(conn, "g_schema_lifecycle")
+            for column in sorted(_LIFECYCLE_COLUMNS):
+                await conn.execute(text(f"ALTER TABLE {_GRAPHS} DROP COLUMN {column}"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert _LIFECYCLE_COLUMNS <= await _graphs_columns(conn)
+            assert (await conn.execute(text(
+                f"SELECT lifecycle_state, lifecycle_rev, lifecycle_changed_at FROM {_GRAPHS} "
+                "WHERE id = 'g_schema_lifecycle'"))).one() == ("live", 0, None)
+            with pytest.raises(DBAPIError, match="ck_graphs_lifecycle_state"):
+                async with conn.begin_nested():
+                    await _insert_graph(conn, "g_schema_trashed", "trashed")
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_lifecycle_migration_round_trips(store):
+    """Down drops the columns, and with them every freeze; the graphs stay."""
+    migration = _migration(_GV_LIFECYCLE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _insert_graph(conn, "g_schema_frozen", "frozen")
+            await conn.run_sync(run("downgrade"))
+            assert not _LIFECYCLE_COLUMNS & await _graphs_columns(conn)
+            assert (await conn.execute(text(
+                f"SELECT count(*) FROM {_GRAPHS} WHERE id = 'g_schema_frozen'"))).scalar() == 1
+            await conn.run_sync(run("upgrade"))
+            assert _LIFECYCLE_COLUMNS <= await _graphs_columns(conn)
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()

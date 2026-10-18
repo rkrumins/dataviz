@@ -107,6 +107,12 @@ class GraphORM(VersioningBase):
     # EVERY read path must filter `deleted_at IS NULL` (see ix_graphs_live).
     deleted_at = Column(Text, nullable=True)
     deleted_by = Column(Text, nullable=True)
+    # live|frozen, and the revision a freeze or unfreeze compares and bumps. Trashed and purging
+    # are derived from deleted_at (and a purge job) until lifecycle v2 stores them; changed_at
+    # restarts the idle-draft TTL at unfreeze (20261018_1200_gv_lifecycle).
+    lifecycle_state = Column(Text, nullable=False, default="live", server_default=text("'live'"))
+    lifecycle_rev = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    lifecycle_changed_at = Column(Text, nullable=True)
 
     __table_args__ = _plain(
         UniqueConstraint("data_source_id", name="uq_graphs_data_source"),
@@ -121,6 +127,9 @@ class GraphORM(VersioningBase):
         ),
         CheckConstraint(
             "audit_tier IN ('commit_only','full_wip')", name="ck_graphs_audit"
+        ),
+        CheckConstraint(
+            "lifecycle_state IN ('live','frozen')", name="ck_graphs_lifecycle_state"
         ),
     )
 
@@ -747,6 +756,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
+    # 20261018_1200_gv_lifecycle.
+    _bounded_step(conn, "the graph lifecycle columns were not added",
+                  lambda: ensure_graph_lifecycle_columns(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False) -> None:
@@ -827,6 +839,29 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_graph_lifecycle_columns(conn) -> None:
+    """Add ``graphs.lifecycle_state``, ``lifecycle_rev`` and ``lifecycle_changed_at``, and the check
+    that stores only live or frozen. A no-op without the table, and once they are there (an ALTER
+    takes the table's ACCESS EXCLUSIVE lock even when it adds nothing). Every existing graph reads
+    live at rev 0: none was frozen before the columns existed. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("graphs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    present = {c["name"] for c in inspector.get_columns("graphs", schema=_SCHEMA)}
+    if {"lifecycle_state", "lifecycle_rev", "lifecycle_changed_at"} <= present:
+        return
+    graphs = f'"{_SCHEMA}"."graphs"'
+    conn.execute(text(
+        f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_state TEXT NOT NULL DEFAULT 'live'"))
+    conn.execute(text(
+        f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_rev BIGINT NOT NULL DEFAULT 0"))
+    conn.execute(text(f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_changed_at TEXT"))
+    conn.execute(text(f"ALTER TABLE {graphs} DROP CONSTRAINT IF EXISTS ck_graphs_lifecycle_state"))
+    conn.execute(text(f"ALTER TABLE {graphs} ADD CONSTRAINT ck_graphs_lifecycle_state "
+                      "CHECK (lifecycle_state IN ('live','frozen'))"))
 
 
 def ensure_ps_key_index(conn, *, strict: bool) -> None:
