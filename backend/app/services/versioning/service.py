@@ -44,8 +44,9 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftRoleRequired,
-                     ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, JobActive, LiveForks,
-                     LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner)
+                     ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, IneligibleMember,
+                     JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork,
+                     NotDraftOwner)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -693,16 +694,24 @@ class GraphVersioningService:
     async def add_branch_member(
         self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
         role: str, actor: str, actor_groups: Sequence[str] = (),
+        check_eligible: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> dict:
         """Grant a user/group a role on a draft (maintainer/owner only). Adding a
-        member marks the draft shared; re-adding an existing subject updates role."""
+        member marks the draft shared; re-adding an existing subject updates role.
+        ``check_eligible`` (raising :class:`IneligibleMember`) runs only once the actor
+        is authorized, under the draft's lock."""
         if role not in ROLE_RANK:
             raise ValueError(f"unknown role {role!r}")
         if subject_type not in ("user", "group"):
             raise ValueError(f"unknown subject_type {subject_type!r}")
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             await self._require_manage(s, branch, actor, actor_groups)
+            if subject_type == "user" and subject_id == branch.owner:
+                raise IneligibleMember(subject_id, "owner")
+            if check_eligible:
+                await check_eligible()
+            await self._set_shared(s, branch, True)      # before the select: sharing drops old rows
             row = (await s.execute(select(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id,
                 BranchMemberORM.subject_type == subject_type,
@@ -713,8 +722,6 @@ class GraphVersioningService:
                                       subject_id=subject_id, role=role))
             else:
                 row.role = role
-            if not branch.is_shared:
-                branch.is_shared = True
             return {"subjectType": subject_type, "subjectId": subject_id, "role": role}
 
     async def remove_branch_member(
@@ -722,7 +729,7 @@ class GraphVersioningService:
         actor: str, actor_groups: Sequence[str] = (),
     ) -> None:
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             await self._require_manage(s, branch, actor, actor_groups)
             await s.execute(delete(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id,
@@ -731,13 +738,33 @@ class GraphVersioningService:
             ))
 
     async def list_branch_members(self, *, graph_id: str, branch_id: str) -> List[dict]:
+        """A private draft has none: rows left on it grant nothing."""
         async with self._session() as s:
-            await self._get_branch(s, graph_id, branch_id)
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if not branch.is_shared:
+                return []
             rows = (await s.execute(select(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id
             ).order_by(BranchMemberORM.created_at))).scalars().all()
             return [{"subjectType": r.subject_type, "subjectId": r.subject_id, "role": r.role}
                     for r in rows]
+
+    async def my_branch_role(self, *, graph_id: str, branch_id: str, actor: str) -> Optional[str]:
+        """*actor*'s role on the draft: ``'owner'``, a member role, or ``None``."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.owner == actor:
+                return "owner"
+            return await self._branch_role(s, branch, actor)
+
+    @staticmethod
+    async def _set_shared(s, branch: BranchORM, shared: bool) -> None:
+        """The one place a draft's visibility changes. Every change starts it from no members:
+        going private removes them, and sharing again never revives rows left behind. The
+        caller holds the branch lock."""
+        if branch.is_shared != shared:
+            await s.execute(delete(BranchMemberORM).where(BranchMemberORM.branch_id == branch.id))
+            branch.is_shared = shared
 
     # ------------------------------------------------------------------ #
     # Staging + checkpoint                                                #
@@ -912,7 +939,8 @@ class GraphVersioningService:
             # updates (not creates) and keeps hash continuity intact.
             composed = await self._composed_state(s, graph_id, branch_id)
             base_state = {eid: composed.get(eid) for eid in touched}
-            if branch.is_shared:
+            # Staged by someone else (a member, before an un-share): fold with OCC, never LWW.
+            if branch.is_shared or (branch.kind != "main" and any(c.actor != branch.owner for c in changes)):
                 # Resolve the value each edit was STAGED against (per base_content_hash, first
                 # occurrence per entity) so the fold's OCC ancestor is the editor's view, not the
                 # live head — catching a stale single-actor checkpoint, not just within-batch clashes.
@@ -1641,12 +1669,14 @@ class GraphVersioningService:
         is_shared: Optional[bool] = None,
     ) -> dict:
         """Edit a draft's metadata — display ``name``, optional ``description``, and shared/private
-        visibility. The owner may always edit their own draft; otherwise maintainer access is
-        required (workspace managers + maintainers of a shared draft). ``main`` is immutable and a
-        terminal (merged/abandoned) branch is read-only. Only the fields passed are changed (``None``
-        = leave as-is; pass ``""`` to clear name/description). Returns the updated branch meta."""
+        visibility. The owner may always edit their own draft; maintainers of a shared draft may edit
+        its name and description. Visibility is the owner's alone (:class:`NotDraftOwner` for anyone
+        else; an unchanged value is ignored), and any change of it removes every member. ``main`` is
+        immutable and a terminal (merged/abandoned) branch is read-only. Only the fields passed are
+        changed (``None`` = leave as-is; pass ``""`` to clear name/description). Returns the updated
+        branch meta."""
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise ValueError("cannot edit the main branch")
             self._require_open(branch)
@@ -1656,8 +1686,10 @@ class GraphVersioningService:
                 branch.name = name.strip() or None
             if description is not None:
                 branch.description = description.strip() or None
-            if is_shared is not None:
-                branch.is_shared = bool(is_shared)
+            if is_shared is not None and bool(is_shared) != branch.is_shared:
+                if branch.owner != actor:
+                    raise NotDraftOwner(branch.id, branch.owner)
+                await self._set_shared(s, branch, bool(is_shared))
             branch.updated_at = _now()
             return self._branch_meta(branch)
 

@@ -19,6 +19,17 @@ on it answers **403 `access_denied`** with code `not_draft_owner` `{branchId, ow
 it answers 403 too. A shared draft keeps its members' roles. Merging a review someone raised from
 their draft is unchanged. The canvas offers to copy the refused edits to a new draft of your own.
 
+**A shared draft is written by its members, and only its owner shares or un-shares it.** Its
+editors write it, its maintainers also publish, abandon and manage its members, and a member through a
+group now counts over HTTP. Anyone else, workspace managers included, is refused with **403
+`access_denied`**, code `not_owner_or_member` and the `required` role, where before some routes
+answered 500. When a group decides and the groups can't be looked up, the answer is **503
+`groups_unavailable`** (retry), never a refusal. Making a draft private removes its members, and
+sharing it again starts from none; an edit a removed member left staged still folds with conflict
+detection, so it cannot silently overwrite the owner's later edit. Adding a member checks that they
+exist and can work in the workspace (**422 `ineligible_member`**), and `GET …/members` now gives each
+member's `name` and your own `myRole`.
+
 **A draft is read only by the people it is for:** its owner, workspace managers, members of a
 shared draft and the people on its pull request. To anyone else, a graph read with `?branchId=`
 naming it, and its neighbors, freshness and members, answer **404**, exactly as for a branch that
@@ -59,6 +70,15 @@ dropping the staged edits.
   merge.
 - Members who published or merged with `workspace_member` now get 403. Grant them
   `workspace_publisher` (or `workspace_data_engineer`), or have them submit drafts for review.
+- A draft's maintainers can no longer change `isShared` (403 `not_draft_owner`); only its owner can.
+- Making a draft private now removes its members. Member rows left on a private draft by an earlier
+  un-share no longer grant anything, and are removed the next time the draft is shared.
+- A refusal on a shared draft is now 403 `{code: "not_owner_or_member", required}`. A client that
+  read only `message` keeps working.
+- `POST …/members` checks who is added (422 `ineligible_member`), and a bad `role` or `subjectType`
+  is now a 422 validation error, not a 404.
+- An editor's queued publish of a shared draft is refused at request time (403, `required:
+  "maintainer"`) instead of after its 202.
 - API keys cannot hold `workspace:datasource:publish`, so a key can no longer publish, merge, revert,
   restore or sync: those routes are off the key surface. A key can still edit drafts and open
   reviews; a person with publish lands them.

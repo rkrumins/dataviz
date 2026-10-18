@@ -21,6 +21,7 @@ from backend.app.services.versioning.errors import (
     DraftRoleRequired,
     ForkNotRestorable,
     GroupsUnavailable,
+    IneligibleMember,
     JobActive,
     LiveForks,
     LockBusy,
@@ -96,6 +97,13 @@ def test_a_group_lookup_outage_is_503_with_retry_after():
     assert err.status_code == 503
     assert err.detail["type"] == "groups_unavailable" and err.detail["retryable"] is True
     assert err.headers == {"Retry-After": "2"}
+
+
+def test_an_ineligible_member_is_422_with_the_reason():
+    err = _raised(IneligibleMember("usr_v", "no_manage"))
+    assert err.status_code == 422
+    assert {k: err.detail[k] for k in ("type", "subjectId", "reason")} == {
+        "type": "ineligible_member", "subjectId": "usr_v", "reason": "no_manage"}
 
 
 @pytest.mark.asyncio

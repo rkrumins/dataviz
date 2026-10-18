@@ -9,7 +9,13 @@ so an editor is refused those, a queued publish at request time. Frank is a main
 
 Groups are looked up by the service itself, only when a group row could decide the answer. When
 that lookup fails the answer is 503 ``groups_unavailable``, never a refusal, while the owner and a
-direct member write on without it. The group lookup is faked here.
+direct member write on without it.
+
+Only the owner changes who a draft is shared with, and every change starts from no members: making
+it private removes them, and member rows left on a private draft grant nothing, not even after it is
+shared again. Whoever is added must exist and, to write, hold workspace manage; that is checked only
+for a caller allowed to manage members, under the draft's lock. The group lookup, users, groups and
+their permissions are faked here.
 """
 import asyncio
 import os
@@ -17,12 +23,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.app.services.versioning import db, models, service
+from sqlalchemy import select
+
+from backend.app.services.versioning import config, db, models, service
 from backend.app.services.versioning.errors import GroupsUnavailable
 
 from .test_api_graph_draft_journey import _IMPORT_NDJSON, _StubCache, _StubManager, _build_app
 
 _GROUPS = {"erin": ("grp_eng",), "frank": ("grp_ops",)}
+_USERS = {"alice", "bob", "carol", "dave", "erin", "frank", "viola"}
+_GROUP_NAMES = {"grp_eng": "Eng", "grp_ops": "Ops"}
 
 
 def _app():
@@ -65,6 +75,36 @@ def _groups(monkeypatch):
     return state
 
 
+@pytest.fixture(autouse=True)
+def directory(monkeypatch):
+    """The management DB's users, groups and permissions: Viola only reads, everyone else also
+    manages. ``resolved`` lists whose permissions were looked up."""
+    from backend.app.api.v1.endpoints import versioning as V
+    from backend.app.db.repositories import group_repo, user_repo
+    from backend.app.services import permission_service
+    from backend.app.services.permission_service import PermissionClaims
+    state = SimpleNamespace(resolved=[])
+
+    async def get_user(_s, uid):
+        return SimpleNamespace(id=uid) if uid in _USERS else None
+
+    async def get_group(_s, gid):
+        return SimpleNamespace(id=gid, name=_GROUP_NAMES[gid]) if gid in _GROUP_NAMES else None
+
+    async def resolve(_s, uid, **_kw):
+        state.resolved.append(uid)
+        perms = ("workspace:datasource:read",) + (() if uid == "viola" else ("workspace:datasource:manage",))
+        return PermissionClaims(sid="", global_perms=(), ws_perms={"ws1": perms})
+
+    async def names(_s, ids):
+        return {uid: (uid.capitalize(), f"{uid}@example.com") for uid in ids if uid in _USERS}
+    monkeypatch.setattr(user_repo, "get_user_by_id", get_user)
+    monkeypatch.setattr(group_repo, "get_group_by_id", get_group)
+    monkeypatch.setattr(permission_service, "resolve", resolve)
+    monkeypatch.setattr(V, "resolve_user_ids", names)
+    return state
+
+
 def _as(user, manage=True):
     return {"X-User": user, "X-Manage": "1" if manage else "0"}
 
@@ -74,6 +114,24 @@ def _refused(r, required, branch_id):
     detail = r.json()["detail"]
     assert (detail["type"], detail["code"]) == ("access_denied", "not_owner_or_member"), detail
     assert (detail["required"], detail["branchId"]) == (required, branch_id), detail
+
+
+def _not_owner(r, branch_id):
+    assert r.status_code == 403, (r.request.url, r.text)
+    detail = r.json()["detail"]
+    assert (detail["code"], detail["branchId"], detail["owner"]) == ("not_draft_owner", branch_id, "alice"), detail
+
+
+def _ineligible(r, subject_id, reason):
+    assert r.status_code == 422, (r.request.url, r.text)
+    detail = r.json()["detail"]
+    assert (detail["type"], detail["subjectId"], detail["reason"]) == ("ineligible_member", subject_id, reason)
+
+
+async def _members(c, branch_url, who="alice"):
+    r = await c.get(f"{branch_url}/members", headers=_as(who))
+    assert r.status_code == 200, r.text
+    return r.json()
 
 
 async def _scenario(body) -> None:
@@ -191,6 +249,7 @@ async def _group_maintainer(c, V, ds, gid, shared_draft) -> None:
     assert r.status_code == 200, r.text
     r = await c.patch(B, json={"name": "renamed by frank"}, headers=_as("frank"))
     assert r.status_code == 200, r.text
+    _not_owner(await c.patch(B, json={"isShared": False}, headers=_as("frank")), d)   # visibility: owner only
     _refused(await c.delete(f"{B}/members/user/dave", headers=_as("bob")), "maintainer", d)
     r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": d}, json=_save("frank"),
                      headers=_as("frank"))
@@ -236,6 +295,103 @@ async def _groups_unavailable(c, V, ds, gid, shared_draft, groups) -> None:
     assert groups.calls == [], groups.calls
 
 
+def _add(c, branch_url, who, subject, role, kind="user"):
+    return c.post(f"{branch_url}/members", json={"subjectType": kind, "subjectId": subject, "role": role},
+                  headers=_as(who))
+
+
+async def _unshare_and_reshare(c, V, ds, gid, shared_draft) -> None:
+    GP = "/api/v1/ws1/graph"
+    d = await shared_draft(bob="editor")
+    B, qd = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{d}", {"dataSourceId": ds, "branchId": d}
+
+    # The modal sends isShared with every save: the same value changes nothing.
+    r = await c.patch(B, json={"name": "x", "isShared": True}, headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    assert [m["subjectId"] for m in (await _members(c, B))["members"]] == ["bob"]
+
+    r = await c.patch(B, json={"isShared": False}, headers=_as("alice"))
+    assert r.status_code == 200 and r.json()["isShared"] is False, r.text
+    assert (await _members(c, B))["members"] == []
+    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
+
+    # Sharing it again starts from no members: Bob is not back.
+    r = await c.patch(B, json={"isShared": True}, headers=_as("alice"))
+    assert r.status_code == 200 and r.json()["isShared"] is True, r.text
+    assert (await _members(c, B))["members"] == []
+    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+
+
+async def _leftover_rows_grant_nothing(c, V, ds, gid, shared_draft) -> None:
+    V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
+    r = await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=_as("alice"))
+    assert r.status_code in (200, 201), r.text
+    d = r.json()["branchId"]
+    B, qd = f"{V1}/graphs/{gid}/branches/{d}", {"dataSourceId": ds, "branchId": d}
+    async with db.graphver_session() as s:          # left by an un-share before members were removed
+        s.add(models.BranchMemberORM(branch_id=d, subject_type="user", subject_id="bob", role="maintainer"))
+
+    _not_owner(await _add(c, B, "bob", "carol", "editor"), d)
+    branches = {b["branchId"]: b for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()}
+    assert branches[d]["isShared"] is False, branches[d]
+    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
+
+    # Alice shares it by adding Carol: the leftover row goes, it does not come back to life.
+    r = await _add(c, B, "alice", "carol", "editor")
+    assert r.status_code == 200, r.text
+    assert [m["subjectId"] for m in (await _members(c, B))["members"]] == ["carol"]
+    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+
+
+async def _eligibility(c, V, ds, gid, shared_draft, directory) -> None:
+    d = await shared_draft(bob="editor", grp_eng="editor")
+    B = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{d}"
+
+    _ineligible(await _add(c, B, "alice", "viola", "editor"), "viola", "no_manage")
+    r = await _add(c, B, "alice", "viola", "viewer")            # reading needs only read
+    assert r.status_code == 200, r.text
+    _ineligible(await _add(c, B, "alice", "alice", "editor"), "alice", "owner")
+    _ineligible(await _add(c, B, "alice", "ghost", "viewer"), "ghost", "unknown_user")
+    _ineligible(await _add(c, B, "alice", "grp_missing", "viewer", kind="group"), "grp_missing", "unknown_group")
+    for bad in ({"role": "admin"}, {"subjectType": "team"}):
+        r = await c.post(f"{B}/members", headers=_as("alice"),
+                         json={"subjectType": "user", "subjectId": "dave", "role": "viewer", **bad})
+        assert r.status_code == 422 and isinstance(r.json()["detail"], list), r.text
+
+    # Authorization comes first: a caller who may not manage members costs no lookup.
+    directory.resolved[:] = []
+    _refused(await _add(c, B, "carol", "viola", "editor"), "maintainer", d)
+    assert directory.resolved == []
+
+    listed = await _members(c, B)
+    assert {m["subjectId"]: (m["role"], m["name"]) for m in listed["members"]} == {
+        "bob": ("editor", "Bob"), "grp_eng": ("editor", "Eng"), "viola": ("viewer", "Viola")}
+    roles = {who: (await _members(c, B, who))["myRole"] for who in ("alice", "bob", "erin", "carol")}
+    assert roles == {"alice": "owner", "bob": "editor", "erin": "editor", "carol": None}, roles
+
+
+async def _membership_takes_the_branch_lock(c, V, ds, gid, shared_draft) -> None:
+    d = await shared_draft(bob="editor")
+    B = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{d}"
+    async with db.graphver_session() as holder:     # another writer of the draft holds its lock
+        await holder.execute(select(models.BranchORM.id).where(models.BranchORM.id == d)
+                             .with_for_update(key_share=True))
+        for send in (lambda: _add(c, B, "alice", "carol", "viewer"),
+                     lambda: c.patch(B, json={"isShared": False}, headers=_as("alice"))):
+            r = await asyncio.wait_for(send(), 10)
+            assert r.status_code == 503 and r.json()["detail"]["type"] == "lock_busy", r.text
+        await holder.rollback()
+
+    r = await _add(c, B, "alice", "carol", "viewer")
+    assert r.status_code == 200, r.text
+    r = await c.patch(B, json={"isShared": False}, headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    async with db.graphver_session() as s:          # a private draft keeps no members
+        assert (await s.get(models.BranchORM, d)).is_shared is False
+        assert (await s.execute(select(models.BranchMemberORM).where(
+            models.BranchMemberORM.branch_id == d))).scalars().all() == []
+
+
 _E2E = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 
 
@@ -255,3 +411,28 @@ def test_group_maintainer(data_sources, monkeypatch):
 def test_groups_unavailable(data_sources, monkeypatch):
     groups = _groups(monkeypatch)
     asyncio.run(_scenario(lambda *a: _groups_unavailable(*a, groups)))
+
+
+@_E2E
+def test_unshare_and_reshare(data_sources, monkeypatch):
+    _groups(monkeypatch)
+    asyncio.run(_scenario(_unshare_and_reshare))
+
+
+@_E2E
+def test_leftover_rows_grant_nothing(data_sources, monkeypatch):
+    _groups(monkeypatch)
+    asyncio.run(_scenario(_leftover_rows_grant_nothing))
+
+
+@_E2E
+def test_eligibility(data_sources, monkeypatch, directory):
+    _groups(monkeypatch)
+    asyncio.run(_scenario(lambda *a: _eligibility(*a, directory)))
+
+
+@_E2E
+def test_membership_takes_the_branch_lock(data_sources, monkeypatch):
+    _groups(monkeypatch)
+    monkeypatch.setattr(config, "GRAPH_LOCK_TIMEOUT_MS", 200, raising=False)
+    asyncio.run(_scenario(_membership_takes_the_branch_lock))

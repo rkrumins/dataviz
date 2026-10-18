@@ -45,7 +45,7 @@ from backend.app.api.v1.versioning_gate import SyncOverrides, sync_override_gate
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo, provider_repo
+from backend.app.db.repositories import data_source_repo, group_repo, provider_repo, user_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -58,11 +58,12 @@ from backend.app.services.managed_sources import (
     drop_managed_data_source,
     register_aggregation,
 )
+from backend.app.services import permission_service
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
-from backend.app.services.versioning.errors import HTTP_MAPPED
+from backend.app.services.versioning.errors import HTTP_MAPPED, IneligibleMember
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -644,9 +645,9 @@ class OpenDraftRequest(_ApiModel):
 
 
 class BranchMemberRequest(_ApiModel):
-    subject_type: str = Field(alias="subjectType", description="user | group")
+    subject_type: Literal["user", "group"] = Field(alias="subjectType")
     subject_id: str = Field(alias="subjectId")
-    role: str = Field(description="viewer | editor | maintainer")
+    role: Literal["viewer", "editor", "maintainer"]
 
 
 class UpdateBranchRequest(_ApiModel):
@@ -1514,11 +1515,40 @@ async def list_branch_members(
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
+    session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
-        return {"members": await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)}
+        members = await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)
+        my_role = await svc.my_branch_role(graph_id=graph_id, branch_id=branch_id, actor=viewer.actor)
+    users = await resolve_user_ids(session, {m["subjectId"] for m in members if m["subjectType"] == "user"})
+    groups = {}
+    for gid in {m["subjectId"] for m in members if m["subjectType"] == "group"}:
+        group = await group_repo.get_group_by_id(session, gid)
+        groups[gid] = group.name if group else None
+    for m in members:
+        m["name"] = (users.get(m["subjectId"], (None, None))[0] if m["subjectType"] == "user"
+                     else groups[m["subjectId"]])
+    return {"members": members, "myRole": my_role}
+
+
+async def _assert_member_eligible(session: AsyncSession, ws_id: str, subject_type: str,
+                                  subject_id: str, role: str) -> None:
+    """Who is added to a draft must exist and, as a user, read the workspace's data sources (and
+    edit them, for editor or maintainer). A group is checked only to exist: its members are
+    checked at write time, by the routes' own permission gate."""
+    if subject_type == "group":
+        if await group_repo.get_group_by_id(session, subject_id) is None:
+            raise IneligibleMember(subject_id, "unknown_group")
+        return
+    if await user_repo.get_user_by_id(session, subject_id) is None:
+        raise IneligibleMember(subject_id, "unknown_user")
+    claims = await permission_service.resolve(session, subject_id)
+    if not has_permission(claims, _READ, workspace_id=ws_id):
+        raise IneligibleMember(subject_id, "no_read")
+    if role != "viewer" and not has_permission(claims, _MANAGE, workspace_id=ws_id):
+        raise IneligibleMember(subject_id, "no_manage")
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/members")
@@ -1526,12 +1556,15 @@ async def add_branch_member(
     ws_id: str, graph_id: str, branch_id: str, body: BranchMemberRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
         return await svc.add_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=body.subject_type,
             subject_id=body.subject_id, role=body.role, actor=user.id,
+            check_eligible=lambda: _assert_member_eligible(
+                session, ws_id, body.subject_type, body.subject_id, body.role),
         )
 
 
@@ -1775,7 +1808,7 @@ async def update_branch(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a draft's name / description / shared-visibility (owner or maintainer)."""
+    """Edit a draft's name / description (owner or maintainer) or visibility (owner only)."""
     with _domain_errors():
         return await svc.update_branch(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,

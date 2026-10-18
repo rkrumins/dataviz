@@ -84,6 +84,26 @@ class GroupsUnavailable(_HttpMapped, RuntimeError):
                          {"type": "groups_unavailable", "retryable": True}, {"Retry-After": "2"})
 
 
+class IneligibleMember(_HttpMapped, RuntimeError):
+    """Who was to be added to a draft cannot hold the role: the owner, an unknown user or
+    group, or a user without the workspace access the role needs. A RuntimeError, so no
+    ``except ValueError`` turns it into a 404."""
+
+    status_code = 422
+    _MESSAGES = {
+        "owner": "the draft's owner already has full access",
+        "unknown_user": "no such user",
+        "unknown_group": "no such group",
+        "no_read": "they can't read this workspace's data sources",
+        "no_manage": "they can't edit this workspace's data sources, so they can only be a viewer",
+    }
+
+    def __init__(self, subject_id: str, reason: str):
+        self.subject_id, self.reason = subject_id, reason
+        super().__init__(f"can't add {subject_id}: {self._MESSAGES[reason]}",
+                         {"type": "ineligible_member", "subjectId": subject_id, "reason": reason})
+
+
 class HeadMoved(_HttpMapped, RuntimeError):
     """An approval named the head the reviewer saw, and the draft has moved on
     since: what they approved is not what would merge."""
@@ -176,5 +196,5 @@ class ForkNotRestorable(_HttpMapped, RuntimeError):
 
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, GroupsUnavailable,
-               HeadMoved, LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork,
-               LiveForks, ForkNotRestorable)
+               IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked,
+               ForkLimit, NotAFork, LiveForks, ForkNotRestorable)

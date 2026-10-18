@@ -3,7 +3,8 @@
 A shared draft field-merges concurrent edits from different collaborators:
 disjoint fields union, a same-field clash raises MergeConflict (settled via
 `resolutions`). A single actor's sequential edits keep last-writer-wins, and a
-private draft is written only by its owner.
+private draft is written only by its owner. Making a shared draft private removes
+its members, and an edit one of them left staged still folds with OCC.
 """
 import asyncio
 import os
@@ -95,6 +96,22 @@ async def _run() -> None:
     await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice", actor_groups=())
     assert (await _x(svc, gid, d))["x"] == 33
     assert await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="ship")  # owner/maintainer
+
+    # ── un-share with a member's edit staged: it goes, and its stale edit folds with OCC ─
+    u = await svc.open_draft(graph_id=gid, owner="alice", shared=True)
+    await svc.add_branch_member(graph_id=gid, branch_id=u, subject_type="user",
+                                subject_id="bob", role="editor", actor="alice")
+    await svc.stage_changes(graph_id=gid, branch_id=u, actor="bob", ops=[_upd("E", "bob", x=9, y=2)])
+    await svc.update_branch(graph_id=gid, branch_id=u, actor="alice", is_shared=False)
+    assert await svc.list_branch_members(graph_id=gid, branch_id=u) == []
+    await svc.apply_ops(graph_id=gid, branch_id=u, actor="alice", ops=[_upd("E", "alice", x=5, y=2)])
+    with pytest.raises(MergeConflict) as ei:                           # not a silent x=9
+        await svc.checkpoint(graph_id=gid, branch_id=u, actor="alice")
+    assert ei.value.conflicts[0]["entity_id"] == "E"
+    assert (await _x(svc, gid, u))["x"] == 5
+    await svc.checkpoint(graph_id=gid, branch_id=u, actor="alice",
+                         resolutions={"E": _node("E", x=7, y=2)})
+    assert (await _x(svc, gid, u))["x"] == 7
 
     # ── private draft: only its owner writes it; her own edits stay last-writer-wins ─
     p = await svc.open_draft(graph_id=gid, owner="alice", shared=False)
