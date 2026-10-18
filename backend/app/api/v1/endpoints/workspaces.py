@@ -124,6 +124,20 @@ async def _visible_workspaces(session: AsyncSession, claims: PermissionClaims):
     return await _as_seen_by(session, claims, workspaces)
 
 
+async def _with_view_counts(session: AsyncSession, user: User, claims: PermissionClaims, workspaces):
+    """Each workspace's live views the caller can open — the count the summary
+    gives, through the same read rule. Left unset when that rule can't be worked
+    out (workspace grants unavailable): the list itself must still load."""
+    try:
+        readable, _scope = await readable_clause(session, user, claims)
+    except HTTPException:
+        return workspaces
+    counts = await view_repo.count_views_grouped(
+        session, ViewORM.workspace_id, readable=readable, ids=[w.id for w in workspaces],
+    )
+    return [w.model_copy(update={"view_count": counts.get(w.id, 0)}) for w in workspaces]
+
+
 def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
     if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not _can_read_workspace(claims, ws_id):
         raise HTTPException(
@@ -142,7 +156,7 @@ async def list_workspaces(
     limit: Optional[int] = Query(None, ge=1, le=200),
     offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None, max_length=200),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -158,7 +172,7 @@ async def list_workspaces(
     the whole estate just to show ten rows.
     """
     if limit is None:
-        return await _visible_workspaces(session, claims)
+        return await _with_view_counts(session, user, claims, await _visible_workspaces(session, claims))
 
     unrestricted = not rbac_flag("RBAC_ENFORCE_WORKSPACES") or _reaches_every_workspace(claims)
     permitted_ids = None if unrestricted else list(claims.ws_perms.keys())

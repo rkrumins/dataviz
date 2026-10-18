@@ -978,8 +978,9 @@ class WorkspaceResponse(BaseModel):
     #: People and groups with access. The cards could not show "who works here"
     #: without it, and asking per-workspace would be one request per card.
     member_count: int = Field(0, alias="memberCount")
-    #: Live (non-deleted) views built on this workspace.
-    view_count: int = Field(0, alias="viewCount")
+    #: Live views built on this workspace that the caller can open — set by the
+    #: full list only; None where it was not counted.
+    view_count: Optional[int] = Field(None, alias="viewCount")
     #: Who may publish a view platform-wide here — 'request' | 'open'.
     publish_policy: str = Field("open", alias="publishPolicy")
     #: The workspace's OWN node-identity defaults. None = it sets none; sources
@@ -1071,18 +1072,6 @@ class WorkspaceSummaryResponse(BaseModel):
     coverage: Literal["all", "granted"]
     totals: WorkspaceSummaryTotals
     workspaces: List[WorkspaceSummaryRow] = Field(default_factory=list)
-
-
-# ============================================
-# Context Model Models
-# ============================================
-
-class InstantiateTemplateRequest(BaseModel):
-    template_id: str = Field(alias="templateId")
-    name: str
-
-    class Config:
-        populate_by_name = True
 
 
 # ============================================

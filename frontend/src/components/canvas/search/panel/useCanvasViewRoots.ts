@@ -15,10 +15,6 @@
  * Search and display rules are NOT consumers any more: both used to ship
  * these URNs as ``scope.rootUrns``, but the backend resolves the view's
  * roots from ``scope.viewId`` itself.
- *
- * The logic mirrors EntityAssignmentPanel.tsx (the view wizard's
- * assignment step), which is the canonical place where the
- * application identifies "view roots" today.
  */
 import { useMemo } from 'react'
 

@@ -823,7 +823,7 @@ export async function unfavouriteView(viewId: string): Promise<void> {
 
 /**
  * Convert a View API response to the ViewConfiguration type
- * consumed by CanvasRouter, ViewSelector, and SidebarNav.
+ * consumed by CanvasRouter and SidebarNav.
  *
  * View.config stores the FULL ViewConfiguration shape — we just
  * overlay the top-level identity fields.

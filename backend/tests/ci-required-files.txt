@@ -182,6 +182,7 @@ tests/test_source_changed_signal.py
 tests/test_squash_plan_unit.py
 tests/test_sso_membership_events.py
 tests/test_store_governor.py
+tests/test_system_role_editing.py
 tests/test_thread_count_assumption.py
 tests/test_timeout_ladder.py
 tests/test_timeout_middleware.py

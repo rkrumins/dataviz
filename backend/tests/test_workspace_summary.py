@@ -211,3 +211,34 @@ async def test_organisation_wide_roles_cover_every_workspace(test_client: AsyncC
         assert {w["id"] for w in body["workspaces"]} == {WS_FIN, WS_OPS}, perm
         assert {w["id"] for w in listed} == {WS_FIN, WS_OPS}, perm
         assert opened.status_code == 200, perm
+
+
+async def test_the_list_counts_only_views_the_caller_can_open(test_client: AsyncClient, db_session):
+    """The list's ``viewCount`` is the summary's per-workspace count — never
+    someone else's private views."""
+    await _estate(db_session)
+    await _views(db_session)
+    admin = {w["id"]: w["viewCount"] for w in (await test_client.get("/api/v1/admin/workspaces")).json()}
+    assert admin == {WS_FIN: 2, WS_OPS: 2}
+
+    bob = PermissionClaims(sid="s_bob", ws_perms={WS_FIN: _MEMBER})
+    with _auth(user=BOB, claims=bob):
+        listed = (await test_client.get("/api/v1/admin/workspaces")).json()
+        summary = (await test_client.get(URL)).json()
+    assert {w["id"]: w["viewCount"] for w in listed} == {WS_FIN: 1} == {
+        w["id"]: w["views"] for w in summary["workspaces"]
+    }
+
+
+async def test_the_list_still_loads_when_view_access_cannot_be_worked_out(
+    test_client: AsyncClient, db_session,
+):
+    """Workspace grants unavailable: views refuse (503), but the list the whole
+    app depends on still loads — without counts rather than with wrong ones."""
+    await _estate(db_session)
+    await _views(db_session)
+    claims = PermissionClaims(sid="s_org", global_perms=("system:org-viewer",), ws_available=False)
+    with _auth(user=BOB, claims=claims):
+        resp = await test_client.get("/api/v1/admin/workspaces")
+    assert resp.status_code == 200
+    assert {w["id"]: w["viewCount"] for w in resp.json()} == {WS_FIN: None, WS_OPS: None}

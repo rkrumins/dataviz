@@ -522,3 +522,14 @@ async def test_the_retired_template_routes_are_gone(test_client, db_session, lib
     # Grants on templates are their own resource type: never a view's.
     grants = (await db_session.execute(select(ResourceGrantORM.resource_type))).scalars().all()
     assert set(grants) == {"layout_template"}
+
+
+async def test_analytics_counts_the_templates_people_made(db_session, library):
+    """Built-ins ship with the product and a deleted template is kept only for
+    Undo: neither is adoption."""
+    from backend.app.db.repositories import analytics_repo
+
+    summary = await analytics_repo.platform_summary(db_session, days=30)
+    assert summary["totals"]["layoutTemplates"]["total"] == 5
+    detail = await analytics_repo.workspace_detail(db_session, WS, days=30)
+    assert detail["totals"]["layoutTemplates"]["total"] == 1

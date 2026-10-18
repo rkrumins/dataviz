@@ -110,11 +110,11 @@ async def test_list_reports_view_counts_without_a_request_per_card(
     await _view(db_session, ws_id, "Two")
     await db_session.commit()
 
-    rows = await workspace_repo.list_workspaces(db_session)
-    counted = next(w for w in rows if w.id == ws_id)
+    resp = await test_client.get("/api/v1/admin/workspaces")
+    counted = next(w for w in resp.json() if w["id"] == ws_id)
 
-    assert counted.view_count == 2
-    assert counted.member_count == 0
+    assert counted["viewCount"] == 2
+    assert counted["memberCount"] == 0
 
 
 async def test_view_count_excludes_soft_deleted_views(
@@ -128,9 +128,9 @@ async def test_view_count_excludes_soft_deleted_views(
     await view_repo.delete_view(db_session, gone.id)
     await db_session.commit()
 
-    rows = await workspace_repo.list_workspaces(db_session)
-    counted = next(w for w in rows if w.id == ws_id)
-    assert counted.view_count == 1
+    resp = await test_client.get("/api/v1/admin/workspaces")
+    counted = next(w for w in resp.json() if w["id"] == ws_id)
+    assert counted["viewCount"] == 1
 
     impact = await workspace_repo.get_workspace_impact(db_session, ws_id)
     impact_names = sorted(v.name for v in impact.views)

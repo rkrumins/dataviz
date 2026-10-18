@@ -134,8 +134,9 @@ export interface WorkspaceResponse {
     /** People/groups with access. Rides along with the list — asking per card
      *  would be one request per workspace. */
     memberCount?: number
-    /** Live (non-deleted) views built on this workspace. */
-    viewCount?: number
+    /** Live views built on this workspace that the caller can open — the full
+     *  list only; null where it was not counted. */
+    viewCount?: number | null
     /** Publication gate for this workspace's views. Absent on servers that
      *  predate the setting — treat a missing value as 'request'. */
     publishPolicy?: WorkspacePublishPolicy

@@ -65,7 +65,7 @@ export const METRICS: Record<string, MetricDefinition> = {
     semanticLayers: {
         title: 'Semantic layers',
         what: 'Ontologies that give raw technical metadata a business meaning — what a table IS, not just what it is called.',
-        how: 'Published ontologies across all workspaces, with context models counted separately beneath.',
+        how: 'Published ontologies across all workspaces, with the layout templates people made counted separately beneath.',
         why: 'Sources without one show column names and types only. Coverage here is what makes lineage readable by people who did not build the pipeline.',
     },
     neverRefreshed: {

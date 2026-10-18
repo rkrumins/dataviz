@@ -17,7 +17,6 @@ from ..models import (
     ViewORM,
     RoleBindingORM,
     RoleORM,
-    view_is_live,
 )
 from backend.common.models.management import (
     WorkspaceCreateRequest,
@@ -151,25 +150,18 @@ def _ws_query():
     )
 
 
-async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
-    """Members and live views per workspace, in TWO grouped queries.
+async def _member_counts(session: AsyncSession) -> dict:
+    """Members per workspace, in ONE grouped query.
 
     Not N+1: the workspaces page renders 25 cards, and asking each one for its
-    own member count would be 25 round-trips for two numbers.
+    own member count would be 25 round-trips. (Each card's view count depends on
+    who is asking, so the list endpoint adds it — ``_with_view_counts``.)
     """
-    members = dict((await session.execute(
+    return dict((await session.execute(
         select(RoleBindingORM.scope_id, func.count())
         .where(RoleBindingORM.scope_type == "workspace")
         .group_by(RoleBindingORM.scope_id)
     )).all())
-
-    views = dict((await session.execute(
-        select(ViewORM.workspace_id, func.count())
-        .where(view_is_live())
-        .group_by(ViewORM.workspace_id)
-    )).all())
-
-    return members, views
 
 
 async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
@@ -178,14 +170,13 @@ async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     )
     rows = result.scalars().unique().all()
 
-    members, views = await _counts_by_workspace(session)
+    members = await _member_counts(session)
     identities = await _resolve_ds_identities(session, rows)
 
     out: List[WorkspaceResponse] = []
     for r in rows:
         resp = _to_response(r, identities)
         resp.member_count = int(members.get(r.id, 0) or 0)
-        resp.view_count = int(views.get(r.id, 0) or 0)
         out.append(resp)
     return out
 

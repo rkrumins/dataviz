@@ -7,7 +7,7 @@
  * reader can take in without scrolling twice.
  */
 import {
-    Activity, ArrowRight, Boxes, Database, Eye, LayoutGrid, MousePointerClick, TrendingUp, Users,
+    Activity, ArrowRight, Boxes, Database, Eye, LayoutGrid, LayoutTemplate, MousePointerClick, TrendingUp, Users,
 } from 'lucide-react'
 
 import { compact, exact, percent } from '@/lib/formatMetric'
@@ -364,8 +364,8 @@ export function OverviewTab({
                             : undefined}
                     />
                     <ScaleTile
-                        label="Context models" value={totals.contextModels.total} icon={Boxes} accent="pink"
-                        meaning="Reusable shapes of the graph — the starting points people build views from."
+                        label="Layout templates" value={totals.layoutTemplates.total} icon={LayoutTemplate} accent="pink"
+                        meaning="Layer layouts people made to start Context Views from. Built-ins are not counted."
                     />
                 </div>
             </ChartFrame>
