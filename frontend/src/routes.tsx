@@ -206,8 +206,8 @@ export const router = createBrowserRouter([
 
       // The layout template library — everyone has some (the built-ins); what
       // each person may change is decided per template, not by the page.
-      { path: 'templates', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren\u2019t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration \u2192 Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
-      { path: 'templates/:templateId', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren\u2019t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration \u2192 Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
+      { path: 'templates', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren’t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration → Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
+      { path: 'templates/:templateId', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren’t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration → Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
