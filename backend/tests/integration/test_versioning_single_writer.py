@@ -199,7 +199,7 @@ def primary(monkeypatch):
         picked["ds"] = ds
         async with db.graphver_session() as session:
             return await ContextEngine.for_workspace("ws1", _Registry(inner), session,
-                                                     branch_id=branch_id)
+                                                     branch_id=branch_id, actor="u")
     return engine
 
 
