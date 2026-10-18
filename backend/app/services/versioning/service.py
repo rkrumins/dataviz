@@ -70,6 +70,7 @@ from .models import (
     WorkingChangeORM,
     _now,
 )
+from .import_export.runner import never_runs
 from .purge_worker import PURGE_JOB_TYPE
 # Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
 # flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
@@ -3115,6 +3116,21 @@ class GraphVersioningService:
                        actor, len(ids), provider)
         return list(ids)
 
+    async def fence_projection_passes(self, *, provider: str) -> None:
+        """FalkorDB ``provider`` moved to another server: bump the epoch of its graphs at
+        watermark 0, so a full replay in flight — bound to the old server, and skipped by
+        :meth:`reset_projection_watermarks` — cannot publish; the next pass reseeds on the new
+        server. Harmless for a row at 0 with no pass: its next claim reads the new epoch."""
+        ps = ProjectionStateORM
+        async with self._session() as s:
+            await s.execute(
+                update(ps)
+                .where(func.coalesce(func.nullif(ps.falkor_provider, ""),
+                                     config.DEFAULT_FALKOR_PROVIDER) == provider,
+                       ps.projected_commit_seq == 0)
+                .values(epoch=ps.epoch + 1)
+                .execution_options(synchronize_session=False))
+
     async def neighbors_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, depth: int = 1,
@@ -5318,10 +5334,13 @@ class GraphVersioningService:
     async def _require_no_import(s, branch_id: str) -> None:
         """A draft is not published while an import is pending or running on it
         (:class:`JobActive`): main would get the windows it has written so far, and the import
-        fail on the closed draft. Under the draft's lock, so no import window lands in between."""
+        fail on the closed draft. Under the draft's lock, so no import window lands in between.
+        A pending one the transfer lane's reaper will fail (:func:`never_runs`) does not count."""
         active = await s.scalar(select(JobORM.id).where(
             JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
-            JobORM.status.in_(("pending", "running"))).limit(1))
+            JobORM.status.in_(("pending", "running")),
+            # IS NOT TRUE: a phase that is NULL makes the queued rule NULL, not false.
+            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))
         if active is not None:
             raise JobActive(active, f"An import is still running on this draft (job {active}). "
                                     "Publish once it has finished.")

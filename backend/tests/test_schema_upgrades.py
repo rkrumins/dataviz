@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.job_lease import QUEUED
@@ -468,6 +469,32 @@ async def test_a_busy_table_never_stalls_a_worker_start(store):
         finally:
             await held.rollback()
     assert waited < 15, f"waited {waited:.0f}s for the busy tables"   # the store fixture rebuilds them
+
+
+@e2e
+@pytest.mark.parametrize("table", ["jobs", "merge_requests"])
+async def test_a_busy_table_stops_a_worker_start_that_needs_its_step(store, table):
+    """``ck_jobs_type`` and ``merge_requests.approvals`` are steps the running code needs: without
+    them a new job type fails its INSERT and every merge request query its SELECT. Their wait is
+    bounded too, but then the start fails, so the worker's restart tries again, rather than run
+    without them."""
+    async with store.begin() as conn:
+        if table == "jobs":
+            await _set_check(conn, _PUBLISH_ERA)
+        else:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".merge_requests DROP COLUMN approvals'))
+    async with store.connect() as holder, store.connect() as conn:
+        held = await holder.begin()
+        try:
+            await holder.execute(text(
+                f'LOCK TABLE "{models._SCHEMA}"."{table}" IN ACCESS SHARE MODE'))
+            async with conn.begin():
+                await conn.execute(text("SET LOCAL statement_timeout = '20s'"))
+                with pytest.raises(DBAPIError, match="lock timeout"):
+                    await conn.run_sync(models._ensure_schema_upgrades)
+        finally:
+            await held.rollback()                           # the store fixture brings them back
 
 
 @e2e

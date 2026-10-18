@@ -68,6 +68,17 @@ a draft is abandoned only if it has no open review, no staged edits waiting for 
 its graph is not deleted. Before, it abandoned those too, closing the draft under its review and
 dropping the staged edits.
 
+**Moving a graph provider to another server reseeds its versioned graphs, or says it did not.** The
+move also stops a full reseed already running on the old server from marking its graph fresh. If
+the graphs still cannot be set to reseed after retries, the edit stays applied, the request answers
+**503** telling the admin to run **Reseed from Postgres** on the provider (Admin → Infrastructure),
+and the activity log records `reseedFailed`. Before, it answered 500, and sending the edit again
+reseeded nothing.
+
+**A publish or merge no longer waits on an import that will never run:** one whose upload broke off
+over an hour ago, or one no worker took within `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS`. Retrying a
+failed import waits for any other import on its draft (409 `job_active`).
+
 ### Upgrading
 
 - A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
@@ -107,6 +118,11 @@ dropping the staged edits.
   a move back onto it is cheap. Run the `20261018_1100_gv_ps_retired` migration (it adds
   `projection_state.retired_keys`), and deploy this release to every web and worker pod before
   using it: an older pod puts a moved graph back on its old key, or keeps reading the old key.
+- With a separate `GRAPHVER_DB_URL`, a versioning worker now exits at start, and its restart tries
+  again, when a busy table keeps it from a schema step the code needs for more than 5 s: the job type
+  check, the projection fencing columns and `reseeding` status, `merge_requests.approvals`, or
+  `projection_state.retired_keys`.
+  Before, it started without the step, and the writes or reads that need it failed until a restart.
 
 ---
 

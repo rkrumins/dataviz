@@ -9,7 +9,10 @@ unbuilt; the index settles them too.
 A job nothing will run does not hold the draft: the refusal applies the transfer lane's reaper
 rules to that job first (never queued for an hour, or queued past the queue timeout), and a job
 whose upload broke off inside the request is failed there and then. A running job whose worker
-went quiet still holds it: it is taken over and resumed, not dead.
+went quiet still holds it: it is taken over and resumed, not dead. A publish does not wait on a job
+nothing will run either.
+
+Retrying a failed import is held to the same rule, under the draft's lock, without the index too.
 """
 import asyncio
 import os
@@ -24,6 +27,7 @@ from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export.service import ImportExportService
+from backend.app.services.versioning.job_lease import QUEUED
 from backend.app.services.versioning.models import BranchORM, JobORM
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -152,6 +156,33 @@ async def _a_retry_waits_its_turn(svc, ie):
     assert await ie.requeue_failed(failed["job_id"]) is True
 
 
+async def _a_retry_waits_its_turn_without_the_index(svc, ie):
+    async with db.get_engine().begin() as conn:
+        await conn.execute(text(f'DROP INDEX "{models._SCHEMA}".uq_jobs_ingest_active'))
+    try:
+        await _a_retry_waits_its_turn(svc, ie)
+    finally:
+        await models.create_schema_and_partitions()        # and the index is built again
+
+
+async def _a_publish_never_waits_on_a_job_nothing_will_run(svc, ie):
+    """Not one whose upload broke off an hour ago, nor one queued past the queue timeout: the
+    reaper fails both at its next round. Until then each holds the draft."""
+    for phase, aged in ((None, {"created_at": _ago(config.JOB_NEVER_QUEUED_SECS + 60)}),
+                        (QUEUED, {"updated_at": _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)})):
+        gid = await _graph(svc)
+        job = await _create(ie, gid)
+        draft = job["branch_id"]
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="u", message="window", ops=[
+            {"op": "create", "entity_kind": "node", "entity_id": "N",
+             "payload": {"urn": "urn:N", "entityType": "Table", "displayName": "N"}}])
+        await _set(job["job_id"], current_phase=phase)
+        with pytest.raises(JobActive):
+            await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m")
+        await _set(job["job_id"], **aged)
+        assert await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m")
+
+
 class _CutOff:
     """A request whose body breaks off midway."""
 
@@ -262,6 +293,14 @@ def test_a_job_nothing_will_run_never_holds_the_draft():
 
 def test_a_failed_import_is_retried_only_once_the_draft_is_free():
     _e2e(_a_retry_waits_its_turn)
+
+
+def test_a_failed_import_is_retried_only_once_the_draft_is_free_without_its_index():
+    _e2e(_a_retry_waits_its_turn_without_the_index)
+
+
+def test_a_publish_never_waits_on_an_import_nothing_will_run():
+    _e2e(_a_publish_never_waits_on_a_job_nothing_will_run)
 
 
 def test_an_import_whose_upload_broke_off_frees_the_draft_at_once(tmp_path):

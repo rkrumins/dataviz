@@ -10,6 +10,8 @@ cache, with ``ro_query`` and a key that can go missing).
 * ``reset_projection_watermarks`` resets exactly the provider's live, pinned, projected graphs, to
   ``reseeding`` rather than to an error, and its dry run counts the same graphs. A graph parked at
   genesis on a key it does not own is left alone: the key is its data source's own graph.
+* ``fence_projection_passes`` (a provider moved to another server) supersedes a full replay in
+  flight on the provider, which the reset skips at watermark 0: it cannot publish.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -272,3 +274,35 @@ async def _run_the_operator_reset_is_scoped_to_a_provider() -> None:
 
 def test_the_operator_reset_is_scoped_to_a_provider():
     asyncio.run(_run_the_operator_reset_is_scoped_to_a_provider())
+
+
+async def _run_a_move_fences_a_rebuild_in_flight() -> None:
+    svc, fake = GraphVersioningService(), LiveFalkor()
+    provider, other = "p_" + os.urandom(4).hex(), "p_" + os.urandom(4).hex()
+    mine, proj, _ = await _seed(svc, fake, provider=provider)
+    theirs, _, _ = await _seed(svc, fake, provider=other)
+    rebuilding = {}
+    for gid in (mine, theirs):          # a full replay claimed, bound to the old server
+        async with db.graphver_session() as s:
+            await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                            .values(projected_commit_seq=0))
+        rebuilding[gid] = await proj._claim(gid, (await _row(gid))["epoch"], 0)
+    assert await svc.reset_projection_watermarks(provider=provider, actor="usr_admin",
+                                                 dry_run=True) == [], "the reset skips it"
+
+    await svc.fence_projection_passes(provider=provider)
+    epoch, attempts = rebuilding[mine]
+    assert not await proj._finish(mine, epoch, published=True, to_seq=3, error=None,
+                                  attempts=attempts)
+    assert (await _row(mine))["projected"] == 0
+    epoch, attempts = rebuilding[theirs]
+    assert await proj._finish(theirs, epoch, published=True, to_seq=3, error=None,
+                              attempts=attempts), "another provider's pass is left alone"
+
+    await proj.project_graph(mine)
+    assert (await _row(mine))["projected"] == 3
+    await db.dispose_engine()
+
+
+def test_a_move_fences_a_rebuild_in_flight():
+    asyncio.run(_run_a_move_fences_a_rebuild_in_flight())

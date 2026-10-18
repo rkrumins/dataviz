@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional, Sequence
 
-from sqlalchemy import update
+from sqlalchemy import and_, update
 
 from .. import config, db, job_lease
 from ..job_lease import INSPECT_TYPES, QUEUED, Lease  # QUEUED: callers import it from here
@@ -66,6 +66,15 @@ class TransferRunner:
         await getattr(ie, entry)(lease.job_id, lease)
 
 
+def never_runs() -> tuple:
+    """:class:`JobReaper`'s rules, as conditions on a pending job: queued too long, and never
+    queued. A job matching either is failed at the reaper's next round."""
+    return (and_(JobORM.current_phase == QUEUED,
+                 JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS)),
+            and_(JobORM.current_phase.is_(None),
+                 JobORM.created_at < _ago(config.JOB_NEVER_QUEUED_SECS)))
+
+
 class JobReaper:
     """Fails the transfer jobs nothing will ever run, so their dialogs stop waiting.
 
@@ -87,17 +96,14 @@ class JobReaper:
         failed = {"status": "failed", "completed_at": now, "updated_at": now}
         which = (JobORM.job_type.in_(types), JobORM.status == "pending") + (
             (JobORM.id == job_id,) if job_id else ())
+        queued_too_long, never_queued = never_runs()
         async with self._session() as s:
             timed_out = (await s.execute(
-                update(JobORM).where(
-                    *which, JobORM.current_phase == QUEUED,
-                    JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS))
+                update(JobORM).where(*which, queued_too_long)
                 .values(error_message=config.JOB_NOT_STARTED, **failed)
                 .execution_options(synchronize_session=False))).rowcount
             abandoned = (await s.execute(
-                update(JobORM).where(
-                    *which, JobORM.current_phase.is_(None),
-                    JobORM.created_at < _ago(config.JOB_NEVER_QUEUED_SECS))
+                update(JobORM).where(*which, never_queued)
                 .values(error_message=config.JOB_NEVER_QUEUED, **failed)
                 .execution_options(synchronize_session=False))).rowcount
         if timed_out or abandoned:

@@ -591,14 +591,25 @@ class ImportExportService:
         epoch. A job with no cursor starts over: rows staged by a worker from before leases (with
         no cursor to resume them by) are dropped, or the claim would fail it again on sight.
         True when the job was queued. An import whose draft has another import pending or
-        running is :class:`JobActive`: one at a time per draft."""
+        running is :class:`JobActive`: one at a time per draft, checked under the draft's lock as
+        :meth:`create_import_job` checks it, so it holds without ``uq_jobs_ingest_active``."""
         draft = None
         try:
             async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id, with_for_update=True)
+                peek = await s.get(JobORM, job_id)
+                if peek is None or peek.status != "failed":
+                    return False
+                draft = peek.branch_id if peek.job_type == "ingest" else None
+                if draft:                       # the draft's lock before the job row's
+                    await self._svc._lock_branch(s, peek.graph_id, draft)
+                row = await s.get(JobORM, job_id, with_for_update=True, populate_existing=True)
                 if row is None or row.status != "failed":
                     return False
-                draft = row.branch_id if row.job_type == "ingest" else None
+                if draft:
+                    active = await self._import_on(s, draft, None)   # this one is failed
+                    if active is not None:
+                        raise JobActive(active, f"Another import is running on this draft (job "
+                                                f"{active}). Retry this one once it has finished.")
                 if row.last_cursor is None:
                     await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
                 summary = row.summary if isinstance(row.summary, dict) else {}

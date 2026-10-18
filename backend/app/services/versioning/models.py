@@ -712,9 +712,10 @@ def _ensure_schema_upgrades(conn) -> None:
     DB, and ``create_all`` creates missing tables but never alters an existing one's checks or
     indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
     added since. Each step is idempotent and a no-op once applied, so it runs on every start, in its
-    own savepoint (:func:`_bounded_step`)."""
+    own savepoint (:func:`_bounded_step`). The steps the running code cannot do without (the job
+    types it inserts, the columns it maps) are required: one that fails stops the start."""
     _bounded_step(conn, "ck_jobs_type was not widened",
-                  lambda: widen_job_type_check(conn, JOB_TYPES))
+                  lambda: widen_job_type_check(conn, JOB_TYPES), required=True)
 
     # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
     def import_rows_indexes() -> None:
@@ -730,7 +731,7 @@ def _ensure_schema_upgrades(conn) -> None:
     _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
-                  lambda: ensure_ps_fencing_columns(conn))
+                  lambda: ensure_ps_fencing_columns(conn), required=True)
     # 20261017_1900_gv_commits_idem.
     _bounded_step(conn, "uq_commits_idem was not built", lambda: ensure_commits_idem_index(conn))
     # 20261017_1950_gv_ingest_active. Two imports still running on one draft leave the index for a
@@ -739,27 +740,30 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ingest_active_index(conn, strict=False))
     # 20261017_2000_gv_ps_reseeding.
     _bounded_step(conn, "the reseeding status was not allowed",
-                  lambda: ensure_ps_reseeding_status(conn))
+                  lambda: ensure_ps_reseeding_status(conn), required=True)
     # 20261018_1000_gv_mr_approvals.
     _bounded_step(conn, "merge_requests.approvals was not added",
-                  lambda: ensure_mr_approvals_column(conn))
+                  lambda: ensure_mr_approvals_column(conn), required=True)
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
-                  lambda: ensure_ps_retired_keys_column(conn))
+                  lambda: ensure_ps_retired_keys_column(conn), required=True)
 
 
-def _bounded_step(conn, failure: str, step) -> None:
+def _bounded_step(conn, failure: str, step, *, required: bool = False) -> None:
     """Run one schema step in a savepoint that waits at most five seconds for a lock, as the
     migrations do (``_bound_lock_wait``): a table a save or a job's heartbeat holds makes the step
     give up rather than queue every later write on the table behind it. Then, or on any other
     failure, the step is rolled back and logged, and the worker starts without it; the next start
-    tries again."""
+    tries again. A ``required`` step's failure is raised instead: the worker exits and its restart
+    tries again, rather than run against a schema its code cannot use."""
     try:
         with conn.begin_nested():
             conn.execute(text("SET LOCAL lock_timeout = '5s'"))
             step()
     except Exception:
         logger.exception("%s; the next start tries again", failure)
+        if required:
+            raise
 
 
 def ensure_ps_fencing_columns(conn) -> None:

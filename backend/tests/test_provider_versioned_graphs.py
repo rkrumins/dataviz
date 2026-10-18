@@ -12,18 +12,25 @@
   409 ``versioned_graphs_bootstrapping`` while version control is still being enabled for a
   graph on the provider. An edit that keeps the server, such as a rename or the same sentinel
   nodes in another shape or order, is never refused.
+* A move fences the projection passes in flight on the provider, so a rebuild the reset skips
+  (its watermark is still 0) cannot publish over the old server's key. The fence and the reset
+  are retried; once committed, the same edit sent again no longer moves anything. If they still
+  fail, the move answers 503 telling the admin to reseed the provider, and the activity log
+  records it.
 * ``POST /versioning/graphs`` refuses a data source on a provider that cannot be copied.
 
 The graphver store is faked at ``versioned_sources.graphs_pinned_to`` and at the versioning
 service; ``integration/test_provider_versioned_graphs_live.py`` runs the real read.
 """
+import json
 from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
-from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+from backend.app.db.models import OutboxEventORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.services import versioned_sources
 
 _PROVIDERS = "/api/v1/admin/providers"
@@ -40,6 +47,10 @@ class _Versioning:
         self.created: list = []
         self.reseedable = ["g_live"]
         self.on_reset = None
+        self.fences: list = []
+
+    async def fence_projection_passes(self, *, provider):
+        self.fences.append(provider)
 
     async def reset_projection_watermarks(self, *, provider, actor, dry_run=False):
         if not dry_run:
@@ -252,6 +263,59 @@ async def test_moving_a_provider_nothing_is_pinned_to_is_not_refused(
     resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={"host": "falkor-b"})
     assert resp.status_code == 200, resp.text
     assert versioning.resets == []
+
+
+async def test_a_move_fences_a_rebuild_the_reset_skips(test_client, pinned, versioning):
+    """A graph mid-rebuild is at watermark 0, so the reset leaves it alone and nothing is
+    confirmed; its pass, bound to the old server, must still not publish."""
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_rebuilding", "customer360")]
+    versioning.reseedable = []
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={"host": "falkor-b"})
+    assert resp.status_code == 200, resp.text
+    assert (versioning.fences, versioning.resets) == ([prov], [])
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}", json={"name": "Renamed"})
+    assert resp.status_code == 200, resp.text
+    assert versioning.fences == [prov], "an edit that keeps the server fences nothing"
+
+
+async def test_a_reset_that_fails_once_is_retried(test_client, pinned, versioning):
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_live", "customer360")]
+    failures = [ConnectionError("graphver went away")]
+
+    def reset():
+        if failures:
+            raise failures.pop()
+    versioning.on_reset = reset
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}?confirmReseed=true", json={"host": "falkor-b"})
+    assert resp.status_code == 200, resp.text
+    assert versioning.resets == [prov]
+
+
+async def test_a_reset_that_keeps_failing_says_to_reseed_and_is_recorded(
+        test_client, db_session, pinned, versioning):
+    """The move stays committed, and the same edit sent again would not reset anything: the
+    admin is told to reseed the provider, and the activity log says its graphs were not reset."""
+    prov = await _provider(test_client)
+    pinned[prov] = [_graph("g_live", "customer360")]
+
+    def reset():
+        raise ConnectionError("graphver went away")
+    versioning.on_reset = reset
+
+    resp = await test_client.put(f"{_PROVIDERS}/{prov}?confirmReseed=true", json={"host": "falkor-b"})
+    assert resp.status_code == 503, resp.text
+    assert "Reseed from Postgres" in resp.json()["detail"]
+    assert versioning.resets == []
+    assert (await test_client.get(f"{_PROVIDERS}/{prov}")).json()["host"] == "falkor-b"
+    rows = (await db_session.execute(select(OutboxEventORM).where(
+        OutboxEventORM.event_type == "provider.connection.updated",
+        OutboxEventORM.aggregate_id == prov))).scalars().all()
+    assert [json.loads(r.payload)["details"].get("reseedFailed") for r in rows] == [True]
 
 
 async def test_versioning_a_source_on_a_provider_that_cannot_be_copied_is_refused(

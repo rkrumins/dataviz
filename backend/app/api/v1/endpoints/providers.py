@@ -4,6 +4,7 @@ Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -33,6 +34,7 @@ from backend.common.models.management import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # Phase 18 — per-endpoint gates. Reads accept any workspace-bound user
@@ -449,7 +451,10 @@ async def update_provider(
     watermarks are reset, so the projector reseeds each graph on the new server. The list is
     the graphs the reset reseeds. While version control is still being enabled for a graph on
     the provider, a move answers 409 ``versioned_graphs_bootstrapping`` naming them, confirmed
-    or not: the reset cannot cover them, and their bootstrap would finish on the old server."""
+    or not: the reset cannot cover them, and their bootstrap would finish on the old server.
+    A move also fences the projection passes in flight on the provider. If the fence or the
+    reset still fails after retries, the move stays applied and answers 503, telling the admin
+    to reseed the provider: the same edit sent again no longer moves anything."""
     from backend.app.services import versioned_sources
     from backend.app.services.node_identity import (
         invalidate_node_identity, provider_identity_from_extra_config,
@@ -463,7 +468,7 @@ async def update_provider(
     # this provider just as surely as editing the column does.
     old_identity = _effective_provider_identity(old_prov)
 
-    moved_graphs = []
+    moved_graphs, fence = [], False
     if old_prov is not None:
         old_extra = json.loads(old_prov.extra_config) if old_prov.extra_config else None
         old_server = _graph_server(old_prov.host, old_prov.port, old_extra)
@@ -486,6 +491,7 @@ async def update_provider(
                     "graphs": [g.model_dump() for g in bootstrapping],
                 })
             if pinned:
+                fence = True
                 # Exactly the graphs the reset below reseeds: what is confirmed is what is reset.
                 reseeded = set(await versioning.reset_projection_watermarks(
                     provider=provider_id, actor=user.id, dry_run=True))
@@ -509,9 +515,24 @@ async def update_provider(
     await provider_registry.evict_provider(provider_id)
     # Which fields were sent, never their values: one of them may be a secret.
     details = {"fields": sorted(req.model_dump(by_alias=True, exclude_unset=True))}
-    if moved_graphs:
-        details["graphsReseeded"] = len(await versioning.reset_projection_watermarks(
-            provider=provider_id, actor=user.id))
+    if fence:
+        # Retried: the move is committed, so the same edit sent again would not get here.
+        for attempt in range(3):
+            try:
+                # A rebuild in flight is at watermark 0, so the reset skips it; bound to the old
+                # server, it would publish a watermark for a key the new one does not hold.
+                await versioning.fence_projection_passes(provider=provider_id)
+                if moved_graphs:
+                    details["graphsReseeded"] = len(await versioning.reset_projection_watermarks(
+                        provider=provider_id, actor=user.id))
+                break
+            except Exception:
+                logger.exception("provider %s moved, but its versioned graphs were not reset "
+                                 "(attempt %d)", provider_id, attempt + 1)
+                if attempt < 2:
+                    await asyncio.sleep(1)
+        else:
+            details["reseedFailed"] = True
     await recorder.record_for_request(
         session, "provider.connection.updated",
         target_type="provider", target_id=provider_id, target_label=prov.name,
@@ -527,6 +548,12 @@ async def update_provider(
             await scopes_resolving_through(session, provider_id=provider_id),
             "provider_identity_changed",
         )
+    if details.get("reseedFailed"):
+        await session.commit()          # the edit and its record stand: the move is applied
+        raise HTTPException(status_code=503, detail=(
+            "The provider now points at the new server, but its versioned graphs could not be set "
+            "to reseed there, so they may read as empty. Run Admin → Infrastructure → Reseed from "
+            "Postgres on this provider."))
     return prov
 
 
