@@ -215,6 +215,56 @@ export interface WorkspaceImpactResponse {
     customRoleCount: number
 }
 
+/** One data source's share of a workspace's numbers in {@link WorkspaceSummary}. */
+export interface WorkspaceSourceSummary {
+    nodes: number
+    edges: number
+    /** Its statistics are still being computed: a source, but not in the sums yet. */
+    pending: boolean
+    /** Live views the caller can read that name this source. */
+    views: number
+}
+
+export interface WorkspaceSummaryRow {
+    id: string
+    name: string
+    isDefault: boolean
+    dataSources: number
+    activeDataSources: number
+    pendingDataSources: number
+    nodes: number
+    edges: number
+    entityTypes: string[]
+    views: number
+    sources: Record<string, WorkspaceSourceSummary>
+}
+
+/**
+ * The estate's numbers as the caller can see them — the ONE definition the
+ * dashboard, the workspaces page and the admin overview all read. They used to
+ * add these up separately in the browser, from different snapshots, and quoted
+ * different totals.
+ */
+export interface WorkspaceSummary {
+    /** 'all' when the caller sees every workspace, 'granted' when only their own. */
+    coverage: 'all' | 'granted'
+    totals: {
+        workspaces: number
+        dataSources: number
+        activeDataSources: number
+        pendingDataSources: number
+        /** Each physical graph counted once, however many workspaces mount it. */
+        nodes: number
+        edges: number
+        entityTypes: string[]
+        /** Live views the caller can read — the Explorer's total. */
+        views: number
+        /** Graphs mounted in more than one of the caller's workspaces. */
+        sharedGraphs: number
+    }
+    workspaces: WorkspaceSummaryRow[]
+}
+
 /**
  * Resolve a data source's provenance when `sourceMode` is null/absent
  * (legacy rows). Mirrors the backend ORM comment: a source with no
@@ -258,6 +308,11 @@ export const workspaceService = {
 
     list(): Promise<WorkspaceResponse[]> {
         return request<WorkspaceResponse[]>(ADMIN_API)
+    },
+
+    /** Counts for every workspace the caller can see — see {@link WorkspaceSummary}. */
+    summary(): Promise<WorkspaceSummary> {
+        return request<WorkspaceSummary>(`${ADMIN_API}/summary`)
     },
 
     /**

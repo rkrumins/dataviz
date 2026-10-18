@@ -1,22 +1,12 @@
-import { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useWorkspaces } from './useWorkspaces'
-import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { withTimeout } from '@/lib/concurrency'
-import { TIMEOUTS } from '@/config/timeouts'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { ontologyListKey } from '@/features/ontology/hooks/useOntologies'
 import {
     ontologyDefinitionService,
     type OntologyDefinitionResponse,
 } from '@/services/ontologyDefinitionService'
-
-export interface DashboardStats {
-    totalWorkspaces: number
-    totalDataSources: number
-    totalEntities: number
-}
 
 export interface DataSourceStats {
     nodeCount: number
@@ -59,100 +49,11 @@ const EMPTY_ONTOLOGIES: OntologyBrief[] = []
 export function useDashboardData() {
     const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
 
-    const [stats, setStats] = useState<DashboardStats>({
-        totalWorkspaces: 0,
-        totalDataSources: 0,
-        totalEntities: 0,
-    })
-
-    // Per-datasource node/edge counts: key = "${wsId}/${dsId}"
-    const [dataSourceStats, setDataSourceStats] = useState<Record<string, DataSourceStats>>({})
-
-    // templates / ontologies + their loading + error are React Query-derived
-    // below (was raw useState + a refetch-from-scratch-on-mount effect, which
-    // re-spun the dashboard every visit; now stale-while-revalidate cached).
-
-    // Calculate high level stats whenever workspaces change
-    useEffect(() => {
-        if (workspaces) {
-            let dsCount = 0
-            workspaces.forEach(ws => {
-                if (ws.dataSources) dsCount += ws.dataSources.length
-            })
-
-            setStats(prev => ({
-                ...prev,
-                totalWorkspaces: workspaces.length,
-                totalDataSources: dsCount,
-            }))
-        }
-    }, [workspaces])
-
-    // Fetch per-datasource graph stats (node + edge counts).
-    //
-    // React Query, NOT a per-instance effect: useDashboardData is mounted
-    // by several components at once (Dashboard, WorkspaceGrid, InsightCards,
-    // TemplateGrid, and one DataSourceCard / DataSourceGridCard PER card on
-    // admin pages). A per-instance fetch fires a duplicate
-    // workspaces×datasources fan-out for EVERY instance on mount — the
-    // "hundreds of cached-stats requests" storm. One query keyed on the
-    // ws/ds id-set means all instances share a single fan-out and cache;
-    // identity churn on the workspaces array is harmless (same key → no
-    // new requests).
-    const statsKey = useMemo(
-        () => (workspaces ?? [])
-            .map(ws => `${ws.id}:${(ws.dataSources ?? []).map(d => d.id).sort().join(',')}`)
-            .sort()
-            .join('|'),
-        [workspaces],
-    )
-    const dsStatsQuery = useQuery({
-        queryKey: ['dashboard-datasource-stats', statsKey],
-        enabled: !!workspaces?.length,
-        staleTime: 30_000,
-        queryFn: async () => {
-            // One bulk request (DB-only, two SQL queries server-side)
-            // replaces the former workspaces×datasources fan-out over the
-            // per-ds /cached-stats endpoint. Entries are keyed
-            // "<wsId>/<dsId>" — the same shape consumers already read.
-            // status==='computing' rows are cold-cache placeholders (the
-            // backend has already enqueued their refresh); skipping them
-            // matches the old null-on-computing behavior.
-            const data = await withTimeout(
-                fetchEnveloped<Record<string, {
-                    status?: string
-                    nodeCount?: number
-                    edgeCount?: number
-                    entityTypeCounts?: Record<string, number>
-                }>>('/api/v1/admin/workspaces/datasources/cached-stats'),
-                TIMEOUTS.ADMIN_LIST_MS,
-                'dashboard.cached-stats.bulk',
-            )
-
-            const results: Record<string, DataSourceStats> = {}
-            let totalEntities = 0
-            for (const [key, entry] of Object.entries(data ?? {})) {
-                if (entry.status === 'computing') continue
-                const nodeCount = entry.nodeCount ?? 0
-                results[key] = {
-                    nodeCount,
-                    edgeCount: entry.edgeCount ?? 0,
-                    entityTypes: Object.keys(entry.entityTypeCounts ?? {}),
-                }
-                totalEntities += nodeCount
-            }
-            return { results, totalEntities }
-        },
-    })
-
-    // Sync the shared query result into the hook's existing state shape so
-    // consumers keep their current API (dataSourceStats + stats.totalEntities).
-    const dsStatsData = dsStatsQuery.data
-    useEffect(() => {
-        if (!dsStatsData) return
-        setDataSourceStats(dsStatsData.results)
-        setStats(prev => ({ ...prev, totalEntities: dsStatsData.totalEntities }))
-    }, [dsStatsData])
+    // The dashboard's NUMBERS no longer come from here: totals used to be summed
+    // from this workspace list (loaded once at sign-in, so they went stale) plus a
+    // bulk stats request this hook fired on EVERY page — useGlobalSearch mounts it
+    // inside the always-present command palette. They now come from the server's
+    // workspace summary (useWorkspaceSummary), shared with Administration.
 
     // Phase 17: Templates + Ontologies live behind system:admin gates.
     // Skip the fetch entirely for non-admins — the dashboard tiles and
@@ -210,8 +111,6 @@ export function useDashboardData() {
     // -side per-user visits) and useViewStats() (authoritative catalog counts).
 
     return {
-        stats,
-        dataSourceStats,
         workspaces,
         templates,
         ontologies,

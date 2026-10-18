@@ -1,9 +1,10 @@
 import { useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { DataSourceStats } from '@/hooks/useDashboardData'
-import { type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
+import {
+    type WorkspaceResponse, type DataSourceResponse, type WorkspaceSummary,
+    type WorkspaceSummaryRow, type WorkspaceSourceSummary,
+} from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useSchemaViews } from '@/store/schema'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Search,
@@ -21,7 +22,9 @@ import {
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { WORKSPACE_PALETTES, compactNum } from './dashboard-constants'
+import { compact } from '@/lib/formatMetric'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { WORKSPACE_PALETTES } from './dashboard-constants'
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Routing helper
@@ -42,15 +45,14 @@ function useNavigateToWorkspace() {
 // ───────────────────────────────────────────────────────────────────────────────
 // Data Source Search Popover (inside workspace card)
 // ───────────────────────────────────────────────────────────────────────────────
-function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, stats, onSelect, palette, viewsByDs }: {
+function DataSourceList({ dataSources, activeDataSourceId, isActiveWs, sources, onSelect, palette }: {
     dataSources: DataSourceResponse[]
-    wsId: string
     activeDataSourceId: string | null
     isActiveWs: boolean
-    stats: Record<string, DataSourceStats>
+    /** Per-source numbers from the workspace summary, keyed by data source id. */
+    sources: Record<string, WorkspaceSourceSummary>
     onSelect: (dsId: string) => void
     palette: typeof WORKSPACE_PALETTES[0]
-    viewsByDs: Record<string, number>   // dsId -> view count
 }) {
     const [query, setQuery] = useState('')
     const filtered = useMemo(() => {
@@ -87,10 +89,9 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
                     <p className="text-xs text-ink-muted text-center py-3">No sources match "{query}"</p>
                 )}
                 {filtered.map((ds) => {
-                    const key = `${wsId}/${ds.id}`
-                    const dsStats = stats[key]
+                    const dsStats = sources[ds.id]
                     const isActive = isActiveWs && ds.id === activeDataSourceId
-                    const viewCount = viewsByDs[ds.id] ?? 0
+                    const viewCount = dsStats?.views ?? 0
                     return (
                         <button
                             key={ds.id}
@@ -125,10 +126,12 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
                             </div>
                             {/* Stats column: nodes · edges · views */}
                             <div className="flex flex-col items-end shrink-0 gap-0.5">
-                                {dsStats ? (
+                                {dsStats?.pending ? (
+                                    <span className="text-[10px] text-ink-muted">Counting…</span>
+                                ) : dsStats ? (
                                     <>
-                                        <span className="text-xs font-bold text-ink tabular-nums">{dsStats.nodeCount.toLocaleString()} <span className="text-ink-muted/50 font-normal text-[10px]">nodes</span></span>
-                                        <span className="text-[10px] text-ink-muted tabular-nums">{dsStats.edgeCount.toLocaleString()} <span className="opacity-50">edges</span></span>
+                                        <span className="text-xs font-bold text-ink tabular-nums">{dsStats.nodes.toLocaleString()} <span className="text-ink-muted/50 font-normal text-[10px]">nodes</span></span>
+                                        <span className="text-[10px] text-ink-muted tabular-nums">{dsStats.edges.toLocaleString()} <span className="opacity-50">edges</span></span>
                                     </>
                                 ) : (
                                     <span className="text-xs text-ink-muted/30">—</span>
@@ -150,31 +153,29 @@ function DataSourceList({ dataSources, wsId, activeDataSourceId, isActiveWs, sta
 // ───────────────────────────────────────────────────────────────────────────────
 // Workspace Card — full-size, spacious design
 // ───────────────────────────────────────────────────────────────────────────────
-function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceId, onSelect, viewsByScope }: {
+function WorkspaceCard({ ws, index, row, isActive, activeDataSourceId, onSelect }: {
     ws: WorkspaceResponse
     index: number
-    dataSourceStats: Record<string, DataSourceStats>
+    /** This workspace's numbers from the summary; undefined while it loads. */
+    row?: WorkspaceSummaryRow
     isActive: boolean
     activeDataSourceId: string | null
     onSelect: (wsId: string) => void
-    viewsByScope: Record<string, number>  // scopeKey (wsId/dsId) -> count
 }) {
     const [expanded, setExpanded] = useState(isActive)
     const palette = WORKSPACE_PALETTES[index % WORKSPACE_PALETTES.length]
     const dataSources = ws.dataSources || []
-    const dsCount = dataSources.length
-    const isOnline = ws.isActive && dsCount > 0
+    const dsCount = row?.dataSources ?? dataSources.length
+    const activeCount = row?.activeDataSources ?? dsCount
+    const pendingCount = row?.pendingDataSources ?? 0
+    const isOnline = ws.isActive && dsCount > 0 && activeCount > 0
     const navigateTo = useNavigateToWorkspace()
 
-    const totalNodes = dataSources.reduce((acc, ds) => acc + (dataSourceStats[`${ws.id}/${ds.id}`]?.nodeCount ?? 0), 0)
-    const totalEdges = dataSources.reduce((acc, ds) => acc + (dataSourceStats[`${ws.id}/${ds.id}`]?.edgeCount ?? 0), 0)
-
-    // Count views scoped to this workspace (across all its data sources)
-    const totalViews = dataSources.reduce((acc, ds) => acc + (viewsByScope[`${ws.id}/${ds.id}`] ?? 0), 0)
-
-    // Per-DS view counts for DataSourceList
-    const viewsByDs: Record<string, number> = {}
-    dataSources.forEach(ds => { viewsByDs[ds.id] = viewsByScope[`${ws.id}/${ds.id}`] ?? 0 })
+    // The summary counts views the way the Explorer does — every live view you
+    // can read in this workspace, not just the ones a client cache happens to hold.
+    const totalNodes = row?.nodes ?? 0
+    const totalEdges = row?.edges ?? 0
+    const totalViews = row?.views ?? 0
 
     const handleOpenCanvas = (e: React.MouseEvent) => {
         e.stopPropagation()
@@ -248,7 +249,11 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                                 isOnline ? 'bg-emerald-500 shadow-[0_0_6px_rgba(34,197,94,0.7)] animate-pulse' : 'bg-slate-400'
                             )} />
                             <span className="text-xs font-medium text-ink-muted">
-                                {isOnline ? 'Online · All sources active' : 'Standby'}
+                                {!isOnline
+                                    ? 'Standby'
+                                    : activeCount === dsCount
+                                        ? 'Online · All sources active'
+                                        : `Online · ${activeCount} of ${dsCount} sources active`}
                             </span>
                         </div>
                     </div>
@@ -263,9 +268,9 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                 <div className="grid grid-cols-4 gap-px bg-glass-border rounded-2xl overflow-visible mb-5">
                     {[
                         { val: dsCount, lbl: 'Sources', sub: 'data sources', icon: Server, tip: 'Connected data pipelines feeding this workspace' },
-                        { val: totalNodes, lbl: 'Nodes', sub: 'total entities', icon: CircleDot, tip: 'Unique entities tracked across all data sources' },
+                        { val: totalNodes, lbl: 'Nodes', sub: pendingCount > 0 ? 'counting…' : 'total entities', icon: CircleDot, tip: 'Unique entities tracked across all data sources' },
                         { val: totalEdges, lbl: 'Edges', sub: 'relationships', icon: GitBranch, tip: 'Relationships and lineage connections mapped' },
-                        { val: totalViews, lbl: 'Views', sub: 'context views', icon: Eye, tip: 'Saved context views scoped to this workspace' },
+                        { val: totalViews, lbl: 'Views', sub: 'context views', icon: Eye, tip: 'Context views in this workspace you can open' },
                     ].map(s => (
                         <div
                             key={s.lbl}
@@ -299,7 +304,7 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                                     ? 'text-violet-500'
                                     : s.val > 0 ? (isActive ? 'text-accent-business' : palette.label) : 'text-ink-muted/30'
                             )}>
-                                {s.val > 0 ? compactNum(s.val) : '—'}
+                                {s.val > 0 ? compact(s.val) : '—'}
                             </span>
                             <span className="text-[10px] text-ink-muted/60">{s.sub}</span>
                         </div>
@@ -332,13 +337,11 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                         >
                             <DataSourceList
                                 dataSources={dataSources}
-                                wsId={ws.id}
                                 activeDataSourceId={activeDataSourceId}
                                 isActiveWs={isActive}
-                                stats={dataSourceStats}
+                                sources={row?.sources ?? {}}
                                 onSelect={handleSelectDs}
                                 palette={palette}
-                                viewsByDs={viewsByDs}
                             />
                         </motion.div>
                     )}
@@ -362,7 +365,7 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
                                 'inline-flex items-center justify-center min-w-[20px] h-[18px] px-1.5 rounded-full text-[10px] font-bold tabular-nums',
                                 isActive ? 'bg-white/20 text-white' : 'bg-violet-500/12 text-violet-500',
                             )}>
-                                {compactNum(totalViews)}
+                                {compact(totalViews)}
                             </span>
                         )}
                     </span>
@@ -376,26 +379,21 @@ function WorkspaceCard({ ws, index, dataSourceStats, isActive, activeDataSourceI
 // ───────────────────────────────────────────────────────────────────────────────
 // Active Environments — 3-col grid, 6 per page with pagination
 // ───────────────────────────────────────────────────────────────────────────────
-export function WorkspaceGrid({ workspaces, dataSourceStats }: {
+export function WorkspaceGrid({ workspaces, summary }: {
     workspaces: WorkspaceResponse[]
-    dataSourceStats: Record<string, DataSourceStats>
+    /** The server's numbers for every workspace the caller can see. */
+    summary?: WorkspaceSummary
 }) {
     const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
     const activeDataSourceId = useWorkspacesStore(s => s.activeDataSourceId)
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
-    // Safely read schema views (stable: only recomputes when view count changes)
-    const schemaViews = useSchemaViews()
     const [wsQuery, setWsQuery] = useState('')
     const [page, setPage] = useState(0)
 
-    // Build scopeKey -> viewCount map from all known views
-    const viewsByScope = useMemo(() => {
-        const map: Record<string, number> = {}
-        schemaViews.forEach(v => {
-            if (v.scopeKey) map[v.scopeKey] = (map[v.scopeKey] ?? 0) + 1
-        })
-        return map
-    }, [schemaViews])
+    const rowsById = useMemo(
+        () => new Map((summary?.workspaces ?? []).map(r => [r.id, r])),
+        [summary],
+    )
 
     const PAGE_SIZE = 6
 
@@ -419,7 +417,7 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
 
     if (!workspaces || workspaces.length === 0) return null
 
-    const totalSources = workspaces.reduce((acc, w) => acc + (w.dataSources?.length || 0), 0)
+    const totals = summary?.totals
     const isSearching = wsQuery.trim().length > 0
     const totalPages = Math.ceil(filteredWorkspaces.length / PAGE_SIZE)
     // While searching show all results; while paginating slice by page
@@ -439,9 +437,25 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
                     </div>
                     <div>
                         <h2 className="text-2xl font-bold text-ink tracking-tight">Your business areas</h2>
-                        <p className="text-sm text-ink-muted mt-0.5">
-                            {workspaces.length} workspace{workspaces.length !== 1 ? 's' : ''} · {totalSources} total data source{totalSources !== 1 ? 's' : ''}
-                            {activeWorkspaceId && <span className="text-accent-business font-semibold"> · 1 active</span>}
+                        <p className="text-sm text-ink-muted mt-0.5 flex items-center gap-1 flex-wrap">
+                            {totals ? (
+                                <>
+                                    <span>
+                                        {totals.workspaces} workspace{totals.workspaces !== 1 ? 's' : ''} · {totals.dataSources} data source{totals.dataSources !== 1 ? 's' : ''}
+                                        {totals.activeDataSources < totals.dataSources && ` (${totals.activeDataSources} active)`}
+                                    </span>
+                                    {totals.pendingDataSources > 0 && (
+                                        <HoverTip
+                                            label={`Counting ${totals.pendingDataSources} source${totals.pendingDataSources !== 1 ? 's' : ''}`}
+                                            detail="Their statistics are being refreshed; the totals fill in on their own."
+                                        >
+                                            <span className="text-accent-business font-semibold"> · counting…</span>
+                                        </HoverTip>
+                                    )}
+                                </>
+                            ) : (
+                                <span>Counting your workspaces…</span>
+                            )}
                         </p>
                     </div>
                 </div>
@@ -478,11 +492,10 @@ export function WorkspaceGrid({ workspaces, dataSourceStats }: {
                             key={ws.id}
                             ws={ws}
                             index={i}
-                            dataSourceStats={dataSourceStats}
+                            row={rowsById.get(ws.id)}
                             isActive={ws.id === activeWorkspaceId}
                             activeDataSourceId={activeDataSourceId}
                             onSelect={handleSelectWorkspace}
-                            viewsByScope={viewsByScope}
                         />
                     ))}
                 </div>

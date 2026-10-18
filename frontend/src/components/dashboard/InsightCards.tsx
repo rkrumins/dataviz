@@ -1,61 +1,65 @@
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { Monitor, BookOpen, Boxes, Component } from 'lucide-react'
+import { Monitor, BookOpen, Boxes, Database } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { DashboardStats } from '@/hooks/useDashboardData'
+import { compact } from '@/lib/formatMetric'
+import type { WorkspaceSummary } from '@/services/workspaceService'
 import { CARD_THEMES } from './dashboard-constants'
 
 /**
  * InsightCards — the dashboard's at-a-glance numbers, framed for the person who
  * uses this day to day (building and browsing views) rather than for an operator.
  *
- * Two things were wrong before:
- *   1. They were `cursor-pointer` with a hover-lift but NO onClick — they looked
- *      interactive and did nothing. Each is now a real click-through.
- *   2. The view count came from a client-side store, not the authoritative
- *      catalog stat.
+ * Every figure comes from the workspace summary — the same server-side numbers
+ * Administration → Global Overview and the Workspaces page show — so the three
+ * can no longer disagree. They used to be added up here from a workspace list
+ * loaded once at sign-in, which went stale the moment anything changed.
  *
- * Framing: leads with what a business user actually reasons about — the views
- * they explore, the SEMANTIC LAYER (the shared business meaning of the data),
- * the workspaces/business areas they belong to, and how much data is covered.
- * "Nodes in all graphs" and pipeline internals are an operator's vocabulary.
+ * The fourth card was "Data Assets", which was really the node count (Admin's
+ * "Total Nodes") under a name Ingestion uses for catalog items. It now counts
+ * data sources, with the entities and relationships they hold underneath —
+ * the same figures, and the same words, as the admin overview.
  */
-export function InsightCards({ stats, viewsCount, semanticLayersCount }: {
-    stats: DashboardStats
-    /** Authoritative catalog total (useViewStats), not schemaStore.views.length. */
-    viewsCount: number
-    /** Published semantic layers — the business vocabulary over the data. */
-    semanticLayersCount: number
+export function InsightCards({ summary, semanticLayers }: {
+    summary?: WorkspaceSummary
+    /** Every semantic layer the caller can read, and how many are published. */
+    semanticLayers: { total: number; published: number }
 }) {
     const navigate = useNavigate()
+    const totals = summary?.totals
+    const pending = totals?.pendingDataSources ?? 0
 
     const cards = [
         {
             label: 'Context Views',
-            sublabel: 'Browse and build views',
-            value: viewsCount,
+            sublabel: 'Views you can open',
+            value: totals ? compact(totals.views) : '—',
             icon: Monitor,
             to: '/explorer',
         },
         {
             label: 'Semantic Layers',
-            sublabel: 'Shared business meaning',
-            value: semanticLayersCount,
+            sublabel: `${compact(semanticLayers.published)} published`,
+            value: compact(semanticLayers.total),
             icon: BookOpen,
             to: '/schema',
         },
         {
             label: 'Workspaces',
-            sublabel: 'Business areas you work in',
-            value: stats.totalWorkspaces,
+            sublabel: summary?.coverage === 'all' ? 'Every business area' : 'Business areas you work in',
+            value: totals ? compact(totals.workspaces) : '—',
             icon: Boxes,
             to: '/workspaces',
         },
         {
-            label: 'Data Assets',
-            sublabel: 'Objects across your connected data',
-            value: new Intl.NumberFormat().format(stats.totalEntities),
-            icon: Component,
+            label: 'Data Sources',
+            sublabel: !totals
+                ? 'Connected data'
+                : pending > 0
+                    ? `Counting ${pending} source${pending === 1 ? '' : 's'}…`
+                    : `${compact(totals.nodes)} entities · ${compact(totals.edges)} relationships`,
+            value: totals ? compact(totals.dataSources) : '—',
+            icon: Database,
             to: '/workspaces',
         },
     ]
@@ -84,7 +88,7 @@ export function InsightCards({ stats, viewsCount, semanticLayersCount }: {
                                 <c.icon className="w-4 h-4" />
                             </div>
                             <div className="mt-auto">
-                                <div className={cn('text-3xl font-black tracking-tight leading-none mb-1', t.valueCls)}>
+                                <div className={cn('text-3xl font-black tracking-tight leading-none mb-1 tabular-nums', t.valueCls)}>
                                     {c.value}
                                 </div>
                                 <div className="text-sm font-semibold text-ink">{c.label}</div>

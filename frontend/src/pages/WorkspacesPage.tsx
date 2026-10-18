@@ -1,12 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { fetchEnveloped } from '@/services/cacheEnvelope'
 import {
     Database, Plus, AlertTriangle,
     CircleDot, ArrowRightLeft, Eye, Sparkles, Boxes,
 } from 'lucide-react'
-import { listViews } from '@/services/viewApiService'
 import { useAuthStore } from '@/store/auth'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse, type CatalogItemBindingResponse } from '@/services/catalogService'
@@ -30,17 +28,13 @@ import {
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useQueryClient } from '@tanstack/react-query'
+import { useWorkspaceSummary, WORKSPACE_SUMMARY_KEY } from '@/hooks/useWorkspaceSummary'
+import { compact } from '@/lib/formatMetric'
 import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { cn } from '@/lib/utils'
 import { Check } from 'lucide-react'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
-
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-    return n.toLocaleString()
-}
 
 function providerLabel(type: string): string {
     if (type === 'neo4j') return 'Neo4j'
@@ -107,7 +101,6 @@ export function WorkspacesPage() {
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
     const [catalogBindings, setCatalogBindings] = useState<CatalogItemBindingResponse[]>([])
-    const [dsStats, setDsStats] = useState<Record<string, { nodes: number; edges: number; types: number }>>({})
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
     const [isLoading, setIsLoading] = useState(true)
@@ -121,8 +114,22 @@ export function WorkspacesPage() {
     /* ── Create-workspace wizard ── */
     const [showWizard, setShowWizard] = useState(false)
 
-    const [totalViews, setTotalViews] = useState(0)
-    const [viewCountByWs, setViewCountByWs] = useState<Record<string, number>>({})
+    // Node, edge, type and view counts are the workspace summary's — the same
+    // server-side numbers the Dashboard and Administration show. This page used to
+    // total the bulk stats itself and count views from the first 200 it listed.
+    const { summary } = useWorkspaceSummary()
+    const dsStats = useMemo(() => {
+        const map: Record<string, { nodes: number; edges: number; types: number }> = {}
+        for (const row of summary?.workspaces ?? []) {
+            map[row.id] = { nodes: row.nodes, edges: row.edges, types: row.entityTypes.length }
+        }
+        return map
+    }, [summary])
+    const viewCountByWs = useMemo(
+        () => Object.fromEntries((summary?.workspaces ?? []).map(row => [row.id, row.views])),
+        [summary],
+    ) as Record<string, number>
+    const totalViews = summary?.totals.views ?? 0
 
     /* ── Bulk selection ── */
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -217,17 +224,15 @@ export function WorkspacesPage() {
 
     /* ── Global summary stats (deduplicated) ── */
     const globalSummary = useMemo(() => {
-        let totalDs = 0, totalNodes = 0, totalEdges = 0
+        // A graph mounted in two workspaces is one graph: the server's totals
+        // count it once, where summing the rows would count it twice.
+        const totalDs = summary?.totals.dataSources ?? workspaces.reduce((n, ws) => n + (ws.dataSources?.length || 0), 0)
+        const totalNodes = summary?.totals.nodes ?? 0
+        const totalEdges = summary?.totals.edges ?? 0
         const providerCounts: Record<string, number> = {}
         const allEntityTypes = new Set<string>()
         const allRelTypes = new Set<string>()
         const allOntologyNames = new Set<string>()
-
-        for (const ws of workspaces) {
-            totalDs += ws.dataSources?.length || 0
-            const s = dsStats[ws.id]
-            if (s) { totalNodes += s.nodes; totalEdges += s.edges }
-        }
 
         for (const infos of Object.values(wsProviderInfoMap)) {
             for (const info of infos) {
@@ -250,7 +255,7 @@ export function WorkspacesPage() {
             providerCounts,
             uniqueProviders: Object.keys(providerCounts),
         }
-    }, [workspaces, dsStats, wsProviderInfoMap])
+    }, [workspaces, summary, wsProviderInfoMap])
 
     /* ── Data loading ── */
     const loadData = useCallback(async () => {
@@ -313,53 +318,12 @@ export function WorkspacesPage() {
                 console.warn('[workspaces] provider/catalog/ontology refresh failed; keeping the last known values')
             }
 
-            listViews({ limit: 200 }).then(({ items, total }) => {
-                setTotalViews(total)
-                const byWs: Record<string, number> = {}
-                for (const v of items) { byWs[v.workspaceId] = (byWs[v.workspaceId] || 0) + 1 }
-                setViewCountByWs(byWs)
-            }).catch(() => {})
-
-            // One bulk request replaces the former per-(workspace, datasource)
-            // cached-stats fan-out (44 datasources × loadData re-runs was
-            // hundreds of requests). Entries are keyed "<wsId>/<dsId>";
-            // status==='computing' rows are cold-cache placeholders (refresh
-            // already enqueued server-side) — skipped, same as the old
-            // null-on-computing behavior.
-            const bulk = await fetchEnveloped<Record<string, {
-                status?: string
-                nodeCount?: number
-                edgeCount?: number
-                entityTypeCounts?: Record<string, number>
-            }>>('/api/v1/admin/workspaces/datasources/cached-stats').catch(() => null)
-            // A failed bulk read means "we don't know", not "there are none" —
-            // the same rule the provider/catalog/ontology probes above follow.
-            // One unhealthy data source can fail this ONE request for every
-            // workspace, and asserting zeros then showed "0 entities" across a
-            // fleet whose other four sources were fine.
-            if (bulk === null) {
-                setProbeFailed(true)
-                console.warn('[workspaces] cached-stats refresh failed; keeping the last known counts')
-                return
-            }
-            const agg: Record<string, { nodes: number; edges: number; types: Set<string> }> = {}
-            for (const [key, entry] of Object.entries(bulk)) {
-                if (entry.status === 'computing') continue
-                const wsId = key.slice(0, key.indexOf('/'))
-                const a = (agg[wsId] ??= { nodes: 0, edges: 0, types: new Set<string>() })
-                a.nodes += entry.nodeCount ?? 0
-                a.edges += entry.edgeCount ?? 0
-                for (const t of Object.keys(entry.entityTypeCounts ?? {})) a.types.add(t)
-            }
-            const statsMap: Record<string, { nodes: number; edges: number; types: number }> = {}
-            for (const ws of wsList) {
-                const a = agg[ws.id]
-                statsMap[ws.id] = { nodes: a?.nodes ?? 0, edges: a?.edges ?? 0, types: a?.types.size ?? 0 }
-            }
-            setDsStats(statsMap)
+            // Counts come from the shared summary; anything that reloads this page
+            // (a delete, a new default, a permissions change) refreshes it too.
+            void queryClient.invalidateQueries({ queryKey: WORKSPACE_SUMMARY_KEY })
         } catch (err) { console.error('Failed to load workspaces', err) }
         finally { setIsLoading(false) }
-    }, [canReadProviders])
+    }, [canReadProviders, queryClient])
 
     useEffect(() => { loadData() }, [loadData])
 
@@ -570,7 +534,7 @@ export function WorkspacesPage() {
                                     <CircleDot className="w-5 h-5 text-emerald-500" />
                                 </div>
                                 <div>
-                                    <div className="text-lg font-bold text-ink">{compactNum(globalSummary.totalNodes)}</div>
+                                    <div className="text-lg font-bold text-ink">{compact(globalSummary.totalNodes)}</div>
                                     <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Nodes</div>
                                 </div>
                             </div>
@@ -580,7 +544,7 @@ export function WorkspacesPage() {
                                     <ArrowRightLeft className="w-5 h-5 text-violet-500" />
                                 </div>
                                 <div>
-                                    <div className="text-lg font-bold text-ink">{compactNum(globalSummary.totalEdges)}</div>
+                                    <div className="text-lg font-bold text-ink">{compact(globalSummary.totalEdges)}</div>
                                     <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Edges</div>
                                 </div>
                             </div>
@@ -649,7 +613,7 @@ export function WorkspacesPage() {
                             <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                             <p className="text-xs text-ink-muted">
                                 {globalSummary.totalNodes > 0 && (
-                                    <span>Your workspaces manage <span className="font-semibold text-ink">{compactNum(globalSummary.totalNodes)} nodes</span> and <span className="font-semibold text-ink">{compactNum(globalSummary.totalEdges)} edges</span></span>
+                                    <span>Your workspaces manage <span className="font-semibold text-ink">{compact(globalSummary.totalNodes)} nodes</span> and <span className="font-semibold text-ink">{compact(globalSummary.totalEdges)} edges</span></span>
                                 )}
                                 {globalSummary.totalEntityTypes > 0 && (
                                     <span>{globalSummary.totalNodes > 0 ? ', classified into ' : 'Classified into '}<span className="font-semibold text-ink">{globalSummary.totalEntityTypes} entity types</span> and <span className="font-semibold text-ink">{globalSummary.totalRelTypes} relationship types</span> via ontologies</span>

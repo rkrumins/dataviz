@@ -23,10 +23,10 @@
  *   • The KPI cards were `cursor-pointer` with no onClick, and the view count came
  *     from a client store rather than the authoritative catalog stat.
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
-import { useViewStats } from '@/hooks/useViewStats'
+import { useWorkspaceSummary } from '@/hooks/useWorkspaceSummary'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
@@ -52,21 +52,22 @@ import { MOTION } from '@/lib/motion'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
 
-const EMPTY_STATS_PARAMS = {}
-
 export function Dashboard() {
     useDocumentTitle('Dashboard')
     const {
-        stats,
-        dataSourceStats,
         workspaces,
         templates,
         ontologies,
         isLoadingWorkspaces,
     } = useDashboardData()
 
-    // Authoritative catalog counts (no filters → the whole catalog).
-    const { stats: viewStats } = useViewStats(EMPTY_STATS_PARAMS)
+    // Every number on the page comes from the server's workspace summary — the
+    // same figures Administration and the Workspaces page show. The workspace
+    // list itself is reloaded on each visit too: it used to load once at sign-in,
+    // so added or removed workspaces and sources never showed up here.
+    const { summary } = useWorkspaceSummary()
+    const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
+    useEffect(() => { void loadWorkspaces() }, [loadWorkspaces])
 
     const navigate = useNavigate()
     const setActiveWorkspace = useWorkspacesStore(s => s.setActiveWorkspace)
@@ -164,8 +165,9 @@ export function Dashboard() {
     }, [navigate, searchResult.query, recordRecentSearch])
 
     // ── Loading state: a content-shaped skeleton (not a centered spinner) so the
-    // shell paints instantly and the layout doesn't jump when data lands. ───────
-    if (isLoadingWorkspaces) {
+    // shell paints instantly and the layout doesn't jump when data lands. Only on
+    // a cold start: the reload on every visit keeps what is already on screen. ──
+    if (isLoadingWorkspaces && (workspaces?.length ?? 0) === 0) {
         return <DashboardSkeleton />
     }
 
@@ -266,7 +268,7 @@ export function Dashboard() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 3, ...MOTION.sectionEntry }}
                 >
-                    <WorkspaceGrid workspaces={workspaces} dataSourceStats={dataSourceStats} />
+                    <WorkspaceGrid workspaces={workspaces} summary={summary} />
                 </motion.div>
 
                 {/* 5. At-a-glance numbers — live values, each a click-through */}
@@ -276,9 +278,11 @@ export function Dashboard() {
                     transition={{ delay: MOTION.sectionStagger * 4, ...MOTION.sectionEntry }}
                 >
                     <InsightCards
-                        stats={stats}
-                        viewsCount={viewStats.total}
-                        semanticLayersCount={ontologies.length}
+                        summary={summary}
+                        semanticLayers={{
+                            total: ontologies.length,
+                            published: ontologies.filter(o => o.isPublished).length,
+                        }}
                     />
                 </motion.div>
 
