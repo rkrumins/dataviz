@@ -10,7 +10,8 @@ have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
 import logging
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -32,10 +33,10 @@ from backend.app.common.single_flight import read_stats_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (
     workspace_repo, provider_repo, ontology_definition_repo, data_source_repo,
-    binding_repo, role_repo, user_repo, view_repo,
+    binding_repo, role_repo, user_repo, view_repo, profiling_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
-from backend.app.services import workspace_visibility
+from backend.app.services import profiling_series, workspace_visibility
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
@@ -58,6 +59,7 @@ from backend.common.models.management import (
     WorkspaceResponse,
     WorkspaceSourceSummary,
     WorkspaceSummaryResponse,
+    WorkspaceSummaryTrendResponse,
     WorkspaceSummaryRow,
     WorkspaceSummaryTotals,
     DataSourceCreateRequest,
@@ -263,6 +265,83 @@ async def get_workspaces_summary(
     every = not rbac_flag("RBAC_ENFORCE_WORKSPACES") or _reaches_every_workspace(claims)
     return WorkspaceSummaryResponse(
         coverage="all" if every else "granted", totals=totals, workspaces=rows,
+    )
+
+
+#: Days the Dashboard's trend covers, today included.
+TREND_DAYS = 30
+
+
+@router.get("/summary/trend", response_model=WorkspaceSummaryTrendResponse)
+async def get_workspaces_summary_trend(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The summary's totals over the last ``TREND_DAYS`` days — the same
+    estate and the same counting rules, for the Dashboard's sparklines.
+
+    Entities and relationships come from the day rollups profiling keeps, each
+    observation filed under its physical graph first, so a graph mounted in two
+    workspaces counts once here as it does in the summary. A graph keeps its
+    last known size through days it wasn't measured; a day before anything was
+    measured is None, not zero. Workspaces, sources and views are counted by
+    the day they were created, among those that exist now. Read-only: unlike
+    the summary it never queues a stats refresh.
+    """
+    now = datetime.now(timezone.utc)
+    days = [(now.date() - timedelta(days=n)).isoformat() for n in range(TREND_DAYS - 1, -1, -1)]
+    workspaces = await _visible_workspaces(session, claims)
+    sources = [ds for ws in workspaces for ds in ws.data_sources]
+
+    graph_of = {
+        ds.id: f"{ds.provider_id}/{ds.graph_name}" if ds.provider_id and ds.graph_name else ds.id
+        for ds in sources
+    }
+    observations, _truncated = await profiling_repo.read_observations(
+        session, scope="all", scope_id=None, visible=list(graph_of),
+        frm=days[0], to=now.isoformat(), grain="day",
+    )
+    series = profiling_series.build_series(
+        [replace(o, data_source_id=graph_of[o.data_source_id]) for o in observations],
+    )
+    measured = {
+        bucket[:10]: (n, e)
+        for bucket, n, e in zip(series["buckets"], series["totals"].get("nodes", []), series["totals"].get("edges", []))
+    }
+    nodes: list = []
+    edges: list = []
+    last = (None, None)
+    for day in days:
+        last = measured.get(day, last)
+        nodes.append(last[0])
+        edges.append(last[1])
+
+    def cumulative(created: list) -> list:
+        born = sorted(c[:10] for c in created)
+        return [sum(1 for b in born if b <= day) for day in days]
+
+    readable, _scope = await readable_clause(session, user, claims)
+    views_before = await view_repo.count_views(session, readable=readable, created_before=days[0])
+    created = await view_repo.view_histogram(
+        session, field="created", grain="hour", after=days[0],
+        before=(now.date() + timedelta(days=1)).isoformat(), readable=readable,
+    )
+    per_day: dict = {}
+    for hour, n in created:
+        per_day[hour[:10]] = per_day.get(hour[:10], 0) + n
+    views, running = [], views_before
+    for day in days:
+        running += per_day.get(day, 0)
+        views.append(running)
+
+    return WorkspaceSummaryTrendResponse(
+        days=days,
+        workspaces=cumulative([ws.created_at for ws in workspaces]),
+        dataSources=cumulative([ds.created_at for ds in sources]),
+        views=views,
+        nodes=nodes,
+        edges=edges,
     )
 
 

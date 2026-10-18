@@ -9,7 +9,7 @@ as the Explorer counts them.
 """
 import contextlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from httpx import AsyncClient
@@ -20,6 +20,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
 )
 from backend.app.db.models import (
+    DataSourceCountRollupORM,
     DataSourceStatsORM,
     ProviderORM,
     ViewORM,
@@ -242,3 +243,57 @@ async def test_the_list_still_loads_when_view_access_cannot_be_worked_out(
         resp = await test_client.get("/api/v1/admin/workspaces")
     assert resp.status_code == 200
     assert {w["id"]: w["viewCount"] for w in resp.json()} == {WS_FIN: None, WS_OPS: None}
+
+
+TREND = "/api/v1/admin/workspaces/summary/trend"
+
+
+async def _rollups(db_session):
+    """Day rollups, as profiling keeps them: g1 through both of its mounts (one
+    graph, 100 then 110), g2 and the paused g3 from yesterday."""
+    today = datetime.now(timezone.utc).date()
+
+    def roll(ds_id, days_ago, nodes, edges):
+        return DataSourceCountRollupORM(
+            data_source_id=ds_id, grain="day", bucket_start=(today - timedelta(days=days_ago)).isoformat(),
+            node_count=nodes, edge_count=edges,
+        )
+
+    db_session.add_all([
+        roll("ds_fin_g1", 2, 100, 50), roll("ds_ops_g1", 2, 100, 50),
+        roll("ds_fin_cold", 1, 7, 3), roll("ds_ops_paused", 1, 10, 5),
+        roll("ds_fin_g1", 0, 110, 55), roll("ds_ops_g1", 0, 110, 55),
+    ])
+    await db_session.commit()
+
+
+async def test_the_trend_counts_a_shared_graph_once_and_ends_where_the_summary_is(
+    test_client: AsyncClient, db_session,
+):
+    await _estate(db_session)
+    await _views(db_session)
+    await _rollups(db_session)
+    trend = (await test_client.get(TREND)).json()
+    summary = (await test_client.get(URL)).json()
+
+    assert len(trend["days"]) == 30
+    assert trend["days"][-1] == datetime.now(timezone.utc).date().isoformat()
+    # Nothing measured before three days ago: unknown, not zero.
+    assert trend["nodes"][:27] == [None] * 27
+    # g1 once (not 200), then g2 and g3 join, then g1 grows.
+    assert trend["nodes"][-3:] == [100, 117, 127]
+    assert trend["edges"][-3:] == [50, 58, 63]
+    for key, total in (("views", "views"), ("workspaces", "workspaces"), ("dataSources", "dataSources")):
+        assert trend[key][-1] == summary["totals"][total], key
+    assert trend["views"][0] == 0  # every view here was made today
+
+
+async def test_the_trend_covers_only_the_callers_workspaces(test_client: AsyncClient, db_session):
+    await _estate(db_session)
+    await _rollups(db_session)
+    bob = PermissionClaims(sid="s_bob", ws_perms={WS_FIN: _MEMBER})
+    with _auth(user=BOB, claims=bob):
+        trend = (await test_client.get(TREND)).json()
+    # Finance mounts g1 and g2; Operations' paused g3 is not Bob's.
+    assert trend["nodes"][-3:] == [100, 107, 117]
+    assert trend["workspaces"][-1] == 1

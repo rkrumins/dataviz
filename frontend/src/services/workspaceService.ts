@@ -267,6 +267,21 @@ export interface WorkspaceSummary {
 }
 
 /**
+ * {@link WorkspaceSummary}'s totals day by day, oldest first: each list holds one
+ * value per entry of `days` (UTC dates, today last). Counted the same way — a
+ * graph used by several workspaces once — among what exists now.
+ */
+export interface WorkspaceSummaryTrend {
+    days: string[]
+    workspaces: number[]
+    dataSources: number[]
+    views: number[]
+    /** null for a day before anything was measured — not zero. */
+    nodes: (number | null)[]
+    edges: (number | null)[]
+}
+
+/**
  * Resolve a data source's provenance when `sourceMode` is null/absent
  * (legacy rows). Mirrors the backend ORM comment: a source with no
  * catalog item is a manual/blank in-app model → managed; anything
@@ -314,6 +329,11 @@ export const workspaceService = {
     /** Counts for every workspace the caller can see — see {@link WorkspaceSummary}. */
     summary(): Promise<WorkspaceSummary> {
         return request<WorkspaceSummary>(`${ADMIN_API}/summary`)
+    },
+
+    /** The same totals day by day over the last 30 days — see {@link WorkspaceSummaryTrend}. */
+    summaryTrend(): Promise<WorkspaceSummaryTrend> {
+        return request<WorkspaceSummaryTrend>(`${ADMIN_API}/summary/trend`)
     },
 
     /**

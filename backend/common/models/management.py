@@ -1074,6 +1074,18 @@ class WorkspaceSummaryResponse(BaseModel):
     workspaces: List[WorkspaceSummaryRow] = Field(default_factory=list)
 
 
+class WorkspaceSummaryTrendResponse(BaseModel):
+    """The summary's totals day by day, oldest first — each list one value per
+    entry of ``days`` (UTC dates, today last)."""
+    days: List[str] = Field(default_factory=list)
+    workspaces: List[int] = Field(default_factory=list)
+    data_sources: List[int] = Field(default_factory=list, alias="dataSources")
+    views: List[int] = Field(default_factory=list)
+    #: None for a day before anything was measured — not zero.
+    nodes: List[Optional[int]] = Field(default_factory=list)
+    edges: List[Optional[int]] = Field(default_factory=list)
+
+
 # ============================================
 # View Models (visual rendering of context models)
 # ============================================

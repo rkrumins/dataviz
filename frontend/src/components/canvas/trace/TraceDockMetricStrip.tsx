@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { TraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
-import { useCountUp } from './useCountUp'
+import { useCountUp } from '@/hooks/useCountUp'
 
 export interface TraceDockMetricStripProps {
   result: TraceResult | null

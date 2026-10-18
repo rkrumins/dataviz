@@ -9,7 +9,11 @@
  *   3. "Where do I go next?"       → workspaces, views, templates, semantic layers
  *
  * Deliberately NOT an operator console: provider health, broken/stale sweeps and
- * pipeline internals belong to an admin persona and live in Ingestion/Admin.
+ * pipeline internals belong to an admin persona and live in Ingestion/Admin. The
+ * one exception is NeedsAttention: open profiling findings (a source that moved
+ * far beyond its usual range, lost a type, or went quiet), shown only to people
+ * who can read profiling, because a Dashboard that says "All sources active"
+ * while a graph lost half its entities is worse than one that says nothing.
  *
  * Everything is now wired to real endpoints. This page previously shipped
  * several placeholders that LOOKED like data:
@@ -28,7 +32,7 @@ import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
 import { useLayoutTemplates } from '@/hooks/useLayoutTemplates'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
-import { useWorkspaceSummary } from '@/hooks/useWorkspaceSummary'
+import { useWorkspaceSummary, useWorkspaceSummaryTrend } from '@/hooks/useWorkspaceSummary'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useSchemaStore } from '@/store/schema'
@@ -44,6 +48,7 @@ import { DashboardSkeleton } from './DashboardSkeleton'
 import { DashboardActivityFeed } from './DashboardActivityFeed'
 import { DashboardWorkHub } from './DashboardWorkHub'
 import { InsightCards } from './InsightCards'
+import { NeedsAttention } from './NeedsAttention'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid } from './TemplateGrid'
 import { DashboardSemanticLayers } from './DashboardSemanticLayers'
@@ -67,6 +72,7 @@ export function Dashboard() {
     // list itself is reloaded on each visit too: it used to load once at sign-in,
     // so added or removed workspaces and sources never showed up here.
     const { summary } = useWorkspaceSummary()
+    const { trend } = useWorkspaceSummaryTrend()
     const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
     useEffect(() => { void loadWorkspaces() }, [loadWorkspaces])
 
@@ -267,19 +273,15 @@ export function Dashboard() {
                     <WorkspaceGrid workspaces={workspaces} summary={summary} />
                 </motion.div>
 
-                {/* 5. At-a-glance numbers — live values, each a click-through */}
+                {/* 5. At-a-glance numbers — live values, their 30-day trend, and a
+                       sheet with what is behind each */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 4, ...MOTION.sectionEntry }}
                 >
-                    <InsightCards
-                        summary={summary}
-                        semanticLayers={{
-                            total: ontologies.length,
-                            published: ontologies.filter(o => o.isPublished).length,
-                        }}
-                    />
+                    <InsightCards summary={summary} trend={trend} ontologies={ontologies} />
+                    <NeedsAttention />
                 </motion.div>
 
                 {/* 6. Layout templates */}
