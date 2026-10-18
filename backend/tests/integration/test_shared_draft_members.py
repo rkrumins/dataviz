@@ -283,9 +283,10 @@ async def _groups_unavailable(c, V, ds, gid, shared_draft, groups) -> None:
     r = await c.get(f"{V1}/graphs/{gid}/branches/{d}/members", headers=_as("erin", manage=False))
     assert r.status_code == 503 and r.json()["detail"]["type"] == "groups_unavailable", r.text
     assert len((await c.get(f"{V1}/graphs/{gid}/commits", params=log, headers=_as("alice"))).json()["commits"]) == commits
-    with pytest.raises(GroupsUnavailable):         # a queued publish fails resumable, not refused
-        await V._publish_from_job({"graphId": gid, "branchId": d, "actor": "frank", "message": "m",
-                                   "workspaceId": "ws1"})
+    refused = await V._publish_from_job({"graphId": gid, "branchId": d, "actor": "frank",
+                                         "message": "m", "workspaceId": "ws1"})
+    # A queued publish records the route's answer, 503: the job fails and the draft is handed back.
+    assert (refused["error"]["status"], refused["error"]["detail"]["type"]) == (503, "groups_unavailable")
 
     # The owner and a direct member never need the lookup.
     groups.calls[:] = []
