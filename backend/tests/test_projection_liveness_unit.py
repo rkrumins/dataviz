@@ -153,7 +153,7 @@ def test_the_projection_lane_runs_the_liveness_loop(monkeypatch):
     async def idle():
         return None
 
-    for name in ("_poll_loop", "_stream_loop"):
+    for name in ("_poll_loop", "_stream_loop", "_retire_loop"):
         monkeypatch.setattr(w, name, idle)
 
     async def no_group():
@@ -183,7 +183,7 @@ def test_liveness_can_be_turned_off(monkeypatch):
     async def idle():
         return None
 
-    for name in ("_poll_loop", "_stream_loop", "_reclaim_pending"):
+    for name in ("_poll_loop", "_stream_loop", "_reclaim_pending", "_retire_loop"):
         monkeypatch.setattr(w, name, idle)
     monkeypatch.setattr(worker, "ensure_consumer_group", idle)
     _run(asyncio.wait_for(w.run(), 5))

@@ -323,77 +323,101 @@ class PurgeRunner:
 
     async def _phase_falkor(self, lease: Lease, graph_id: str) -> bool:
         """Drop the projected FalkorDB graph — if, and only if, it is ours to drop and nothing else
-        reads it."""
+        reads it — and, by the same rule, each old key a move left waiting to be dropped
+        (``retired_keys``) that holds the projector's pass marker."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             name = ps.falkor_graph_name if ps else None
             owned = bool(ps.owns_falkor_graph) if ps else False
             provider = ps.falkor_provider if ps else None
+            retired = list(ps.retired_keys or []) if ps else []
             ds_id = getattr(await s.get(JobORM, lease.job_id), "data_source_id", None)
 
+        async def verdict_for(name, provider, owned, *, marked: bool = False) -> str:
             shared_with = 0
             if name:
-                # Belt and braces: even a graph we minted must not be dropped while another
-                # SURVIVING graph still projects into it. Ownership answers "did we make this?";
-                # this answers "is anyone still using it?".
-                shared_with = int(await s.scalar(text(
-                    f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
-                    f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
-                    f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
-                    f'  AND g.deleted_at IS NULL'
-                ), {"n": name, "g": graph_id}) or 0)
+                async with self._session() as s:
+                    # Belt and braces: even a graph we minted must not be dropped while another
+                    # SURVIVING graph still projects into it. Ownership answers "did we make this?";
+                    # this answers "is anyone still using it?".
+                    shared_with = int(await s.scalar(text(
+                        f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
+                        f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
+                        f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
+                        f'  AND g.deleted_at IS NULL'
+                    ), {"n": name, "g": graph_id}) or 0)
 
-        # Ownership says we made the key; it does not say nobody else reads it now — another data
-        # source bound to the same name, or a catalog entry publishing it. Asked last (only of a key
-        # we would otherwise drop), and an answer we cannot get keeps the key: fail closed.
-        readers: Optional[List[dict]] = []
-        if name and owned and not shared_with:
-            try:
-                readers = await self._key_in_use(provider, name, ds_id)
-            except Exception:                                   # noqa: BLE001 — fail closed
-                logger.warning("purge %s: could not ask who reads '%s'", lease.job_id, name,
-                               exc_info=True)
-                readers = None
+            # Ownership says we made the key; it does not say nobody else reads it now — another
+            # data source bound to the same name, or a catalog entry publishing it. Asked last (only
+            # of a key we would otherwise drop), and an answer we cannot get keeps the key: fail
+            # closed.
+            readers: Optional[List[dict]] = []
+            if name and owned and not shared_with:
+                try:
+                    readers = await self._key_in_use(provider, name, ds_id)
+                except Exception:                               # noqa: BLE001 — fail closed
+                    logger.warning("purge %s: could not ask who reads '%s'", lease.job_id, name,
+                                   exc_info=True)
+                    readers = None
 
-        verdict: str
-        if not name:
-            verdict = "no projected graph"
-        elif not owned:
-            verdict = f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
-        elif shared_with:
-            verdict = f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
-        elif readers is None:
-            verdict = f"PROTECTED: could not check what else reads '{name}' — left untouched"
-        elif readers:
-            verdict = (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
-                       "catalog entr(ies) — left untouched")
-        elif self._factory is None:
-            verdict = f"skipped: no graph client configured — '{name}' left in place"
-        else:
+            if not name:
+                return "no projected graph"
+            if not owned:
+                return f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
+            if shared_with:
+                return f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
+            if readers is None:
+                return f"PROTECTED: could not check what else reads '{name}' — left untouched"
+            if readers:
+                return (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
+                        "catalog entr(ies) — left untouched")
+            if self._factory is None:
+                return f"skipped: no graph client configured — '{name}' left in place"
             try:
                 client = self._factory(name, provider)
                 if inspect.isawaitable(client):
                     client = await client
+                if marked:
+                    # A key the projector wrote carries its pass marker; one without it is not
+                    # a key we can vouch for.
+                    from .projection import read_projection_marker
+                    exists, seq = await read_projection_marker(client)
+                    if exists is False:
+                        return f"'{name}' was already gone"
+                    if seq is None:
+                        return (f"PROTECTED: '{name}' holds no projection marker of ours — "
+                                "left untouched")
                 await client.delete()
-                verdict = f"dropped '{name}'"
                 logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)",
                                lease.job_id, name)
                 # A graph later written under the same name gets a new id catalogue;
                 # every long-lived reader must drop its old one (graph_generation).
                 from backend.app.providers.graph_generation import bump_graph_generation
                 await bump_graph_generation(name, reason=f"purge {lease.job_id}")
+                return f"dropped '{name}'"
             except Exception as exc:                            # pragma: no cover - infra
                 # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
                 # purge over it — and stranding millions of SQL rows — is not an improvement.
                 verdict = f"could not drop '{name}': {exc}"
                 logger.warning("purge %s: %s", lease.job_id, verdict)
+                return verdict
+
+        verdict = await verdict_for(name, provider, owned)
+        # Every key a move left is one we owned: the move refuses any other.
+        gone = []
+        for entry in retired:
+            gone.append({"name": entry["name"], "provider": entry.get("provider"),
+                         "verdict": await verdict_for(entry["name"], entry.get("provider"), True,
+                                                      marked=True)})
 
         async with self._session() as s:
             job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
-            summary["falkor"] = {"name": name, "owned": owned, "verdict": verdict}
+            summary["falkor"] = {"name": name, "owned": owned, "verdict": verdict,
+                                 "retired": gone}
             await lease.checkpoint(s, summary=summary)
-        logger.info("purge %s falkor: %s", lease.job_id, verdict)
+        logger.info("purge %s falkor: %s (%d old key(s) of a move)", lease.job_id, verdict,
+                    len(gone))
         return True
 
     async def _phase_meta(self, lease: Lease, graph_id: str) -> bool:

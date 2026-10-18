@@ -2,7 +2,8 @@
 
 * ``versioned_sources.graphs_pinned_to`` lists every graph whose projection is pinned to the
   provider, trashed ones marked, and none pinned elsewhere. A graph whose version control is
-  still being enabled (an unfinished bootstrap) is marked too.
+  still being enabled (an unfinished bootstrap) is marked too. So is a graph moved off the
+  provider whose old key there is still waiting to be dropped.
 * The provider delete guard counts them, and a blank model's manual data source, which has no
   catalog item.
 * The impact report lists each pinned graph's key.
@@ -77,7 +78,18 @@ async def _run() -> None:
             for g in await versioned_sources.graphs_pinned_to(boot_prov)] == [
         (enabling, True), (enabled, False)]
 
+    # A graph moved away still has its old key on the provider until that key is dropped.
+    left_prov, moved = f"prov_left_{tag}", f"g_{tag}_a_moved"
+    await _seed_graph(moved, ds=f"dsmoved_{tag}", provider=f"prov_new_{tag}")
+    async with db.graphver_session() as s:
+        (await s.get(ProjectionStateORM, moved)).retired_keys = [
+            {"name": f"old_{moved}", "provider": left_prov, "retireAfter": models._now(),
+             "afterSeq": 1, "movedBy": "admin"}]
+    assert [g.graph_id for g in await versioned_sources.graphs_pinned_to(left_prov)] == [moved]
+
     async with get_async_session() as s:
+        assert await provider_repo.has_workspaces(s, left_prov) is True, \
+            "an old key still waiting to be dropped there"
         assert await provider_repo.has_workspaces(s, blank_prov) is True
         assert await provider_repo.has_workspaces(s, fork_prov) is True, \
             "pinned graphs alone, with no management row naming the provider"

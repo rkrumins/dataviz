@@ -78,7 +78,8 @@ def _landing(job):
 
 
 def _ps(owned, name="cust_graph"):
-    return SimpleNamespace(falkor_graph_name=name, owns_falkor_graph=owned, falkor_provider=None)
+    return SimpleNamespace(falkor_graph_name=name, owns_falkor_graph=owned, falkor_provider=None,
+                           retired_keys=None)
 
 
 def test_external_graph_is_never_dropped():

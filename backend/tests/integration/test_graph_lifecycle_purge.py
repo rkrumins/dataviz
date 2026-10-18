@@ -11,6 +11,8 @@
   once, and a purge refused for forks is retried once they are gone;
 * a trashed fork past its grace is purged by the reaper, which drops the fork's own key and
   never its parent's — a customer's;
+* a purge also drops the old keys a move left waiting, unless something else reads one or it
+  holds no pass marker of ours, and records what it did with each;
 * a restore that wins the race with the reaper keeps its graph, and so does a fork's restore
   that wins the race with its parent's purge; a fork, or a fork's restore, made while its parent
   is being purged or trashed loses;
@@ -35,7 +37,7 @@ from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, Workspace
 from backend.app.services.versioning import config, db, models, purge_worker
 from backend.app.services.versioning.errors import ForkNotRestorable
 from backend.app.services.versioning.job_lease import Lease
-from backend.app.services.versioning.models import GraphORM, JobORM
+from backend.app.services.versioning.models import GraphORM, JobORM, ProjectionStateORM
 from backend.app.services.versioning.purge_worker import (
     PurgeRefused,
     PurgeRunner,
@@ -548,6 +550,45 @@ async def test_the_reaper_purges_an_expired_trashed_fork_dropping_only_its_own_k
     assert await _rows_of(gid, "projection_state") == 1
     for table in [t for t, _ in purge_worker._BULK] + ["branches", "projection_state"]:
         assert await _rows_of(fid, table) == 0, table
+
+
+async def test_a_purge_drops_the_old_keys_a_move_left_and_keeps_those_it_may_not():
+    svc = GraphVersioningService()
+    key = "gvt_" + os.urandom(4).hex()
+    ds, gid = await _graph(svc, falkor_graph_name=key, owns_falkor_graph=True)
+    old, bound, unmarked = (f"gvt_{n}_" + os.urandom(3).hex() for n in ("old", "bound", "bare"))
+    async with db.graphver_session() as s:          # moved away from each, none dropped yet
+        (await s.get(ProjectionStateORM, gid)).retired_keys = [
+            {"name": n, "provider": "prov_A", "retireAfter": "2999-01-01T00:00:00+00:00",
+             "afterSeq": 99, "movedBy": "admin"} for n in (old, bound, unmarked)]
+    await _trash(ds)
+    job_id = await create_purge_job(graph_id=gid, workspace_id=WS, actor="alice")
+
+    dropped = []
+
+    class _Key:
+        def __init__(self, name, provider_id):
+            self.at = (provider_id, name)
+
+        async def ro_query(self, cypher, params=None, timeout=None):     # the pass marker
+            return SimpleNamespace(result_set=[] if self.at[1] == unmarked else [[2]])
+
+        async def delete(self):
+            dropped.append(self.at)
+
+    async def readers(_provider, name, _exclude_ds):
+        return [{"kind": "dataSource", "dataSourceId": "ds_other"}] if name == bound else []
+
+    runner = PurgeRunner(lambda name, provider_id=None: _Key(name, provider_id),
+                         key_in_use=readers)
+    assert (await runner.run_job(await _take(job_id)))["status"] == "completed"
+    assert dropped == [(None, key), ("prov_A", old)]                  # the pin, then the rest
+    falkor = (await _job(job_id)).summary["falkor"]
+    assert falkor["verdict"] == f"dropped '{key}'"
+    verdicts = {r["name"]: r["verdict"] for r in falkor["retired"]}
+    assert verdicts[old] == f"dropped '{old}'"
+    assert verdicts[bound].startswith("PROTECTED") and verdicts[unmarked].startswith("PROTECTED")
+    assert [r["provider"] for r in falkor["retired"]] == ["prov_A"] * 3
 
 
 async def test_a_fork_waits_for_and_loses_to_a_parent_purge_being_queued():

@@ -193,7 +193,8 @@ class PinnedGraph:
 
 
 async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
-    """Every versioned graph projected into provider ``provider_id``, by graph id.
+    """Every versioned graph projected into provider ``provider_id``, or with an old key there a
+    move left waiting to be dropped (``retired_keys``), by graph id.
 
     The provider guards ask this: deleting a provider strands these graphs, and moving it to
     another server leaves their watermarks describing keys that server does not hold. Trashed
@@ -202,7 +203,7 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
     and blank models are found here although no catalog item names the provider. Uncached and
     unbounded in time: a guard must not answer from a stale or missing read, so any failure
     raises."""
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from backend.app.services.versioning.db import get_session_factory
     from backend.app.services.versioning.models import GraphORM, JobORM, ProjectionStateORM
@@ -214,7 +215,8 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
                    select(JobORM.id).where(*bootstrap_unfinished(GraphORM.id))
                    .correlate(GraphORM).exists())
             .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
-            .where(ProjectionStateORM.falkor_provider == provider_id)
+            .where(or_(ProjectionStateORM.falkor_provider == provider_id,
+                       ProjectionStateORM.retired_keys.contains([{"provider": provider_id}])))
             .order_by(GraphORM.id)
         )).all()
     return [PinnedGraph(graph_id=r[0], falkor_graph_name=r[1], trashed=r[2] is not None,

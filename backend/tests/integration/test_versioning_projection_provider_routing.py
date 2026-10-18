@@ -6,6 +6,12 @@ read path and aggregation worker use), an unpinned/None provider falls back to t
 default handle, an awaitable factory result is awaited (the registry factory resolves
 provider rows asynchronously), and eviction drops the graph on its pinned provider.
 
+A moved graph's old key (``keymigrate.retire_moved_keys``) is dropped on its own provider only
+once the new key has caught up and the grace period has passed, and only under the graph's
+projection lock. A key another data source or catalog entry reads, another graph's pin, and a key
+without the projector's pass marker are kept (PROTECTED); when its readers cannot be asked, the
+key waits for the next run.
+
 The ``make_registry_graph_factory``/``list_graph_keys`` unit tests below (no Postgres
 needed — ``session_factory``/``provider_repo`` are stubbed) pin the fail-loud contract: a
 PINNED provider that is missing/inactive/non-falkordb/no-host, or whose lookup raises,
@@ -16,15 +22,23 @@ unrouted/``None`` case is unchanged — env default.
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import func, select
 
 from backend.app.providers import falkor_graph_registry
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import config, db, keymigrate, models, projection
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.tests.integration.test_versioning_projection import (
+    FakeGraph,
+    _Result,
+    _edit_publish,
+    _node,
+)
 
 
 class Recorder:
@@ -116,6 +130,154 @@ async def _run() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_provider_routing_e2e():
     asyncio.run(_run())
+
+
+# ── a moved graph's old key is dropped once the new key has caught up ──
+
+class _Keys:
+    """Per-provider FakeGraphs keyed (provider, name). A RO_QUERY on a key that does not exist
+    raises as FalkorDB does, and the marker read answers from the key's pass marker."""
+
+    def __init__(self):
+        self.keys: dict = {}
+        self.drops: list = []
+
+    def __call__(self, name, provider_id=None):
+        return _Key(self, provider_id, name)
+
+
+class _Key:
+    def __init__(self, keys, provider_id, name):
+        self._keys, self._at = keys, (provider_id, name)
+
+    async def query(self, cypher, params=None):
+        return await self._keys.keys.setdefault(self._at, FakeGraph()).query(cypher, params)
+
+    async def ro_query(self, cypher, params=None, timeout=None):
+        g = self._keys.keys.get(self._at)
+        if g is None:
+            raise RuntimeError("Invalid graph operation on empty key")
+        if cypher == projection._MARKER_READ:
+            return _Result([[g.proj_meta["seq"]]] if g.proj_meta else [])
+        return await g.query(cypher, params)
+
+    async def delete(self):
+        self._keys.drops.append(self._at)
+        self._keys.keys.pop(self._at, None)
+
+
+async def _retired(gid):
+    async with db.graphver_session() as s:
+        return (await s.get(models.ProjectionStateORM, gid)).retired_keys
+
+
+async def _run_retire() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    keys = _Keys()
+    proj = FalkorProjector(keys)
+    asked: list = []
+
+    async def nobody(provider, name, exclude_ds):
+        asked.append((provider, name, exclude_ds))
+        return []
+
+    async def moved(*, caught_up=True):
+        """A graph projected into its own key K1 on prov_A, moved to its platform key on prov_B
+        and, unless asked otherwise, caught up there. Returns ``(graph_id, data_source_id, K1)``."""
+        ds, k1 = "ds_" + os.urandom(4).hex(), "gvt_k1_" + os.urandom(3).hex()
+        gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u",
+                                      falkor_graph_name=k1, falkor_provider="prov_A",
+                                      owns_falkor_graph=True))["graph_id"]
+        await _edit_publish(svc, gid, "u", [
+            {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("A")}], "s")
+        await proj.project_graph(gid)
+        assert keys.keys[("prov_A", k1)].proj_meta, "the old key carries its pass marker"
+        await svc.move_projection(graph_id=gid, provider="prov_B",
+                                  key=keymigrate.owned_key(gid, 1), actor="admin", shard_map={})
+        if caught_up:
+            await proj.project_graph(gid)
+        return gid, ds, k1
+
+    async def retire(gid, **kw):
+        return [r for r in await keymigrate.retire_moved_keys(proj, **kw) if r["graphId"] == gid]
+
+    # Not before the new key has caught up, nor before the grace period has passed.
+    gid, ds, k1 = await moved(caught_up=False)
+    assert await retire(gid, key_in_use=nobody) == []
+    await proj.project_graph(gid)
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    assert await retire(gid, key_in_use=nobody, now=past) == []
+    assert [e["name"] for e in await _retired(gid)] == [k1]
+    assert ("prov_A", k1) not in keys.drops
+
+    # Then the old key is dropped, on its own provider, and its entry goes. Its readers were asked
+    # leaving out only the graph's own data source.
+    assert await retire(gid, key_in_use=nobody) == [
+        {"graphId": gid, "key": k1, "provider": "prov_A", "verdict": "dropped"}]
+    assert keys.drops == [("prov_A", k1)] and ("prov_A", k1) not in keys.keys
+    # (A run walks every graph's entries, other tests' too.)
+    assert [a for a in asked if a[1] == k1] == [("prov_A", k1, ds)]
+    assert await _retired(gid) is None
+    assert await retire(gid, key_in_use=nobody) == []                       # a second run: no-op
+    assert keys.keys[("prov_B", keymigrate.owned_key(gid, 1))].nodes      # the new key is served
+
+    # Another data source or catalog entry reads it: kept, and its entry goes (PROTECTED).
+    gid, ds, k1 = await moved()
+
+    async def bound(*_a):
+        return [{"kind": "dataSource", "dataSourceId": "ds_other"}]
+
+    (out,) = await retire(gid, key_in_use=bound)
+    assert out["verdict"].startswith("PROTECTED") and ("prov_A", k1) not in keys.drops, out
+    assert await _retired(gid) is None
+
+    # Who reads it cannot be asked: kept, with its entry, for the next run.
+    gid, ds, k1 = await moved()
+
+    async def down(*_a):
+        raise RuntimeError("management database unreachable")
+
+    assert await retire(gid, key_in_use=down) == []
+    assert [e["name"] for e in await _retired(gid)] == [k1]
+
+    # A pass (or an evict) holds the graph's gvproj lock: nothing happens until it is free.
+    async with db.graphver_lock_session() as lock_s:
+        lock = func.hashtext(f"gvproj:{gid}")
+        assert await lock_s.scalar(select(func.pg_try_advisory_lock(lock)))
+        assert await retire(gid, key_in_use=nobody) == []
+        assert [e["name"] for e in await _retired(gid)] == [k1]
+        await lock_s.execute(select(func.pg_advisory_unlock(lock)))
+    assert [r["verdict"] for r in await retire(gid, key_in_use=nobody)] == ["dropped"]
+
+    # Another graph has since been pinned to the old key: kept, and its entry goes.
+    gid, ds, k1 = await moved()
+    await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                           actor="u", falkor_graph_name=k1, falkor_provider="prov_A")
+    (out,) = await retire(gid, key_in_use=nobody)
+    assert out["verdict"].startswith("PROTECTED") and ("prov_A", k1) not in keys.drops, out
+    assert await _retired(gid) is None
+
+    # A key without our pass marker is not one the projector wrote: kept, and its entry goes.
+    gid, ds, k1 = await moved()
+    keys.keys[("prov_A", k1)].proj_meta = {}
+    (out,) = await retire(gid, key_in_use=nobody)
+    assert out["verdict"].startswith("PROTECTED") and ("prov_A", k1) not in keys.drops, out
+    assert ("prov_A", k1) in keys.keys and await _retired(gid) is None
+
+    # A key that is already gone counts as dropped, and nothing is sent to it.
+    gid, ds, k1 = await moved()
+    del keys.keys[("prov_A", k1)]
+    assert [r["verdict"] for r in await retire(gid, key_in_use=nobody)] == ["gone"]
+    assert ("prov_A", k1) not in keys.drops and await _retired(gid) is None
+
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_moved_graphs_old_key_is_dropped_once_the_new_one_caught_up(monkeypatch):
+    monkeypatch.setattr(config, "RETIRE_GRACE_SECS", 0)
+    asyncio.run(_run_retire())
 
 
 # ── pinned-unresolvable provider fails loud (no Postgres needed — stubbed lookup) ──
