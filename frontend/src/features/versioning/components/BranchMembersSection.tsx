@@ -3,6 +3,7 @@
  * and maintainers change roles, remove and add people or groups; everyone else reads the list.
  */
 import { Eye, Loader2, Pencil, ShieldCheck, Trash2, Users2 } from 'lucide-react'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Segmented } from '@/components/ui/Segmented'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -81,15 +82,17 @@ export function BranchMembersSection({
                       options={DRAFT_ROLES.map(({ id, label }) => ({ value: id, label }))}
                       onChange={(role) => add.mutate({ subjectType: m.subjectType, subjectId: m.subjectId, role }, { onError })}
                     />
-                    <button
-                      onClick={() => remove.mutate({ subjectType: m.subjectType, subjectId: m.subjectId }, { onError })}
-                      disabled={remove.isPending}
-                      aria-label={`Remove ${name}`}
-                      title={`Remove ${name}`}
-                      className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <HoverTip className="inline-flex" label={`Remove ${name} from this draft`}
+                      detail="Any access the workspace gives them stays as it is">
+                      <button
+                        onClick={() => remove.mutate({ subjectType: m.subjectType, subjectId: m.subjectId }, { onError })}
+                        disabled={remove.isPending}
+                        aria-label={`Remove ${name}`}
+                        className="p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </HoverTip>
                   </>
                 ) : (
                   <span className="text-[11px] font-medium text-ink-muted shrink-0">
