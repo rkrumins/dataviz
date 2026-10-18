@@ -94,6 +94,11 @@ dropping the staged edits.
   publish, Rebuild, and the projection worker) re-points only a graph with no key or with the
   `gv_<id>` placeholder; before, it put any graph whose key differed from its data source's
   `graph_name` back on that name. A pinned key changes only by a projection move.
+- Reads and rollups of a versioned data source now go to the FalkorDB key its graph projects into
+  (`graphver.projection_state`), not the key the data source names. Nothing changes for a graph
+  pinned to its data source's own key. A fork bound to a real data source now reads the fork's key,
+  which the projector writes, instead of the data source's key, which it does not. Each read of a
+  versioned source costs one more graphver lookup, and fails as unavailable if graphver is down.
 
 ---
 

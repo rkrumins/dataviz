@@ -178,6 +178,7 @@ tests/test_property_index.py
 tests/test_property_patch.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
+tests/test_provider_manager_pin_routing.py
 tests/test_provider_refresh_batch.py
 tests/test_provider_versioned_graphs.py
 tests/test_publish_async_api.py
@@ -242,6 +243,7 @@ tests/test_versioning_fork_lifecycle_route.py
 tests/test_versioning_keymigrate.py
 tests/test_versioning_main_lock.py
 tests/test_versioning_neighbors_entitytype.py
+tests/test_versioning_neighbors_route.py
 tests/test_versioning_ontology_rules.py
 tests/test_versioning_pr_reviewers_routes.py
 tests/test_versioning_raw_path_route.py

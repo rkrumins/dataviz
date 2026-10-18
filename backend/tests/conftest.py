@@ -225,6 +225,19 @@ def _no_graphs_pinned_to_providers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _physical_key_is_the_data_source_key(monkeypatch):
+    """Every data source is read from its own key, so ``ProviderManager.get_provider`` does not
+    reach for the ``graphver`` store (see above). A routing test restores the real
+    ``versioned_sources.physical_key`` (see test_provider_manager_pin_routing.py)."""
+    from backend.app.services import versioned_sources
+
+    async def _identity(ds_id, provider_id, graph_name):
+        return provider_id, graph_name
+
+    monkeypatch.setattr(versioned_sources, "physical_key", _identity)
+
+
+@pytest.fixture(autouse=True)
 def _reset_replica_penalty_box():
     """Clear the process-global replica penalty box between tests.
 

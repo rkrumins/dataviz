@@ -9,7 +9,7 @@
 * A move to another key (doc 14 KeyMigration, phase 1) bumps the epoch too: a pass it overtook is
   superseded, and the old key waits in ``retired_keys``. Only this graph's own platform keys move
   or are moved onto; the customer's key and an unpinned graph are refused untouched. The target
-  self-heal never moves the pin back.
+  self-heal never moves the pin back, and the data source's readers follow the pin.
 * Evict and rebuild bump the epoch; a rebuild clears the backoff.
 * A publishing pass leaves its ``_GVProjMeta`` marker (the published seq, its epoch) as its last
   write; a held-back pass leaves the previous one.
@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from backend.app.services import versioned_sources
+from backend.app.services.versioned_sources import physical_key
 from backend.app.services.versioning import db, keymigrate, models, projection
 from backend.app.services.versioning.cache_manager import CacheManager
 from backend.app.services.versioning.errors import (ProjectionKeyInUse, ProjectionKeyInvalid,
@@ -210,6 +212,28 @@ async def _run_the_self_heal_keeps_a_moved_pin() -> None:
 
 def test_the_self_heal_keeps_a_moved_pin():
     asyncio.run(_run_the_self_heal_keeps_a_moved_pin())
+
+
+async def _run_reads_follow_the_pin() -> None:
+    # The management DB keeps naming the data source's key; its readers are routed to the pin.
+    # ``physical_key`` is imported above, before conftest makes it the identity.
+    svc = GraphVersioningService()
+    gid, proj = await _seed(svc, FakeFalkor())
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    old, new = (await _row(gid))["name"], keymigrate.owned_key(gid, 1)
+    versioned_sources.reset_cache()
+    assert await physical_key(ds, "prov_ds", old) == ("prov_ds", old)
+    await svc.move_projection(graph_id=gid, provider="prov_b", key=new, actor="a", shard_map={})
+    assert await physical_key(ds, "prov_ds", old) == ("prov_b", new)
+    await svc.move_projection(graph_id=gid, provider="default", key=old, actor="a", shard_map={})
+    assert await physical_key(ds, "prov_ds", old) == ("prov_ds", old)
+    assert await physical_key("ds_unversioned", "prov_ds", "k") == ("prov_ds", "k")
+    await proj.project_graph(gid)                         # leave the row idle for later tests
+    await db.dispose_engine()
+
+
+def test_reads_follow_the_pin():
+    asyncio.run(_run_reads_follow_the_pin())
 
 
 async def _run_a_move_touches_only_what_it_may() -> None:

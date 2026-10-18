@@ -164,13 +164,18 @@ class ContextEngine:
         norm = (branch_id or "").strip()
         if data_source_id:
             from .versioning.service import GraphVersioningService
+            from .versioned_sources import serves_pin
             svc = GraphVersioningService()
             graph = await svc.get_graph_by_data_source(data_source_id)
             if graph is not None:
                 gid = graph["graph_id"]
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
-                main_fresh = (await svc.projection_watermark(gid))["fresh"]
+                wm = await svc.projection_watermark(gid)
+                # Main is served from FalkorDB only from the key the projection publishes.
+                main_fresh = wm["fresh"] and serves_pin(
+                    getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+                    wm.get("falkor_graph_name"), gid)
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:

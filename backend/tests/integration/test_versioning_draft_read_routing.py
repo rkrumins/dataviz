@@ -8,7 +8,8 @@ omission, and the opaque main id) the rule is read-your-writes: the live provide
 is fresh (the hot path), but the Postgres reader when the projection lags the committed head (e.g.
 just after a merge) so the change is visible immediately. An unknown branch on a versioned graph is a
 KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data source
-is ignored (lenient). No FalkorDB — the live provider is a stub since only the *selection* is under
+is ignored (lenient). A fresh projection serves main only through a provider that reads the pinned
+key (``serves_pin``): one resolved to another key falls back to Postgres. No FalkorDB — the live provider is a stub since only the *selection* is under
 test; ontology resolution and the projection watermark are stubbed so the test is independent of DB
 ontology and any running projector.
 """
@@ -34,14 +35,20 @@ class _StubProvider:
 
 
 class _StubRegistry:
+    def __init__(self, manager_cache_key=None):
+        self._key = manager_cache_key
+
     async def get_provider_for_workspace(self, workspace_id, session, data_source_id):
-        return _StubProvider()
+        provider = _StubProvider()
+        if self._key is not None:
+            provider.manager_cache_key = self._key
+        return provider
 
 
-async def _for_workspace(ds, branch_id):
+async def _for_workspace(ds, branch_id, registry=None):
     async with db.graphver_session() as session:
         return await ContextEngine.for_workspace(
-            "ws1", _StubRegistry(), session, data_source_id=ds, branch_id=branch_id)
+            "ws1", registry or _StubRegistry(), session, data_source_id=ds, branch_id=branch_id)
 
 
 async def _run() -> None:
@@ -92,6 +99,28 @@ async def _run() -> None:
         live_main = (await _for_workspace(ds, "main")).provider
         assert isinstance(live_main, VersionedWriteProvider) and isinstance(live_main._inner, _StubProvider)
         assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
+
+        # Fresh, but the provider in hand serves another key than the pin (a move committed after
+        # it was resolved, or a stale versioned-set cache): main and a draft's base read Postgres.
+        pin = ("prov_B", "K2_" + os.urandom(3).hex())
+        async with db.graphver_session() as s:
+            ps = await s.get(models.ProjectionStateORM, gid)
+            old_pin = (ps.falkor_provider, ps.falkor_graph_name)
+            ps.falkor_provider, ps.falkor_graph_name = pin
+        assert (await svc.projection_watermark(gid))["fresh"] is True
+        elsewhere = _StubRegistry(manager_cache_key=("prov_A", "K1"))
+        e = await _for_workspace(ds, "main", elsewhere)
+        assert isinstance(e.provider, VersionedBranchProvider) and e.provider._branch == main
+        assert isinstance((await _for_workspace(ds, draft, elsewhere)).provider._base,
+                          VersionedBranchProvider)
+        # The provider that serves the pin is the hot path again.
+        served = _StubRegistry(manager_cache_key=pin)
+        e = await _for_workspace(ds, "main", served)
+        assert isinstance(e.provider, VersionedWriteProvider) and isinstance(e.provider._inner, _StubProvider)
+        assert isinstance((await _for_workspace(ds, draft, served)).provider._base, _StubProvider)
+        async with db.graphver_session() as s:
+            ps = await s.get(models.ProjectionStateORM, gid)
+            ps.falkor_provider, ps.falkor_graph_name = old_pin
 
         # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live
         # provider, wrapped so a write commits to versioning even with GRAPHVER_VERSIONED_WRITES=0

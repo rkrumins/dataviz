@@ -29,6 +29,10 @@ set costs one indexed scan and removes any dependence on the caller's candidate
 list. A source becomes versioned once and stays versioned, so the result is
 cached generously.
 
+:func:`physical_key` answers a third question for the provider manager: which key a
+versioned source's reads go to, since a moved graph projects into a key the management DB does
+not name.
+
 :func:`projector_health` is the sibling that answers the *other* half of
 the question — not "who masters this source" but "and is that mastering
 currently working". It reads the same control plane and is cached for
@@ -216,6 +220,57 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
     return [PinnedGraph(graph_id=r[0], falkor_graph_name=r[1], trashed=r[2] is not None,
                         bootstrapping=bool(r[3]))
             for r in rows]
+
+
+async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) -> tuple:
+    """The (provider, FalkorDB key) a data source's reads and rollups go to (doc 14 §6, phase 1).
+
+    The management DB keeps naming the data source's logical key; a versioned graph's projection
+    pin is where its content actually is once the graph has been moved. A source that is not
+    versioned, or whose graph is unpinned (NULL, or the ``gv_<id>`` placeholder nothing reads),
+    keeps its own key. A pin on the default provider keeps the data source's provider. Uncached;
+    a failed graphver read raises, so a versioned read never silently lands on the old key."""
+    try:
+        versioned = ds_id in await versioned_data_source_ids()
+    except VersionedLookupUnavailable as exc:
+        logger.warning("versioned set unavailable, reading ds=%s from its own key: %s", ds_id, exc)
+        return provider_id, graph_name
+    if not versioned:
+        return provider_id, graph_name
+
+    from sqlalchemy import select
+
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
+    from backend.app.services.versioning.db import get_session_factory
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    async with get_session_factory()() as session:
+        row = (await session.execute(
+            select(GraphORM.id, ProjectionStateORM.falkor_provider,
+                   ProjectionStateORM.falkor_graph_name)
+            .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+            .where(GraphORM.data_source_id == ds_id, GraphORM.deleted_at.is_(None))
+        )).first()
+    if row is None or row[2] in (None, f"gv_{row[0]}"):
+        return provider_id, graph_name
+    pin_provider = row[1] if row[1] not in (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id
+    return pin_provider, row[2]
+
+
+def serves_pin(served, pin_provider: Optional[str], pin_name: Optional[str],
+               graph_id: str) -> bool:
+    """Whether a provider built for ``served`` = (provider, key) reads the graph's pinned key.
+
+    ContextEngine counts main as fresh only when it does: a move can commit, and its new key
+    publish, between ``get_provider`` resolving the old key and the watermark read. A provider
+    the manager did not build (no key), an unpinned graph, and a pin on the default provider
+    (compared by name only) all count as serving."""
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
+
+    if served is None or pin_name in (None, f"gv_{graph_id}"):
+        return True
+    return served[1] == pin_name and (pin_provider in (None, "", DEFAULT_FALKOR_PROVIDER)
+                                      or served[0] == pin_provider)
 
 
 def _iso(value) -> Optional[str]:

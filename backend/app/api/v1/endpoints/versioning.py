@@ -2367,6 +2367,7 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
     can_falkor = bool(
         is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
+        and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
     )
     if can_falkor:
         await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
