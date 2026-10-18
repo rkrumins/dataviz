@@ -277,7 +277,7 @@ _REACHABLE_AMBIGUOUS_PERSISTENCE = int(os.getenv("PROVIDER_PREFLIGHT_AMBIGUOUS_M
 _NON_CLOSED_BREAKER_STATES = (BreakerState.OPEN.value, BreakerState.HALF_OPEN.value)
 
 
-async def _publish_provider_state_changed() -> None:
+def _publish_provider_state_changed() -> None:
     """Tell connected clients that provider state moved.
 
     Called only on an actual transition — a provider recovering, or a
@@ -287,14 +287,15 @@ async def _publish_provider_state_changed() -> None:
     constantly, and a bump per check would turn every client's idle poll
     into an idle refetch, which is worse than the poll it replaced.
 
-    Best-effort and non-fatal: provider observation must not depend on
-    Redis being reachable.
+    Best-effort, non-fatal, and never waited for: provider observation
+    must not depend on Redis being reachable, and this runs inside the
+    loop that opens and closes every provider's breakers.
     """
     try:
         from backend.app.changes import topics as change_topics
-        from backend.app.changes.publish import publish_change
+        from backend.app.changes.publish import schedule_change
 
-        await publish_change(
+        schedule_change(
             change_topics.PROVIDER_HEALTH, change_topics.PROVIDER_STATUS,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1010,7 +1011,7 @@ class ProviderManager:
                 "Provider %s recovered (source=%s) — breakers reset, cache evicted",
                 provider_id, source,
             )
-            await _publish_provider_state_changed()
+            _publish_provider_state_changed()
 
     async def record_probe_failure(
         self,
@@ -1118,7 +1119,7 @@ class ProviderManager:
         # closed → open: this provider has actually changed state, as
         # opposed to failing another probe it was already failing.
         if pre_trip_targets:
-            await _publish_provider_state_changed()
+            _publish_provider_state_changed()
 
     def snapshot_state(
         self, provider_id: str, graph_name: str = "",

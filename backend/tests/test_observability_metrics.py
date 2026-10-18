@@ -244,6 +244,50 @@ async def test_db_queries_are_counted():
         await engine.dispose()
 
 
+async def test_a_failing_query_counter_never_fails_the_query(monkeypatch):
+    """The counter runs inside every statement, health checks' included,
+    so a metrics backend that raises must cost a missed count, never a
+    database call."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from backend.app.db.engine import _count_queries_on
+    from backend.app.observability.metrics import db_queries_total
+
+    class _Broken:
+        def inc(self, *a, **k):
+            raise OSError("metrics file unwritable")
+
+    monkeypatch.setattr(db_queries_total, "labels", lambda **_: _Broken())
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        _count_queries_on(engine, "test-role")
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT 1"))).scalar() == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_a_failing_request_counter_never_reaches_the_response(monkeypatch):
+    """The outermost middleware sees every request, liveness and readiness
+    probes included. A metrics fault must not turn an answered request
+    into an error."""
+    app = _app()
+
+    @app.get("/healthy")
+    async def healthy():
+        return PlainTextResponse("ok")
+
+    def _broken(**_):
+        raise OSError("metrics file unwritable")
+
+    monkeypatch.setattr(http_requests_total, "labels", _broken)
+
+    resp = await _get(app, "/healthy")
+
+    assert resp.status_code == 200 and resp.text == "ok"
+
+
 # ── Multiple workers ──────────────────────────────────────────────────
 #
 # Production runs gunicorn with several workers, and workers are not

@@ -123,3 +123,97 @@ describe('provider pollers — chain-leak contract', () => {
     }
   })
 })
+
+/**
+ * While a provider is down, these stores re-read on a timer of their own.
+ *
+ * They otherwise refresh only when the server publishes a transition, and
+ * the recovery transition is the one that can be lost: published while
+ * Redis is unreachable, or waiting behind a long change-feed interval with
+ * live push off. The timer exists only during an outage.
+ */
+describe('provider pollers — outage recheck', () => {
+  /** One recheck interval plus the most `withJitter` can add. */
+  const ONE_TICK = 60_000 * 1.3 + 1
+
+  beforeEach(() => {
+    vi.resetModules()
+    mockFetch.mockReset()
+    localStorage.clear()
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  const health = (status: string) =>
+    ({ ok: true, json: async () => ({ providers: { 'ws_1:ds_1': { status } } }) }) as unknown as Response
+
+  it('providerHealth: rechecks every minute while a provider is down, and stops once it is back', async () => {
+    mockFetch.mockResolvedValue(health('unreachable'))
+    const { enableProviderHealthPolling, disableProviderHealthPolling } = await import('../providerHealth')
+
+    enableProviderHealthPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(ONE_TICK)
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+
+    mockFetch.mockResolvedValue(health('healthy'))
+    await vi.advanceTimersByTimeAsync(ONE_TICK)
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(ONE_TICK * 3)
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+
+    disableProviderHealthPolling()
+  })
+
+  it('providerHealth: asks nothing on a timer while every provider is healthy', async () => {
+    mockFetch.mockResolvedValue(health('healthy'))
+    const { enableProviderHealthPolling, disableProviderHealthPolling } = await import('../providerHealth')
+
+    enableProviderHealthPolling()
+    await vi.advanceTimersByTimeAsync(ONE_TICK * 3)
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    disableProviderHealthPolling()
+  })
+
+  it('providerStatus: rechecks every minute while a provider is unavailable', async () => {
+    const { providerService } = await import('@/services/providerService')
+    const status = (s: 'ready' | 'unavailable') =>
+      [{ id: 'prov_1', name: 'Graph', status: s }] as unknown as Awaited<ReturnType<typeof providerService.listStatus>>
+    const spy = vi.spyOn(providerService, 'listStatus').mockResolvedValue(status('unavailable'))
+    const { enableProviderStatusPolling, disableProviderStatusPolling } = await import('../providerStatus')
+
+    enableProviderStatusPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(ONE_TICK)
+    expect(spy).toHaveBeenCalledTimes(2)
+
+    spy.mockResolvedValue(status('ready'))
+    await vi.advanceTimersByTimeAsync(ONE_TICK)
+    await vi.advanceTimersByTimeAsync(ONE_TICK * 3)
+    expect(spy).toHaveBeenCalledTimes(3)
+
+    disableProviderStatusPolling()
+  })
+
+  it('providerStatus: asks nothing on a timer while every provider is ready', async () => {
+    const { providerService } = await import('@/services/providerService')
+    const spy = vi
+      .spyOn(providerService, 'listStatus')
+      .mockResolvedValue([{ id: 'prov_1', name: 'Graph', status: 'ready' }] as unknown as Awaited<ReturnType<typeof providerService.listStatus>>)
+    const { enableProviderStatusPolling, disableProviderStatusPolling } = await import('../providerStatus')
+
+    enableProviderStatusPolling()
+    await vi.advanceTimersByTimeAsync(ONE_TICK * 3)
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    disableProviderStatusPolling()
+  })
+})

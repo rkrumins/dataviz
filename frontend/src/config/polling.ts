@@ -41,12 +41,13 @@ export const POLLING_INTERVALS = {
    */
   announcements: 60_000,
   /**
-   * Provider health/status. Background poll for the connection status
-   * indicator across all configured providers. 60s (was 30s): the
-   * indicator is advisory; real outages surface through request
-   * failures and the health banner long before this poll.
+   * Provider health/status, re-read while a provider is down and only
+   * then (`lib/outageRecheck.ts`). Otherwise both follow the change feed.
+   * The cadence the old background poll used, kept for the one moment
+   * that matters: noticing a recovery whose published transition was
+   * lost, or is waiting behind a long change-feed interval.
    */
-  providerStatus: 60_000,
+  providerOutageRecheck: 60_000,
   /**
    * The change manifest (`GET /api/v1/changes`) — the one request that
    * replaced nine.
@@ -74,29 +75,6 @@ export const POLLING_INTERVALS = {
    * scales linearly with how many users are watching.
    */
   aggregationHistoryActive: 5_000,
-  /**
-   * Caller's own permissions (``GET /me/permissions``). Catches the
-   * idle-user case where an admin mutates bindings while the user is
-   * staring at a page without making any API calls — the silent
-   * refresh-on-401 dance only fires when the user actively requests
-   * something, so without this poll, idle users would still be on
-   * stale claims until natural JWT expiry. The endpoint is a no-DB
-   * JWT decode (``backend/app/api/v1/endpoints/me.py:39``) so a 60s
-   * poll is essentially free.
-   */
-  permissions: 60_000,
-  /**
-   * The bell (``GET /me/notifications``). Like announcements and
-   * permissions this is an always-mounted, idle poll, so it belongs to
-   * the same fleet-cost class: one small query per minute per tab. 60s
-   * is chosen for that reason rather than for latency — a notification
-   * is a message that already waited on someone else's action, so
-   * arriving up to a minute later changes nothing for the reader. The
-   * poll pauses on hidden tabs and refetches immediately on focus, so
-   * the case people actually notice (come back to the tab, see the
-   * badge) is covered by the focus refetch, not by the interval.
-   */
-  notifications: 60_000,
   /**
    * "Your connections are still catching up" — the canvas asks the projector
    * whether a source really is behind, and it only arms once a read came back

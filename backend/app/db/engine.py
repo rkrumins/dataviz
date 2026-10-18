@@ -810,7 +810,10 @@ def _count_queries_on(engine, role_name: str) -> None:
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
         def _on_execute(conn, cursor, statement, parameters, context, executemany):
-            counter.inc()
+            try:
+                counter.inc()
+            except Exception:  # noqa: BLE001
+                pass  # This runs inside every statement: a missed count, never a failed query.
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(

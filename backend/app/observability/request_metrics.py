@@ -100,11 +100,14 @@ class RequestMetricsMiddleware:
             # client, or a handler that raised, still lands in the
             # numbers. A request that only counts when it succeeds makes
             # an unhealthy fleet look quiet.
-            http_requests_total.labels(
-                method=scope.get("method", "?"),
-                route=_route_label(scope),
-                # 0 rather than a guess: the response never started, so
-                # there is no status, and inventing 500 would conflate a
-                # client hang-up with a server error.
-                status=str(status_holder.get("status", 0)),
-            ).inc()
+            try:
+                http_requests_total.labels(
+                    method=scope.get("method", "?"),
+                    route=_route_label(scope),
+                    # 0 rather than a guess: the response never started, so
+                    # there is no status, and inventing 500 would conflate a
+                    # client hang-up with a server error.
+                    status=str(status_holder.get("status", 0)),
+                ).inc()
+            except Exception:  # noqa: BLE001
+                pass  # Every request passes here, probes included: a missed count, never an error.

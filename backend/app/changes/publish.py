@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .registry import get_registry
 
-__all__ = ["publish_change_after_commit", "publish_change"]
+__all__ = ["publish_change_after_commit", "schedule_change"]
 
 
 _LISTENER_KEY = "_change_feed_listener_registered"
@@ -102,15 +102,19 @@ def publish_change_after_commit(session: AsyncSession, *topics: str) -> None:
     pending.update(topics)
 
 
-async def publish_change(*topics: str) -> None:
-    """Publish ``topics`` right now.
+def schedule_change(*topics: str) -> None:
+    """Publish ``topics`` now, without waiting for Redis to answer.
 
     For changes that are not part of a database transaction at all — a
     provider health sweep flipping state, an in-memory cache being
     invalidated. If a database write is involved, use
     :func:`publish_change_after_commit` instead; see this module's
     docstring for what publishing early costs.
+
+    Never awaited, because the caller that needs it is the provider
+    probe loop, which also opens and closes every provider's circuit
+    breakers. A bump against a Redis that hangs rather than refuses can
+    take as long as the client's timeouts allow, and the rest of the
+    fleet's probes would wait behind it.
     """
-    registry = get_registry()
-    for topic in topics:
-        await registry.bump(topic)
+    _schedule(topics)

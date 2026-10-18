@@ -9,7 +9,9 @@
 import { create } from 'zustand'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { POLLING_INTERVALS } from '@/config/polling'
 import { onAppVisible } from '@/lib/appVisibility'
+import { startOutageRecheck } from '@/lib/outageRecheck'
 import { TOPICS, subscribeToTopic } from '@/store/changeFeed'
 
 export type ProviderStatus = 'healthy' | 'unhealthy' | 'unknown'
@@ -158,6 +160,15 @@ function refreshOnce() {
   })()
 }
 
+let stopOutageRecheck: (() => void) | null = null
+
+function anyUnhealthy(): boolean {
+  for (const entry of useProviderHealthStore.getState().providers.values()) {
+    if (entry.status === 'unhealthy') return true
+  }
+  return false
+}
+
 function stopPolling() {
   epoch += 1
   running = false
@@ -165,6 +176,8 @@ function stopPolling() {
     unsubscribeTopic()
     unsubscribeTopic = null
   }
+  stopOutageRecheck?.()
+  stopOutageRecheck = null
 }
 
 /** Call once after auth resolves. */
@@ -177,6 +190,15 @@ export function enableProviderHealthPolling() {
   // asking sixty times an hour whether it had.
   if (unsubscribeTopic === null) {
     unsubscribeTopic = subscribeToTopic(TOPICS.providerHealth, refreshOnce)
+  }
+  // ...except that the recovery transition is the one we cannot afford
+  // to miss, and it can be lost (published while Redis was unreachable).
+  // So while anything is down, keep asking on a timer of our own.
+  if (stopOutageRecheck === null) {
+    stopOutageRecheck = startOutageRecheck(
+      anyUnhealthy, refreshOnce,
+      POLLING_INTERVALS.providerOutageRecheck, useProviderHealthStore.subscribe,
+    )
   }
   refreshOnce()
 }

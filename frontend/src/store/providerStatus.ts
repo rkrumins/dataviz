@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
 import { create } from 'zustand'
 import { providerService, type ProviderStatusResponse } from '@/services/providerService'
+import { POLLING_INTERVALS } from '@/config/polling'
 import { onAppVisible } from '@/lib/appVisibility'
+import { startOutageRecheck } from '@/lib/outageRecheck'
 import { TOPICS, subscribeToTopic } from '@/store/changeFeed'
 
 export interface ProviderStatusEntry extends ProviderStatusResponse {}
@@ -195,6 +197,13 @@ let unsubscribeTopic: (() => void) | null = null
 let running = false
 let epoch = 0
 
+let stopOutageRecheck: (() => void) | null = null
+
+function anyUnavailable(): boolean {
+  return Object.values(useProviderStatusStore.getState().statuses)
+    .some((entry) => entry.status === 'unavailable')
+}
+
 function stopPolling() {
   epoch += 1
   running = false
@@ -202,6 +211,8 @@ function stopPolling() {
     unsubscribeTopic()
     unsubscribeTopic = null
   }
+  stopOutageRecheck?.()
+  stopOutageRecheck = null
 }
 
 /** Read provider status once. Nothing re-arms; the caller decides when. */
@@ -233,6 +244,15 @@ export function enableProviderStatusPolling() {
   // replaces.
   if (unsubscribeTopic === null) {
     unsubscribeTopic = subscribeToTopic(TOPICS.providerStatus, refreshOnce)
+  }
+  // While a provider is unavailable, also ask on a timer: its recovery
+  // transition can be lost (published while Redis was unreachable). The
+  // snooze still applies, because `refreshOnce` honours it.
+  if (stopOutageRecheck === null) {
+    stopOutageRecheck = startOutageRecheck(
+      anyUnavailable, refreshOnce,
+      POLLING_INTERVALS.providerOutageRecheck, useProviderStatusStore.subscribe,
+    )
   }
   refreshOnce()
 }
