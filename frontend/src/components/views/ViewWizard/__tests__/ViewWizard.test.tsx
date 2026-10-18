@@ -92,9 +92,17 @@ vi.mock('../steps/BasicsStep', () => ({
 // The real step pins entityScope when a rule-driven Quick Start is applied; the
 // stub exposes that one gesture so the pin can be traced to the layout write.
 vi.mock('../steps/LayoutStep', () => ({
-  LayoutStep: ({ updateFormData }: { updateFormData: (u: Record<string, unknown>) => void }) => (
+  LayoutStep: ({ updateFormData, initialTemplateId }: {
+    updateFormData: (u: Record<string, unknown>) => void
+    initialTemplateId?: string
+  }) => (
     <div data-testid="layout-step">
+      <span data-testid="layout-initial-template">{initialTemplateId ?? ''}</span>
       <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
+      <button onClick={() => updateFormData({
+        contextModelId: 'tpl_1', layoutTemplateId: 'tpl_1',
+        layers: [{ id: 'fresh', name: 'Bronze', entityTypes: [], order: 0 }],
+      })}>stub-apply-library-template</button>
     </div>
   ),
 }))
@@ -433,6 +441,46 @@ describe('ViewWizard — no hardcoded root types in the saved config', () => {
 
     await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
     expect(createViewMock.mock.calls[0][0].config.content).not.toHaveProperty('rootEntityTypes')
+  })
+})
+
+describe('ViewWizard — started from a layout template', () => {
+  it('hands the template to the Layout step and records it on the new view', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+            initialTemplateId="tpl_1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('layout-step')
+    expect(screen.getByTestId('layout-initial-template')).toHaveTextContent('tpl_1')
+    fireEvent.click(screen.getByRole('button', { name: 'stub-apply-library-template' }))
+    for (const step of ['assignment-step', 'entities-step', 'preview-step']) {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId(step)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
+    expect(createViewMock.mock.calls[0][0].contextModelId).toBe('tpl_1')
   })
 })
 

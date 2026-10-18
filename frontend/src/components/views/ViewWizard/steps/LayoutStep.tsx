@@ -4,7 +4,7 @@
  * Beautiful card-based layout selection with recommended badge
  */
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react'
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
     Check,
@@ -16,16 +16,25 @@ import {
     Wand2,
     Sparkles,
     Repeat,
-    Layers
+    Layers,
+    LayoutTemplate,
+    Search,
+    Save,
+    AlertTriangle,
+    X,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
-import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { useLayoutTemplate, useLayoutTemplates } from '@/hooks/useLayoutTemplates'
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
-import { useWorkspacesStore } from '@/store/workspaces'
+import type { LayoutTemplate as LibraryTemplate } from '@/services/layoutTemplateService'
+import { TemplatePreview } from '@/components/templates/TemplatePreview'
+import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
+import { fitTemplate, type TemplateFit } from '@/components/templates/templateFit'
+import { AUDIENCE, LIBRARY_TABS, audienceOf, type LibraryTab, type TemplateAudience } from '@/components/templates/templateAudience'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
 import { deriveRootTypeCandidates, layersForRootTypes } from '../autoLayers'
@@ -52,114 +61,22 @@ interface LayoutStepProps {
     /** The layers came from an imported file. No Quick Start: a template replaces the layers
      *  and so unplaces everything the file placed. */
     imported?: boolean
+    /** Opened from a library template ("Use template"): apply it once, as soon as the
+     *  semantic layer it is matched against is known. */
+    initialTemplateId?: string
 }
-
-interface LayerTemplate {
-    id: string
-    name: string
-    description: string
-    category?: string
-    layers: Omit<ViewLayerConfig, 'id' | 'order'>[]
-}
-
-// ============================================
-// Local fallback templates (used when backend returns 0 templates)
-// ============================================
-
-// Entity types are intentionally left empty — they are driven by the active
-// data source's ontology and selected by the user in the layer editor.
-const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
-    {
-        id: 'data-flow',
-        name: 'Data Flow',
-        description: 'Follow data from its raw sources through staging and transformation to the reports that consume it.',
-        category: 'data-engineering',
-        layers: [
-            { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: [] },
-            { name: 'Staging', description: 'Intermediate storage', color: '#8b5cf6', entityTypes: [] },
-            { name: 'Transform', description: 'Processing layer', color: '#f59e0b', entityTypes: [] },
-            { name: 'Consumption', description: 'Analytics and reports', color: '#22c55e', entityTypes: [] }
-        ]
-    },
-    {
-        id: 'medallion',
-        name: 'Medallion',
-        description: 'The lakehouse refinement pattern: raw data lands in Bronze and is progressively refined to business-ready Gold.',
-        category: 'data-engineering',
-        layers: [
-            { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: [] },
-            { name: 'Silver', description: 'Cleansed', color: '#C0C0C0', entityTypes: [] },
-            { name: 'Gold', description: 'Business-ready', color: '#FFD700', entityTypes: [] }
-        ]
-    },
-    {
-        id: 'simple',
-        name: 'Simple',
-        description: 'The minimal two-column map: what feeds in, and what comes out.',
-        category: undefined,
-        layers: [
-            { name: 'Input', description: 'Source systems', color: '#3b82f6', entityTypes: [] },
-            { name: 'Output', description: 'Target systems', color: '#22c55e', entityTypes: [] }
-        ]
-    }
-]
 
 /** Shared layer palette — also used by the Layer Studio's in-step "Add layer"
  *  so colours never drift between the two places layers can be created. */
 export const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
 
 // ============================================
-// Blank-model Quick Start template gallery
+// Quick Start template gallery
 // ============================================
 
-/** Mini preview: up to five neutral column bars with truncated names. Deliberately
- *  monochrome — a grid of tinted cards reads as noise; the layers' real colors show
- *  on the canvas. Only the SELECTED card's bars take a soft accent. Hovering a bar
- *  shows the layer's description, so the structure stays scannable but explained. */
-function TemplatePreview({ layers, active }: { layers: ViewLayerConfig[]; active?: boolean }) {
-    if (layers.length === 0) {
-        return (
-            <div className="flex items-center justify-center h-[52px] rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-[10px] text-slate-400">
-                Empty canvas
-            </div>
-        )
-    }
-    const shown = layers.slice(0, 5)
-    const extra = layers.length - shown.length
-    return (
-        <div className="flex items-end gap-1.5">
-            {shown.map((layer, i) => (
-                <div
-                    key={layer.id ?? i}
-                    className="flex-1 min-w-0"
-                    title={layer.description ? `${layer.name} — ${layer.description}` : layer.name}
-                >
-                    <div className={cn(
-                        'h-8 rounded-md border',
-                        active
-                            ? 'bg-blue-100 border-blue-200 dark:bg-blue-900/40 dark:border-blue-800'
-                            : 'bg-slate-100 border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60',
-                    )} />
-                    <div className="mt-1 text-[9px] text-slate-500 dark:text-slate-400 truncate text-center">
-                        {layer.name}
-                    </div>
-                </div>
-            ))}
-            {extra > 0 && (
-                <div className="flex-none">
-                    <div className="h-8 px-1.5 rounded-md bg-slate-100 border border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60 flex items-center justify-center text-[9px] font-semibold text-slate-500 dark:text-slate-300">
-                        +{extra}
-                    </div>
-                    <div className="mt-1 text-[9px] text-transparent">.</div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-/** One template offering, whatever its origin (blank Quick Start, backend
- *  ContextModel, local fallback, or ontology-derived). The gallery renders all
- *  of them identically so both creation flows share one visual language. */
+/** One template offering, whatever its origin (blank Quick Start, ontology-derived,
+ *  or the template library). The gallery renders all of them identically so both
+ *  creation flows share one visual language. */
 interface GalleryTemplate {
     id: string
     name: string
@@ -167,6 +84,9 @@ interface GalleryTemplate {
     category?: string
     recommended?: boolean
     layers: Array<Partial<ViewLayerConfig> & { name: string }>
+    /** A library template: who it is for, and how well it fits this data. */
+    audience?: TemplateAudience
+    fit?: TemplateFit
     /** Pin the view's entity scope when the template's layers only work under one.
      *  A template whose layers carry `entityTypes` places entities BY RULE and
      *  writes no assignments — that resolves only in open ('all') scope, and
@@ -248,11 +168,32 @@ function TemplateGallery({
                         <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 leading-snug mb-3">
                             {template.description}
                         </p>
-                        <TemplatePreview layers={template.layers as ViewLayerConfig[]} active={active} />
-                        {template.category && (
-                            <span className="inline-block mt-2.5 px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded capitalize">
-                                {template.category.replace(/-/g, ' ')}
-                            </span>
+                        <TemplatePreview layers={template.layers} active={active} />
+                        {(template.category || template.audience || template.fit) && (
+                            <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                                {template.audience && (
+                                    <span className={cn('px-1.5 py-0.5 text-[10px] font-semibold rounded border', AUDIENCE[template.audience].badge)}>
+                                        {AUDIENCE[template.audience].label}
+                                    </span>
+                                )}
+                                {template.category && (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded capitalize">
+                                        {template.category.replace(/-/g, ' ')}
+                                    </span>
+                                )}
+                                {template.fit && template.fit.typedLayers > 0 && (
+                                    <span className={cn(
+                                        'ml-auto px-1.5 py-0.5 text-[10px] font-semibold rounded',
+                                        template.fit.matchedLayers === template.fit.typedLayers
+                                            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                                    )}>
+                                        {template.fit.matchedLayers === template.fit.typedLayers
+                                            ? 'Fits your data'
+                                            : `Matches ${template.fit.matchedLayers} of ${template.fit.typedLayers} layers`}
+                                    </span>
+                                )}
+                            </div>
                         )}
                     </button>
                 )
@@ -265,7 +206,7 @@ function TemplateGallery({
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank, imported }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank, imported, initialTemplateId }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
     // into the schema store, so read entity types from there instead.
@@ -308,46 +249,39 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
         setGalleryOpen(true)
     }, [formData.layers.length])
 
-    // ── Backend templates ────────────────────────────────────────────────────
-    const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
-    const [templatesLoading, setTemplatesLoading] = useState(false)
-    // Templates read via the workspace-scoped route (workspace:datasource:read) — any
-    // member can browse them. Without a workspace we fall back to the local templates.
-    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+    // ── The template library ─────────────────────────────────────────────
+    // Built-ins, the organization's, the workspace's and the person's own — one
+    // cached list shared with the Templates page. Each is matched to THIS data's
+    // semantic layer before it is offered, so the card can say how well it fits.
+    const { templates: library, isLoading: libraryLoading } = useLayoutTemplates()
+    const [libraryTab, setLibraryTab] = useState<LibraryTab>('all')
+    const [libraryQuery, setLibraryQuery] = useState('')
+    const [dismissedFitFor, setDismissedFitFor] = useState<string | null>(null)
+    const [savingAsTemplate, setSavingAsTemplate] = useState(false)
+    const declaredTypes = useMemo(() => schemaEntityTypes.map(et => et.id), [schemaEntityTypes])
+    const libraryTabs = useMemo(
+        () => LIBRARY_TABS.filter(tab => tab.id === 'all' || library.some(tab.match)),
+        [library],
+    )
+    const libraryTemplates: GalleryTemplate[] = useMemo(() => {
+        const q = libraryQuery.trim().toLowerCase()
+        const inTab = LIBRARY_TABS.find(tab => tab.id === libraryTab)?.match ?? (() => true)
+        return library
+            .filter(t => inTab(t) && (!q || t.name.toLowerCase().includes(q)
+                || (t.description ?? '').toLowerCase().includes(q)))
+            .map(t => ({
+                id: t.id,
+                name: t.name,
+                description: t.description ?? '',
+                category: t.category ?? undefined,
+                layers: t.layers,
+                audience: audienceOf(t),
+                fit: fitTemplate(t.layers, declaredTypes),
+            }))
+    }, [library, libraryTab, libraryQuery, declaredTypes])
 
-    useEffect(() => {
-        if (!activeWorkspaceId) return
-        setTemplatesLoading(true)
-        fetchBackendTemplates(activeWorkspaceId)
-            .then(results => {
-                if (results.length > 0) {
-                    // Map backend ContextModel → LayerTemplate
-                    const mapped: LayerTemplate[] = results.map(cm => ({
-                        id: cm.id,
-                        name: cm.name,
-                        description: cm.description ?? '',
-                        category: cm.category ?? undefined,
-                        layers: (cm.layersConfig ?? []).map(l => ({
-                            name: l.name,
-                            description: l.description,
-                            color: l.color ?? '#6366f1',
-                            icon: l.icon,
-                            entityTypes: l.entityTypes ?? [],
-                            rules: l.rules,
-                        }))
-                    }))
-                    setBackendTemplates(mapped)
-                }
-            })
-            .catch(() => { /* silent — fallback to local */ })
-            .finally(() => setTemplatesLoading(false))
-    }, [activeWorkspaceId])
-
-    // Use backend templates if available, otherwise local fallbacks
-    const activeTemplates = backendTemplates.length > 0 ? backendTemplates : LOCAL_FALLBACK_TEMPLATES
-
-    // The one list the gallery renders, per flow.
-    const galleryTemplates: GalleryTemplate[] = useMemo(() => {
+    // What the data itself suggests, per flow; the library follows it.
+    const suggestedTemplates: GalleryTemplate[] = useMemo(() => {
         if (blank) return blankTemplates
 
         // One column per TOP-LEVEL type, so Domain and Root each get their own
@@ -385,10 +319,9 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
         return [
             ...(perRootType ? [perRootType] : []),
             ...(fromSchema ? [fromSchema] : []),
-            ...activeTemplates,
         ]
     }, [
-        blank, blankTemplates, schemaEntityTypes, activeTemplates,
+        blank, blankTemplates, schemaEntityTypes,
         dsRelationshipTypes, dsRootEntityTypes, dsContainmentEdgeTypes,
     ])
 
@@ -418,10 +351,70 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             layers,
             assignments: {},
             layoutTemplateId: template.id,
+            contextModelId: undefined,
             entityScope: template.entityScope,
         })
         setGalleryOpen(false)
     }, [updateFormData, schemaEntityTypes])
+
+    // A library template: every structural field kept, types resolved against
+    // this data's semantic layer (unknown ones reported, never silently empty),
+    // fresh layer ids, and the template recorded as where the view started.
+    const libraryTemplateUpdate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers'>): Partial<WizardFormData> => {
+        const layers = fitTemplate(template.layers, declaredTypes).layers.map((l, i) => ({
+            ...l,
+            description: l.description ?? '',
+            color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
+        }))
+        return {
+            layoutType: 'reference',
+            layers,
+            assignments: {},
+            layoutTemplateId: template.id,
+            contextModelId: template.id,
+            // Layers that place by rule resolve only in open scope (see GalleryTemplate.entityScope).
+            entityScope: layers.some(l => l.entityTypes.length > 0 || (l.rules?.length ?? 0) > 0) ? 'all' : undefined,
+        }
+    }, [declaredTypes])
+
+    const handleApplyLibraryTemplate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers'>) => {
+        updateFormData(libraryTemplateUpdate(template))
+        setDismissedFitFor(null)
+        setGalleryOpen(false)
+    }, [updateFormData, libraryTemplateUpdate])
+
+    // Opened from "Use template": apply it once, when both it and this data's
+    // semantic layer are known. A hidden or unshared one is fetched on its own,
+    // and one that cannot be read leaves the gallery open.
+    const listedInitial = initialTemplateId ? library.find(t => t.id === initialTemplateId) : undefined
+    const fetchedInitial = useLayoutTemplate(
+        initialTemplateId && !libraryLoading && !listedInitial ? initialTemplateId : null,
+    )
+    const autoApplied = useRef(false)
+    useEffect(() => {
+        if (!initialTemplateId || autoApplied.current || imported) return
+        if (formData.contextModelId === initialTemplateId) { autoApplied.current = true; return }
+        const template = listedInitial ?? fetchedInitial.data
+        if (!template || dsSchemaLoading) return
+        autoApplied.current = true
+        updateFormData(libraryTemplateUpdate(template))
+    }, [
+        initialTemplateId, imported, formData.contextModelId, listedInitial, fetchedInitial.data,
+        dsSchemaLoading, updateFormData, libraryTemplateUpdate,
+    ])
+
+    // How the template this view started from fits this data — derived, so it
+    // reads the same however the step is reached, until it is dismissed.
+    const appliedTemplate = formData.contextModelId
+        ? library.find(t => t.id === formData.contextModelId)
+            ?? (fetchedInitial.data?.id === formData.contextModelId ? fetchedInitial.data : undefined)
+        : undefined
+    const appliedFit = useMemo(
+        () => appliedTemplate && dismissedFitFor !== appliedTemplate.id
+            ? { name: appliedTemplate.name, fit: fitTemplate(appliedTemplate.layers, declaredTypes) }
+            : null,
+        [appliedTemplate, dismissedFitFor, declaredTypes],
+    )
     // ────────────────────────────────────────────────────────────────────────
 
     const handleSelectLayoutType = useCallback((type: 'graph' | 'hierarchy' | 'reference') => {
@@ -473,6 +466,14 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
 
     return (
         <div className="space-y-8">
+            {savingAsTemplate && (
+                <SaveAsTemplateDialog
+                    sourceName={formData.name.trim() || 'New view'}
+                    description={formData.description}
+                    layers={formData.layers}
+                    onClose={() => setSavingAsTemplate(false)}
+                />
+            )}
             {/* Layout Type Selection */}
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
@@ -563,6 +564,16 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 </p>
                             </div>
                             <div className="flex items-center gap-2">
+                                {!showGallery && formData.layers.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setSavingAsTemplate(true)}
+                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                    >
+                                        <Save className="w-4 h-4" />
+                                        Save as template
+                                    </button>
+                                )}
                                 {!showGallery && !imported && (
                                     <button
                                         onClick={handleSwitchTemplate}
@@ -597,27 +608,114 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                             </div>
                         )}
 
-                        {/* Quick Start template gallery — shared by both creation flows */}
+                        {/* Quick Start: what the data suggests, then the template library —
+                            shared by both creation flows */}
                         {showGallery && (
                             <motion.div
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
-                                className="p-4 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-800"
+                                className="p-4 space-y-6 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-800"
                             >
-                                <div className="flex items-center gap-2 mb-3">
-                                    <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                                    <span className="font-semibold text-slate-800 dark:text-slate-200">Quick Start Templates</span>
-                                    {!blank && templatesLoading && (
-                                        <span className="ml-auto text-[10px] text-indigo-500 animate-pulse">Loading from backend…</span>
+                                {(suggestedTemplates.length > 0 || (!blank && dsSchemaLoading)) && (
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-3">
+                                            <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                                            <span className="font-semibold text-slate-800 dark:text-slate-200">Suggested for your data</span>
+                                        </div>
+                                        <TemplateGallery
+                                            templates={suggestedTemplates}
+                                            activeId={formData.layoutTemplateId}
+                                            loading={!blank && dsSchemaLoading}
+                                            onApply={handleApplyGalleryTemplate}
+                                        />
+                                    </div>
+                                )}
+                                <div>
+                                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                                        <LayoutTemplate className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                                        <span className="font-semibold text-slate-800 dark:text-slate-200">Template library</span>
+                                        <span className="text-xs text-slate-500">Yours, your teams' and your organization's</span>
+                                        <div className="relative ml-auto">
+                                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                                            <input
+                                                type="search"
+                                                value={libraryQuery}
+                                                onChange={e => setLibraryQuery(e.target.value)}
+                                                placeholder="Search templates"
+                                                aria-label="Search templates"
+                                                className="h-8 w-52 pl-8 pr-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                            />
+                                        </div>
+                                    </div>
+                                    {libraryTabs.length > 1 && (
+                                        <div role="tablist" aria-label="Template collections" className="flex flex-wrap gap-1 mb-3">
+                                            {libraryTabs.map(tab => (
+                                                <button
+                                                    key={tab.id}
+                                                    type="button"
+                                                    role="tab"
+                                                    aria-selected={libraryTab === tab.id}
+                                                    onClick={() => setLibraryTab(tab.id)}
+                                                    className={cn(
+                                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors',
+                                                        libraryTab === tab.id
+                                                            ? 'bg-indigo-600 text-white'
+                                                            : 'text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800',
+                                                    )}
+                                                >
+                                                    {tab.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <TemplateGallery
+                                        templates={libraryTemplates}
+                                        activeId={formData.layoutTemplateId}
+                                        loading={libraryLoading || (!blank && dsSchemaLoading)}
+                                        onApply={item => {
+                                            const template = library.find(t => t.id === item.id)
+                                            if (template) handleApplyLibraryTemplate(template)
+                                        }}
+                                    />
+                                    {!libraryLoading && !(!blank && dsSchemaLoading) && libraryTemplates.length === 0 && (
+                                        <p className="text-xs text-slate-500 py-2">
+                                            {libraryQuery ? `No template matches "${libraryQuery}".` : 'No templates in this collection yet.'}
+                                        </p>
                                     )}
                                 </div>
-                                <TemplateGallery
-                                    templates={galleryTemplates}
-                                    activeId={formData.layoutTemplateId}
-                                    loading={!blank && (templatesLoading || dsSchemaLoading)}
-                                    onApply={handleApplyGalleryTemplate}
-                                />
                             </motion.div>
+                        )}
+
+                        {/* How a library template fit this data's semantic layer — say what
+                            didn't match instead of leaving columns silently empty. */}
+                        {appliedFit && showLayerList && (
+                            appliedFit.fit.unmatchedTypes.length > 0 ? (
+                                <div role="status" className="flex items-start gap-3 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/60 dark:bg-amber-950/20 px-4 py-3">
+                                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex-1">
+                                        <span className="font-semibold text-slate-800 dark:text-slate-100">
+                                            "{appliedFit.name}" matches {appliedFit.fit.matchedLayers} of {appliedFit.fit.typedLayers} layers to this data.
+                                        </span>{' '}
+                                        Not in its semantic layer: {appliedFit.fit.unmatchedTypes.join(', ')}. Pick types for those layers below, or place entities in them by hand.
+                                    </p>
+                                    <button type="button" onClick={() => setDismissedFitFor(formData.contextModelId ?? null)} aria-label="Dismiss" className="p-0.5 rounded text-slate-400 hover:text-slate-600">
+                                        <X className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            ) : (
+                                <div role="status" className="flex items-start gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-4 py-3">
+                                    <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex-1">
+                                        <span className="font-semibold text-slate-800 dark:text-slate-100">Started from "{appliedFit.name}".</span>{' '}
+                                        {appliedFit.fit.typedLayers > 0
+                                            ? 'Every layer matched this data\'s semantic layer. Refine them below.'
+                                            : 'Its layers are filled by hand: place entities in them on the next step.'}
+                                    </p>
+                                    <button type="button" onClick={() => setDismissedFitFor(formData.contextModelId ?? null)} aria-label="Dismiss" className="p-0.5 rounded text-slate-400 hover:text-slate-600">
+                                        <X className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            )
                         )}
 
                         {/* Blank models: empty template chosen — prompt to build layers */}

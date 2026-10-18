@@ -315,6 +315,7 @@ import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -956,6 +957,7 @@ export function ContextViewCanvas({
   })
   // The Import / Export menu's "This view": moving the view itself between environments. Updating
   // it from a file opens the View wizard's Import journey on it, for someone who may edit it.
+  // Saving its layers as a template is open to anyone reading it: the layout is what they see.
   const viewEditor = useContext(ViewEditorContext)
   const activeViewId = activeView?.id ?? null
   const thisView = useMemo(() => activeViewId ? {
@@ -964,6 +966,7 @@ export function ContextViewCanvas({
     onUpdateFromFile: viewCaps.canEdit && viewEditor
       ? () => viewEditor.openViewEditor(undefined, { journey: 'import', importIntoViewId: activeViewId })
       : undefined,
+    onSaveAsTemplate: () => setSavingAsTemplate(true),
   } : undefined, [activeViewId, viewCaps.canEdit, viewEditor])
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
@@ -1557,6 +1560,7 @@ export function ContextViewCanvas({
   const [showExportDialog, setShowExportDialog] = useState(false)
   // The view itself, exported for another environment: its design alone, or with its data.
   const [viewExport, setViewExport] = useState<'view' | 'data' | null>(null)
+  const [savingAsTemplate, setSavingAsTemplate] = useState(false)
   const [showStartEditing, setShowStartEditing] = useState(false)
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
@@ -6278,6 +6282,14 @@ export function ContextViewCanvas({
             views={[{ id: activeView.id, name: activeView.name }]}
             initialContent={viewExport}
             onClose={() => setViewExport(null)}
+          />
+        )}
+        {savingAsTemplate && activeView && (
+          <SaveAsTemplateDialog
+            sourceName={activeView.name}
+            description={activeView.description}
+            layers={sortedLayers}
+            onClose={() => setSavingAsTemplate(false)}
           />
         )}
         {/* Start editing — the deliberate branch chooser that replaces the silent draft resume/create. */}

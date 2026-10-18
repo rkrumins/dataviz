@@ -23,6 +23,7 @@ import {
     CheckCircle2,
     Clock,
     KeySquare,
+    LayoutTemplate,
     Megaphone,
     Share2,
     ShieldAlert,
@@ -50,6 +51,11 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: Share2,
         icon: 'text-sky-500',
         tile: 'bg-sky-500/10',
+    },
+    'layout_template.shared': {
+        Icon: LayoutTemplate,
+        icon: 'text-fuchsia-500',
+        tile: 'bg-fuchsia-500/10',
     },
     'view.publish_requested': {
         Icon: Megaphone,

@@ -57,7 +57,7 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Boxes, ChevronRight, Database, Layers, Server } from 'lucide-react'
+import { Boxes, ChevronRight, Database, LayoutTemplate, Layers, Server } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
@@ -65,6 +65,7 @@ import { providerService } from '@/services/providerService'
 import { useFeature } from '@/store/features'
 import { KIND_TEXT } from '@/features/sync-status/deriveSync'
 import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
+import { useLayoutTemplate } from '@/hooks/useLayoutTemplates'
 import { PROVIDER_HEALTH_META, useProviderHealth } from '@/store/providerHealthModel'
 import { useAnyWorkspacePermission, useNavPermission } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
@@ -112,6 +113,9 @@ export function ViewBuiltOn({ view }: { view: View }) {
     // `requires(..., workspace_any=True)`).
     const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
     const canReadOntology = useAnyWorkspacePermission('workspace:ontology:read')
+    // The layout template the view started from — named only when this reader
+    // can open it (the read 404s otherwise, and the line is simply absent).
+    const { data: template } = useLayoutTemplate(view.contextModelId)
 
     // Shares the ['provider', id] cache with useDataSourceProfile.
     const providerQuery = useQuery({
@@ -255,6 +259,20 @@ export function ViewBuiltOn({ view }: { view: View }) {
                     <RungRow key={r.key} rung={r} last={i === rungs.length - 1} />
                 ))}
             </ol>
+
+            {template && (
+                <Link
+                    to={`/templates/${template.id}`}
+                    className="group/tpl flex items-center gap-2 rounded-xl border border-black/[0.07] dark:border-white/[0.08] px-3 py-2 text-xs hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                >
+                    <LayoutTemplate aria-hidden className="h-3.5 w-3.5 shrink-0 text-fuchsia-500" />
+                    <span className="text-ink-muted shrink-0">Layers started from</span>
+                    <span className="truncate font-semibold text-ink group-hover/tpl:text-indigo-600 dark:group-hover/tpl:text-indigo-400">
+                        {template.name}
+                    </span>
+                    <ChevronRight aria-hidden className="ml-auto h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                </Link>
+            )}
 
             {/* Every explanation the rows used to carry inline, in one place a
                 reader opens once and never again. Native <details> — keyboard

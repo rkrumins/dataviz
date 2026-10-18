@@ -50,6 +50,7 @@ const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelem
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
 const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
+const TemplatesPage = lazyWithRetry(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
@@ -201,6 +202,11 @@ export const router = createBrowserRouter([
       // Reviews are a versioning surface — the whole route disappears (redirects
       // to the workspace) when the admin turns version control off.
       { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
+
+      // The layout template library — everyone has some (the built-ins); what
+      // each person may change is decided per template, not by the page.
+      { path: 'templates', element: <Lazy><TemplatesPage /></Lazy> },
+      { path: 'templates/:templateId', element: <Lazy><TemplatesPage /></Lazy> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },

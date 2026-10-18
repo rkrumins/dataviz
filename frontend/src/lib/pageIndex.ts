@@ -73,6 +73,15 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'sidebar', key: 'explore' },
     },
     {
+        id: 'templates',
+        category: 'Page',
+        title: 'Templates',
+        description: 'Reusable layer layouts for Context Views',
+        keywords: ['layout', 'layouts', 'template', 'layers', 'columns', 'quick start', 'starter', 'reuse', 'team'],
+        path: '/templates',
+        gate: { kind: 'sidebar', key: 'templates' },
+    },
+    {
         id: 'workspaces',
         category: 'Page',
         title: 'Workspaces',

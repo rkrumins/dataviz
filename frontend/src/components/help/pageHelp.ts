@@ -12,6 +12,8 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/dashboard', slugs: ['quick-start', 'welcome'] },
   { path: '/explorer', slugs: ['browsing-views', 'creating-views', 'managing-views'] },
   { path: '/views/:viewId', slugs: ['exploring-graph', 'reading-lineage', 'lineage-lens', 'editing-in-a-draft'] },
+  { path: '/templates', slugs: ['creating-views', 'managing-views'] },
+  { path: '/templates/:templateId', slugs: ['creating-views', 'managing-views'] },
   { path: '/workspaces', slugs: ['workspace-admin', 'admin-setup'] },
   { path: '/workspaces/:wsId', slugs: ['workspace-admin', 'data-freshness'] },
   { path: '/workspaces/:wsId/reviews', slugs: ['review-center', 'versioning-change-control'] },

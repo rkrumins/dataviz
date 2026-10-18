@@ -768,7 +768,7 @@ export function ShareViewDialog({
 
 // ── Add-grant picker (subject-type toggle + directory search + role) ──
 
-function AddGrantPicker({
+export function AddGrantPicker({
     disabled,
     onAdd,
 }: {

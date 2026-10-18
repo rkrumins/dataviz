@@ -162,13 +162,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
         navigate(`/schema/${hit.ontology.id}`)
         break
       case 'Template':
-        // Templates have no dedicated detail route — land the user on the
-        // dashboard where the templates section lives, then scroll into view.
-        navigate('/dashboard')
-        requestAnimationFrame(() => {
-          document.getElementById('dashboard-templates')
-            ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        })
+        navigate(`/templates/${hit.template.id}`)
         break
     }
     onClose()

@@ -26,6 +26,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardData } from '@/hooks/useDashboardData'
+import { useLayoutTemplates } from '@/hooks/useLayoutTemplates'
+import type { LayoutTemplate } from '@/services/layoutTemplateService'
 import { useWorkspaceSummary } from '@/hooks/useWorkspaceSummary'
 import { useGlobalSearch, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
@@ -43,11 +45,10 @@ import { DashboardActivityFeed } from './DashboardActivityFeed'
 import { DashboardWorkHub } from './DashboardWorkHub'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
-import { TemplateGrid as BlueprintGrid } from './TemplateGrid'
+import { TemplateGrid } from './TemplateGrid'
 import { DashboardSemanticLayers } from './DashboardSemanticLayers'
 import { DashboardOnboarding } from './DashboardOnboarding'
 import { motion } from 'framer-motion'
-import { LayoutTemplate } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -56,10 +57,10 @@ export function Dashboard() {
     useDocumentTitle('Dashboard')
     const {
         workspaces,
-        templates,
         ontologies,
         isLoadingWorkspaces,
     } = useDashboardData()
+    const { templates } = useLayoutTemplates()
 
     // Every number on the page comes from the server's workspace summary — the
     // same figures Administration and the Workspaces page show. The workspace
@@ -122,12 +123,7 @@ export function Dashboard() {
                 navigate(`/views/${hit.view.id}`)
                 break
             case 'Template':
-                // Templates have no dedicated detail route — scroll to the
-                // dashboard's templates section so the user sees the matching card.
-                requestAnimationFrame(() => {
-                    document.getElementById('dashboard-templates')
-                        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                })
+                navigate(`/templates/${hit.template.id}`)
                 break
             case 'Semantic Layer':
                 navigate(`/schema/${hit.ontology.id}`)
@@ -151,10 +147,7 @@ export function Dashboard() {
                 navigate('/schema')
                 break
             case 'Template':
-                requestAnimationFrame(() => {
-                    document.getElementById('dashboard-templates')
-                        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                })
+                navigate('/templates')
                 break
             case 'Data Source':
                 // No dedicated index — fall through to workspaces list.
@@ -163,6 +156,14 @@ export function Dashboard() {
         }
         setSearchQuery('')
     }, [navigate, searchResult.query, recordRecentSearch])
+
+    const templateGridProps = {
+        templates,
+        onUse: (t: LayoutTemplate) => openViewEditor(undefined, { templateId: t.id }),
+        onOpen: (t: LayoutTemplate) => navigate(`/templates/${t.id}`),
+        onBrowseAll: () => navigate('/templates'),
+        onCreate: () => navigate('/templates?new=1'),
+    }
 
     // ── Loading state: a content-shaped skeleton (not a centered spinner) so the
     // shell paints instantly and the layout doesn't jump when data lands. Only on
@@ -179,7 +180,7 @@ export function Dashboard() {
                     <DashboardOnboarding
                         completedSteps={onboardingCompletedSteps}
                         onCreateWorkspace={() => navigate('/workspaces')}
-                        onBrowseTemplates={() => navigate('/schema')}
+                        onBrowseTemplates={() => navigate('/templates')}
                         onDismiss={dismissOnboarding}
                     />
 
@@ -190,12 +191,7 @@ export function Dashboard() {
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: MOTION.sectionStagger * 2, ...MOTION.sectionEntry }}
                         >
-                            <BlueprintGrid
-                                title="Starter Templates"
-                                subtitle="Pre-built context models to accelerate setup"
-                                items={templates}
-                                icon={LayoutTemplate}
-                            />
+                            <TemplateGrid {...templateGridProps} />
                         </motion.div>
                     )}
                 </PageContainer>
@@ -286,19 +282,13 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 6. Starter templates */}
+                {/* 6. Layout templates */}
                 <motion.div
-                    id="dashboard-templates"
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: MOTION.sectionStagger * 5, ...MOTION.sectionEntry }}
                 >
-                    <BlueprintGrid
-                        title="Starter Templates"
-                        subtitle="Pre-built context models to accelerate setup"
-                        items={templates}
-                        icon={LayoutTemplate}
-                    />
+                    <TemplateGrid {...templateGridProps} />
                 </motion.div>
 
                 {/* 7. Semantic layers — the REAL ones, from the same cache the

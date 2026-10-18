@@ -133,10 +133,6 @@ const KNOWN = new Map<string, { count: number; why: string }>([
     { count: 1, why: 'The drilldown list\'s sticky header, over the longest scroller in the canvas.' },
   ],
   [
-    'components/dashboard/TemplateGrid.tsx',
-    { count: 1, why: 'The category chips sit in a horizontally scrolling strip and each carries its own blur.' },
-  ],
-  [
     'components/explorer/ExplorerRecentStrip.tsx',
     { count: 1, why: 'Every card in the recents strip is a `glass-panel` inside that strip\'s own scroller.' },
   ],

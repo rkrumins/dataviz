@@ -34,8 +34,8 @@ const ONBOARDING_STEPS = [
     },
     {
         id: 'template_deployed',
-        label: 'Deploy a starter template',
-        description: 'Jumpstart your workspace with a pre-built semantic layer and layout.',
+        label: 'Start a view from a template',
+        description: 'Jumpstart a Context View with a proven layer layout — a built-in, or your team’s.',
         icon: LayoutTemplate,
     },
 ] as const
@@ -233,7 +233,7 @@ export function DashboardOnboarding({
                         Start from a Template
                     </span>
                     <span className="text-xs text-ink-muted">
-                        Use a pre-built semantic layer to get started fast.
+                        Use a proven layer layout to get started fast.
                     </span>
                 </button>
             </motion.div>

@@ -1,31 +1,38 @@
 /**
- * LayoutStep — RTL test (Task 4: canonical view-config store).
+ * LayoutStep — the template library on the wizard's Layout step.
  *
- * Template application is a client-side copy of layer STRUCTURE only — it must
- * never carry assignments into formData.assignments (a fresh create/template
- * switch always resets assignments to {}), matching the wizard's canonical
- * write path where placements live exclusively in formData.assignments.
+ * Applying a template is a client-side copy of layer STRUCTURE only: it never
+ * carries assignments into formData.assignments (a fresh create or template
+ * switch always resets them to {}), every layer gets a fresh id, and a library
+ * template is recorded as where the view started. Its entity types resolve
+ * against THIS data's semantic layer, and what doesn't match is said, not
+ * silently dropped.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
 // The data source's ontology, as useDataSourceSchema reports it — mutable so a
 // case can give the source an ontology, or hold it loading.
 const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], isLoading: false }))
+const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
   useDataSourceSchema: () => ({ entityTypes: ds.entityTypes, isLoading: ds.isLoading, isError: false }),
 }))
 
-vi.mock('@/services/contextModelService', () => ({
-  listTemplates: vi.fn().mockResolvedValue([]),
+vi.mock('@/hooks/useLayoutTemplates', () => ({
+  useLayoutTemplates: () => ({ templates: lib.templates, isLoading: lib.isLoading, error: null }),
+  useLayoutTemplate: () => ({ data: undefined }),
+  useInvalidateLayoutTemplates: () => () => undefined,
 }))
 
 // The workspaces store transitively imports @/main (createRoot) — mock it so the module graph
-// stays test-safe (mirrors ViewWizard.test.tsx). LayoutStep reads activeWorkspaceId to fetch
-// workspace-scoped templates; a value here exercises that path (the mocked listTemplates → []).
+// stays test-safe (mirrors ViewWizard.test.tsx). The save-as dialog's audience picker reads it.
 vi.mock('@/store/workspaces', () => {
-  const state = { activeWorkspaceId: 'ws1' }
+  const state = { activeWorkspaceId: 'ws1', workspaces: [] }
   const useWorkspacesStore = Object.assign(
     (selector: (s: typeof state) => unknown) => selector(state),
     { getState: () => state },
@@ -33,7 +40,6 @@ vi.mock('@/store/workspaces', () => {
   return { useWorkspacesStore }
 })
 
-import { listTemplates } from '@/services/contextModelService'
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
 
@@ -42,6 +48,33 @@ const layoutTypes = [
   { id: 'hierarchy' as const, label: 'Hierarchy', icon: null, description: '', features: [] },
   { id: 'reference' as const, label: 'Context View', icon: null, description: '', features: [] },
 ]
+
+function template(over: Partial<LayoutTemplate>): LayoutTemplate {
+  return {
+    id: 'tpl', name: 'Template', description: '', category: null, visibility: 'enterprise',
+    builtIn: true, hidden: false, workspaceId: null, workspaceName: null, layers: [],
+    createdBy: null, createdAt: '', updatedAt: '', usageCount: 0, grantCount: null,
+    access: { via: 'builtin', canEdit: false, canDelete: false, canShare: false, canHide: false },
+    ...over,
+  }
+}
+
+const MEDALLION = template({
+  id: 'tpl_medallion', name: 'Medallion',
+  layers: [
+    { id: 'bronze', name: 'Bronze', color: '#cd7f32', entityTypes: [], order: 0 },
+    { id: 'silver', name: 'Silver', color: '#c0c0c0', entityTypes: [], order: 1, showUnassigned: true },
+    { id: 'gold', name: 'Gold', color: '#ffd700', entityTypes: [], order: 2 },
+  ],
+})
+
+const DATA_MESH = template({
+  id: 'tpl_mesh', name: 'Data Mesh',
+  layers: [
+    { id: 'domain', name: 'Domain', entityTypes: ['domain', 'bounded-context'], order: 0 },
+    { id: 'product', name: 'Data Product', entityTypes: ['data-product', 'dataset', 'DATASET', 'table'], order: 1 },
+  ],
+})
 
 function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   return {
@@ -61,89 +94,96 @@ function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   }
 }
 
+/** The step with real form state, so what it applies is what it then renders. */
+function Harness({ spy, ...props }: { spy: (u: Partial<WizardFormData>) => void } & Partial<Parameters<typeof LayoutStep>[0]>) {
+  const [formData, setFormData] = useState(makeFormData())
+  return (
+    <MemoryRouter>
+      <LayoutStep
+        formData={formData}
+        updateFormData={u => { spy(u); setFormData(f => ({ ...f, ...u })) }}
+        layoutTypes={layoutTypes}
+        {...props}
+      />
+    </MemoryRouter>
+  )
+}
+
 afterEach(() => {
   ds.entityTypes = []
   ds.isLoading = false
+  lib.templates = []
+  lib.isLoading = false
 })
 
-describe('LayoutStep — template application', () => {
-  it('applying a Quick Start template copies layer structure but never assignments', async () => {
-    const updateFormData = vi.fn()
-    render(
-      <LayoutStep
-        formData={makeFormData()}
-        updateFormData={updateFormData}
-        layoutTypes={layoutTypes}
-      />
-    )
+describe('LayoutStep — the template library', () => {
+  it('applying a library template copies structure, never assignments, and records it', () => {
+    lib.templates = [MEDALLION]
+    const spy = vi.fn()
+    render(<Harness spy={spy} />)
 
-    // Wait for the (mocked, empty) backend template fetch to resolve so the
-    // fallback gallery (LOCAL_FALLBACK_TEMPLATES) is the one rendered.
-    await waitFor(() => expect(screen.getByText('Simple')).toBeInTheDocument())
-    fireEvent.click(screen.getByText('Simple'))
+    fireEvent.click(screen.getByText('Medallion'))
 
-    expect(updateFormData).toHaveBeenCalledTimes(1)
-    const call = updateFormData.mock.calls[0][0]
-    expect(call.layers).toHaveLength(2)
-    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Input', 'Output'])
-    expect(call.layoutTemplateId).toBe('simple')
-    // A template's layers get fresh ids, so any prior assignments (keyed to the
-    // OLD layer ids) are reset — never carried over, and never populated FROM
-    // the template (templates don't carry assignments in the first place).
+    expect(spy).toHaveBeenCalledTimes(1)
+    const call = spy.mock.calls[0][0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Bronze', 'Silver', 'Gold'])
+    // Every structural field survives; the ids are the new view's own.
+    expect(call.layers[1].showUnassigned).toBe(true)
+    expect(call.layers.map((l: { id: string }) => l.id)).not.toContain('bronze')
     expect(call.assignments).toEqual({})
-    expect(call.layers.every((l: { entityAssignments?: unknown }) => !l.entityAssignments)).toBe(true)
+    expect(call.contextModelId).toBe('tpl_medallion')
+    expect(call.layoutTemplateId).toBe('tpl_medallion')
   })
 
-  it("resolves a backend template's types against the data source ontology", async () => {
+  it("resolves a template's types against the data source and names what didn't match", () => {
     ds.entityTypes = [
       { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 0, canContain: [] } },
       { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 0, canContain: [] } },
     ]
-    // A seeded template written for another ontology.
-    vi.mocked(listTemplates).mockResolvedValueOnce([{
-      id: 'cm1', name: 'Data Mesh', description: '', category: 'data-mesh', isTemplate: true, isActive: true,
-      instanceAssignments: {}, createdAt: '', updatedAt: '',
-      layersConfig: [
-        { name: 'Domain', entityTypes: ['domain', 'bounded-context'] },
-        { name: 'Data Product', entityTypes: ['data-product', 'dataset', 'DATASET', 'table'] },
-      ],
-    }] as never)
-    const updateFormData = vi.fn()
-    render(
-      <LayoutStep
-        formData={makeFormData()}
-        updateFormData={updateFormData}
-        layoutTypes={layoutTypes}
-        dataSourceId="ds1"
-      />
-    )
+    lib.templates = [DATA_MESH]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
 
-    await waitFor(() => expect(screen.getByText('Data Mesh')).toBeInTheDocument())
+    // The card says how well it fits before anyone applies it.
+    expect(screen.getByText('Matches 1 of 2 layers')).toBeInTheDocument()
     fireEvent.click(screen.getByText('Data Mesh'))
 
-    const call = updateFormData.mock.calls[0][0]
+    const call = spy.mock.calls[0][0]
     // A layer whose types the ontology lacks survives, empty; a declared type
     // takes the ontology's spelling, once.
     expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domain', 'Data Product'])
     expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['Dataset']])
+    expect(screen.getByRole('status')).toHaveTextContent('matches 1 of 2 layers')
+    expect(screen.getByRole('status')).toHaveTextContent('bounded-context, data-product, domain, table')
   })
 
-  it('waits for the ontology before a template can be applied', async () => {
+  it('waits for the ontology before a template can be applied', () => {
     ds.isLoading = true
-    render(
-      <LayoutStep
-        formData={makeFormData()}
-        updateFormData={vi.fn()}
-        layoutTypes={layoutTypes}
-        dataSourceId="ds1"
-      />
-    )
+    lib.templates = [MEDALLION]
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+    expect(screen.queryByText('Medallion')).not.toBeInTheDocument()
+  })
 
-    // The backend templates have settled; only the ontology is still loading.
-    await waitFor(() => {
-      expect(listTemplates).toHaveBeenCalled()
-      expect(screen.queryByText('Loading from backend…')).not.toBeInTheDocument()
-    })
-    expect(screen.queryByText('Simple')).not.toBeInTheDocument()
+  it('applies the template it was opened from, once', () => {
+    lib.templates = [MEDALLION, DATA_MESH]
+    const spy = vi.fn()
+    render(<Harness spy={spy} initialTemplateId="tpl_medallion" />)
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0].contextModelId).toBe('tpl_medallion')
+    expect(screen.getByRole('status')).toHaveTextContent('Started from "Medallion"')
+  })
+
+  it('a suggestion from the data itself is not recorded as a library template', () => {
+    lib.templates = [MEDALLION]
+    ds.entityTypes = [
+      { id: 'Domain', name: 'Domain', pluralName: 'Domains', hierarchy: { level: 0, canContain: [] }, visual: { color: '#000' } },
+    ]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByText('From your schema'))
+    expect(spy.mock.calls[0][0].contextModelId).toBeUndefined()
+    expect(spy.mock.calls[0][0].assignments).toEqual({})
   })
 })
