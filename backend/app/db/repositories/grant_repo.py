@@ -1,8 +1,10 @@
-"""Repository: resource_grants — per-View explicit shares.
+"""Repository: resource_grants — explicit shares on a view or a layout template.
 
 Layer 3 of the View access model. A grant adds a subject (user or
 group) to a single view at a narrow role (editor or viewer). It is
-**additive** — independent of workspace membership.
+**additive** — independent of workspace membership. Layout templates
+use the same table (``resource_type='layout_template'``): sharing one
+with a group is how a team gets its own templates.
 
 The grant role enum is intentionally narrower than the global RBAC
 role enum. ``editor`` here is *resource-scoped* (can edit this one
@@ -19,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import ResourceGrantORM
 
 
-VALID_RESOURCE_TYPES = {"view"}
+VALID_RESOURCE_TYPES = {"view", "layout_template"}
 VALID_SUBJECT_TYPES = {"user", "group"}
 VALID_GRANT_ROLES = {"editor", "viewer"}
 

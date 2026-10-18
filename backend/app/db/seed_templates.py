@@ -1,29 +1,41 @@
 """
-Seed Quick Start Context Model Templates.
+Seed the built-in layout templates.
 
-Called once during application startup. Skips if templates already exist.
+Built-ins are the product's own starting points: context_models rows with a
+``system_key``. They are upserted by that key on every start, so an upgrade
+refreshes their content; an administrator can hide one for everyone
+(``is_active = False``), and that choice — like a soft delete — survives the
+refresh. Built-ins are read-only in the app: people duplicate one to change it.
+
+This used to insert four templates only when NO template rows existed, so
+deleting every template brought them all back on the next boot and a change
+here never reached an existing database.
 """
+import json
 import logging
-from sqlalchemy import select, func
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ContextModelORM
-from backend.common.models.management import ContextModelCreateRequest
-from .repositories import context_model_repo
 
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
 # Template Definitions                                                 #
 # ------------------------------------------------------------------ #
+# Entity types are suggestions written for SOME ontology: applying a template
+# keeps only the types the target data source's ontology declares.
 
-TEMPLATES = [
-    ContextModelCreateRequest(
-        name="Data Engineering Flow",
-        description="Classic data engineering pipeline: Source → Staging → Transform → Warehouse → Report",
-        is_template=True,
-        category="data-engineering",
-        layers_config=[
+BUILTIN_TEMPLATES: list[dict[str, Any]] = [
+    {
+        "system_key": "data-engineering-flow",
+        "name": "Data Engineering Flow",
+        "description": "Classic data engineering pipeline: Source → Staging → Transform → Warehouse → Report",
+        "category": "data-engineering",
+        "layers": [
             {
                 "id": "source",
                 "name": "Source",
@@ -34,9 +46,9 @@ TEMPLATES = [
                 "order": 0,
                 "sequence": 0,
                 "logicalNodes": [
-                    {"id": "databases", "name": "Databases", "icon": "Database"},
-                    {"id": "apis", "name": "APIs", "icon": "Globe"},
-                    {"id": "files", "name": "Files", "icon": "FileText"},
+                    {"id": "databases", "name": "Databases", "type": "group", "icon": "Database"},
+                    {"id": "apis", "name": "APIs", "type": "group", "icon": "Globe"},
+                    {"id": "files", "name": "Files", "type": "group", "icon": "FileText"},
                 ],
                 "showUnassigned": True,
             },
@@ -61,9 +73,9 @@ TEMPLATES = [
                 "order": 2,
                 "sequence": 2,
                 "logicalNodes": [
-                    {"id": "cleansing", "name": "Cleansing", "icon": "Filter"},
-                    {"id": "enrichment", "name": "Enrichment", "icon": "Sparkles"},
-                    {"id": "aggregation", "name": "Aggregation", "icon": "Layers"},
+                    {"id": "cleansing", "name": "Cleansing", "type": "group", "icon": "Filter"},
+                    {"id": "enrichment", "name": "Enrichment", "type": "group", "icon": "Sparkles"},
+                    {"id": "aggregation", "name": "Aggregation", "type": "group", "icon": "Layers"},
                 ],
                 "showUnassigned": True,
             },
@@ -90,13 +102,13 @@ TEMPLATES = [
                 "showUnassigned": True,
             },
         ],
-    ),
-    ContextModelCreateRequest(
-        name="Analytics Pipeline",
-        description="Analytics data flow: Raw → Curated → Aggregated → Dashboard",
-        is_template=True,
-        category="analytics",
-        layers_config=[
+    },
+    {
+        "system_key": "analytics-pipeline",
+        "name": "Analytics Pipeline",
+        "description": "Analytics data flow: Raw → Curated → Aggregated → Dashboard",
+        "category": "analytics",
+        "layers": [
             {
                 "id": "raw",
                 "name": "Raw",
@@ -142,13 +154,13 @@ TEMPLATES = [
                 "showUnassigned": True,
             },
         ],
-    ),
-    ContextModelCreateRequest(
-        name="Data Mesh",
-        description="Domain-oriented data product architecture",
-        is_template=True,
-        category="data-mesh",
-        layers_config=[
+    },
+    {
+        "system_key": "data-mesh",
+        "name": "Data Mesh",
+        "description": "Domain-oriented data product architecture",
+        "category": "data-mesh",
+        "layers": [
             {
                 "id": "domain",
                 "name": "Domain",
@@ -159,9 +171,9 @@ TEMPLATES = [
                 "order": 0,
                 "sequence": 0,
                 "logicalNodes": [
-                    {"id": "sales", "name": "Sales", "icon": "ShoppingCart"},
-                    {"id": "finance", "name": "Finance", "icon": "DollarSign"},
-                    {"id": "operations", "name": "Operations", "icon": "Settings"},
+                    {"id": "sales", "name": "Sales", "type": "group", "icon": "ShoppingCart"},
+                    {"id": "finance", "name": "Finance", "type": "group", "icon": "DollarSign"},
+                    {"id": "operations", "name": "Operations", "type": "group", "icon": "Settings"},
                 ],
                 "showUnassigned": True,
             },
@@ -188,13 +200,13 @@ TEMPLATES = [
                 "showUnassigned": True,
             },
         ],
-    ),
-    ContextModelCreateRequest(
-        name="ETL Classic",
-        description="Traditional Extract → Transform → Load pattern",
-        is_template=True,
-        category="data-engineering",
-        layers_config=[
+    },
+    {
+        "system_key": "etl-classic",
+        "name": "ETL Classic",
+        "description": "Traditional Extract → Transform → Load pattern",
+        "category": "data-engineering",
+        "layers": [
             {
                 "id": "extract",
                 "name": "Extract",
@@ -229,7 +241,130 @@ TEMPLATES = [
                 "showUnassigned": True,
             },
         ],
-    ),
+    },
+    {
+        "system_key": "medallion",
+        "name": "Medallion",
+        "category": "data-engineering",
+        "description": "The lakehouse refinement pattern: raw data lands in Bronze and is progressively refined to business-ready Gold.",
+        "layers": [
+            {
+                "id": "medallion-0",
+                "name": "Bronze",
+                "description": "Raw data as it arrives",
+                "icon": "Inbox",
+                "color": "#CD7F32",
+                "entityTypes": [],
+                "order": 0,
+                "sequence": 0,
+                "showUnassigned": True,
+            },
+            {
+                "id": "medallion-1",
+                "name": "Silver",
+                "description": "Cleansed and conformed",
+                "icon": "Filter",
+                "color": "#94a3b8",
+                "entityTypes": [],
+                "order": 1,
+                "sequence": 1,
+                "showUnassigned": True,
+            },
+            {
+                "id": "medallion-2",
+                "name": "Gold",
+                "description": "Business-ready data products",
+                "icon": "Award",
+                "color": "#eab308",
+                "entityTypes": [],
+                "order": 2,
+                "sequence": 2,
+                "showUnassigned": True,
+            },
+        ],
+    },
+    {
+        "system_key": "source-to-target",
+        "name": "Source to target",
+        "category": "data-engineering",
+        "description": "Trace where data comes from, how it changes, and where it ends up.",
+        "layers": [
+            {
+                "id": "source-to-target-0",
+                "name": "Sources",
+                "description": "Where the data originates",
+                "icon": "Database",
+                "color": "#8b5cf6",
+                "entityTypes": [],
+                "order": 0,
+                "sequence": 0,
+                "showUnassigned": True,
+            },
+            {
+                "id": "source-to-target-1",
+                "name": "Transformations",
+                "description": "How the data is shaped along the way",
+                "icon": "Workflow",
+                "color": "#f59e0b",
+                "entityTypes": [],
+                "order": 1,
+                "sequence": 1,
+                "showUnassigned": True,
+            },
+            {
+                "id": "source-to-target-2",
+                "name": "Targets",
+                "description": "Where the data lands",
+                "icon": "Target",
+                "color": "#22c55e",
+                "entityTypes": [],
+                "order": 2,
+                "sequence": 2,
+                "showUnassigned": True,
+            },
+        ],
+    },
+    {
+        "system_key": "data-flow",
+        "name": "Data flow",
+        "category": "analytics",
+        "description": "Map which systems produce data, the pipelines that move it, and who consumes it.",
+        "layers": [
+            {
+                "id": "data-flow-0",
+                "name": "Producers",
+                "description": "Systems that create data",
+                "icon": "Server",
+                "color": "#06b6d4",
+                "entityTypes": [],
+                "order": 0,
+                "sequence": 0,
+                "showUnassigned": True,
+            },
+            {
+                "id": "data-flow-1",
+                "name": "Pipelines",
+                "description": "Jobs that move and process it",
+                "icon": "Workflow",
+                "color": "#6366f1",
+                "entityTypes": [],
+                "order": 1,
+                "sequence": 1,
+                "showUnassigned": True,
+            },
+            {
+                "id": "data-flow-2",
+                "name": "Consumers",
+                "description": "Reports, apps and teams using it",
+                "icon": "Users",
+                "color": "#ec4899",
+                "entityTypes": [],
+                "order": 2,
+                "sequence": 2,
+                "showUnassigned": True,
+            },
+        ],
+    },
 ]
 
 
@@ -238,18 +373,45 @@ TEMPLATES = [
 # ------------------------------------------------------------------ #
 
 async def seed_templates(session: AsyncSession) -> None:
-    """Insert Quick Start Templates if none exist yet."""
-    result = await session.execute(
-        select(func.count()).where(ContextModelORM.is_template == True)
-    )
-    count = result.scalar() or 0
+    """Insert missing built-ins and refresh the content of existing ones.
 
-    if count > 0:
-        logger.debug("Skipping template seeding — %d templates already exist", count)
-        return
-
-    logger.info("Seeding %d Quick Start Context Model templates...", len(TEMPLATES))
-    for tmpl in TEMPLATES:
-        await context_model_repo.create_context_model(session, tmpl)
-
-    logger.info("Quick Start templates seeded successfully")
+    Never touches ``is_active`` (an administrator hid it) or ``deleted_at``.
+    Each insert gets its own savepoint: two workers starting together race on
+    the unique ``system_key`` and the loser simply finds the row already there.
+    """
+    existing = {
+        row.system_key: row
+        for row in (await session.execute(
+            select(ContextModelORM).where(ContextModelORM.system_key.isnot(None))
+        )).scalars()
+    }
+    inserted = refreshed = 0
+    for tmpl in BUILTIN_TEMPLATES:
+        layers = json.dumps(tmpl["layers"])
+        row = existing.get(tmpl["system_key"])
+        if row is None:
+            try:
+                async with session.begin_nested():
+                    session.add(ContextModelORM(
+                        system_key=tmpl["system_key"],
+                        name=tmpl["name"],
+                        description=tmpl["description"],
+                        category=tmpl["category"],
+                        layers_config=layers,
+                        is_template=True,
+                        visibility="enterprise",
+                    ))
+                inserted += 1
+            except IntegrityError:
+                logger.debug("Built-in template %s was seeded concurrently", tmpl["system_key"])
+            continue
+        if (row.name, row.description, row.category, row.layers_config) != (
+            tmpl["name"], tmpl["description"], tmpl["category"], layers,
+        ):
+            row.name = tmpl["name"]
+            row.description = tmpl["description"]
+            row.category = tmpl["category"]
+            row.layers_config = layers
+            refreshed += 1
+    if inserted or refreshed:
+        logger.info("Built-in layout templates: %d added, %d refreshed", inserted, refreshed)

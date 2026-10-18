@@ -838,6 +838,14 @@ class ContextModelORM(Base):
     )
     is_template = Column(Boolean, nullable=False, default=False)
     category = Column(Text, nullable=True)                           # e.g. "data-engineering"
+    # Layout templates (is_template rows) — see services/template_access.py.
+    # A built-in is a row with a system_key: product-owned, refreshed from
+    # seed_templates.py on every start, read-only (is_active=False hides it).
+    system_key = Column(Text, nullable=True)
+    # Soft delete: keeps the id, its shares and the views that name it, so
+    # "Undo" puts back exactly what was there.
+    deleted_at = Column(Text, nullable=True, default=None)
+    deleted_by = Column(Text, nullable=True, default=None)
     layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
@@ -863,6 +871,12 @@ class ContextModelORM(Base):
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
+        # One row per built-in. Both dialect kwargs: a bare postgresql_where is
+        # silently dropped on SQLite, which would make NULL keys collide there.
+        Index("uq_cm_system_key", "system_key",
+              unique=True,
+              postgresql_where=text("system_key IS NOT NULL"),
+              sqlite_where=text("system_key IS NOT NULL")),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_context_models_visibility",
@@ -2863,7 +2877,7 @@ class NotificationORM(Base):
 
 
 class ResourceGrantORM(Base):
-    """Explicit grant of access to a single resource (Phase 1: views only).
+    """Explicit grant of access to a single resource: a view or a layout template.
 
     Additive only — a grant extends access to a subject regardless of
     workspace membership. The role_name enum here is intentionally
@@ -2873,7 +2887,7 @@ class ResourceGrantORM(Base):
     __tablename__ = "resource_grants"
 
     id = Column(Text, primary_key=True, default=lambda: f"grt_{uuid.uuid4().hex[:12]}")
-    resource_type = Column(Text, nullable=False)  # 'view' for now
+    resource_type = Column(Text, nullable=False)  # 'view' | 'layout_template'
     resource_id = Column(Text, nullable=False)
     subject_type = Column(Text, nullable=False)   # user | group
     subject_id = Column(Text, nullable=False)
@@ -2891,7 +2905,7 @@ class ResourceGrantORM(Base):
         # Reverse: "what views does Bob have explicit access to?"
         Index("idx_resource_grants_subject", "subject_type", "subject_id"),
         CheckConstraint(
-            "resource_type IN ('view')",
+            "resource_type IN ('view', 'layout_template')",
             name="ck_resource_grants_resource_type",
         ),
         CheckConstraint(

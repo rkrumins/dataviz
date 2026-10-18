@@ -56,6 +56,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "system:groups:manage",
             "system:org-admin",
             "system:org-viewer",
+            "system:templates:manage",
             "system:users:manage",
             "system:workspaces:create",
             "workspace:admin",
@@ -81,6 +82,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         permissions=frozenset({
             "system:groups:manage",
             "system:org-admin",
+            "system:templates:manage",
             "system:workspaces:create",
             "workspace:admin",
             "workspace:catalog:manage",
