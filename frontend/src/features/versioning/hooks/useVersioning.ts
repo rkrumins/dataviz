@@ -5,7 +5,7 @@
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -27,6 +27,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'branches', ws, gid, ...(viewId ? [viewId] : []), ...(status ? [{ status }] : [])] as const,
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
+  branchMembers: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchMembers', ws, gid, bid] as const,
   branchFreshness: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchFreshness', ws, gid, bid] as const,
   diffVsMain: (ws?: string, gid?: string | null, bid?: string | null) =>
@@ -120,6 +122,15 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
     queryFn: () => api.getBranchState(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+  })
+}
+
+/** A draft's members and the caller's own role on it. */
+export function useBranchMembers(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId),
+    queryFn: () => api.listBranchMembers(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
   })
 }
 
@@ -571,11 +582,39 @@ export function useUpdateBranch(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { branchId: string; name?: string; description?: string; isShared?: boolean }) =>
       api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description, isShared: v.isShared }),
-    onSuccess: () => {
+    onSuccess: (_d, v) => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+      // Making a draft private removes its members.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, v.branchId) })
     },
   })
+}
+
+/** Add a draft member or change their role. Refreshes the members, and the branch list + resolve too,
+ *  since the first member makes a private draft shared. */
+export function useAddBranchMember(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { subjectType: 'user' | 'group'; subjectId: string; role: DraftRole }) =>
+      api.addBranchMember(wsId, graphId, branchId, v),
+    onSuccess: () => invalidateBranchMembers(qc, wsId, graphId, branchId),
+  })
+}
+
+export function useRemoveBranchMember(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { subjectType: 'user' | 'group'; subjectId: string }) =>
+      api.removeBranchMember(wsId, graphId, branchId, v.subjectType, v.subjectId),
+    onSuccess: () => invalidateBranchMembers(qc, wsId, graphId, branchId),
+  })
+}
+
+function invalidateBranchMembers(qc: ReturnType<typeof useQueryClient>, wsId: string, graphId: string, branchId: string) {
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can

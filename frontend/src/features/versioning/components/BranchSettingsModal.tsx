@@ -1,8 +1,9 @@
 /**
  * BranchSettingsModal — manage a draft branch: rename, optional description, shared/private
- * visibility, and a one-click shareable deep-link (/views/{viewId}?branch={branchId}). Opened from
- * the BranchSwitcher (per-draft gear). Edits go through useUpdateBranch (owner/maintainer gated
- * server-side); the link is permission-gated on open by useBranchDeepLink.
+ * visibility, its members, and a one-click shareable deep-link (/views/{viewId}?branch={branchId}).
+ * Opened from the BranchSwitcher (per-draft gear). Edits go through useUpdateBranch (owner/maintainer
+ * gated server-side; visibility is the owner's alone); the link is permission-gated on open by
+ * useBranchDeepLink.
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -11,8 +12,10 @@ import { X, GitBranch, Link2, Check, Loader2, Lock, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useAuthStore } from '@/store/auth'
 import type { Branch } from '@/services/versioningApiService'
-import { useUpdateBranch } from '../hooks/useVersioning'
+import { useBranchMembers, useUpdateBranch } from '../hooks/useVersioning'
+import { BranchMembersSection } from './BranchMembersSection'
 
 export function BranchSettingsModal({
   wsId,
@@ -31,8 +34,15 @@ export function BranchSettingsModal({
   const update = useUpdateBranch(wsId, graphId)
   const [name, setName] = useState(branch.name ?? '')
   const [description, setDescription] = useState(branch.description ?? '')
+  const membersQ = useBranchMembers(wsId, graphId, branch.branchId)
+  const me = useAuthStore((s) => s.user?.id)
+  // `branch` is a snapshot from when the modal opened: adding the first member shares the draft,
+  // so visibility is compared with (and sent only when it differs from) this baseline instead.
+  const [baseShared, setBaseShared] = useState(!!branch.isShared)
   const [isShared, setIsShared] = useState(!!branch.isShared)
   const [copied, setCopied] = useState(false)
+  const isOwner = membersQ.data ? membersQ.data.myRole === 'owner' : branch.owner === me
+  const losing = baseShared && !isShared ? membersQ.data?.members ?? [] : []
 
   // Prefer the view the branch was created from so the link lands on its home context; fall back to
   // the view in hand. Both resolve to the same data source, so the branch is accessible either way.
@@ -44,7 +54,7 @@ export function BranchSettingsModal({
   const dirty =
     name.trim() !== (branch.name ?? '') ||
     description.trim() !== (branch.description ?? '') ||
-    isShared !== !!branch.isShared
+    isShared !== baseShared
 
   const copyLink = async () => {
     if (!link) return
@@ -59,7 +69,10 @@ export function BranchSettingsModal({
 
   const save = () => {
     update.mutate(
-      { branchId: branch.branchId, name: name.trim(), description: description.trim(), isShared },
+      {
+        branchId: branch.branchId, name: name.trim(), description: description.trim(),
+        ...(isShared !== baseShared ? { isShared } : {}),
+      },
       {
         onSuccess: () => { notify('success', 'Draft updated.'); onClose() },
         onError: (e) => notify('error', (e as Error).message),
@@ -74,7 +87,7 @@ export function BranchSettingsModal({
       <AnimatePresence>
         <motion.div
           key="branch-settings"
-          className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
+          className="pointer-events-auto w-full max-w-xl rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
           initial={{ scale: 0.96, y: 8 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 8 }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -93,7 +106,7 @@ export function BranchSettingsModal({
             </button>
           </div>
 
-          <div className="px-5 py-4 space-y-4">
+          <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
             <div>
               <label className="block text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5">Name</label>
               <input
@@ -127,8 +140,10 @@ export function BranchSettingsModal({
                   <button
                     key={label}
                     onClick={() => setIsShared(v)}
+                    disabled={!isOwner}
+                    title={isOwner ? undefined : 'Only the draft’s owner can change who it’s shared with'}
                     className={cn(
-                      'rounded-lg border px-3 py-2 text-left transition-colors',
+                      'rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
                       isShared === v ? 'border-accent-lineage/50 bg-accent-lineage/[0.07] ring-1 ring-accent-lineage/30'
                         : 'border-glass-border hover:border-glass-border/80',
                     )}
@@ -140,7 +155,22 @@ export function BranchSettingsModal({
                   </button>
                 ))}
               </div>
+              {losing.length > 0 && (
+                <p className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+                  Making this draft private removes {losing.map((m) => m.name ?? m.subjectId).join(', ')}
+                </p>
+              )}
             </div>
+
+            {membersQ.isError ? (
+              <p className="text-xs text-ink-muted">Couldn’t load this draft’s members.</p>
+            ) : (
+              <BranchMembersSection
+                wsId={wsId} graphId={graphId} branchId={branch.branchId}
+                members={membersQ.data?.members} myRole={membersQ.data?.myRole}
+                onAdded={() => { setBaseShared(true); setIsShared(true) }}
+              />
+            )}
 
             {link && (
               <div>
@@ -174,7 +204,7 @@ export function BranchSettingsModal({
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-50"
             >
               {update.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              Save changes
+              {losing.length > 0 ? `Make private and remove ${losing.length}` : 'Save changes'}
             </button>
           </div>
         </motion.div>

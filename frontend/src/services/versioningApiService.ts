@@ -560,6 +560,21 @@ export class NotDraftOwnerError extends Error {
   }
 }
 
+/** A shared draft's owner or members refused the caller: the change needs `required` (`editor` to
+ *  change the draft, `maintainer` to manage it) and the caller holds less. Nothing was written. */
+export class DraftRoleRequiredError extends Error {
+  required?: string
+  branchId?: string
+  constructor(detail: { required?: string; branchId?: string }) {
+    super(detail.required === 'maintainer'
+      ? 'Only the owner or a maintainer of this shared draft can do that.'
+      : 'Only the owner and editors of this shared draft can change it.')
+    this.name = 'DraftRoleRequiredError'
+    this.required = detail.required
+    this.branchId = detail.branchId
+  }
+}
+
 /** The save named Published itself; edits reach it only through a draft. */
 export class MainWriteForbiddenError extends Error {
   constructor() {
@@ -614,6 +629,8 @@ type RefusalDetail = string | {
   /** Which refusal an `access_denied` is, e.g. `not_draft_owner`. */
   code?: string
   owner?: string
+  /** The role a `not_owner_or_member` refusal needs. */
+  required?: string
   behindBy?: number
   prId?: string
   title?: string | null
@@ -645,6 +662,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 403 && d?.type === 'access_denied' && d.code === 'not_draft_owner') {
     return new NotDraftOwnerError(d)
+  }
+  if (status === 403 && d?.type === 'access_denied' && d.code === 'not_owner_or_member') {
+    return new DraftRoleRequiredError(d)
   }
   if (status === 409 && d?.type === 'main_write_forbidden') {
     return new MainWriteForbiddenError()
@@ -1089,6 +1109,46 @@ export function updateBranch(
     method: 'PATCH',
     body: JSON.stringify(data),
   })
+}
+
+export type DraftRole = 'viewer' | 'editor' | 'maintainer'
+
+export interface BranchMember {
+  subjectType: 'user' | 'group'
+  subjectId: string
+  role: DraftRole
+  /** The user's or group's display name; null when it no longer resolves. */
+  name?: string | null
+}
+
+export interface BranchMembersResponse {
+  /** Empty for a private draft. */
+  members: BranchMember[]
+  /** The caller's own role on the draft; null when they hold none. */
+  myRole: 'owner' | DraftRole | null
+}
+
+export function listBranchMembers(wsId: string, graphId: string, branchId: string): Promise<BranchMembersResponse> {
+  return vfetch<BranchMembersResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/members`)
+}
+
+/** Add a member, or change an existing member's role. The first member makes a private draft shared. */
+export function addBranchMember(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  data: { subjectType: 'user' | 'group'; subjectId: string; role: DraftRole },
+): Promise<BranchMember> {
+  return vfetch<BranchMember>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/members`, jsonBody(data))
+}
+
+export function removeBranchMember(
+  wsId: string, graphId: string, branchId: string, subjectType: 'user' | 'group', subjectId: string,
+): Promise<{ removed: boolean }> {
+  return vfetch<{ removed: boolean }>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/members/${subjectType}/${encodeURIComponent(subjectId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 // ============================================

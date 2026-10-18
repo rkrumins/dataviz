@@ -198,6 +198,11 @@ with resolutions**.
   next to a draft: change its **Name** and **Description**, set its
   **Visibility** (**Private** or **Shared**), or copy its **Shareable link**.
   Choose **Save changes**.
+- **Share it.** **Draft settings** also lists the draft's **Members**. Its
+  owner and maintainers add a person or group as a **Viewer**, **Editor** or
+  **Maintainer**, change a role, or remove someone; adding the first member
+  shares a private draft. Only the owner can change **Visibility**, and
+  making a draft **Private** removes its members.
 - **Stop editing.** **Done** leaves the draft and returns you to Published.
   The draft is kept — nothing is discarded. If you still have staged edits,
   **Review & Save** opens instead: save or discard them first.
