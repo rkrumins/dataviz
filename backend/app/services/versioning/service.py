@@ -46,7 +46,7 @@ from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, IneligibleMember,
                      JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork,
-                     NotDraftOwner)
+                     NotDraftOwner, SelfReview)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -2232,13 +2232,15 @@ class GraphVersioningService:
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
     ) -> dict:
-        """Record ``actor``'s approval of a PR. The author can't approve their own
-        PR; once every requested reviewer has approved, ``approval_status`` flips
-        to ``approved`` (and an otherwise-mergeable PR to status ``approved``).
+        """Record ``actor``'s approval of a PR. Its author and its source draft's owner can't
+        approve it (:class:`SelfReview`); once every requested reviewer has approved,
+        ``approval_status`` flips to ``approved`` (and an otherwise-mergeable PR to status
+        ``approved``).
 
-        The approval is of the source branch's head now: a content commit after it makes it
-        stale (:meth:`_approvals`). ``expected_head_commit_id`` is the head the reviewer saw;
-        :class:`HeadMoved` when the branch has moved on since.
+        The approval is of the source branch's head now, and records that commit's seq, never
+        a later commit's: a content commit after it makes it stale (:meth:`_approvals`).
+        ``expected_head_commit_id`` is the head the reviewer saw; :class:`HeadMoved` when the
+        branch has moved on since.
 
         The PR row is locked for the transaction, so a second reviewer approving at the same
         moment waits and adds to this approval rather than writing over it."""
@@ -2248,17 +2250,19 @@ class GraphVersioningService:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status in ("merged", "closed"):
                 raise ValueError(f"pr {pr_id} is {pr.status}")
-            if actor == pr.actor:
-                raise AccessDenied("author cannot approve their own PR")
             src = await s.get(BranchORM, pr.source_branch_id)
+            if actor == pr.actor or (src is not None and actor == src.owner):
+                raise SelfReview(pr_id)
             head = src.head_commit_id if src else None
             if expected_head_commit_id is not None and expected_head_commit_id != head:
                 raise HeadMoved(pr_id, head)
+            # The head's own seq: a checkpoint committed since the head was read is after it.
+            head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
+                CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
             approved = list(dict.fromkeys((pr.approved_by or []) + [actor]))
             pr.approved_by = approved
             pr.approvals = {**(pr.approvals or {}), actor: {
-                "headCommitId": head, "at": _now(),
-                "headSeq": await self._next_seq(s, pr.graph_id, pr.source_branch_id) - 1}}
+                "headCommitId": head, "at": _now(), "headSeq": head_seq}}
             standing, _stale = await self._approvals(s, pr)
             reviewers = set(pr.reviewers or [])
             pr.approval_status = "approved" if reviewers <= set(standing) else "pending"
@@ -5132,9 +5136,9 @@ class GraphVersioningService:
         # merged (re-pulling short-circuits as already_up_to_date). This now mirrors the gate
         # merge_mr actually enforces (it reads draft.base_commit_seq), so UI and server agree.
         behind = behind_by = None
+        src = await s.get(BranchORM, pr.source_branch_id)
         if self._is_draft_mr(pr):
             graph = await s.get(GraphORM, pr.target_graph_id)
-            src = await s.get(BranchORM, pr.source_branch_id)
             base = (src.base_commit_seq if src else pr.base_commit_seq) or 0
             behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
             behind = behind_by > 0
@@ -5151,6 +5155,8 @@ class GraphVersioningService:
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
             "source_branch_id": pr.source_branch_id,
+            # The source's head now: what an approval is of (``approve_pr``'s expected head).
+            "head_commit_id": src.head_commit_id if src else None,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": status,
             "behind": behind, "behind_by": behind_by,

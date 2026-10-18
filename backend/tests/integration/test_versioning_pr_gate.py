@@ -170,6 +170,49 @@ async def _run_head_bound_approvals() -> None:
         await svc.merge_mr(mr_id=mr4, actor="alice", message="merge")
     assert ei.value.stale == ["carol"]
 
+    # ── A checkpoint that lands while the approval is being recorded is not approved with it ──
+    # The approval records the head carol saw and that head's seq, never a later commit's.
+    d5 = await draft("alice", [_upd("A", f=5)])
+    mr5 = await svc.open_draft_mr(graph_id=gid, branch_id=d5, actor="alice", reviewers=["carol"])
+    seen = await head(d5)
+    next_seq, raced = svc._next_seq, []
+
+    async def a_checkpoint_lands_first(s, graph_id, branch_id):
+        if not raced:
+            raced.append(1)
+            await svc.stage_changes(graph_id=gid, branch_id=d5, actor="alice", ops=[_upd("A", f=6)])
+            await svc.checkpoint(graph_id=gid, branch_id=d5, actor="alice")
+        return await next_seq(s, graph_id, branch_id)
+    svc._next_seq = a_checkpoint_lands_first
+    try:
+        await svc.approve_pr(pr_id=mr5, actor="carol", expected_head_commit_id=seen)
+    finally:
+        svc._next_seq = next_seq
+    if not raced:                                      # the checkpoint lands just after, then
+        await svc.stage_changes(graph_id=gid, branch_id=d5, actor="alice", ops=[_upd("A", f=6)])
+        await svc.checkpoint(graph_id=gid, branch_id=d5, actor="alice")
+    async with db.graphver_session() as s:
+        rec = (await s.execute(__import__("sqlalchemy").text(
+            "SELECT approvals->'carol' FROM graphver.merge_requests WHERE id = :id"), {"id": mr5})).scalar_one()
+        seq = (await s.execute(__import__("sqlalchemy").text(
+            "SELECT commit_seq FROM graphver.commits WHERE id = :id"), {"id": seen})).scalar_one()
+    assert rec["headCommitId"] == seen and rec["headSeq"] == seq, rec
+    meta = await svc.get_pr(mr5)
+    assert meta["approval_status"] == "pending" and meta["stale_approved_by"] == ["carol"], meta
+    assert meta["head_commit_id"] == await head(d5) != seen, meta
+
+    # ── The draft's owner can't approve a review of it, any more than its author can ──
+    from backend.app.services.versioning.errors import SelfReview
+    d6 = await draft("bob", [_upd("B", f=6)])
+    await svc.add_branch_member(graph_id=gid, branch_id=d6, subject_type="user", subject_id="alice",
+                                role="editor", actor="bob")
+    mr6 = await svc.open_draft_mr(graph_id=gid, branch_id=d6, actor="alice", reviewers=["bob", "carol"])
+    for who in ("bob", "alice"):
+        with pytest.raises(SelfReview) as sr:
+            await svc.approve_pr(pr_id=mr6, actor=who)
+        assert (sr.value.status_code, sr.value.detail["code"]) == (403, "self_review")
+    assert (await svc.approve_pr(pr_id=mr6, actor="carol"))["approved_by"] == ["carol"]
+
     await db.dispose_engine()
 
 
@@ -269,6 +312,15 @@ async def _run_publish_permission() -> None:
             mr3 = r.json()["prId"]
             r = await c.post(f"{V1}/merge-requests/{mr3}/approve", json={"expectedHeadCommitId": "c_old"}, headers=pat)
             assert r.status_code == 409 and r.json()["detail"]["type"] == "head_moved", r.text
+            # The PR read carries the head to approve: the draft's head now.
+            head = r.json()["detail"]["headCommitId"]
+            r = await c.get(f"{V1}/merge-requests/{mr3}", headers=pat)
+            assert r.status_code == 200 and head and r.json()["headCommitId"] == head, r.text
+            # The draft's owner (mia raised it, too) is refused with a code that says why.
+            r = await c.post(f"{V1}/merge-requests/{mr3}/approve", json={"expectedHeadCommitId": head}, headers=mia)
+            assert r.status_code == 403 and r.json()["detail"]["code"] == "self_review", r.text
+            r = await c.post(f"{V1}/merge-requests/{mr3}/approve", json={"expectedHeadCommitId": head}, headers=pat)
+            assert r.status_code == 200 and r.json()["approvalStatus"] == "approved", r.text
             r = await c.post(f"{V1}/merge-requests/{mr3}/approve", headers=pat)      # no body: as before
             assert r.status_code == 200 and r.json()["approvalStatus"] == "approved", r.text
     finally:

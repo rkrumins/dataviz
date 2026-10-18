@@ -814,7 +814,8 @@ function useInvalidatePr(wsId: string) {
 export function useApproveMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   return useMutation({
-    mutationFn: (v: { prId: string; graphId: string }) => api.approveMergeRequest(wsId, v.prId),
+    mutationFn: (v: { prId: string; graphId: string; expectedHeadCommitId?: string | null }) =>
+      api.approveMergeRequest(wsId, v.prId, v.expectedHeadCommitId),
     onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
   })
 }

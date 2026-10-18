@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import ImportRowORM, JobORM
+from ..models import ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, Viewer
 from . import stream
 from .export_worker import ExportWorker, example_template_records
@@ -499,8 +499,9 @@ class ImportExportService:
         :class:`MainWriteForbidden`, a closed draft :class:`BranchNotOpen`), and it becomes
         ``publishing``, closed to every write but the job's publish until the job ends. A publish of
         someone else's private draft is :class:`NotDraftOwner`, of a shared draft by anyone but its owner
-        or a maintainer :class:`DraftRoleRequired`. The job is stored already queued: it has no input
-        to wait for."""
+        or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
+        :class:`ApprovalRequired` here, before the draft is closed for it; the job checks again. The job
+        is stored already queued: it has no input to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
@@ -514,6 +515,11 @@ class ImportExportService:
             if not merge_request_id:                     # a review's merger need not own the draft
                 await self._svc._require_publish(s, branch, actor, ())
             await self._svc._require_no_import(s, branch_id)
+            if merge_request_id:
+                pr = await s.get(MergeRequestORM, merge_request_id)
+                if pr is None or pr.status in ("merged", "closed"):
+                    raise ValueError(f"merge request {merge_request_id} is not open")
+                await self._svc._require_approvals(s, pr)
             branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,

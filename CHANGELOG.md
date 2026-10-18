@@ -46,9 +46,15 @@ Publish now, Merge and the rollback actions for people without it, and says why.
 **An approval is of what the reviewer saw.** Each approval records the draft's head. A content commit
 on the draft after it makes it stale: the merge answers **409 `approval_required`** with that
 reviewer in the new `stale` list, and the review shows them as still to approve. A pull that rewrote
-none of the draft's own edits keeps approvals. `POST …/approve` takes an optional
-`{expectedHeadCommitId}` and answers **409 `head_moved`** `{headCommitId}` when the draft has moved
-on. The approval check now runs before the merge is computed.
+none of the draft's own edits keeps approvals. The PR read gives the draft's head now
+(`headCommitId`), and `POST …/approve` takes an optional `{expectedHeadCommitId}` and answers **409
+`head_moved`** `{headCommitId}` when the draft has moved on. The review sends the head it loaded, and
+on `head_moved` reloads and says the draft changed. A checkpoint that lands while an approval is
+recorded is no longer counted as approved. The approval check now runs before the merge is computed,
+and a merge large enough to run as a job is refused with `approval_required` before it is queued,
+instead of closing the draft as publishing until the job fails. A PR's author and its draft's owner
+can't approve it: **403 `access_denied`** with code `self_review`, and the review does not offer
+them Approve.
 
 **Reviewers can be asked when a draft goes for review, and after.** "Submit for review" has a
 reviewer picker listing the workspace members who can approve (`GET …/versioning/reviewers`).

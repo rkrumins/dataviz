@@ -6,7 +6,7 @@
  *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -20,7 +20,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
-  MergeConflictError, NotUpToDateError,
+  HeadMovedError, MergeConflictError, NotUpToDateError,
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
@@ -82,6 +82,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
+  // Approve sends the head the PR was read at, so the diff on screen must be of that head: when a
+  // poll brings a new one, read the diff again (Approve waits for it).
+  const refetchDiff = diffQ.refetch
+  const diffHead = useRef(pr?.headCommitId)
+  useEffect(() => {
+    if (pr?.headCommitId === diffHead.current) return
+    if (diffHead.current !== undefined) void refetchDiff()
+    diffHead.current = pr?.headCommitId
+  }, [pr?.headCommitId, refetchDiff])
   // Edits still staged on the canvas for this draft are not part of it: a merge would leave them behind.
   const unsaved = useUnsavedCountOnBranch(pr?.sourceBranchId)
 
@@ -140,12 +149,14 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
   const terminal = isTerminalPr(pr?.status)
   const isAuthor = !!user && pr?.actor === user.id
+  // Nor does the draft's owner approve its review (doc 13 PR_REVIEW): the server refuses both.
+  const isOwner = !!user && pr?.sourceBranchOwner === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
   // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
   // its reviewer is offered Approve again.
   const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
-  const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && isRequested
+  const showApprove = canManage && !terminal && !isAuthor && !isOwner && !alreadyApproved && isRequested
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -488,11 +499,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
             {showApprove && (
               <button
-                onClick={() => approve.mutate({ prId, graphId: pr.graphId }, {
+                onClick={() => approve.mutate({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId }, {
                   onSuccess: () => notify('success', 'Approved.'),
-                  onError: (e) => notify('error', (e as Error).message),
+                  onError: (e) => {
+                    // The draft moved on since this review was loaded: load it again before approving.
+                    if (e instanceof HeadMovedError) { void prQ.refetch(); void refetchDiff() }
+                    notify('error', (e as Error).message)
+                  },
                 })}
-                disabled={busy}
+                disabled={busy || diffQ.isFetching}
                 title="Sign off on these changes so they can be merged"
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
               >

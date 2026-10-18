@@ -29,6 +29,7 @@ from backend.app.services.versioning.errors import (
     MassDeleteBlocked,
     NotAFork,
     NotDraftOwner,
+    SelfReview,
 )
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 
@@ -90,6 +91,15 @@ def test_a_shared_draft_refusal_names_the_role_it_needs():
     assert err.status_code == 403
     assert {k: err.detail[k] for k in ("type", "code", "required", "branchId")} == {
         "type": "access_denied", "code": "not_owner_or_member", "required": "editor", "branchId": "br_1"}
+
+
+def test_approving_your_own_draft_or_review_is_403_self_review():
+    exc = SelfReview("pr_1")
+    assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)
+    err = _raised(exc)
+    assert err.status_code == 403
+    assert {k: err.detail[k] for k in ("type", "code", "prId")} == {
+        "type": "access_denied", "code": "self_review", "prId": "pr_1"}
 
 
 def test_a_group_lookup_outage_is_503_with_retry_after():

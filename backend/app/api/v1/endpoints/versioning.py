@@ -1166,6 +1166,8 @@ class PrResponse(_ApiModel):
     # who owns the draft (only populated by GET /…/{pr_id}, not the list endpoints).
     source_branch_owner: Optional[str] = Field(default=None, alias="sourceBranchOwner")
     source_branch_name: Optional[str] = Field(default=None, alias="sourceBranchName")
+    # The source's head now: approve sends it back as expectedHeadCommitId (409 head_moved if it moved).
+    head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")

@@ -4,9 +4,10 @@ The job goes through the same hook the API wires into the import/export service 
 live ontology, the route's refusals, then what a publish sets off), so this runs it end to end
 against Postgres: the draft's changes reach main and the job carries the commit; a draft that fell
 behind main is refused with the route's own answer, for the client to raise the same error; the
-merge of a draft's review goes the same way, waiting on its reviewer's approval. And a job run again
-after its draft merged — its worker died after the squash, or a superseded attempt's squash landed
-under it — completes with that merge, publishing nothing twice, and what a publish sets off runs.
+merge of a draft's review goes the same way, and one its reviewer has not approved is refused
+before it is queued. And a job run again after its draft merged — its worker died after the
+squash, or a superseded attempt's squash landed under it — completes with that merge, publishing
+nothing twice, and what a publish sets off runs.
 The draft is ``publishing`` while its job is queued, ``open`` again when the job is refused, and
 ``merged`` when it lands.
 """
@@ -16,6 +17,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.service import ApprovalRequired
 
 
 async def _run(monkeypatch) -> None:
@@ -76,10 +78,11 @@ async def _run(monkeypatch) -> None:
                                           actor="alice", message="ship it", merge_request_id=mr)
         return await ie.run_publish(job["job_id"])
 
-    unapproved = await merge_by_job()
-    assert unapproved["error"] == {"status": 409, "detail": {"type": "approval_required", "pending": ["carol"],
-                                                           "stale": []}}
-    assert await status(reviewed) == "open", "refused: open again, so it can be queued again"
+    # Refused before it is queued: the draft is never closed as publishing for a merge that can't land.
+    with pytest.raises(ApprovalRequired) as ei:
+        await merge_by_job()
+    assert (ei.value.pending, ei.value.stale) == (["carol"], [])
+    assert await status(reviewed) == "open", "refused before queuing: the draft stays open"
     await svc.approve_pr(pr_id=mr, actor="carol")
     merged = await merge_by_job()
     pr = await svc.get_pr(mr)

@@ -78,6 +78,18 @@ class DraftRoleRequired(_HttpMapped, AccessDenied):
                           "required": required, "branchId": branch_id})
 
 
+class SelfReview(_HttpMapped, AccessDenied):
+    """PR_REVIEW (doc 13): a PR's author, or its source draft's owner, approved it. An
+    approval is someone else's review of the changes."""
+
+    status_code = 403
+
+    def __init__(self, pr_id: str):
+        self.pr_id = pr_id
+        super().__init__(f"the author or the draft's owner cannot approve pr {pr_id}",
+                         {"type": "access_denied", "code": "self_review", "prId": pr_id})
+
+
 class GroupsUnavailable(_HttpMapped, RuntimeError):
     """The actor's groups could not be looked up, and a group decides their
     role on the draft. Never read as "no groups": that would refuse a member."""
@@ -200,6 +212,6 @@ class ForkNotRestorable(_HttpMapped, RuntimeError):
                          {"type": "fork_not_restorable", "graphId": graph_id, "reason": reason})
 
 
-HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, GroupsUnavailable,
-               IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked,
-               ForkLimit, NotAFork, LiveForks, ForkNotRestorable)
+HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
+               GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
+               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable)

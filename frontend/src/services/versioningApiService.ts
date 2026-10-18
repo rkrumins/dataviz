@@ -406,6 +406,8 @@ export interface PullRequest {
   sourceBranchId: string
   sourceBranchOwner?: string | null   // owner of the source draft (only on the single-PR read)
   sourceBranchName?: string | null
+  /** The source draft's head now: Approve sends it back, so the approval is of what was reviewed. */
+  headCommitId?: string | null
   originatingViewId?: string | null   // the view the source draft belongs to — for "back to view" nav
   targetGraphId: string
   targetBranch: string
@@ -575,6 +577,17 @@ export class DraftRoleRequiredError extends Error {
   }
 }
 
+/** An approval named the draft head the reviewer saw, and the draft has moved on since: what they
+ *  approved is not what would merge. `headCommitId` is the head now. Nothing was approved. */
+export class HeadMovedError extends Error {
+  headCommitId?: string | null
+  constructor(detail: { headCommitId?: string | null }) {
+    super('This draft changed since you loaded it. Review the latest changes, then approve again.')
+    this.name = 'HeadMovedError'
+    this.headCommitId = detail.headCommitId
+  }
+}
+
 /** The save named Published itself; edits reach it only through a draft. */
 export class MainWriteForbiddenError extends Error {
   constructor() {
@@ -639,6 +652,8 @@ type RefusalDetail = string | {
   reason?: string
   /** The fork cap (`fork_limit`). */
   limit?: number
+  /** The draft's head now (`head_moved`). */
+  headCommitId?: string | null
 } | null | undefined
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
@@ -665,6 +680,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 403 && d?.type === 'access_denied' && d.code === 'not_owner_or_member') {
     return new DraftRoleRequiredError(d)
+  }
+  if (status === 409 && d?.type === 'head_moved') {
+    return new HeadMovedError(d)
   }
   if (status === 409 && d?.type === 'main_write_forbidden') {
     return new MainWriteForbiddenError()
@@ -1633,8 +1651,12 @@ export function previewMergeRequest(wsId: string, prId: string): Promise<MergePr
   return vfetch<MergePreviewResponse>(`${base(wsId)}/merge-requests/${prId}/preview`)
 }
 
-export function approveMergeRequest(wsId: string, prId: string): Promise<PullRequest> {
-  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/approve`, jsonBody({}))
+/** Approve a merge request at `expectedHeadCommitId`, the draft head the reviewer saw
+ *  ({@link HeadMovedError} when the draft has moved on since). */
+export function approveMergeRequest(
+  wsId: string, prId: string, expectedHeadCommitId?: string | null,
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/approve`, jsonBody({ expectedHeadCommitId }))
 }
 
 export function closeMergeRequest(wsId: string, prId: string): Promise<PullRequest> {
