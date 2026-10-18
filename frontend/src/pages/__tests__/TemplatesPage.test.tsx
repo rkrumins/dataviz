@@ -307,6 +307,42 @@ describe('TemplatesPage', () => {
         expect(screen.getByRole('combobox', { name: 'Sort templates' })).toHaveValue('updated')
     })
 
+    it('opens with the library at a glance, each tile showing what it counts', async () => {
+        service.list.mockResolvedValue({
+            items: LIBRARY.map(x => x.id === 'tpl_ws' ? { ...x, isFavourite: true } : x), total: LIBRARY.length,
+        })
+        renderAt()
+        await screen.findByRole('button', { name: 'My flow' })
+        const tile = (label: string) => screen.getByText(label, { selector: 'div' }).closest('button')!
+        expect(tile('Templates')).toHaveTextContent('5')
+        expect(tile('Views Using Them')).toHaveTextContent('3')
+        expect(tile('Your Favorites')).toHaveTextContent('1')
+        expect(screen.queryByText('Awaiting Your Decision')).not.toBeInTheDocument()
+
+        fireEvent.click(tile('Your Favorites'))
+        expect(screen.getByRole('tab', { name: /^Favorites/ })).toHaveAttribute('aria-selected', 'true')
+        expect(screen.getByRole('button', { name: 'Finance flow' })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'My flow' })).not.toBeInTheDocument()
+
+        fireEvent.click(tile('Views Using Them'))
+        expect(screen.getByRole('tab', { name: /^All/ })).toHaveAttribute('aria-selected', 'true')
+        expect(screen.getByRole('combobox', { name: 'Sort templates' })).toHaveValue('used')
+    })
+
+    it('tells a template manager how many requests wait on them, one click from answering', async () => {
+        useAuthStore.setState({ permissions: { global: ['system:templates:manage'], ws: {} } } as never)
+        service.promotionRequests.mockResolvedValue([t('tpl_pipeline', 'Pipeline flow', {
+            access: { via: 'request', ...NONE, canDecidePromotion: true },
+            promotionRequest: { requestedBy: 'usr_ana', requestedAt: '2026-10-17T09:00:00Z', note: 'Three teams copy it' },
+        })])
+        renderAt()
+        const waiting = (await screen.findByText('Awaiting Your Decision', { selector: 'div' })).closest('button')!
+        await waitFor(() => expect(waiting).toHaveTextContent('1'))
+        fireEvent.click(waiting)
+        expect(await screen.findByText('Three teams copy it')).toBeInTheDocument()
+        expect(screen.getByRole('tab', { name: /^Requests/ })).toHaveAttribute('aria-selected', 'true')
+    })
+
     it('lets a template manager answer requests to offer a template to everyone', async () => {
         useAuthStore.setState({ permissions: { global: ['system:templates:manage'], ws: {} } } as never)
         const asked = t('tpl_pipeline', 'Pipeline flow', {

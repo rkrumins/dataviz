@@ -14,13 +14,16 @@ limitations** — a changelog that only lists good news is not worth reading.
 ### Added
 
 **A Templates library.** **Templates** in the sidebar holds every layer layout you can start a
-Context View from: the built-ins that ship with {brand}, your organization's, your workspaces',
-your own and the ones shared with you. Tabs count each collection (**All**, **Mine**, **Shared with
-me**, **Workspace**, **Organization**, **Built-in**); search covers names, descriptions and layer
-names; categories and sorting (recently updated, most used, A–Z) narrow the rest. Each card shows
-the layout's columns in their colours, who it is for, who made it and how many of the views you can
-open were built from it, and offers only what you may do with it. Open one for every layer — its
-entity types, rules and groups — who can use it, and the views built from it.
+Context View from: the built-ins that ship with {brand}, your organization's, your workspaces', your
+own and the ones shared with you. Tabs count each collection (**All**, **Mine**, **Shared with me**,
+**Workspace**, **Organization**, **Built-in**); search covers names, descriptions and layer names;
+categories and sorting (recently updated, most used, A–Z) narrow the rest. Each card shows the
+layout's columns in their colours, who it is for, who made it and how many of the views you can open
+were built from it, and offers only what you may do with it. Open one for every layer — its entity
+types, rules and groups — who can use it, and the views built from it. A banner at the top sums up
+the library, like the ones Explore and Workspaces open with: templates, the views using them, this
+week's updates, your favorites and, for managers, the requests waiting on them, each tile one click
+from what it counts.
 
 **Make, edit and duplicate in a guided studio.** **New template** starts blank, from another
 template or from one of your Context Views; then name it, shape its layers (order, colour, icon,

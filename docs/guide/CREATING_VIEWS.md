@@ -259,6 +259,10 @@ and **Built-in** — and, for template managers, **Requests**.
 
 ### Find the right one
 
+- The banner at the top sums up the library, as **Explore** and **Workspaces** do: how many
+  **Templates** you can use, the **Views Using Them**, how many were **Updated This Week**, **Your
+  Favorites** and, for template managers, the requests **Awaiting Your Decision**. Select one to see
+  what it counts — **Views Using Them**, for instance, sorts the library by **Most used**.
 - **Featured** leads the **All** tab: the templates your template managers recommend. **Recently
   used** follows, with the templates you last built Views from — **Use** starts another.
 - The heart on a card or in a template's details makes it a favorite, kept under **Favorites**.

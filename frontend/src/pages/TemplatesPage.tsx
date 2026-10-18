@@ -31,6 +31,7 @@ import { ShareTemplateDialog } from '@/components/templates/ShareTemplateDialog'
 import { TemplateCard } from '@/components/templates/TemplateCard'
 import { TemplateDetailDrawer } from '@/components/templates/TemplateDetailDrawer'
 import { FeaturedShelf, RecentShelf } from '@/components/templates/TemplateShelves'
+import { TemplateStatsBar } from '@/components/templates/TemplateStatsBar'
 import { TemplateStudio, type StudioSeed } from '@/components/templates/TemplateStudio'
 import { WorkspaceDefaultDialog } from '@/components/templates/WorkspaceDefaultDialog'
 import {
@@ -175,6 +176,12 @@ export function TemplatesPage() {
             if (next === 'all') out.delete('tab'); else out.set('tab', next)
             return out
         }, { replace: true })
+    }
+    // The summary tiles: the whole library, unfiltered, in the order a tile asks for.
+    const showLibrary = (by?: SortKey) => {
+        setQuery('')
+        setTab('all')
+        if (by) setSort(by)
     }
 
     // `?new=1` (the Dashboard's "New template") opens the studio until it closes.
@@ -355,6 +362,21 @@ export function TemplatesPage() {
                         </button>
                     </div>
                 </div>
+
+                {/* ── The library at a glance ── */}
+                {!(error && !isLoading && templates.length === 0) && (
+                    <TemplateStatsBar
+                        templates={templates}
+                        isLoading={isLoading}
+                        pendingRequests={isManager ? requests.data?.length ?? 0 : null}
+                        requestsLoading={requests.isLoading}
+                        onShowAll={() => showLibrary()}
+                        onShowMostUsed={() => showLibrary('used')}
+                        onShowRecentlyUpdated={() => showLibrary('updated')}
+                        onShowFavourites={() => setTab('favourites')}
+                        onShowRequests={() => setTab('requests')}
+                    />
+                )}
 
                 {/* ── Tabs ── */}
                 <div role="tablist" aria-label="Template collections" className="flex flex-wrap items-center gap-1 border-b border-slate-200 dark:border-slate-700">
