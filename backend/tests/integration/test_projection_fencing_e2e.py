@@ -3,13 +3,13 @@
 * A held-back graph is retried after a backoff and reaches the committed head with no new commit:
   the failed pass no longer pins ``target`` to the un-advanced seq.
 * A publish that lands while a pass fails keeps its target.
-* Whatever resets the watermark under a pass wins: a repin mid-pass (``project_now`` runs the
-  target repair outside the projector's lock) keeps its new key and its replay; a second writer
-  that publishes after a stale one claimed leaves the stale one superseded, the watermark lowered
-  to where it started, and the worker nudged.
+* Whatever resets the watermark under a pass wins: a second writer that publishes after a stale
+  one claimed leaves the stale one superseded, the watermark lowered to where it started, and the
+  worker nudged.
 * A move to another key (doc 14 KeyMigration, phase 1) bumps the epoch too: a pass it overtook is
   superseded, and the old key waits in ``retired_keys``. Only this graph's own platform keys move
-  or are moved onto; the customer's key and an unpinned graph are refused untouched.
+  or are moved onto; the customer's key and an unpinned graph are refused untouched. The target
+  self-heal never moves the pin back.
 * Evict and rebuild bump the epoch; a rebuild clears the backoff.
 * A publishing pass leaves its ``_GVProjMeta`` marker (the published seq, its epoch) as its last
   write; a held-back pass leaves the previous one.
@@ -144,38 +144,6 @@ def test_a_publish_during_a_failing_pass_keeps_its_target():
     asyncio.run(_run_publish_during_a_failing_pass_keeps_its_target())
 
 
-async def _run_repin_mid_pass_survives() -> None:
-    # Realistic because project_now repairs the target OUTSIDE the projector's lock
-    # (versioning.project_now → _repair_projection_target), so it can land mid-pass.
-    svc = GraphVersioningService()
-    gid, proj = await _seed(svc, FakeFalkor())
-    new = "gvt_" + os.urandom(3).hex()
-    nudged = []
-
-    async def nudge(graph_id):
-        nudged.append(graph_id)
-
-    async def repin_then_pass(*a, **k):
-        assert await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=new)
-        return None, False
-
-    proj._verify_and_heal = repin_then_pass
-    real_nudge, projection.nudge_projection = projection.nudge_projection, nudge
-    try:
-        r = await proj.project_graph(gid)
-    finally:
-        projection.nudge_projection = real_nudge
-    assert r.get("skipped") == "superseded", r
-    row = await _row(gid)
-    assert row["name"] == new and row["projected"] == 0, row
-    assert nudged == [gid]
-    await db.dispose_engine()
-
-
-def test_a_repin_mid_pass_keeps_its_key_and_its_replay():
-    asyncio.run(_run_repin_mid_pass_survives())
-
-
 async def _run_move_mid_pass_is_fenced() -> None:
     # The move takes the graph lock, not the projector's, so it can land mid-pass.
     svc, fake = GraphVersioningService(), FakeFalkor()
@@ -215,6 +183,33 @@ async def _run_move_mid_pass_is_fenced() -> None:
 
 def test_a_move_mid_pass_is_fenced_and_queues_the_old_key():
     asyncio.run(_run_move_mid_pass_is_fenced())
+
+
+async def _run_the_self_heal_keeps_a_moved_pin() -> None:
+    # The worker's target_resolver re-pins to the data source's key on every pass; after a move
+    # that key is the old one, which the move must keep.
+    svc, fake = GraphVersioningService(), FakeFalkor()
+    gid, _ = await _seed(svc, fake)
+    old, new = (await _row(gid))["name"], keymigrate.owned_key(gid, 1)
+    await svc.move_projection(graph_id=gid, provider="prov_b", key=new, actor="a", shard_map={})
+    before = dict(fake(old).nodes)
+
+    async def resolver(s, graph_id):
+        return await s.ensure_projection_target(graph_id=graph_id, falkor_graph_name=old)
+
+    proj = FalkorProjector(graph_client_factory=fake, target_resolver=resolver)
+    await proj.project_graph(gid)
+    await _edit_publish(svc, gid, "a", _create("D"), "after the move")
+    await proj.project_graph(gid)
+    row = await _row(gid)
+    assert (row["name"], row["projected"]) == (new, 4), row
+    await _assert_matches_main(svc, fake, gid)
+    assert fake(old).nodes == before                      # the old key is not written
+    await db.dispose_engine()
+
+
+def test_the_self_heal_keeps_a_moved_pin():
+    asyncio.run(_run_the_self_heal_keeps_a_moved_pin())
 
 
 async def _run_a_move_touches_only_what_it_may() -> None:

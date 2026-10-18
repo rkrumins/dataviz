@@ -90,6 +90,10 @@ dropping the staged edits.
 - API keys cannot hold `workspace:datasource:publish`, so a key can no longer publish, merge, revert,
   restore or sync: those routes are off the key surface. A key can still edit drafts and open
   reviews; a person with publish lands them.
+- A versioned graph pinned to a FalkorDB key now stays on it. The projection self-heal (after a
+  publish, Rebuild, and the projection worker) re-points only a graph with no key or with the
+  `gv_<id>` placeholder; before, it put any graph whose key differed from its data source's
+  `graph_name` back on that name. A pinned key changes only by a projection move.
 
 ---
 

@@ -2933,9 +2933,11 @@ class GraphVersioningService:
     async def ensure_projection_target(
         self, *, graph_id: str, falkor_graph_name: str,
     ) -> Optional[str]:
-        """Pin a graph's FalkorDB projection to ``falkor_graph_name`` (the data source's real graph —
-        the one the canvas reads). Self-healing: graphs auto-created before the name was injected are
-        pinned to an orphan ``gv_<id>`` that nothing reads, so merged main state never surfaces.
+        """Pin an UNPINNED graph's FalkorDB projection to ``falkor_graph_name`` (the data source's
+        real graph — the one the canvas reads). Self-healing: graphs auto-created before the name was
+        injected have no pin, or the orphan ``gv_<id>`` that nothing reads, so merged main state never
+        surfaces. A graph pinned to any other key keeps it: ``projection_state`` is authoritative and
+        a pinned key changes only through :meth:`move_projection`.
         Re-pointing here and resetting ``projected_commit_seq`` to 0 makes the next projection replay
         the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
         MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
@@ -2952,6 +2954,10 @@ class GraphVersioningService:
             if ps is None or ps.falkor_graph_name == falkor_graph_name:
                 return None
             await self._assert_not_bootstrapping(s, graph_id)
+            # projection_state is authoritative: only an unpinned graph (NULL, or the gv_<id>
+            # placeholder nothing reads) is healed; a pinned key changes only through move_projection.
+            if ps.falkor_graph_name not in (None, f"gv_{graph_id}"):
+                return None
             await self._claim_projection_key(s, falkor_graph_name, ps.falkor_provider,
                                              exclude_graph_id=graph_id)
             old = ps.falkor_graph_name
