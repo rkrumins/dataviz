@@ -21,6 +21,11 @@ Grants — to a person or a group — are how a team gets its own templates. API
 keys never reach these routes (deny-by-default surface). ``readable_templates_clause``
 renders the read rule as SQL for the list; ``tests/test_layout_templates.py``
 holds the two renderings together.
+
+A personal or workspace template whose owner has asked for it to be offered to
+the whole organization (``promotion_requested_at``) is readable by managers
+until they answer — they can't approve what they can't see. Approving moves it
+to the organization, where managers look after it from then on.
 """
 from __future__ import annotations
 
@@ -96,6 +101,8 @@ def can_read(ctx: TemplateViewer, t: ContextModelORM) -> bool:
         return bool(t.is_active) or ctx.is_manager
     if _owner(ctx, t) or t.id in ctx.grants or t.visibility == "enterprise":
         return True
+    if ctx.is_manager and t.promotion_requested_at is not None:
+        return True
     return t.visibility == "workspace" and _in_workspace(ctx, t, "workspace:view:read")
 
 
@@ -131,6 +138,36 @@ def can_share(ctx: TemplateViewer, t: ContextModelORM) -> bool:
 
 def can_hide(ctx: TemplateViewer, t: ContextModelORM) -> bool:
     return _builtin(t) and ctx.is_manager
+
+
+def can_feature(ctx: TemplateViewer, t: ContextModelORM) -> bool:
+    """Featured is a library-wide spotlight, so only for templates everyone sees."""
+    return ctx.is_manager and (_builtin(t) or t.visibility == "enterprise")
+
+
+def can_request_promotion(ctx: TemplateViewer, t: ContextModelORM) -> bool:
+    """Whoever may change a team's template's audience may ask for everyone —
+    a manager simply moves it."""
+    return (
+        not _builtin(t) and t.visibility != "enterprise" and t.promotion_requested_at is None
+        and not ctx.is_manager and can_share(ctx, t)
+    )
+
+
+def can_decide_promotion(ctx: TemplateViewer, t: ContextModelORM) -> bool:
+    return ctx.is_manager and t.promotion_requested_at is not None and t.visibility != "enterprise"
+
+
+def can_be_workspace_default(t: ContextModelORM, workspace_id: str) -> bool:
+    """A template every member of ``workspace_id`` can use: a shown built-in,
+    an organization template, or that workspace's own."""
+    if not t.is_template or t.deleted_at is not None:
+        return False
+    if _builtin(t):
+        return bool(t.is_active)
+    return t.visibility == "enterprise" or (
+        t.visibility == "workspace" and t.workspace_id == workspace_id
+    )
 
 
 def audience_problem(visibility: str, workspace_id: Optional[str]) -> Optional[str]:
@@ -183,16 +220,21 @@ def access_envelope(ctx: TemplateViewer, t: ContextModelORM) -> dict:
         via = "owner"
     elif t.id in ctx.grants:
         via = "grant"
-    elif t.visibility == "workspace":
+    elif t.visibility == "enterprise":
+        via = "organization"
+    elif t.visibility == "workspace" and _in_workspace(ctx, t, "workspace:view:read"):
         via = "workspace"
     else:
-        via = "organization"
+        via = "request"  # a template manager, until the request is answered
     return {
         "via": via,
         "canEdit": can_edit(ctx, t),
         "canDelete": can_delete(ctx, t),
         "canShare": can_share(ctx, t),
         "canHide": can_hide(ctx, t),
+        "canFeature": can_feature(ctx, t),
+        "canRequestPromotion": can_request_promotion(ctx, t),
+        "canDecidePromotion": can_decide_promotion(ctx, t),
     }
 
 
@@ -212,6 +254,7 @@ def readable_templates_clause(ctx: TemplateViewer) -> ColumnElement[bool]:
         T.id.in_(list(ctx.grants)),
         T.visibility == "enterprise",
         workspace_tier,
+        T.promotion_requested_at.isnot(None) if ctx.is_manager else sa.false(),
     ))
     builtin = and_(T.system_key.isnot(None), sa.true() if ctx.is_manager else T.is_active.is_(True))
     return and_(T.is_template.is_(True), T.deleted_at.is_(None), or_(builtin, people_made))

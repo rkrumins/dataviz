@@ -177,6 +177,28 @@ describe('LayoutStep — the template library', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Started from "Medallion"')
   })
 
+  it("starts from the workspace's default, with one click back to an empty canvas", () => {
+    lib.templates = [MEDALLION]
+    const spy = vi.fn()
+    const applied = vi.fn()
+    render(
+      <Harness
+        spy={spy}
+        initialTemplateId="tpl_medallion"
+        onInitialTemplateApplied={applied}
+        workspaceDefault={{ templateId: 'tpl_medallion', workspaceName: 'Finance' }}
+      />,
+    )
+    expect(applied).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/start from this layout/).closest('[role="status"]'))
+      .toHaveTextContent('New views in Finance start from this layout.')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start empty instead' }))
+    expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ layers: [], contextModelId: undefined }))
+    expect(screen.queryByText(/start from this layout/)).not.toBeInTheDocument()
+    expect(screen.getByText('Choose a starting template')).toBeInTheDocument()
+  })
+
   it('a suggestion from the data itself is not recorded as a library template', () => {
     lib.templates = [MEDALLION]
     ds.entityTypes = [

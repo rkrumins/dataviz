@@ -127,6 +127,7 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
         publishPolicy=row.publish_policy or "open",
         identityProperty=getattr(row, "identity_property", None),
         nameProperty=getattr(row, "name_property", None),
+        defaultLayoutTemplateId=getattr(row, "default_layout_template_id", None),
     )
 
 
@@ -358,6 +359,9 @@ async def update_workspace(
         row.identity_property = req.identity_property.strip() or None
     if req.name_property is not None:
         row.name_property = req.name_property.strip() or None
+    # Checked by the endpoint (``template_access.can_be_workspace_default``).
+    if req.default_layout_template_id is not None:
+        row.default_layout_template_id = req.default_layout_template_id or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -446,3 +450,17 @@ async def get_workspace_impact(
         memberCount=int(member_count or 0),
         customRoleCount=int(role_count or 0),
     )
+
+
+async def defaults_for_templates(session: AsyncSession, template_ids: List[str]) -> List[tuple]:
+    """``(workspace_id, workspace_name, template_id)`` for every live workspace
+    that starts new views from one of ``template_ids``."""
+    if not template_ids:
+        return []
+    rows = await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name, WorkspaceORM.default_layout_template_id).where(
+            WorkspaceORM.default_layout_template_id.in_(template_ids),
+            WorkspaceORM.deleted_at.is_(None),
+        )
+    )
+    return [tuple(r) for r in rows.all()]

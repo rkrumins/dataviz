@@ -152,6 +152,9 @@ async def library(db_session):
         tpl("t_ws_other", "workspace", "usr_erin", workspace_id=WS_OTHER),
         tpl("t_alice", "private", "usr_alice"),
         tpl("t_shared", "private", "usr_alice"),
+        # Alice asked for this one to be offered to everyone: managers may read it.
+        tpl("t_requested", "private", "usr_alice",
+            promotion_requested_by="usr_alice", promotion_requested_at="2026-10-01T00:00:00Z"),
         tpl("t_deleted", "private", "usr_alice", deleted_at="2026-10-01T00:00:00Z"),
         ContextModelORM(id="cm_not_a_template", name="old instance", is_template=False,
                         visibility="enterprise"),
@@ -168,7 +171,7 @@ async def library(db_session):
 
 _EVERYONE = {"t_builtin", "t_org"}
 _READS = {
-    "alice": _EVERYONE | {"t_ws", "t_alice", "t_shared"},
+    "alice": _EVERYONE | {"t_ws", "t_alice", "t_shared", "t_requested"},
     "carol": _EVERYONE | {"t_shared"},
     "dave": _EVERYONE | {"t_ws"},
     "wsadmin": _EVERYONE | {"t_ws"},
@@ -176,9 +179,9 @@ _READS = {
     "org_viewer": _EVERYONE | {"t_ws", "t_ws_other"},
     "org_admin": _EVERYONE | {"t_ws", "t_ws_other"},
     # Managers (system:admin implies it) also see hidden built-ins — and
-    # still nobody's personal templates.
-    "sysadmin": _EVERYONE | {"t_builtin_hidden", "t_ws", "t_ws_other"},
-    "manager": _EVERYONE | {"t_builtin_hidden"},
+    # nobody's personal templates, except one its owner asked them to review.
+    "sysadmin": _EVERYONE | {"t_builtin_hidden", "t_ws", "t_ws_other", "t_requested"},
+    "manager": _EVERYONE | {"t_builtin_hidden", "t_requested"},
 }
 
 
@@ -244,6 +247,7 @@ async def test_a_personal_template_is_its_owners_alone(test_client, db_session, 
     assert body["name"] == "My flow" and body["visibility"] == "private"
     assert body["access"] == {
         "via": "owner", "canEdit": True, "canDelete": True, "canShare": True, "canHide": False,
+        "canFeature": False, "canRequestPromotion": True, "canDecidePromotion": False,
     }
     assert body["grantCount"] == 0
 
@@ -533,6 +537,6 @@ async def test_analytics_counts_the_templates_people_made(db_session, library):
     from backend.app.db.repositories import analytics_repo
 
     summary = await analytics_repo.platform_summary(db_session, days=30)
-    assert summary["totals"]["layoutTemplates"]["total"] == 5
+    assert summary["totals"]["layoutTemplates"]["total"] == 6
     detail = await analytics_repo.workspace_detail(db_session, WS, days=30)
     assert detail["totals"]["layoutTemplates"]["total"] == 1

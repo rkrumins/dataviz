@@ -15,14 +15,27 @@ export type TemplateVisibility = 'private' | 'workspace' | 'enterprise'
 
 export interface LayoutTemplateAccess {
     /** How the caller reaches it: their own, a share, their workspace, the
-     *  organization's, or a built-in. */
-    via: 'owner' | 'grant' | 'workspace' | 'organization' | 'builtin'
+     *  organization's, a built-in, or (template managers) a pending request. */
+    via: 'owner' | 'grant' | 'workspace' | 'organization' | 'builtin' | 'request'
     canEdit: boolean
     canDelete: boolean
     /** Change who can use it: audience and shares. */
     canShare: boolean
     /** Built-ins only, for template managers. */
     canHide: boolean
+    /** Feature it at the top of the library — managers, for templates everyone can use. */
+    canFeature?: boolean
+    /** Ask for it to be offered to the whole organization. */
+    canRequestPromotion?: boolean
+    /** Approve or decline that request — managers. */
+    canDecidePromotion?: boolean
+}
+
+/** A pending request to offer a template to everyone. */
+export interface TemplatePromotionRequest {
+    requestedBy?: string | null
+    requestedAt: string
+    note?: string | null
 }
 
 export interface LayoutTemplate {
@@ -46,6 +59,16 @@ export interface LayoutTemplate {
     grantCount?: number | null
     /** Its layers' version: changing the layers makes a new one. */
     version: number
+    /** Spotlit at the top of the library by a template manager. */
+    featured?: boolean
+    /** The caller's favourite. */
+    isFavourite?: boolean
+    /** When the caller last built a view from it. */
+    lastUsedAt?: string | null
+    /** Workspaces (that the caller can see) whose new views start from it. */
+    defaultFor?: { workspaceId: string; workspaceName?: string | null }[]
+    /** Pending request to offer it to everyone — for its requester, owner and managers. */
+    promotionRequest?: TemplatePromotionRequest | null
     access: LayoutTemplateAccess
 }
 
@@ -132,6 +155,43 @@ export const layoutTemplateService = {
     setHidden(id: string, hidden: boolean): Promise<LayoutTemplate> {
         return authFetch<LayoutTemplate>(url(id, '/hidden'), {
             method: 'PUT', body: JSON.stringify({ hidden }),
+        })
+    },
+
+    setFeatured(id: string, featured: boolean): Promise<LayoutTemplate> {
+        return authFetch<LayoutTemplate>(url(id, '/featured'), {
+            method: 'PUT', body: JSON.stringify({ featured }),
+        })
+    },
+
+    favourite(id: string): Promise<LayoutTemplate> {
+        return authFetch<LayoutTemplate>(url(id, '/favourite'), { method: 'POST' })
+    },
+
+    unfavourite(id: string): Promise<void> {
+        return authFetch<void>(url(id, '/favourite'), { method: 'DELETE' })
+    },
+
+    /** Ask for it to be offered to the whole organization. */
+    requestPromotion(id: string, note?: string | null): Promise<LayoutTemplate> {
+        return authFetch<LayoutTemplate>(url(id, '/promotion-request'), {
+            method: 'POST', body: JSON.stringify({ note: note ?? null }),
+        })
+    },
+
+    withdrawPromotion(id: string): Promise<void> {
+        return authFetch<void>(url(id, '/promotion-request'), { method: 'DELETE' })
+    },
+
+    /** The pending requests — template managers only. */
+    promotionRequests(): Promise<LayoutTemplate[]> {
+        return authFetch<{ items: LayoutTemplate[] }>(`${BASE}/promotion-requests`, { silent403: true })
+            .then(r => r.items)
+    },
+
+    answerPromotion(id: string, approve: boolean, note?: string | null): Promise<LayoutTemplate> {
+        return authFetch<LayoutTemplate>(url(id, `/promotion-request/${approve ? 'approve' : 'decline'}`), {
+            method: 'POST', body: JSON.stringify({ note: note ?? null }),
         })
     },
 

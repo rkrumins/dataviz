@@ -109,3 +109,42 @@ export function useSetLayoutTemplateHidden() {
         }
     }, [invalidate, notify])
 }
+
+/**
+ * A favourite, at once: every cached list shows the heart before the server
+ * answers, and puts it back if the server refuses.
+ */
+export function useToggleTemplateFavourite() {
+    const queryClient = useQueryClient()
+    const { notify } = useAppNotifications()
+
+    return useCallback(async (template: LayoutTemplate) => {
+        const next = !template.isFavourite
+        const patch = (on: boolean) => {
+            const apply = (t: LayoutTemplate) => (t.id === template.id ? { ...t, isFavourite: on } : t)
+            queryClient.setQueriesData<{ items: LayoutTemplate[]; total: number }>(
+                { queryKey: [...LAYOUT_TEMPLATES_KEY, 'list'] },
+                old => old && { ...old, items: old.items.map(apply) },
+            )
+            queryClient.setQueryData<LayoutTemplate>([...LAYOUT_TEMPLATES_KEY, 'one', template.id], old => old && apply(old))
+        }
+        patch(next)
+        try {
+            if (next) await layoutTemplateService.favourite(template.id)
+            else await layoutTemplateService.unfavourite(template.id)
+        } catch (err) {
+            patch(!next)
+            notify('error', (err as Error).message)
+        }
+    }, [queryClient, notify])
+}
+
+/** Requests to offer a team's template to everyone — for the template managers who answer them. */
+export function usePromotionRequests(enabled: boolean) {
+    return useQuery({
+        queryKey: [...LAYOUT_TEMPLATES_KEY, 'promotion-requests'],
+        queryFn: () => layoutTemplateService.promotionRequests(),
+        enabled,
+        staleTime: 30_000,
+    })
+}

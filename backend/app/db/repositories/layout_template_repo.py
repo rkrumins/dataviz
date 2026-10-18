@@ -9,11 +9,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from ..models import ContextModelORM, LayoutTemplateVersionORM
+from ..models import ContextModelORM, LayoutTemplateFavouriteORM, LayoutTemplateVersionORM
 
 
 def _json_list(text: Optional[str]) -> list:
@@ -132,3 +132,38 @@ async def get_version(
             LayoutTemplateVersionORM.version == version,
         )
     )
+
+
+async def favourite_ids(session: AsyncSession, user_id: str, ids: List[str]) -> set:
+    """Which of ``ids`` are ``user_id``'s favourites."""
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(LayoutTemplateFavouriteORM.template_id).where(
+            LayoutTemplateFavouriteORM.user_id == user_id,
+            LayoutTemplateFavouriteORM.template_id.in_(ids),
+        )
+    )
+    return {tid for (tid,) in rows.all()}
+
+
+async def set_favourite(session: AsyncSession, template_id: str, user_id: str, on: bool) -> bool:
+    """Make it a favourite or not; True when that changed anything."""
+    if not on:
+        result = await session.execute(delete(LayoutTemplateFavouriteORM).where(
+            LayoutTemplateFavouriteORM.template_id == template_id,
+            LayoutTemplateFavouriteORM.user_id == user_id,
+        ))
+        return bool(result.rowcount)
+    if await favourite_ids(session, user_id, [template_id]):
+        return False
+    session.add(LayoutTemplateFavouriteORM(template_id=template_id, user_id=user_id))
+    await session.flush()
+    return True
+
+
+def set_promotion_request(row: ContextModelORM, *, requested_by: Optional[str], note: Optional[str]) -> None:
+    """Record a request to offer ``row`` to everyone, or clear it (``requested_by=None``)."""
+    row.promotion_requested_by = requested_by
+    row.promotion_requested_at = datetime.now(timezone.utc).isoformat() if requested_by else None
+    row.promotion_request_note = note if requested_by else None

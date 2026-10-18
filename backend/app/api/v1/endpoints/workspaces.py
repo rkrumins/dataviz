@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM, ViewORM
+from backend.app.db.models import ContextModelORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
 from backend.app.api.v1.view_read_scope import readable_clause
@@ -36,7 +36,7 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo, view_repo, profiling_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
-from backend.app.services import profiling_series, workspace_visibility
+from backend.app.services import profiling_series, template_access, workspace_visibility
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
@@ -414,6 +414,13 @@ async def update_workspace(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update workspace metadata (name, description, is_active)."""
+    if req.default_layout_template_id:
+        template = await session.get(ContextModelORM, req.default_layout_template_id)
+        if template is None or not template_access.can_be_workspace_default(template, workspace_id):
+            raise HTTPException(status_code=422, detail=(
+                "A workspace's default layout template must be one every member can use: "
+                "a built-in, an organization template, or this workspace's own."
+            ))
     old_ws = await session.get(WorkspaceORM, workspace_id)
     old_identity = (
         getattr(old_ws, "identity_property", None),

@@ -5,9 +5,11 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import {
-    ArrowRight, Copy, Eye, EyeOff, MoreHorizontal, Pencil, Share2, Trash2,
+    ArrowRight, Building2, Clock, Copy, Eye, EyeOff, Home, MoreHorizontal, Pencil, Share2, Star, StarOff,
+    Trash2, Undo2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { cn } from '@/lib/utils'
@@ -20,9 +22,37 @@ const ACTION_META: Record<Exclude<TemplateAction, 'use'>, { label: string; icon:
     edit: { label: 'Edit', icon: Pencil },
     duplicate: { label: 'Duplicate', icon: Copy },
     share: { label: 'Share', icon: Share2 },
+    request: { label: 'Offer to everyone…', icon: Building2 },
+    withdraw: { label: 'Withdraw the request', icon: Undo2 },
+    feature: { label: 'Feature it', icon: Star },
+    unfeature: { label: 'Stop featuring', icon: StarOff },
+    default: { label: 'Workspace default…', icon: Home },
     hide: { label: 'Hide for everyone', icon: EyeOff },
     show: { label: 'Show to everyone', icon: Eye },
     delete: { label: 'Delete', icon: Trash2, danger: true },
+}
+
+/** How much of a template's layers find their entity types in some data. */
+export function FitRing({ matched, typed, workspaceName }: { matched: number; typed: number; workspaceName: string }) {
+    if (typed === 0) return null
+    const pct = Math.round((100 * matched) / typed)
+    const r = 9
+    const c = 2 * Math.PI * r
+    const tone = pct >= 80 ? 'stroke-emerald-500' : pct >= 50 ? 'stroke-amber-500' : 'stroke-rose-500'
+    return (
+        <HoverTip label={`Matches ${matched} of ${typed} layer${typed === 1 ? '' : 's'} in ${workspaceName}`}>
+            <span role="img" className="relative inline-flex items-center justify-center w-7 h-7 shrink-0" aria-label={`${pct}% match`}>
+                <svg viewBox="0 0 24 24" className="w-7 h-7 -rotate-90" aria-hidden>
+                    <circle cx="12" cy="12" r={r} fill="none" strokeWidth="3" className="stroke-slate-200 dark:stroke-slate-700" />
+                    <circle
+                        cx="12" cy="12" r={r} fill="none" strokeWidth="3" strokeLinecap="round"
+                        strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} className={tone}
+                    />
+                </svg>
+                <span aria-hidden className="absolute text-[8px] font-bold text-ink tabular-nums">{pct}</span>
+            </span>
+        </HoverTip>
+    )
 }
 
 export function AudienceBadge({ template }: { template: LayoutTemplate }) {
@@ -41,9 +71,10 @@ export function AudienceBadge({ template }: { template: LayoutTemplate }) {
     )
 }
 
-function ActionsMenu({ template, onAction }: {
+function ActionsMenu({ template, onAction, canSetDefault }: {
     template: LayoutTemplate
     onAction: (action: TemplateAction) => void
+    canSetDefault?: boolean
 }) {
     const [open, setOpen] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
@@ -79,7 +110,7 @@ function ActionsMenu({ template, onAction }: {
                     role="menu"
                     className="absolute right-0 top-full mt-1 z-30 w-52 py-1 rounded-2xl border border-glass-border bg-white dark:bg-slate-900 shadow-lg"
                 >
-                    {menuActions(template).map(action => {
+                    {menuActions(template, { canSetDefault }).map(action => {
                         const { label, icon: Icon, danger } = ACTION_META[action]
                         return (
                             <button
@@ -105,12 +136,17 @@ function ActionsMenu({ template, onAction }: {
     )
 }
 
-export function TemplateCard({ template, onOpen, onAction }: {
+export function TemplateCard({ template, onOpen, onAction, onToggleFavourite, fit, canSetDefault }: {
     template: LayoutTemplate
     onOpen: () => void
     onAction: (action: TemplateAction) => void
+    onToggleFavourite?: () => void
+    /** How well it fits the data chosen on the page, when one is. */
+    fit?: { matched: number; typed: number; workspaceName: string } | null
+    canSetDefault?: boolean
 }) {
     const usage = template.usageCount
+    const defaults = template.defaultFor ?? []
     return (
         <div
             onClick={onOpen}
@@ -136,18 +172,46 @@ export function TemplateCard({ template, onOpen, onAction }: {
                         </span>
                     </HoverTip>
                 )}
-                <div className="ml-auto">
-                    <ActionsMenu template={template} onAction={onAction} />
+                {template.featured && (
+                    <HoverTip label="Featured by your template managers">
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                            <Star className="w-3 h-3" fill="currentColor" /> Featured
+                        </span>
+                    </HoverTip>
+                )}
+                {template.promotionRequest && (
+                    <HoverTip label="Asked to be offered to everyone" detail="A template manager will answer.">
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                            <Clock className="w-3 h-3" /> Requested
+                        </span>
+                    </HoverTip>
+                )}
+                {defaults.length > 0 && (
+                    <HoverTip label={`New views in ${defaults.map(d => d.workspaceName ?? d.workspaceId).join(', ')} start from it`}>
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 max-w-[9rem]">
+                            <Home className="w-3 h-3 shrink-0" />
+                            <span className="truncate">Default{defaults.length === 1 ? ` · ${defaults[0].workspaceName ?? ''}` : ` · ${defaults.length}`}</span>
+                        </span>
+                    </HoverTip>
+                )}
+                <div className="ml-auto flex items-center">
+                    {onToggleFavourite && (
+                        <HeartBurstButton favourited={!!template.isFavourite} onToggle={onToggleFavourite} />
+                    )}
+                    <ActionsMenu template={template} onAction={onAction} canSetDefault={canSetDefault} />
                 </div>
             </div>
 
-            <button
-                type="button"
-                onClick={e => { e.stopPropagation(); onOpen() }}
-                className="text-left text-sm font-bold text-ink leading-snug hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus:outline-none focus-visible:underline"
-            >
-                {template.name}
-            </button>
+            <div className="flex items-start gap-2">
+                <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); onOpen() }}
+                    className="flex-1 min-w-0 text-left text-sm font-bold text-ink leading-snug hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus:outline-none focus-visible:underline"
+                >
+                    {template.name}
+                </button>
+                {fit && <FitRing {...fit} />}
+            </div>
             <p className={cn(
                 'mt-1 text-xs leading-snug line-clamp-2 min-h-[2rem]',
                 template.description ? 'text-ink-muted' : 'text-ink-muted/60 italic',

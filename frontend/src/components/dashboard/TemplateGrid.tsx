@@ -1,12 +1,13 @@
-import { ArrowRight, ChevronRight, LayoutTemplate, Plus, Sparkles } from 'lucide-react'
+import { ArrowRight, ChevronRight, LayoutTemplate, Plus, Sparkles, Star } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { AudienceBadge } from '@/components/templates/TemplateCard'
 import { TemplatePreview } from '@/components/templates/TemplatePreview'
 import type { LayoutTemplate as Template } from '@/services/layoutTemplateService'
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Layout templates on the Dashboard: the library's most used, one click from a
-// new Context View. Everything else about them lives on the Templates page.
+// Layout templates on the Dashboard: what template managers feature, then the
+// library's most used, one click from a new Context View. Everything else about
+// them lives on the Templates page.
 // ───────────────────────────────────────────────────────────────────────────────
 
 const SHOWN = 6
@@ -18,8 +19,10 @@ export function TemplateGrid({ templates, onUse, onOpen, onBrowseAll, onCreate }
     onBrowseAll: () => void
     onCreate: () => void
 }) {
-    const ranked = [...templates].sort((a, b) => b.usageCount - a.usageCount || b.updatedAt.localeCompare(a.updatedAt))
-    const [featured, ...rest] = ranked.slice(0, SHOWN)
+    const ranked = [...templates].sort((a, b) =>
+        Number(!!b.featured) - Number(!!a.featured)
+        || b.usageCount - a.usageCount || b.updatedAt.localeCompare(a.updatedAt))
+    const [lead, ...rest] = ranked.slice(0, SHOWN)
 
     return (
         <section className="mb-16">
@@ -45,7 +48,7 @@ export function TemplateGrid({ templates, onUse, onOpen, onBrowseAll, onCreate }
                 </button>
             </div>
 
-            {!featured ? (
+            {!lead ? (
                 <div className="flex flex-col items-center justify-center p-14 rounded-3xl border-2 border-dashed border-glass-border">
                     <div className="w-12 h-12 rounded-2xl border border-glass-border bg-black/5 dark:bg-white/5 flex items-center justify-center mb-3">
                         <LayoutTemplate className="w-6 h-6 text-ink-muted/40" />
@@ -66,7 +69,7 @@ export function TemplateGrid({ templates, onUse, onOpen, onBrowseAll, onCreate }
                 <>
                     <motion.div
                         initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
-                        onClick={() => onOpen(featured)}
+                        onClick={() => onOpen(lead)}
                         className="group relative mb-4 glass-panel rounded-2xl border border-accent-business/20 hover:border-accent-business/40 overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-accent-business/10 cursor-pointer"
                     >
                         <div className="absolute inset-0 bg-gradient-to-r from-accent-business/5 to-accent-explore/3 pointer-events-none" />
@@ -77,21 +80,21 @@ export function TemplateGrid({ templates, onUse, onOpen, onBrowseAll, onCreate }
                             <div className="flex-1 min-w-[12rem]">
                                 <div className="flex items-center gap-2 mb-0.5">
                                     <span className="text-[10px] font-bold uppercase tracking-widest text-accent-business">
-                                        {featured.usageCount > 0 ? 'Most used' : 'Featured'}
+                                        {lead.featured ? 'Featured' : lead.usageCount > 0 ? 'Most used' : 'Suggested'}
                                     </span>
-                                    <AudienceBadge template={featured} />
+                                    <AudienceBadge template={lead} />
                                 </div>
-                                <h4 className="font-bold text-lg text-ink group-hover:text-accent-business transition-colors mb-0.5 leading-tight">{featured.name}</h4>
+                                <h4 className="font-bold text-lg text-ink group-hover:text-accent-business transition-colors mb-0.5 leading-tight">{lead.name}</h4>
                                 <p className="text-sm text-ink-muted line-clamp-1">
-                                    {featured.description || `${featured.layers.length} layers, ready to fill with your data.`}
+                                    {lead.description || `${lead.layers.length} layers, ready to fill with your data.`}
                                 </p>
                             </div>
                             <div className="w-full sm:w-64 shrink-0">
-                                <TemplatePreview layers={featured.layers} />
+                                <TemplatePreview layers={lead.layers} />
                             </div>
                             <button
                                 type="button"
-                                onClick={e => { e.stopPropagation(); onUse(featured) }}
+                                onClick={e => { e.stopPropagation(); onUse(lead) }}
                                 className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-business text-white font-semibold text-sm shadow-md shadow-accent-business/20 hover:brightness-110 transition"
                             >
                                 Use template <ArrowRight className="w-3.5 h-3.5" />
@@ -110,6 +113,7 @@ export function TemplateGrid({ templates, onUse, onOpen, onBrowseAll, onCreate }
                                 >
                                     <div className="flex items-center gap-2 mb-1.5">
                                         <h4 className="font-semibold text-sm text-ink group-hover:text-accent-business transition-colors truncate flex-1">{t.name}</h4>
+                                        {t.featured && <Star role="img" aria-label="Featured" className="w-3.5 h-3.5 shrink-0 text-amber-500" fill="currentColor" />}
                                         <AudienceBadge template={t} />
                                     </div>
                                     <p className="text-xs text-ink-muted line-clamp-2 min-h-[2rem] mb-3">

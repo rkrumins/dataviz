@@ -22,6 +22,7 @@ import {
     Save,
     AlertTriangle,
     X,
+    Home,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
@@ -62,9 +63,14 @@ interface LayoutStepProps {
     /** The layers came from an imported file. No Quick Start: a template replaces the layers
      *  and so unplaces everything the file placed. */
     imported?: boolean
-    /** Opened from a library template ("Use template"): apply it once, as soon as the
-     *  semantic layer it is matched against is known. */
+    /** Opened from a library template ("Use template"), or the workspace's default:
+     *  apply it once, as soon as the semantic layer it is matched against is known. */
     initialTemplateId?: string
+    /** Told once `initialTemplateId` is applied, so a later visit to this step
+     *  never applies it over what the person chose since. */
+    onInitialTemplateApplied?: () => void
+    /** The workspace's default template, when the view started from it. */
+    workspaceDefault?: { templateId: string; workspaceName: string }
 }
 
 export { LAYER_COLORS } from '../layerColors'
@@ -205,7 +211,10 @@ function TemplateGallery({
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank, imported, initialTemplateId }: LayoutStepProps) {
+export function LayoutStep({
+    formData, updateFormData, layoutTypes, dataSourceId, blank, imported, initialTemplateId, onInitialTemplateApplied,
+    workspaceDefault,
+}: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
     // into the schema store, so read entity types from there instead.
@@ -390,15 +399,29 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     const autoApplied = useRef(false)
     useEffect(() => {
         if (!initialTemplateId || autoApplied.current || imported) return
-        if (formData.contextModelId === initialTemplateId) { autoApplied.current = true; return }
+        if (formData.contextModelId === initialTemplateId) {
+            autoApplied.current = true
+            onInitialTemplateApplied?.()
+            return
+        }
         const template = listedInitial ?? fetchedInitial.data
         if (!template || dsSchemaLoading) return
         autoApplied.current = true
         updateFormData(libraryTemplateUpdate(template))
+        onInitialTemplateApplied?.()
     }, [
         initialTemplateId, imported, formData.contextModelId, listedInitial, fetchedInitial.data,
-        dsSchemaLoading, updateFormData, libraryTemplateUpdate,
+        dsSchemaLoading, updateFormData, libraryTemplateUpdate, onInitialTemplateApplied,
     ])
+
+    // Started from the workspace's default: one click back to an empty canvas.
+    const startedFromDefault = !!workspaceDefault && formData.contextModelId === workspaceDefault.templateId
+    const startEmpty = useCallback(() => {
+        updateFormData({
+            layers: [], assignments: {}, layoutTemplateId: undefined,
+            contextModelId: undefined, contextModelVersion: undefined, entityScope: undefined,
+        })
+    }, [updateFormData])
 
     // How the template this view started from fits this data — derived, so it
     // reads the same however the step is reached, until it is dismissed.
@@ -681,6 +704,18 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                     )}
                                 </div>
                             </motion.div>
+                        )}
+
+                        {startedFromDefault && showLayerList && (
+                            <div role="status" className="flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-4 py-2.5">
+                                <Home className="w-4 h-4 text-emerald-600 shrink-0" />
+                                <p className="text-xs text-slate-600 dark:text-slate-300 flex-1">
+                                    New views in <span className="font-semibold text-slate-800 dark:text-slate-100">{workspaceDefault!.workspaceName}</span> start from this layout.
+                                </p>
+                                <button type="button" onClick={startEmpty} className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline">
+                                    Start empty instead
+                                </button>
+                            </div>
                         )}
 
                         {/* How a library template fit this data's semantic layer — say what

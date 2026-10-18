@@ -72,10 +72,11 @@ export function audienceDescription(
     }
 }
 
-export type LibraryTab = 'all' | 'mine' | 'shared' | 'workspace' | 'organization' | 'builtin'
+export type LibraryTab = 'all' | 'favourites' | 'mine' | 'shared' | 'workspace' | 'organization' | 'builtin'
 
 export const LIBRARY_TABS: readonly { id: LibraryTab; label: string; match: (t: LayoutTemplate) => boolean }[] = [
     { id: 'all', label: 'All', match: () => true },
+    { id: 'favourites', label: 'Favorites', match: t => !!t.isFavourite },
     { id: 'mine', label: 'Mine', match: t => t.access.via === 'owner' },
     { id: 'shared', label: 'Shared with me', match: t => t.access.via === 'grant' },
     { id: 'workspace', label: 'Workspace', match: t => audienceOf(t) === 'workspace' },
@@ -90,16 +91,32 @@ export function categoryLabel(category: string): string {
 }
 
 /** What a person can do with a template, beyond reading it. */
-export type TemplateAction = 'use' | 'edit' | 'duplicate' | 'share' | 'hide' | 'show' | 'delete'
+export type TemplateAction =
+    | 'use' | 'edit' | 'duplicate' | 'share' | 'request' | 'withdraw' | 'feature' | 'unfeature'
+    | 'default' | 'hide' | 'show' | 'delete'
 
 /** The menu's actions, in order, as `access` allows them. Duplicating is
- *  always open: it makes a Personal copy of something the caller can read. */
-export function menuActions(t: LayoutTemplate): Exclude<TemplateAction, 'use'>[] {
+ *  always open: it makes a Personal copy of something the caller can read.
+ *  `canSetDefault`: the caller administers a workspace it could start from. */
+export function menuActions(
+    t: LayoutTemplate, opts: { canSetDefault?: boolean } = {},
+): Exclude<TemplateAction, 'use'>[] {
     const out: Exclude<TemplateAction, 'use'>[] = []
     if (t.access.canEdit) out.push('edit')
     out.push('duplicate')
     if (t.access.canShare) out.push('share')
+    if (t.access.canRequestPromotion) out.push('request')
+    if (t.promotionRequest && !t.access.canDecidePromotion) out.push('withdraw')
+    if (t.access.canFeature) out.push(t.featured ? 'unfeature' : 'feature')
+    if (opts.canSetDefault) out.push('default')
     if (t.access.canHide) out.push(t.hidden ? 'show' : 'hide')
     if (t.access.canDelete) out.push('delete')
     return out
+}
+
+/** Whether new views in `workspaceId` may start from `t`: every member must be
+ *  able to use it. The server's rule (`template_access.can_be_workspace_default`). */
+export function canBeWorkspaceDefault(t: LayoutTemplate, workspaceId: string): boolean {
+    if (t.builtIn) return !t.hidden
+    return t.visibility === 'enterprise' || (t.visibility === 'workspace' && t.workspaceId === workspaceId)
 }

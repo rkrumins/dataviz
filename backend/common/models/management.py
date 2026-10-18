@@ -961,6 +961,9 @@ class WorkspaceUpdateRequest(BaseModel):
     # to the platform default). See ``backend.app.services.node_identity``.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
     name_property: Optional[str] = Field(None, alias="nameProperty")
+    # The layout template new views here start from: a built-in, an
+    # organization template or this workspace's own. None = untouched; "" clears.
+    default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
 
     class Config:
         populate_by_name = True
@@ -987,6 +990,8 @@ class WorkspaceResponse(BaseModel):
     #: under it may still resolve one from their provider or the platform.
     identity_property: Optional[str] = Field(None, alias="identityProperty")
     name_property: Optional[str] = Field(None, alias="nameProperty")
+    #: The layout template a new view here starts from, if any.
+    default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
 
     class Config:
         populate_by_name = True

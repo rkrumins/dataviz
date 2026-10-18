@@ -13,6 +13,11 @@ personal, plus shares with people and groups.
   PUT    /{id}/hidden             hide or show a built-in for everyone
   GET    /{id}/versions[/{v}]     every version of its layers (newest first), or one
   POST   /{id}/versions/{v}/restore   make version v's layers the newest version
+  PUT    /{id}/featured           spotlight it at the top of the library (managers)
+  POST|DELETE /{id}/favourite     the caller's favourites
+  POST|DELETE /{id}/promotion-request   ask (or stop asking) for it to be offered to everyone
+  POST   /{id}/promotion-request/approve|decline   a manager's answer
+  GET    /promotion-requests      the pending ones (managers)
   GET|POST /{id}/grants           shares (owner or workspace admin)
   PUT|DELETE /{id}/grants/{gid}
 
@@ -42,12 +47,14 @@ from backend.app.db.repositories import (
 from backend.app.services import template_access
 from backend.app.services.activity import recorder
 from backend.app.services.layout_config import strip_placements
-from backend.app.services.permission_service import PermissionClaims
-from backend.app.services.template_access import RESOURCE, TemplateViewer
+from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.template_access import MANAGE, RESOURCE, TemplateViewer
 from backend.auth_service.interface import User
 from backend.common.models.layout_templates import (
     LayoutTemplateCreateRequest,
+    LayoutTemplateFeaturedRequest,
     LayoutTemplateHiddenRequest,
+    LayoutTemplateNoteRequest,
     LayoutTemplateListResponse,
     LayoutTemplateResponse,
     LayoutTemplateUpdateRequest,
@@ -135,6 +142,12 @@ async def _responses(
     grants = await grant_repo.count_grants_for_resources(
         session, resource_type=RESOURCE, resource_ids=sorted(shareable),
     )
+    favourites = await layout_template_repo.favourite_ids(session, user.id, ids)
+    last_used = await view_repo.last_built_from(session, user.id, ids)
+    defaults: dict[str, list] = {}
+    for ws_id, ws_name, tid in await workspace_repo.defaults_for_templates(session, ids):
+        if has_permission(claims, "workspace:view:read", workspace_id=ws_id):
+            defaults.setdefault(tid, []).append({"workspaceId": ws_id, "workspaceName": ws_name})
     return [
         LayoutTemplateResponse(
             id=r.id,
@@ -153,10 +166,29 @@ async def _responses(
             usageCount=usage.get(r.id, 0),
             grantCount=grants.get(r.id, 0) if r.id in shareable else None,
             version=r.version,
+            featured=bool(r.is_pinned) and (r.system_key is not None or r.visibility == "enterprise"),
+            isFavourite=r.id in favourites,
+            lastUsedAt=last_used.get(r.id),
+            defaultFor=defaults.get(r.id, []),
+            promotionRequest=_promotion_request(ctx, r),
             access=template_access.access_envelope(ctx, r),
         )
         for r in rows
     ]
+
+
+def _promotion_request(ctx: TemplateViewer, row: ContextModelORM) -> Optional[dict]:
+    """A pending request to offer it to everyone — for whoever asked, whoever
+    may change its audience, and the managers who answer."""
+    if row.promotion_requested_at is None:
+        return None
+    if not (ctx.is_manager or row.promotion_requested_by == ctx.user_id or template_access.can_share(ctx, row)):
+        return None
+    return {
+        "requestedBy": row.promotion_requested_by,
+        "requestedAt": row.promotion_requested_at,
+        "note": row.promotion_request_note,
+    }
 
 
 async def _response(
@@ -274,6 +306,26 @@ async def create_layout_template(
         details={"visibility": row.visibility},
     )
     return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.get("/promotion-requests", response_model=LayoutTemplateListResponse)
+async def list_layout_template_promotion_requests(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Templates whose owners ask for them to be offered to everyone — for the
+    managers who answer. Declared before ``/{template_id}``."""
+    ctx = await _viewer(session, user, claims)
+    if not ctx.is_manager:
+        raise HTTPException(status_code=403, detail="Only template managers answer these requests.")
+    where = and_(
+        ContextModelORM.is_template.is_(True), ContextModelORM.deleted_at.is_(None),
+        ContextModelORM.promotion_requested_at.isnot(None), ContextModelORM.visibility != "enterprise",
+    )
+    rows, total = await layout_template_repo.list_templates(session, where, limit=500)
+    items = await _responses(session, ctx, rows, user=user, claims=claims)
+    return LayoutTemplateListResponse(items=items, total=total)
 
 
 @router.get("/{template_id}", response_model=LayoutTemplateResponse)
@@ -474,6 +526,191 @@ async def set_layout_template_hidden(
             else "visualization.layout_template.shown",
             **_target(row),
         )
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.put("/{template_id}/featured", response_model=LayoutTemplateResponse)
+async def set_layout_template_featured(
+    template_id: str,
+    req: LayoutTemplateFeaturedRequest = Body(...),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Spotlight a template at the top of everyone's library, or stop."""
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    if not template_access.can_feature(ctx, row):
+        raise HTTPException(status_code=403, detail=(
+            "Only a template manager can feature a template, and only one everyone can use."
+        ))
+    if bool(row.is_pinned) != req.featured:
+        await layout_template_repo.update_template(session, row, {"is_pinned": req.featured})
+        await recorder.record_for_request(
+            session,
+            "visualization.layout_template.featured" if req.featured
+            else "visualization.layout_template.unfeatured",
+            **_target(row),
+        )
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.post("/{template_id}/favourite", response_model=LayoutTemplateResponse)
+async def favourite_layout_template(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One of the caller's favourites — theirs alone. Asking twice is fine."""
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    await layout_template_repo.set_favourite(session, row.id, user.id, True)
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.delete("/{template_id}/favourite", status_code=status.HTTP_204_NO_CONTENT)
+async def unfavourite_layout_template(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """No longer a favourite — allowed even after losing access, so nobody keeps
+    one they can't remove."""
+    await layout_template_repo.set_favourite(session, template_id, user.id, False)
+
+
+@router.post("/{template_id}/promotion-request", response_model=LayoutTemplateResponse)
+async def request_layout_template_promotion(
+    template_id: str,
+    req: Optional[LayoutTemplateNoteRequest] = Body(None),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Ask for a team's template to be offered to the whole organization. The
+    template managers hear about it, and may read the template until they answer."""
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    if row.promotion_requested_at is not None:
+        raise HTTPException(status_code=409, detail="Already asked — a template manager will answer.")
+    if not template_access.can_request_promotion(ctx, row):
+        raise HTTPException(status_code=403, detail=(
+            "Only its owner or a workspace admin can ask for this template to be offered to everyone."
+        ))
+    note = ((req.note or "").strip() or None) if req else None
+    layout_template_repo.set_promotion_request(row, requested_by=user.id, note=note)
+    await session.flush()
+    managers = await notification_repo.users_with_global_permission(session, MANAGE)
+    await notification_repo.notify(
+        session,
+        user_ids=sorted(managers),
+        kind="layout_template.promotion_requested",
+        title=f'Offer "{row.name}" to everyone?',
+        body=note or "Its owner asks for this layout template to be offered to the whole organization.",
+        link=f"/templates/{row.id}",
+        actor_id=user.id,
+        resource_type=RESOURCE,
+        resource_id=row.id,
+    )
+    await recorder.record_for_request(
+        session, "visualization.layout_template.promotion_requested", **_target(row),
+    )
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.delete("/{template_id}/promotion-request", status_code=status.HTTP_204_NO_CONTENT)
+async def withdraw_layout_template_promotion(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    ctx = await _viewer(session, user, claims)
+    row = await _readable(session, ctx, template_id)
+    if row.promotion_requested_at is None:
+        return
+    if row.promotion_requested_by != user.id and not template_access.can_share(ctx, row):
+        raise HTTPException(
+            status_code=403,
+            detail="Only whoever asked, or whoever may share it, can withdraw this request.",
+        )
+    layout_template_repo.set_promotion_request(row, requested_by=None, note=None)
+    await recorder.record_for_request(
+        session, "visualization.layout_template.promotion_withdrawn", **_target(row),
+    )
+
+
+async def _answer_promotion(
+    session: AsyncSession, ctx: TemplateViewer, template_id: str, *, approve: bool,
+    note: Optional[str], user: User,
+) -> ContextModelORM:
+    row = await _readable(session, ctx, template_id)
+    if not template_access.can_decide_promotion(ctx, row):
+        if row.promotion_requested_at is None:
+            raise HTTPException(status_code=409, detail="There is no request to answer.")
+        raise HTTPException(status_code=403, detail="Only template managers answer these requests.")
+    requester = row.promotion_requested_by
+    if approve:
+        # A manager's call: no rights over its current audience are needed.
+        await layout_template_repo.update_template(
+            session, row, {"visibility": "enterprise", "workspace_id": None},
+        )
+    layout_template_repo.set_promotion_request(row, requested_by=None, note=None)
+    await session.flush()
+    if requester:
+        await notification_repo.notify(
+            session,
+            user_ids=[requester],
+            kind="layout_template.promotion_approved" if approve else "layout_template.promotion_declined",
+            title=(f'"{row.name}" is now offered to everyone' if approve
+                   else f'"{row.name}" stays as it was'),
+            body=note or (
+                "A template manager approved your request; template managers look after it from now on."
+                if approve else "A template manager declined your request to offer it to everyone."
+            ),
+            link=f"/templates/{row.id}",
+            actor_id=user.id,
+            resource_type=RESOURCE,
+            resource_id=row.id,
+        )
+    await recorder.record_for_request(
+        session,
+        "visualization.layout_template.promotion_approved" if approve
+        else "visualization.layout_template.promotion_declined",
+        **_target(row),
+    )
+    return row
+
+
+@router.post("/{template_id}/promotion-request/approve", response_model=LayoutTemplateResponse)
+async def approve_layout_template_promotion(
+    template_id: str,
+    req: Optional[LayoutTemplateNoteRequest] = Body(None),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Offer it to the whole organization — template managers look after it from then on."""
+    ctx = await _viewer(session, user, claims)
+    row = await _answer_promotion(
+        session, ctx, template_id, approve=True, note=req.note if req else None, user=user,
+    )
+    return await _response(session, ctx, row, user=user, claims=claims)
+
+
+@router.post("/{template_id}/promotion-request/decline", response_model=LayoutTemplateResponse)
+async def decline_layout_template_promotion(
+    template_id: str,
+    req: Optional[LayoutTemplateNoteRequest] = Body(None),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    ctx = await _viewer(session, user, claims)
+    row = await _answer_promotion(
+        session, ctx, template_id, approve=False, note=req.note if req else None, user=user,
+    )
     return await _response(session, ctx, row, user=user, claims=claims)
 
 

@@ -6,9 +6,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
-    ArrowRight, Box, Copy, Eye, EyeOff, GitBranch, Layers, Pencil, Share2, Trash2, X,
+    ArrowRight, Box, Building2, Copy, Eye, EyeOff, GitBranch, Home, Layers, Pencil, Share2, Star,
+    StarOff, Trash2, Undo2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { useModalA11y } from '@/hooks/useModalA11y'
@@ -18,6 +20,7 @@ import { listViews } from '@/services/viewApiService'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 import { useBrand } from '@/store/branding'
 import type { LogicalNodeConfig, ViewLayerConfig } from '@/types/schema'
+import { PromotionDecision } from './PromotionDecision'
 import { AudienceBadge } from './TemplateCard'
 import { TemplateUpdateChip } from './TemplateUpdateChip'
 import { TemplateVersionHistory } from './TemplateVersionHistory'
@@ -27,6 +30,11 @@ const ACTION_BUTTONS: Record<Exclude<TemplateAction, 'use'>, { label: string; ic
     edit: { label: 'Edit', icon: Pencil },
     duplicate: { label: 'Duplicate', icon: Copy },
     share: { label: 'Share', icon: Share2 },
+    request: { label: 'Offer to everyone', icon: Building2 },
+    withdraw: { label: 'Withdraw request', icon: Undo2 },
+    feature: { label: 'Feature', icon: Star },
+    unfeature: { label: 'Unfeature', icon: StarOff },
+    default: { label: 'Workspace default', icon: Home },
     hide: { label: 'Hide', icon: EyeOff },
     show: { label: 'Show', icon: Eye },
     delete: { label: 'Delete', icon: Trash2 },
@@ -75,11 +83,13 @@ function LayerRow({ layer, index }: { layer: ViewLayerConfig; index: number }) {
     )
 }
 
-export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
+export function TemplateDetailDrawer({ template, open, onClose, onAction, onToggleFavourite, canSetDefault }: {
     template: LayoutTemplate | null
     open: boolean
     onClose: () => void
     onAction: (template: LayoutTemplate, action: TemplateAction) => void
+    onToggleFavourite?: (template: LayoutTemplate) => void
+    canSetDefault?: boolean
 }) {
     const ref = useModalA11y(open, onClose)
     const { appName } = useBrand()
@@ -119,11 +129,15 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                                         {categoryLabel(template.category)}
                                     </span>
                                 )}
+                                <span className="ml-auto" />
+                                {onToggleFavourite && (
+                                    <HeartBurstButton favourited={!!template.isFavourite} onToggle={() => onToggleFavourite(template)} />
+                                )}
                                 <button
                                     type="button"
                                     onClick={onClose}
                                     aria-label="Close"
-                                    className="ml-auto p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
                                 >
                                     <X className="w-4 h-4" />
                                 </button>
@@ -140,7 +154,7 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                                 >
                                     Use template <ArrowRight className="w-4 h-4" />
                                 </button>
-                                {menuActions(template).map(action => {
+                                {menuActions(template, { canSetDefault }).map(action => {
                                     const { label, icon: Icon } = ACTION_BUTTONS[action]
                                     return (
                                         <button
@@ -162,6 +176,9 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                         </header>
 
                         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                            {template.promotionRequest && template.access.canDecidePromotion && (
+                                <PromotionDecision template={template} onDone={stillReadable => { if (!stillReadable) onClose() }} />
+                            )}
                             <section>
                                 <h3 className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-2">Who can use it</h3>
                                 <p className="text-sm text-ink-secondary">
@@ -175,6 +192,16 @@ export function TemplateDetailDrawer({ template, open, onClose, onAction }: {
                                 {template.hidden && (
                                     <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
                                         Hidden: only template managers see it in the library.
+                                    </p>
+                                )}
+                                {template.promotionRequest && !template.access.canDecidePromotion && (
+                                    <p className="text-xs text-sky-600 dark:text-sky-400 mt-1">
+                                        Asked {timeAgo(template.promotionRequest.requestedAt)} to be offered to everyone — a template manager will answer.
+                                    </p>
+                                )}
+                                {(template.defaultFor ?? []).length > 0 && (
+                                    <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1">
+                                        New views in {(template.defaultFor ?? []).map(d => d.workspaceName ?? d.workspaceId).join(', ')} start from it.
                                     </p>
                                 )}
                             </section>

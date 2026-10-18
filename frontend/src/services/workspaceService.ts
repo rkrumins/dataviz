@@ -120,6 +120,8 @@ export interface WorkspaceUpdateRequest {
      *  Omit to leave untouched; "" clears it back to unset. */
     identityProperty?: string
     nameProperty?: string
+    /** The layout template new views here start from (workspace:admin); "" clears it. */
+    defaultLayoutTemplateId?: string
 }
 
 export interface WorkspaceResponse {
@@ -144,6 +146,8 @@ export interface WorkspaceResponse {
      *  so its sources fall through to the platform default. */
     identityProperty?: string | null
     nameProperty?: string | null
+    /** The layout template a new view here starts from, if any. */
+    defaultLayoutTemplateId?: string | null
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string

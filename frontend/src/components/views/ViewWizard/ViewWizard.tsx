@@ -1122,6 +1122,18 @@ function ViewWizardBody({
         // Checked against the draft the data went into, so what it brought counts as found.
         ...(importDataBranch ? { branchId: importDataBranch } : {}),
     }), [importTargetViewId, resolvedWorkspaceId, resolvedDataSourceId, importDataBranch])
+    // The template a new view starts from: the one "Use template" named, else the
+    // workspace's default. Applied once per wizard, however often the Layout step
+    // is revisited — another template chosen since, or an empty start, sticks.
+    const workspaceDefaultId = useWorkspacesStore(
+        s => s.workspaces.find(w => w.id === resolvedWorkspaceId)?.defaultLayoutTemplateId ?? undefined,
+    )
+    const workspaceDefault = mode === 'create' && !isImport && !isBlank && !initialTemplateId && workspaceDefaultId
+        ? { templateId: workspaceDefaultId, workspaceName: scopeContext.workspaceName }
+        : undefined
+    const startTemplateId = mode === 'create' && !isImport ? (initialTemplateId ?? workspaceDefault?.templateId) : undefined
+    const [startTemplateApplied, setStartTemplateApplied] = useState(false)
+    const markStartTemplateApplied = useCallback(() => setStartTemplateApplied(true), [])
     const importTargetLabel = isImportUpdate
         ? `“${importSession?.targetView?.name ?? 'the view'}”`
         : `${scopeContext.workspaceName} · ${scopeContext.dataSourceLabel}`
@@ -2184,7 +2196,9 @@ function ViewWizardBody({
                     dataSourceId={formData.dataSourceId}
                     blank={isBlank}
                     imported={isImport}
-                    initialTemplateId={mode === 'create' && !isImport ? initialTemplateId : undefined}
+                    initialTemplateId={startTemplateApplied ? undefined : startTemplateId}
+                    onInitialTemplateApplied={markStartTemplateApplied}
+                    workspaceDefault={workspaceDefault}
                 />
             )}
             {currentStep === 'assignment' && (

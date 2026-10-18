@@ -40,12 +40,35 @@ class LayoutTemplateAccess(BaseModel):
     """What the caller may do with one template — the UI shows only these."""
     model_config = ConfigDict(populate_by_name=True)
     #: How the caller reaches it: their own, a share, their workspace, the
-    #: organization's, or a built-in.
-    via: Literal["owner", "grant", "workspace", "organization", "builtin"]
+    #: organization's, a built-in, or (template managers) a pending request
+    #: to offer it to everyone.
+    via: Literal["owner", "grant", "workspace", "organization", "builtin", "request"]
     can_edit: bool = Field(alias="canEdit")
     can_delete: bool = Field(alias="canDelete")
     can_share: bool = Field(alias="canShare")
     can_hide: bool = Field(alias="canHide")
+    #: Feature it at the top of the library (managers; organization and built-in).
+    can_feature: bool = Field(False, alias="canFeature")
+    #: Ask for it to be offered to the whole organization.
+    can_request_promotion: bool = Field(False, alias="canRequestPromotion")
+    #: Approve or decline that request (managers).
+    can_decide_promotion: bool = Field(False, alias="canDecidePromotion")
+
+
+class LayoutTemplateWorkspaceRef(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+
+
+class LayoutTemplatePromotionInfo(BaseModel):
+    """A pending request to offer the template to the whole organization."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    requested_by: Optional[str] = Field(None, alias="requestedBy")
+    requested_at: str = Field(alias="requestedAt")
+    note: Optional[str] = None
 
 
 class LayoutTemplateResponse(BaseModel):
@@ -70,6 +93,16 @@ class LayoutTemplateResponse(BaseModel):
     grant_count: Optional[int] = Field(None, alias="grantCount")
     #: Its layers' version — bumped only when the layers change.
     version: int = 1
+    #: Spotlit at the top of the library by a template manager.
+    featured: bool = False
+    #: The caller's favourite.
+    is_favourite: bool = Field(False, alias="isFavourite")
+    #: When the caller last built a (live) view from it.
+    last_used_at: Optional[str] = Field(None, alias="lastUsedAt")
+    #: Workspaces the caller can see that start new views from it.
+    default_for: List[LayoutTemplateWorkspaceRef] = Field(default_factory=list, alias="defaultFor")
+    #: Pending request to offer it to everyone — for its requester, owner and managers.
+    promotion_request: Optional[LayoutTemplatePromotionInfo] = Field(None, alias="promotionRequest")
     access: LayoutTemplateAccess
 
 
@@ -131,6 +164,15 @@ class LayoutTemplateUpdateRequest(BaseModel):
 
 class LayoutTemplateHiddenRequest(BaseModel):
     hidden: bool
+
+
+class LayoutTemplateFeaturedRequest(BaseModel):
+    featured: bool
+
+
+class LayoutTemplateNoteRequest(BaseModel):
+    """An optional note: why to offer a template to everyone, or why not."""
+    note: Optional[str] = Field(None, max_length=500)
 
 
 class LayoutTemplateVersionSummary(BaseModel):

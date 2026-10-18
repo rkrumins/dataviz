@@ -2348,6 +2348,22 @@ async def set_context_model_version(
     return await _to_enriched_response(session, row, user_id)
 
 
+async def last_built_from(session: AsyncSession, user_id: str, template_ids: Sequence[str]) -> Dict[str, str]:
+    """When ``user_id`` last made a live view from each of ``template_ids`` —
+    "recently used", as far as anyone can tell: views are what templates are
+    used for."""
+    if not template_ids:
+        return {}
+    rows = await session.execute(
+        select(ViewORM.context_model_id, func.max(ViewORM.created_at)).where(
+            ViewORM.created_by == user_id,
+            ViewORM.context_model_id.in_(list(template_ids)),
+            view_is_live(),
+        ).group_by(ViewORM.context_model_id)
+    )
+    return {tid: at for tid, at in rows.all()}
+
+
 async def template_owners_behind(session: AsyncSession, template_id: str, version: int) -> set:
     """Who made a live view from ``template_id`` that matches a version older
     than ``version`` — the people a new version is news to."""
