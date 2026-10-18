@@ -1314,7 +1314,7 @@ def _projection_rows():
             lag.label("lag"), status.label("status"),
             ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
             ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
-            ProjectionStateORM.updated_at,
+            ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1469,6 +1469,10 @@ async def list_versioned_graphs(
             "owned": bool(r.owns_falkor_graph),
             "forkParentGraphId": r.fork_parent_graph_id,
             "orphan": r.fork_parent_graph_id is None and r.data_source_id not in live,
+            # The old keys a move left, until they are dropped (keymigrate.retire_moved_keys).
+            "retiredKeys": [{"name": e["name"], "provider": e.get("provider"),
+                             "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
+                            for e in r.retired_keys or []],
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

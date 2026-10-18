@@ -24,6 +24,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func, select
@@ -279,6 +280,141 @@ def test_a_moved_graphs_old_key_is_dropped_once_the_new_one_caught_up(monkeypatc
     monkeypatch.setattr(config, "RETIRE_GRACE_SECS", 0)
     asyncio.run(_run_retire())
 
+
+
+# ── the admin move, end to end: A to B, a failing target, and back ──
+
+async def _run_move_between_providers() -> None:
+    from fastapi import BackgroundTasks
+
+    from backend.app.api.v1.endpoints import versioning_admin as va
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    keys = _Keys()
+
+    def falkor(name, provider_id=None):
+        if provider_id != "prov_C":
+            return keys(name, provider_id)
+
+        async def down(*_a, **_k):
+            raise ConnectionError("prov_C is unreachable")
+        return SimpleNamespace(query=down, ro_query=down, delete=down)
+
+    proj = FalkorProjector(falkor)
+    recorded: list = []
+
+    async def usable(*_a, **_k):
+        return None
+
+    async def unbound(*_a, **_k):
+        return []
+
+    async def get_ds(*_a):
+        return SimpleNamespace(projection_mode=None, provider_id="prov_A")
+
+    async def listed(provider_id):
+        return {n for p, n in keys.keys if p == provider_id}
+
+    async def as_is(session, wm):
+        return wm
+
+    async def record(session, event_type, **fields):
+        recorded.append(event_type)
+        return True
+
+    class _NoJobs:
+        async def execute(self, stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    async def move(gid, **body):
+        background = BackgroundTasks()
+        with patch.object(va.managed_sources, "assert_provider_usable", usable), \
+                patch.object(va.managed_sources, "graph_key_bindings", unbound), \
+                patch.object(va.data_source_repo, "get_data_source_orm", get_ds), \
+                patch.object(va.falkor_graph_registry, "list_graph_keys", listed), \
+                patch.object(va, "_watermark_model", as_is), \
+                patch.object(va.recorder, "record_for_request", record):
+            out = await va.move_projection(gid, va.ProjectionMoveRequest.model_validate(body),
+                                           background, user=SimpleNamespace(id="usr_admin"),
+                                           session=_NoJobs())
+        assert [(t.func, t.args) for t in background.tasks] == (
+            [(va.rebuild_now, (gid,))] if out["changed"] else [])
+        return out
+
+    def content(provider, name):
+        g = keys.keys[(provider, name)]
+        return g.entity_ids(), set(g.edges)
+
+    async def main_content(gid):
+        st = await svc.materialize_state(graph_id=gid, branch_id=await svc.main_branch_id(gid))
+        return set(st["nodes"]), set(st["edges"])
+
+    # A graph projecting into its own key K1 on prov_A, caught up.
+    k1 = "gvt_k1_" + os.urandom(3).hex()
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="u", falkor_graph_name=k1, falkor_provider="prov_A",
+                                  owns_falkor_graph=True))["graph_id"]
+    await _edit_publish(svc, gid, "u", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("A")}], "s")
+    await proj.project_graph(gid)
+    at_move = content("prov_A", k1)
+    epoch = (await svc.projection_watermark(gid))["epoch"]
+
+    # Move to prov_B: the graph's first platform key there, reseeded from scratch.
+    gvp = keymigrate.owned_key(gid, 1)
+    out = await move(gid, providerId="prov_B")
+    assert (out["changed"], out["from"], out["to"]) == (
+        True, {"providerId": "prov_A", "key": k1}, {"providerId": "prov_B", "key": gvp}), out
+    wm = out["watermark"]
+    assert (wm["fresh"], wm["status"], wm["epoch"]) == (False, "reseeding", epoch + 1), wm
+    assert wm["read_route"]["main"] == "postgres"
+    assert [(e["provider"], e["name"]) for e in wm["retired_keys"]] == [("prov_A", k1)]
+    assert recorded == ["platform.versioning.projection_moved"]
+
+    # A publish during the move is read from Postgres; then the new key catches up to it. The old
+    # key is as it was at the move.
+    await _edit_publish(svc, gid, "u", [
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("B")}], "m")
+    assert {"A", "B"} <= (await main_content(gid))[0]
+    await proj.project_graph(gid)
+    wm = await svc.projection_watermark(gid)
+    assert (wm["fresh"], wm["falkor_provider"], wm["falkor_graph_name"]) == (True, "prov_B", gvp)
+    assert content("prov_B", gvp) == await main_content(gid)
+    assert content("prov_A", k1) == at_move
+
+    # Asked again, nothing moves, mints or is recorded.
+    epoch = wm["epoch"]
+    out = await move(gid, providerId="prov_B")
+    assert out["changed"] is False and out["to"] == {"providerId": "prov_B", "key": gvp}
+    assert (await svc.projection_watermark(gid))["epoch"] == epoch
+    assert recorded == ["platform.versioning.projection_moved"]
+
+    # A target that cannot be written: reads stay on Postgres, and the error shows.
+    await move(gid, providerId="prov_C")
+    with pytest.raises(ConnectionError):
+        await proj.project_graph(gid)
+    wm = await svc.projection_watermark(gid)
+    assert (wm["fresh"], wm["read_route"]["main"]) == (False, "postgres")
+    assert "prov_C is unreachable" in wm["last_error"]
+
+    # Moved back onto K1, which still exists: accepted as the graph's own retired key, and the
+    # failed target is queued instead. The next pass reconciles K1 in place.
+    out = await move(gid, providerId="prov_A", key=k1)
+    assert out["changed"] is True and out["to"] == {"providerId": "prov_A", "key": k1}
+    assert sorted((e["provider"], e["name"]) for e in await _retired(gid)) == [
+        ("prov_B", gvp), ("prov_C", gvp)]
+    await proj.project_graph(gid)
+    assert (await svc.projection_watermark(gid))["fresh"] is True
+    assert content("prov_A", k1) == await main_content(gid)
+    assert ("prov_A", k1) not in keys.drops
+
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_move_between_providers_e2e():
+    asyncio.run(_run_move_between_providers())
 
 # ── pinned-unresolvable provider fails loud (no Postgres needed — stubbed lookup) ──
 

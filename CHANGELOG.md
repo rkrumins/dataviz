@@ -99,6 +99,14 @@ dropping the staged edits.
   pinned to its data source's own key. A fork bound to a real data source now reads the fork's key,
   which the projector writes, instead of the data source's key, which it does not. Each read of a
   versioned source costs one more graphver lookup, and fails as unavailable if graphver is down.
+- A platform admin can move a versioned graph's projection to another FalkorDB provider or key:
+  `POST /api/v1/admin/versioning/graphs/{graphId}/projection/move {providerId, key?}`
+  (`system:admin`; not open to API keys). Only keys the platform owns move: a graph still projecting
+  into the customer's own graph answers **409 `projection_not_adopted`**. Reads come from Postgres
+  until the new key catches up; the old key is dropped about 15 minutes after that, and until then
+  a move back onto it is cheap. Run the `20261018_1100_gv_ps_retired` migration (it adds
+  `projection_state.retired_keys`), and deploy this release to every web and worker pod before
+  using it: an older pod puts a moved graph back on its old key, or keeps reading the old key.
 
 ---
 

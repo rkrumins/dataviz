@@ -340,6 +340,22 @@ flowchart TD
 The probe-before-drop guard (§6) turns an unreachable pinned instance into a raised error before any
 destructive op — so a misroute never wipes the cache.
 
+**Moving a graph's projection.** `projection_state` (`falkor_provider`, `falkor_graph_name`) is
+authoritative: `ensure_projection_target` heals only a graph with no key or the `gv_<id>`
+placeholder, and a pinned key changes only by a move. Readers and rollup writers of a versioned data
+source follow the pin, not `ds.graph_name`, which stays the logical name: `ProviderManager.get_provider`
+routes through `versioned_sources.physical_key`, and ContextEngine serves main from FalkorDB only when
+the provider it holds serves the published pin (`serves_pin`). A platform admin moves a graph with
+`POST /admin/versioning/graphs/{graphId}/projection/move {providerId, key?}` (doc 14 §6, phase 1: a
+reseed move). Only owned keys move; the customer's own graph, an unpinned graph and a key other data
+sources read answer 409 `projection_not_adopted`. The new key is the graph's `gvp_<graphId>{<tag>.<n>}`
+(the first free one when `key` is omitted). `move_projection` swaps the pin, bumps the epoch (a pass
+in flight is superseded), lowers the watermark to 0 (`reseeding`) and appends the old key to
+`retired_keys`; reads fall back to Postgres until the reseed catches up. The worker's retire loop
+(`keymigrate.retire_moved_keys`) drops the old key under `gvproj` once the new key has reached the
+head at the move and `RETIRE_GRACE_SECS` have passed, unless something still reads or pins it; purge
+drops pending retired keys too. Until then, a move back onto the retired key reconciles it in place.
+
 ---
 
 ## 10. The read providers

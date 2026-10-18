@@ -1,7 +1,8 @@
 """The fleet inventory (``GET /admin/versioning/graphs``) against Postgres.
 
 * It lists every versioned graph — a live data source's own graph, a fork and an orphan whose data
-  source is gone — but not a deleted one, each with its provider, key, ownership and state.
+  source is gone — but not a deleted one, each with its provider, key, ownership and state, and
+  the old keys a move left that are still to be dropped.
 * It pages by graph id: each page continues where the last stopped, and none repeats a graph.
 * It filters by provider, status, workspace, kind (main, fork or orphan) and a search that matches
   a graph id, data source id, key or data-source label.
@@ -38,7 +39,7 @@ async def _seed_data_source(ds: str, ws: str, label: str) -> None:
 
 
 async def _seed_graph(gid, *, ws, ds, provider, head=3, projected=3, status="idle", error=None,
-                      owned=False, fork_of=None, deleted=False):
+                      owned=False, fork_of=None, deleted=False, retired=None):
     async with db.graphver_session() as s:
         s.add(GraphORM(id=gid, data_source_id=ds, workspace_id=ws, kind="manual",
                        main_head_commit_seq=head, fork_parent_graph_id=fork_of,
@@ -46,7 +47,8 @@ async def _seed_graph(gid, *, ws, ds, provider, head=3, projected=3, status="idl
         s.add(ProjectionStateORM(graph_id=gid, projected_commit_seq=projected,
                                  target_commit_seq=projected, status=status,
                                  falkor_provider=provider, falkor_graph_name=f"gvt_{gid}",
-                                 owns_falkor_graph=owned, last_error=error))
+                                 owns_falkor_graph=owned, last_error=error,
+                                 retired_keys=retired))
 
 
 async def _list(**kw):
@@ -74,7 +76,9 @@ async def _run() -> None:
         f"graph_{tag}_{n}" for n in ("a_main", "b_fork", "c_orphan", "d_failed", "e_gone", "f_ws2"))
     await _seed_graph(main, ws=ws, ds=live_ds, provider=prov, owned=True)
     await _seed_graph(fork, ws=ws, ds=f"dsfork_{tag}", provider=prov, head=5, projected=2,
-                      fork_of=main)
+                      fork_of=main, retired=[{"name": "gvt_old", "provider": None,
+                                              "retireAfter": "2026-10-18T12:00:00+00:00",
+                                              "afterSeq": 5, "movedBy": "usr_admin"}])
     await _seed_graph(orphan, ws=ws, ds=f"ds_deleted_{tag}", provider=other_prov,
                       status="evicted", projected=0)
     await _seed_graph(failed, ws=ws, ds=f"ds_deleted2_{tag}", provider=prov,
@@ -94,8 +98,12 @@ async def _run() -> None:
         "falkorGraphName": f"gvt_{main}", "falkorProvider": prov, "committed": 3,
         "projected": 3, "target": 3, "lag": 0, "status": "idle", "lastError": None,
         "lastProjectedAt": None, "progressDone": None, "progressTotal": None, "updatedAt": None,
-        "owned": True, "forkParentGraphId": None, "orphan": False,
+        "owned": True, "forkParentGraphId": None, "orphan": False, "retiredKeys": [],
     }
+    # A moved graph's old key, until it is dropped.
+    assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
+                                          "retireAfter": "2026-10-18T12:00:00+00:00",
+                                          "afterSeq": 5}]
     assert rows[fork]["forkParentGraphId"] == main and rows[fork]["lag"] == 3
     assert rows[fork]["orphan"] is False, "a fork's data source id is never a management row"
     assert rows[orphan]["orphan"] is True and rows[orphan]["dataSourceLabel"] is None

@@ -239,6 +239,8 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 
 ### 6. KeyMigration (`versioning/keymigrate.py`)
 
+> **Shipped (Stage 2, 2D-3): phase 1, the reseed move.** `keymigrate.py` (`owned_key`, `retire_moved_keys`), `projection_state.retired_keys`, a `shard_map` subset `{tag, slot, chosenAt, chosenBy}`, and the read and derive half of `physical_key`. The admin move reseeds the new key in place of seed, catchup, parity and swap; `place` and blue/green arrive with L2. See doc 04 §9.
+
 **place**
 - Taken under `pg_advisory_xact_lock(hashtext('gvplace:'||provider))`.
 - Per master: `free = maxmemory − used − Σ reserved − FORK_HEADROOM_FRACTION·maxmemory`. Pick the requested node, or the largest free master with `free ≥ need·1.3`. Co-residency with attached sources is counted.
