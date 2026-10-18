@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import select, delete, or_, and_
+from sqlalchemy import select, delete, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ResourceGrantORM
@@ -79,6 +79,26 @@ async def list_grants_for_resource(
         )
     )
     return list(result.scalars().all())
+
+
+async def count_grants_for_resources(
+    session: AsyncSession,
+    *,
+    resource_type: str,
+    resource_ids: list[str],
+) -> dict[str, int]:
+    """resource id → how many grants it has, for the ids that have any."""
+    if not resource_ids:
+        return {}
+    rows = await session.execute(
+        select(ResourceGrantORM.resource_id, func.count())
+        .where(
+            ResourceGrantORM.resource_type == resource_type,
+            ResourceGrantORM.resource_id.in_(resource_ids),
+        )
+        .group_by(ResourceGrantORM.resource_id)
+    )
+    return {resource_id: int(n) for resource_id, n in rows.all()}
 
 
 async def list_grants_for_user_with_groups(

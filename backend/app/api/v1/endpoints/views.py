@@ -51,7 +51,7 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import view_access, view_library, view_source_kinds
+from backend.app.services import template_access, view_access, view_library, view_source_kinds
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
@@ -829,6 +829,14 @@ async def create_view(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
+    # The layout template it was built from, kept only when it is one the
+    # creator can use: a stale or foreign id would name a template they can't
+    # see (and fail the foreign key).
+    if req.context_model_id:
+        req.context_model_id = await template_access.usable_template_id(
+            session, user=user, claims=claims, template_id=req.context_model_id,
+        )
+
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
@@ -960,6 +968,13 @@ async def update_view(
     # the admin is told — would be false the moment they renamed one.
     if req.view_type is not None and req.view_type != existing.view_type:
         await ensure_view_mode_allowed(req.view_type, session)
+
+    # As on create: only a layout template the editor can use is recorded;
+    # any other id leaves the view's provenance as it was.
+    if req.context_model_id and req.context_model_id != existing.context_model_id:
+        req.context_model_id = await template_access.usable_template_id(
+            session, user=user, claims=claims, template_id=req.context_model_id,
+        )
 
     # Layer rules are not checked here but where they are authored (create and PUT /layout):
     # the wizard's save sends back the layout it read, a draft's overlay included, so a rename

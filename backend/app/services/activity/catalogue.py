@@ -762,6 +762,15 @@ LABELS: dict[str, str] = {
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",
+    "visualization.layout_template.created": "Created a layout template",
+    "visualization.layout_template.updated": "Edited a layout template",
+    "visualization.layout_template.deleted": "Deleted a layout template",
+    "visualization.layout_template.restored": "Restored a layout template",
+    "visualization.layout_template.hidden": "Hid a built-in layout template",
+    "visualization.layout_template.shown": "Showed a built-in layout template",
+    "visualization.layout_template.grant_added": "Shared a layout template",
+    "visualization.layout_template.grant_updated": "Changed a layout template share",
+    "visualization.layout_template.grant_removed": "Unshared a layout template",
     "branding.updated": "Changed branding",
 }
 

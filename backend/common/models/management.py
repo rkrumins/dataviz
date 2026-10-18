@@ -1077,55 +1077,6 @@ class WorkspaceSummaryResponse(BaseModel):
 # Context Model Models
 # ============================================
 
-class ContextModelCreateRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
-    is_template: bool = Field(False, alias="isTemplate")
-    category: Optional[str] = None
-    layers_config: List[Dict[str, Any]] = Field(default_factory=list, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-
-    class Config:
-        populate_by_name = True
-
-
-class ContextModelUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    layers_config: Optional[List[Dict[str, Any]]] = Field(None, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Optional[Dict[str, Any]] = Field(None, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-
-    class Config:
-        populate_by_name = True
-
-
-class ContextModelResponse(BaseModel):
-    id: str
-    name: str
-    description: Optional[str] = None
-    workspace_id: Optional[str] = Field(None, alias="workspaceId")
-    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
-    is_template: bool = Field(alias="isTemplate")
-    category: Optional[str] = None
-    layers_config: List[Dict[str, Any]] = Field(default_factory=list, alias="layersConfig")
-    scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
-    instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
-    scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
-    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
-    is_active: bool = Field(alias="isActive")
-    created_at: str = Field(alias="createdAt")
-    updated_at: str = Field(alias="updatedAt")
-
-    class Config:
-        populate_by_name = True
-
-
 class InstantiateTemplateRequest(BaseModel):
     template_id: str = Field(alias="templateId")
     name: str

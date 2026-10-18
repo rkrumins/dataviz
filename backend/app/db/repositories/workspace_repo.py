@@ -5,7 +5,7 @@ Workspaces are operational contexts that contain one or more data sources
 """
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -246,6 +246,17 @@ async def get_workspace(
     if not row:
         return None
     return _to_response(row, await _resolve_ds_identities(session, [row]))
+
+
+async def names_by_id(session: AsyncSession, ids: Iterable[str]) -> Dict[str, str]:
+    """Workspace id → name, for the ids that still exist."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ids))
+    )
+    return {ws_id: name for ws_id, name in rows.all()}
 
 
 async def get_workspace_orm(

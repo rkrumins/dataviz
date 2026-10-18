@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
-from sqlalchemy import and_, case, literal_column, select, delete, func, or_, update
+from sqlalchemy import and_, case, false, literal_column, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -82,13 +82,25 @@ async def _get_workspace_name(
     return result.scalar_one_or_none()
 
 
+def _nameable_template(user_id: Optional[str]):
+    """The layout templates a view may name as the one it was built from: not
+    deleted, and not someone else's personal one — whose name is theirs."""
+    mine = ContextModelORM.created_by == user_id if user_id else false()
+    return and_(
+        ContextModelORM.deleted_at.is_(None),
+        or_(ContextModelORM.visibility != "private", mine),
+    )
+
+
 async def _get_context_model_name(
-    session: AsyncSession, context_model_id: Optional[str]
+    session: AsyncSession, context_model_id: Optional[str], user_id: Optional[str] = None,
 ) -> Optional[str]:
     if not context_model_id:
         return None
     result = await session.execute(
-        select(ContextModelORM.name).where(ContextModelORM.id == context_model_id)
+        select(ContextModelORM.name).where(
+            ContextModelORM.id == context_model_id, _nameable_template(user_id),
+        )
     )
     return result.scalar_one_or_none()
 
@@ -377,7 +389,7 @@ async def _to_enriched_response(
     """
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
-    cm_name = await _get_context_model_name(session, row.context_model_id)
+    cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal) — avatars included.
     user_map = await _resolve_user_identities(session, {
@@ -503,7 +515,7 @@ async def _batch_enrich_rows(
     if cm_ids:
         res = await session.execute(
             select(ContextModelORM.id, ContextModelORM.name)
-            .where(ContextModelORM.id.in_(cm_ids))
+            .where(ContextModelORM.id.in_(cm_ids), _nameable_template(user_id))
         )
         cm_map = {cid: name for cid, name in res.all()}
 
@@ -2387,7 +2399,7 @@ async def list_popular_views(
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
         ds_name = await _get_data_source_name(session, row.data_source_id)
-        cm_name = await _get_context_model_name(session, row.context_model_id)
+        cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
         # The data publisher too, in the same lookup: without it this path showed
         # every trail without its last publisher, unlike the batched one.
         publisher_id = getattr(row, 'data_updated_by', None)
