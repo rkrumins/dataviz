@@ -10,9 +10,10 @@ unbounded.
   is the one the lock holder left.
 * revert, restore, sync and the API path of bulk import take the lock, then refuse a graph whose
   enablement has not finished, before they read anything; each is retried. Bulk import into a
-  graph created in the same transaction takes no lock.
+  graph created in the same transaction takes no lock. Under the lock they check the graph is
+  writable, and a graph that is not is refused, not retried.
 * A busy graph reaches the caller as LockBusy through ContextEngine and ``/commands/batch``,
-  instead of a ``success: false``. Once a batch command has committed, the busy command is a
+  instead of a ``success: false``; so does a paused one, as GraphNotWritable. Once a batch command has committed, the busy command is a
   ``lock_busy`` result instead and the batch stops, so a retry does not resend what landed.
 
 Pure unit tests: fakes stand in for the session. The same runs on Postgres in
@@ -25,7 +26,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.app.services.versioning import config
-from backend.app.services.versioning.errors import ContentionExhausted, LockBusy
+from backend.app.services.versioning.errors import ContentionExhausted, GraphNotWritable, LockBusy
 from backend.app.services.versioning.models import BranchORM, GraphORM
 from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 
@@ -181,9 +182,10 @@ class _Session:
         self.events.append(f"refresh {type(obj).__name__}")
 
 
-def _spied_svc(monkeypatch, rows=None, lock_failures=()):
-    """A service whose sessions record into ``events``; the graph lock and the bootstrap check are
-    spies, and the lock raises ``lock_failures`` in turn on its first calls."""
+def _spied_svc(monkeypatch, rows=None, lock_failures=(), refuse=None):
+    """A service whose sessions record into ``events``; the graph lock, the bootstrap check and
+    the lifecycle check are spies, the lock raises ``lock_failures`` in turn on its first calls,
+    and the lifecycle check raises ``refuse``."""
     events = []
 
     @contextlib.asynccontextmanager
@@ -201,10 +203,16 @@ def _spied_svc(monkeypatch, rows=None, lock_failures=()):
     async def not_bootstrapping(s, gid):
         events.append("not bootstrapping")
 
+    async def writable(s, gid):
+        events.append("writable")
+        if refuse is not None:
+            raise refuse
+
     async def nothing(*_a, **_k):
         return None
     monkeypatch.setattr(svc, "_lock_graph", lock)
     monkeypatch.setattr(svc, "_assert_not_bootstrapping", not_bootstrapping)
+    monkeypatch.setattr(svc, "_assert_writable", writable)
     monkeypatch.setattr(svc, "_assert_syncable", nothing)
     monkeypatch.setattr("backend.app.services.versioning.service.asyncio.sleep", nothing)
     return svc, events
@@ -259,11 +267,26 @@ async def test_main_advancers_are_retried(monkeypatch, advance):
     assert events.count("lock") == 3, events
 
 
+@pytest.mark.parametrize("advance", _ADVANCERS)
+async def test_main_advancers_check_the_lifecycle_under_the_lock(monkeypatch, advance):
+    rows = {(GraphORM, "g1"): GraphORM(id="g1", main_head_commit_seq=3)}
+    svc, events = _spied_svc(monkeypatch, rows, refuse=GraphNotWritable("frozen"))
+
+    async def main_bid(s, gid):
+        return "main1"
+    monkeypatch.setattr(svc, "_main_branch_id", main_bid)
+    with pytest.raises(GraphNotWritable) as refused:
+        await advance(svc)
+    assert refused.value.state == "frozen"
+    assert events.index("lock") < events.index("writable"), events
+    assert events.count("lock") == 1, "a paused graph is not retried"
+
+
 async def test_a_seed_inside_the_creating_transaction_takes_no_lock(monkeypatch):
     svc, events = _spied_svc(monkeypatch)
     with pytest.raises(ValueError, match="unknown graph"):
         await svc.bulk_ingest(graph_id="g1", rows=[], actor="u", session=_Session(events))
-    assert "lock" not in events and "not bootstrapping" not in events
+    assert not {"lock", "not bootstrapping", "writable"} & set(events)
 
 
 async def test_bulk_import_through_the_api_refuses_a_graph_that_has_entities(monkeypatch):
@@ -320,7 +343,8 @@ def _busy_engine(monkeypatch, exc):
     return engine
 
 
-@pytest.mark.parametrize("exc", [LockBusy(), ContentionExhausted()], ids=["busy", "exhausted"])
+@pytest.mark.parametrize("exc", [LockBusy(), ContentionExhausted(), GraphNotWritable("frozen")],
+                         ids=["busy", "exhausted", "paused"])
 async def test_context_engine_writes_let_a_busy_graph_through(monkeypatch, exc):
     from backend.app.models.graph import CreateNodeRequest
     from backend.common.models.graph import CreateEdgeRequest, UpdateEdgeRequest
@@ -334,16 +358,17 @@ async def test_context_engine_writes_let_a_busy_graph_through(monkeypatch, exc):
         await engine.update_edge("e1", UpdateEdgeRequest(properties={"w": 1}))
 
 
+@pytest.mark.parametrize("exc", [LockBusy(), GraphNotWritable("frozen")], ids=["busy", "paused"])
 @pytest.mark.parametrize("op, payload", [
     ("create_node", {"entityType": "dataset", "displayName": "n"}),
     ("delete_edge", {"edgeId": "e1"}),
 ])
-async def test_a_batch_lets_a_busy_graph_through(monkeypatch, op, payload):
+async def test_a_batch_lets_a_busy_graph_through(monkeypatch, op, payload, exc):
     from backend.app.api.v1.endpoints.graph import batch_commands
     from backend.common.models.graph import BatchCommandRequest
 
-    engine = _busy_engine(monkeypatch, LockBusy())
-    with pytest.raises(LockBusy):
+    engine = _busy_engine(monkeypatch, exc)
+    with pytest.raises(type(exc)):
         await batch_commands(request=BatchCommandRequest(commands=[{"op": op, "payload": payload}]),
                              _=None, engine=engine)
 

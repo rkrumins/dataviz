@@ -90,7 +90,7 @@ from backend.app.auth.dependencies import (
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.auth_service.interface import User
 from backend.app.services.top_level_cache import try_serve_top_level
-from backend.app.services.versioning.errors import LockBusy
+from backend.app.services.versioning.errors import GraphNotWritable, LockBusy
 from backend.app.services.versioning.service import Viewer
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
@@ -4137,6 +4137,7 @@ async def batch_commands(
 
     A busy graph (LockBusy) is a 503 only while no command has committed;
     after that it is the failing command's result and the batch stops.
+    So is a graph that is not writable (GraphNotWritable), as a 409.
 
     All node/edge mutations are validated against the active ontology before
     any write is attempted.  Validation failures count as command failures.
@@ -4213,6 +4214,8 @@ async def batch_commands(
                 ))
             break
         except Exception as exc:
+            if isinstance(exc, GraphNotWritable) and succeeded == 0:
+                raise                              # nothing landed: the 409 says why
             failed += 1
             results.append(BatchCommandResult(
                 ref=cmd.ref, op=cmd.op, success=False, error=str(exc),

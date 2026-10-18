@@ -4,7 +4,8 @@ sweep_idle_drafts abandons open drafts whose updated_at is older than the TTL,
 leaving fresh drafts, already-terminal branches, and main untouched. It also leaves an
 idle draft that is still in use: one with a live PR, one being published, one with
 staged (uncheckpointed) work, and one on a deleted graph. It is global
-(a janitor across all graphs). The worker runs it on a timer; here we drive
+(a janitor across all graphs). A frozen graph's drafts are not swept (nobody can touch them), and
+after an unfreeze each gets a full TTL again. The worker runs it on a timer; here we drive
 sweep_once directly, which is all the worker loop adds.
 """
 import asyncio
@@ -114,6 +115,33 @@ async def _run() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_versioning_draft_sweep_e2e():
     asyncio.run(_run())
+
+
+async def _frozen() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    paused, control = [(await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                               workspace_id="ws1", actor="alice"))["graph_id"]
+                       for _ in range(2)]
+    kept = await svc.open_draft(graph_id=paused, owner="alice")
+    swept = await svc.open_draft(graph_id=control, owner="alice")      # never changed state
+    await svc.set_frozen(graph_id=paused, frozen=True, expected_rev=0)
+    for bid in (kept, swept):
+        await _backdate(bid, 60)
+
+    first = await svc.sweep_idle_drafts(ttl_days=30)
+    assert swept in first and kept not in first, "nobody can touch a frozen graph's draft"
+    await svc.set_frozen(graph_id=paused, frozen=False, expected_rev=1)
+    assert kept not in await svc.sweep_idle_drafts(ttl_days=30), "a full TTL from the unfreeze"
+    unfrozen = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    await _set(GraphORM, paused, lifecycle_changed_at=unfrozen)
+    assert kept in await svc.sweep_idle_drafts(ttl_days=30)
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_the_sweep_spares_drafts_of_a_frozen_or_just_unfrozen_graph():
+    asyncio.run(_frozen())
 
 
 if __name__ == "__main__":

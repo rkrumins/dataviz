@@ -130,6 +130,18 @@ failed import waits for any other import on its draft (409 `job_active`).
   check, the projection fencing columns and `reseeding` status, `merge_requests.approvals`, or
   `projection_state.retired_keys`.
   Before, it started without the step, and the writes or reads that need it failed until a restart.
+- Run the `20261018_1200_gv_lifecycle` migration before rolling out this release: every versioned
+  write now reads `graphs.lifecycle_state`. A versioning worker on a separate `GRAPHVER_DB_URL` adds
+  the columns at start.
+- A write to a versioned graph in the trash, or being purged, now answers **409
+  `graph_not_writable`** `{state: "trashed" | "purging", reason, retryable: false}` instead of
+  landing: saves (`/graph/changes`, node and edge writes, `/commands/batch` until one command has
+  landed), opening, staging, checkpointing, pulling, publishing and merging a draft, revert, restore,
+  bulk import, sync and resync, forking it, and creating an import or publish job. A queued publish
+  fails and hands its draft back; a running import fails after its last committed window and
+  resumes from there when retried after a restore. A save that already landed still answers with
+  its commit. The same 409 with `state: "frozen"` refuses every such write to a graph whose editing
+  is paused; it holds only once every web and versioning-worker pod runs this release.
 
 ---
 

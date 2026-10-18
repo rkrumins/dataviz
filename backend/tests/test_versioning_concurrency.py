@@ -9,6 +9,9 @@ spuriously trip ``NotUpToDate`` and flap the projection target. These tests pin 
 * a draft-branch write takes the draft's row lock (``_lock_branch``), not the graph lock, and
   is refused when the draft is not open;
 * a write that names main (its id or ``'main'``) is refused unless the caller allows it;
+* every write checks the graph is writable: a draft write before the draft's lock, a main write
+  after the graph lock; a paused graph's refusal comes after the idempotent replay (a save that
+  landed still answers with its commit) and before the draft's open check;
 * ``_compute_fork_merge`` fails loud on a fork row with no ``fork_base_commit_seq`` instead
   of silently merging against an empty (genesis) base.
 
@@ -22,7 +25,7 @@ import contextlib
 
 import pytest
 
-from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden
+from backend.app.services.versioning.errors import BranchNotOpen, GraphNotWritable, MainWriteForbidden
 from backend.app.services.versioning.models import BranchORM, GraphORM
 from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 
@@ -61,14 +64,22 @@ def _factory(rows):
     return _session
 
 
-def _svc_with_spy(rows, monkeypatch):
+def _svc_with_spy(rows, monkeypatch, refuse=None):
     svc = GraphVersioningService(session_factory=_factory(rows))
     lock_calls = []
     svc.branch_locks = []
+    svc.calls = []                              # every lock and lifecycle check, in order
 
     async def spy_lock(s, gid):                 # shadows the _lock_graph staticmethod
         lock_calls.append(gid)
+        svc.calls.append(("graph lock", gid))
     monkeypatch.setattr(svc, "_lock_graph", spy_lock)
+
+    async def spy_writable(s, gid):
+        svc.calls.append(("writable", gid))
+        if refuse is not None:
+            raise refuse
+    monkeypatch.setattr(svc, "_assert_writable", spy_writable)
 
     async def main_bid(s, gid):
         return "main1"
@@ -76,6 +87,7 @@ def _svc_with_spy(rows, monkeypatch):
 
     async def spy_lock_branch(s, gid, bid):     # shadows the _lock_branch staticmethod
         svc.branch_locks.append(bid)
+        svc.calls.append(("branch lock", bid))
         return rows[(BranchORM, bid)]
     monkeypatch.setattr(svc, "_lock_branch", spy_lock_branch)
 
@@ -136,6 +148,69 @@ def test_apply_ops_closed_draft_refused(monkeypatch, status):
     with pytest.raises(BranchNotOpen) as exc:     # before _current_values (_StopAfterLock)
         asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
     assert exc.value.status == status and exc.value.branch_id == "draft1"
+
+
+def test_a_draft_write_checks_the_lifecycle_before_the_draft_lock(monkeypatch):
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="open",
+                                          owner="u", is_shared=False)}
+    svc, _ = _svc_with_spy(rows, monkeypatch)
+
+    with pytest.raises(_StopAfterLock):
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
+    assert svc.calls == [("writable", "g1"), ("branch lock", "draft1")]
+
+
+def test_a_main_write_checks_the_lifecycle_after_the_graph_lock(monkeypatch):
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "main1"): _Obj(id="main1", kind="main")}
+    svc, _ = _svc_with_spy(rows, monkeypatch)
+
+    with pytest.raises(_StopAfterLock):
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", ops=_DEL_OP))
+    assert svc.calls == [("graph lock", "g1"), ("writable", "g1")]
+
+
+class _LandedSession(_FakeSession):
+    """No unfinished enablement; the idempotency key's commit is ``c_landed``."""
+
+    def __init__(self, rows):
+        super().__init__(rows)
+        self._answers = [None, "c_landed"]
+
+    async def scalar(self, _stmt):
+        return self._answers.pop(0)
+
+
+@pytest.mark.parametrize("branch_id", [None, "draft1"], ids=["main", "draft"])
+def test_a_landed_save_still_replays_on_a_frozen_graph(monkeypatch, branch_id):
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "main1"): _Obj(id="main1", kind="main"),
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="open",
+                                          owner="u", is_shared=False)}
+    svc, _ = _svc_with_spy(rows, monkeypatch, refuse=GraphNotWritable("frozen"))
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield _LandedSession(rows)
+    svc._session = session
+
+    async def current(s, gid, bid, ids):
+        return {}
+    monkeypatch.setattr(svc, "_current_values", current)
+    res = asyncio.run(svc.apply_ops_detailed(graph_id="g1", actor="u", branch_id=branch_id,
+                                             ops=_DEL_OP, idempotency_key="k1"))
+    assert res.commit_id == "c_landed"
+
+
+def test_a_frozen_draft_save_is_refused_before_the_open_check(monkeypatch):
+    rows = {(GraphORM, "g1"): _Obj(id="g1"),
+            (BranchORM, "draft1"): _Obj(id="draft1", kind="draft", status="merged")}
+    svc, _ = _svc_with_spy(rows, monkeypatch, refuse=GraphNotWritable("frozen"))
+
+    with pytest.raises(GraphNotWritable):
+        asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
+    assert ("branch lock", "draft1") in svc.calls, "refused under the draft's lock, after any replay"
 
 
 def test_lock_branch_is_graph_scoped_no_key_update():

@@ -131,6 +131,7 @@ class ImportExportService:
             uri = source_uri
             async with db.graphver_session() as s:
                 await self._lock_in_workspace(s, graph_id, workspace_id)
+                await self._svc._assert_writable(s, graph_id)
                 branch = await self._svc._lock_branch(s, graph_id, branch_id)
                 if branch.kind == "main":
                     raise MainWriteForbidden()
@@ -520,6 +521,7 @@ class ImportExportService:
             fields["mergeRequestId"] = merge_request_id
         async with db.graphver_session() as s:
             await self._lock_in_workspace(s, graph_id, workspace_id)
+            await self._svc._assert_writable(s, graph_id)
             branch = await self._svc._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise MainWriteForbidden()
