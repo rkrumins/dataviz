@@ -260,6 +260,10 @@ class ProjectionStateORM(VersioningBase):
     falkor_graph_name = Column(Text, nullable=True)
     falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)
     shard_map = Column(JSONB, nullable=True)
+    # A moved graph's old platform keys, waiting to be dropped once the new key has caught up:
+    # ``[{name, provider, retireAfter, afterSeq, movedBy}]``, NULL when none
+    # (``move_projection``; 20261018_1100_gv_ps_retired).
+    retired_keys = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -739,6 +743,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1000_gv_mr_approvals.
     _bounded_step(conn, "merge_requests.approvals was not added",
                   lambda: ensure_mr_approvals_column(conn))
+    # 20261018_1100_gv_ps_retired.
+    _bounded_step(conn, "the retired_keys column was not added",
+                  lambda: ensure_ps_retired_keys_column(conn))
 
 
 def _bounded_step(conn, failure: str, step) -> None:
@@ -790,6 +797,20 @@ def ensure_ps_reseeding_status(conn) -> None:
     conn.execute(text(
         f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status "
         "CHECK (status IN ('idle','projecting','rebuilding','evicted','reseeding'))"))
+
+
+def ensure_ps_retired_keys_column(conn) -> None:
+    """Add ``projection_state.retired_keys``, a moved graph's old keys. A no-op without the table,
+    and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "retired_keys" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                    schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'ALTER TABLE "{_SCHEMA}"."projection_state" ADD COLUMN IF NOT EXISTS retired_keys JSONB'))
 
 
 def ensure_mr_approvals_column(conn) -> None:

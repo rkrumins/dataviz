@@ -197,6 +197,9 @@ LEASE_TTL: int = int(os.getenv("GRAPHVER_LEASE_TTL", "60"))
 FALKOR_MAX_RESIDENT: int = int(os.getenv("GRAPHVER_FALKOR_MAX_RESIDENT", "0"))
 FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{}")
 DEFAULT_FALKOR_PROVIDER: str = "default"
+# A moved graph's old platform key is dropped no sooner than this after the move, and only once the
+# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place.
+RETIRE_GRACE_SECS: int = 900
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
 # DERIVED_LABELS / not_derived_clause are imported at the top of this module and

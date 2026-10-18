@@ -29,6 +29,9 @@ from backend.app.services.versioning.errors import (
     MassDeleteBlocked,
     NotAFork,
     NotDraftOwner,
+    ProjectionKeyInUse,
+    ProjectionKeyInvalid,
+    ProjectionNotAdopted,
     SelfReview,
 )
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
@@ -161,6 +164,20 @@ def test_fork_errors_carry_their_answer():
         assert type(exc) in HTTP_MAPPED
         err = _raised(exc)
         assert err.status_code == 409
+        assert {k: err.detail[k] for k in detail} == detail and err.detail["message"]
+
+
+def test_a_refused_move_answers_with_its_reason():
+    for exc, status, detail in [
+        (ProjectionNotAdopted("customer_key"), 409,
+         {"type": "projection_not_adopted", "reason": "customer_key"}),
+        (ProjectionKeyInUse("prov_b", "gvp_g{abcd1234.1}"), 409,
+         {"type": "graph_key_in_use", "providerId": "prov_b", "key": "gvp_g{abcd1234.1}"}),
+        (ProjectionKeyInvalid("nexus"), 422, {"type": "invalid_target_key", "key": "nexus"}),
+    ]:
+        assert type(exc) in HTTP_MAPPED
+        err = _raised(exc)
+        assert err.status_code == status
         assert {k: err.detail[k] for k in detail} == detail and err.detail["message"]
 
 

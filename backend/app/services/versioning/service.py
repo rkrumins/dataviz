@@ -39,14 +39,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
-from . import config, db
+from . import config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GroupsUnavailable, HeadMoved,
                      IneligibleMember, JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked,
-                     NotAFork, NotDraftOwner, SelfReview)
+                     NotAFork, NotDraftOwner, ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
+                     SelfReview)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -2925,6 +2926,8 @@ class GraphVersioningService:
                 "next_retry_at": ps.next_retry_at if ps else None,
                 "liveness_error": (ps.last_error if ps and (ps.last_error or "").startswith("liveness:")
                                    else None),
+                # Old platform keys a move left, waiting to be dropped (move_projection).
+                "retired_keys": list(ps.retired_keys or []) if ps else [],
             }
 
     async def ensure_projection_target(
@@ -2991,6 +2994,76 @@ class GraphVersioningService:
             ps.failed_attempts = 0
             ps.next_retry_at = None
             return True
+
+    async def move_projection(self, *, graph_id: str, provider: str, key: str, actor: str,
+                              shard_map: dict) -> Dict[str, object]:
+        """Move a graph's projection to FalkorDB key ``key`` on ``provider`` (doc 14 §6
+        KeyMigration, phase 1: a reseed move). Swaps the pin, bumps the epoch so a pass in flight
+        cannot publish over it, and lowers the watermark to 0 (``reseeding``), so the next pass
+        reconciles all of committed main into the new key while reads fall back to Postgres. The
+        old key is appended to ``retired_keys``, to be dropped once the new key has caught up and
+        ``RETIRE_GRACE_SECS`` have passed; until then a move back onto it is allowed, and takes it
+        off that list.
+
+        Only keys the platform owns move: an unpinned graph and a graph still projecting into the
+        customer's own key are refused (:class:`ProjectionNotAdopted`), and nothing is written. The
+        target must be this graph's own platform key or one of its retired keys
+        (:class:`ProjectionKeyInvalid`), and no other graph's pin (:class:`ProjectionKeyInUse`).
+        Moving to the current pin changes nothing (``changed: False``). Refused
+        (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
+        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None or graph.deleted_at is not None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                await self._assert_not_bootstrapping(s, graph_id)
+                ps = (await s.execute(
+                    select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                    .with_for_update().execution_options(populate_existing=True)
+                )).scalar_one_or_none()
+                if ps is None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
+                tgt = {"providerId": provider, "key": key}
+                if cur == tgt:
+                    return {"changed": False, "from": cur, "to": tgt, "retiring": None}
+                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                    raise ProjectionNotAdopted(
+                        "unpinned", "this graph has no FalkorDB key yet; nothing to move")
+                if not ps.owns_falkor_graph:
+                    raise ProjectionNotAdopted(
+                        "customer_key", "this graph projects into the customer's own FalkorDB "
+                        "graph; only platform keys can be moved")
+                retired = list(ps.retired_keys or [])
+                own = [e for e in retired
+                       if ((e.get("provider") or default), e["name"]) == (provider, key)]
+                if not (own or keymigrate.is_owned_key(graph_id, key)):
+                    raise ProjectionKeyInvalid(key)
+                try:
+                    await self._claim_projection_key(s, key, provider, exclude_graph_id=graph_id)
+                except ConcurrencyError:
+                    raise ProjectionKeyInUse(provider, key) from None
+                entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                         "retireAfter": (datetime.now(timezone.utc)
+                                         + timedelta(seconds=config.RETIRE_GRACE_SECS)).isoformat(),
+                         "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
+                ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
+                ps.projected_commit_seq = 0
+                ps.target_commit_seq = graph.main_head_commit_seq
+                ps.status = "reseeding"
+                ps.last_error = None
+                ps.failed_attempts = 0
+                ps.next_retry_at = None
+                ps.progress_done = ps.progress_total = None
+                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+                ps.retired_keys = [e for e in retired if e not in own] + [entry]
+                ps.shard_map = shard_map
+        except IntegrityError:
+            raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
+        return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
 
     async def reset_projection_watermarks(self, *, provider: str, actor: str,
                                           dry_run: bool = False) -> List[str]:

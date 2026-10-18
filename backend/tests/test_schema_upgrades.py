@@ -727,3 +727,50 @@ async def test_the_approvals_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── projection_state.retired_keys: a moved graph's old keys (20261018_1100_gv_ps_retired) ──
+_PS_RETIRED = _VERSIONS / "20261018_1100_gv_ps_retired.py"
+
+
+def test_the_retired_keys_column_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.retired_keys.nullable
+    migration = _migration(_PS_RETIRED)
+    assert migration.revision == _PS_RETIRED.stem
+    assert migration.down_revision == "20261018_1000_gv_mr_approvals"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_retired_keys_column(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"ALTER TABLE {_PS} DROP COLUMN retired_keys"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "retired_keys" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_retired_keys_migration_round_trips(store):
+    migration = _migration(_PS_RETIRED)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "retired_keys" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "retired_keys" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

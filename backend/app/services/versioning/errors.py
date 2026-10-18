@@ -222,6 +222,40 @@ class GraphMoved(_HttpMapped, RuntimeError):
                          {"type": "graph_moved", "graphId": graph_id})
 
 
+class ProjectionNotAdopted(_HttpMapped, RuntimeError):
+    """A projection move reached a key the platform has not adopted: the graph is unpinned
+    (``unpinned``), or still projects into the customer's own FalkorDB graph (``customer_key``),
+    which a move must never write or drop (doc 14 L2 moves owned keys only)."""
+
+    def __init__(self, reason: str, message: str = "", **extra: Any):
+        self.reason = reason
+        super().__init__(message or f"this graph's projection cannot be moved: {reason}",
+                         {"type": "projection_not_adopted", "reason": reason, **extra})
+
+
+class ProjectionKeyInUse(_HttpMapped, RuntimeError):
+    """The FalkorDB key a projection move targets already holds another graph's projection.
+    Same type as ``BootstrapConflict``'s ``graph_key_in_use``."""
+
+    def __init__(self, provider_id: str, key: str):
+        self.provider_id, self.key = provider_id, key
+        super().__init__(f"FalkorDB graph {key} on {provider_id} is already in use",
+                         {"type": "graph_key_in_use", "providerId": provider_id, "key": key})
+
+
+class ProjectionKeyInvalid(_HttpMapped, RuntimeError):
+    """A projection move named a key that is neither this graph's own platform key
+    (``gvp_<graphId>{<tag>.<n>}``) nor one of its retired keys."""
+
+    status_code = 422
+
+    def __init__(self, key: str):
+        self.key = key
+        super().__init__(f"{key} is not a FalkorDB key this graph can move to",
+                         {"type": "invalid_target_key", "key": key})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
-               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved)
+               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved,
+               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid)

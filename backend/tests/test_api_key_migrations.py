@@ -47,6 +47,8 @@ _ON_LIVE_TABLES = {
     "20261017_2000_gv_ps_reseeding.py": ("upgrade", "downgrade"),
     # graphver.merge_requests, which every review writes.
     "20261018_1000_gv_mr_approvals.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: a moved graph's retired keys.
+    "20261018_1100_gv_ps_retired.py": ("upgrade", "downgrade"),
 }
 
 

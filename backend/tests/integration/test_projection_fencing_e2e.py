@@ -7,6 +7,9 @@
   target repair outside the projector's lock) keeps its new key and its replay; a second writer
   that publishes after a stale one claimed leaves the stale one superseded, the watermark lowered
   to where it started, and the worker nudged.
+* A move to another key (doc 14 KeyMigration, phase 1) bumps the epoch too: a pass it overtook is
+  superseded, and the old key waits in ``retired_keys``. Only this graph's own platform keys move
+  or are moved onto; the customer's key and an unpinned graph are refused untouched.
 * Evict and rebuild bump the epoch; a rebuild clears the backoff.
 * A publishing pass leaves its ``_GVProjMeta`` marker (the published seq, its epoch) as its last
   write; a held-back pass leaves the previous one.
@@ -14,19 +17,23 @@
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
 import asyncio
+import functools
 import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.app.services.versioning import db, models, projection
+from backend.app.services.versioning import db, keymigrate, models, projection
 from backend.app.services.versioning.cache_manager import CacheManager
+from backend.app.services.versioning.errors import (ProjectionKeyInUse, ProjectionKeyInvalid,
+                                                    ProjectionNotAdopted)
 from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
 
 from backend.tests.integration.test_versioning_projection import (
     FakeFalkor,
+    _assert_matches_main,
     _edit_publish,
     _node,
 )
@@ -167,6 +174,104 @@ async def _run_repin_mid_pass_survives() -> None:
 
 def test_a_repin_mid_pass_keeps_its_key_and_its_replay():
     asyncio.run(_run_repin_mid_pass_survives())
+
+
+async def _run_move_mid_pass_is_fenced() -> None:
+    # The move takes the graph lock, not the projector's, so it can land mid-pass.
+    svc, fake = GraphVersioningService(), FakeFalkor()
+    gid, proj = await _seed(svc, fake)
+    old, new = (await _row(gid))["name"], keymigrate.owned_key(gid, 1)
+    nudged = []
+
+    async def nudge(graph_id):
+        nudged.append(graph_id)
+
+    async def move_then_pass(*a, **k):
+        res = await svc.move_projection(graph_id=gid, provider="prov_b", key=new, actor="a",
+                                        shard_map={})
+        assert res["changed"] and res["retiring"]["name"] == old, res
+        return None, False
+
+    proj._verify_and_heal = move_then_pass
+    real_nudge, projection.nudge_projection = projection.nudge_projection, nudge
+    try:
+        r = await proj.project_graph(gid)
+    finally:
+        projection.nudge_projection = real_nudge
+    assert r.get("skipped") == "superseded", r
+    row = await _row(gid)
+    assert (row["name"], row["projected"], row["status"]) == (new, 0, "reseeding"), row
+    wm = await svc.projection_watermark(gid)
+    assert wm["falkor_provider"] == "prov_b" and wm["owns_falkor_graph"], wm
+    assert [(e["name"], e["provider"], e["afterSeq"], e["movedBy"]) for e in wm["retired_keys"]] == [
+        (old, None, 3, "a")], wm
+    assert nudged == [gid]
+    del proj._verify_and_heal
+    await proj.project_graph(gid)                         # the next pass reseeds the new key
+    assert ((await _row(gid))["projected"], (await _row(gid))["status"]) == (3, "idle")
+    await _assert_matches_main(svc, fake, gid)
+    await db.dispose_engine()
+
+
+def test_a_move_mid_pass_is_fenced_and_queues_the_old_key():
+    asyncio.run(_run_move_mid_pass_is_fenced())
+
+
+async def _run_a_move_touches_only_what_it_may() -> None:
+    svc = GraphVersioningService()
+    gid, proj = await _seed(svc, FakeFalkor())
+    old = (await _row(gid))["name"]
+    move = functools.partial(svc.move_projection, actor="a", shard_map={})
+
+    # Already there: nothing is bumped.
+    before = await _row(gid)
+    assert (await move(graph_id=gid, provider="default", key=old))["changed"] is False
+    assert await _row(gid) == before
+    with pytest.raises(ProjectionKeyInvalid):              # not this graph's platform key
+        await move(graph_id=gid, provider="prov_b", key="nexus_lineage")
+    with pytest.raises(ProjectionKeyInvalid):
+        await move(graph_id=gid, provider="prov_b", key=keymigrate.owned_key("graph_other", 1))
+
+    # The customer's own key, and an unpinned graph, never move.
+    cust = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                   actor="a", falkor_graph_name="cust_" + os.urandom(3).hex()))
+    cust_before = await _row(cust["graph_id"])
+    with pytest.raises(ProjectionNotAdopted) as info:
+        await move(graph_id=cust["graph_id"], provider="prov_b",
+                   key=keymigrate.owned_key(cust["graph_id"], 1))
+    assert info.value.detail["reason"] == "customer_key"
+    assert await _row(cust["graph_id"]) == cust_before
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, cust["graph_id"])
+        ps.falkor_graph_name, ps.owns_falkor_graph = f"gv_{cust['graph_id']}", True
+    with pytest.raises(ProjectionNotAdopted) as info:
+        await move(graph_id=cust["graph_id"], provider="prov_b",
+                   key=keymigrate.owned_key(cust["graph_id"], 1))
+    assert info.value.detail["reason"] == "unpinned"
+
+    # A key another graph pins is refused; a move back onto our own retired key is not.
+    first = keymigrate.owned_key(gid, 1)
+    assert (await move(graph_id=gid, provider="prov_b", key=first))["changed"]
+    async with db.graphver_session() as s:
+        (await s.get(ProjectionStateORM, cust["graph_id"])).falkor_provider = "prov_c"
+        (await s.get(ProjectionStateORM, cust["graph_id"])).falkor_graph_name = (
+            keymigrate.owned_key(gid, 2))
+    with pytest.raises(ProjectionKeyInUse):
+        await move(graph_id=gid, provider="prov_c", key=keymigrate.owned_key(gid, 2))
+    epoch = (await _row(gid))["epoch"]
+    back = await move(graph_id=gid, provider="default", key=old)
+    assert back["changed"] and back["retiring"]["name"] == first, back
+    row = await _row(gid)
+    assert (row["name"], row["epoch"]) == (old, epoch + 1), row
+    wm = await svc.projection_watermark(gid)
+    assert [(e["name"], e["provider"]) for e in wm["retired_keys"]] == [(first, "prov_b")], wm
+    await proj.project_graph(gid)                         # and reconciles back into the old key
+    assert ((await _row(gid))["projected"], (await _row(gid))["status"]) == (3, "idle")
+    await db.dispose_engine()
+
+
+def test_a_move_touches_only_what_it_may():
+    asyncio.run(_run_a_move_touches_only_what_it_may())
 
 
 async def _run_stale_writer_is_superseded() -> None:
