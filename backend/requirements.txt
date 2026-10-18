@@ -1,7 +1,7 @@
 # Core backend
 fastapi>=0.141.1         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
 uvicorn[standard]>=0.52.4
-gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via Transfer-Encoding). WSGI server (uvicorn workers) for viz/graph.
+gunicorn>=26.2.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via Transfer-Encoding). WSGI server (uvicorn workers) for viz/graph.
 pydantic>=2.13.5          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
