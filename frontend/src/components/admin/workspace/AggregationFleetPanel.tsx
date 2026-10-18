@@ -9,7 +9,7 @@
  *   (GET/PUT /aggregation/settings) that seeds every new job.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Cpu, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePolling } from '@/hooks/usePolling'
