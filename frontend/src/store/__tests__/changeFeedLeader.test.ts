@@ -236,3 +236,120 @@ describe('change feed follower', () => {
     stop()
   })
 })
+
+/**
+ * Nobody looking, nothing asked.
+ *
+ * The leader is often a background tab working for a visible one, so it
+ * cannot pause on its own visibility alone. Visible tabs tell it they are
+ * there; when none has for a while, it stops checking, and the first sign
+ * of someone looking checks at once and resumes.
+ */
+describe('change feed while no tab is visible', () => {
+  /** Longer than any jittered check interval (60s plus up to 30%). */
+  const ONE_CHECK = 60_000 * 1.3 + 1
+
+  function setHidden(hidden: boolean) {
+    Object.defineProperty(document, 'hidden', { value: hidden, configurable: true })
+  }
+
+  function presenceHeardBy(channel: FakeBroadcastChannel): unknown[] {
+    const heard: unknown[] = []
+    channel.addEventListener('message', (ev) => heard.push(ev.data))
+    return heard
+  }
+
+  beforeEach(() => {
+    __resetChangeFeedForTests()
+    fetchChangeManifest.mockReset()
+    fetchChangeManifest.mockResolvedValue({})
+    FakeBroadcastChannel.instances = []
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+    vi.stubGlobal('navigator', { locks: new FakeLockManager() })
+    vi.stubGlobal('EventSource', InertEventSource)
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    setHidden(false)
+    __resetChangeFeedForTests()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('stops checking once no tab in the browser is visible', async () => {
+    setHidden(true)
+    const stop = startChangeFeed({ stream: false })
+    // Past a new leader's grace period, it has no reason to think anyone
+    // is looking.
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 3)
+    const paused = fetchChangeManifest.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 10)
+
+    expect(fetchChangeManifest.mock.calls.length).toBe(paused)
+    stop()
+  })
+
+  it('keeps checking while this tab is hidden but another is being looked at', async () => {
+    setHidden(true)
+    const stop = startChangeFeed({ stream: false })
+    const visibleTab = new FakeBroadcastChannel('nx-change-feed')
+    const before = fetchChangeManifest.mock.calls.length
+
+    for (let i = 0; i < 10; i++) {
+      visibleTab.postMessage({ present: true })
+      await vi.advanceTimersByTimeAsync(30_000)
+    }
+
+    // Five minutes with someone looking: a check at least every 78s.
+    expect(fetchChangeManifest.mock.calls.length - before).toBeGreaterThanOrEqual(3)
+    stop()
+  })
+
+  it('checks at once when somebody looks again, then keeps checking', async () => {
+    setHidden(true)
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 3)
+    const paused = fetchChangeManifest.mock.calls.length
+
+    const visibleTab = new FakeBroadcastChannel('nx-change-feed')
+    visibleTab.postMessage({ present: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchChangeManifest.mock.calls.length).toBe(paused + 1)
+
+    // Still looking: the tab keeps saying so, as a visible tab does.
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(30_000)
+      visibleTab.postMessage({ present: true })
+    }
+    expect(fetchChangeManifest.mock.calls.length).toBeGreaterThan(paused + 1)
+    stop()
+  })
+
+  it('says it is being looked at while visible, and keeps saying so', async () => {
+    const otherTab = new FakeBroadcastChannel('nx-change-feed')
+    const heard = presenceHeardBy(otherTab)
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    const first = heard.filter((m) => (m as { present?: boolean })?.present).length
+    expect(first).toBeGreaterThan(0)
+
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    expect(heard.filter((m) => (m as { present?: boolean })?.present).length).toBeGreaterThan(first)
+    stop()
+  })
+
+  it('says nothing while hidden', async () => {
+    setHidden(true)
+    const otherTab = new FakeBroadcastChannel('nx-change-feed')
+    const heard = presenceHeardBy(otherTab)
+    const stop = startChangeFeed({ stream: false })
+
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 2)
+
+    expect(heard.some((m) => (m as { present?: boolean })?.present)).toBe(false)
+    stop()
+  })
+})

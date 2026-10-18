@@ -49,8 +49,13 @@ class FakeEventSource {
   }
 
   emit(type: string, data: unknown) {
+    this.emitRaw(type, JSON.stringify(data))
+  }
+
+  /** Deliver a frame exactly as given, parsed or not. */
+  emitRaw(type: string, data: string) {
     for (const fn of this.listeners.get(type) ?? []) {
-      fn({ data: JSON.stringify(data) } as MessageEvent)
+      fn({ data } as MessageEvent)
     }
   }
 
@@ -144,9 +149,7 @@ describe('change feed streaming transport', () => {
     const es = FakeEventSource.instances[0]
     fetchChangeManifest.mockClear()
 
-    for (const fn of (es as any).listeners.get('changed') ?? []) {
-      fn({ data: 'not json at all' } as MessageEvent)
-    }
+    es.emitRaw('changed', 'not json at all')
     await settle()
 
     expect(fetchChangeManifest).toHaveBeenCalled()
@@ -205,25 +208,6 @@ describe('change feed streaming transport', () => {
     await vi.advanceTimersByTimeAsync(90_000)
 
     expect(fetchChangeManifest).toHaveBeenCalled()
-  })
-
-  it('keeps polling even while this tab is hidden', async () => {
-    // The tab holding the lock works for every tab in the browser, and it
-    // is very often a background one while the user reads a different
-    // tab. Pausing here — which is what every poller this replaced did —
-    // would stop the reconciliation floor for tabs somebody is looking at.
-    vi.useFakeTimers()
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
-    try {
-      teardown = startChangeFeed()
-      fetchChangeManifest.mockClear()
-
-      await vi.advanceTimersByTimeAsync(90_000)
-
-      expect(fetchChangeManifest).toHaveBeenCalled()
-    } finally {
-      Object.defineProperty(document, 'hidden', { value: false, configurable: true })
-    }
   })
 
   it('stops the stream on teardown', () => {

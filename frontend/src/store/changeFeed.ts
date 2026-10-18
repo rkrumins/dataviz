@@ -440,30 +440,87 @@ function broadcastVersions(next: ChangeVersions): void {
   }
 }
 
+/** How often a visible tab tells the leader that somebody is looking. */
+const PRESENCE_INTERVAL_MS = 30_000
+/**
+ * How long the leader keeps checking after the last sign of a visible
+ * tab: two missed heartbeats and a margin, so one late message does not
+ * pause it under somebody's nose.
+ */
+const PRESENCE_TTL_MS = 75_000
+
+/** When a visible tab last said so, as far as the leader knows. */
+let lastPresenceAt = 0
+
+/**
+ * Tell the leader, while this tab is visible, that somebody is looking.
+ *
+ * Every tab does this, leader included (it costs no requests: the
+ * channel never leaves the browser). A hidden tab says nothing, so once
+ * no tab is visible the messages stop and the leader stops checking.
+ */
+function announcePresence(myEpoch: number): () => void {
+  const say = () => {
+    if (myEpoch !== transportEpoch) return
+    if (typeof document !== 'undefined' && document.hidden) return
+    try {
+      openChannel()?.postMessage({ present: true })
+    } catch {
+      // No channel: the leader falls back to its own visibility.
+    }
+  }
+
+  say()
+  const timer = setInterval(() => {
+    if (myEpoch !== transportEpoch) {
+      clearInterval(timer)
+      return
+    }
+    say()
+  }, PRESENCE_INTERVAL_MS)
+  // On return, at once rather than at the next heartbeat: this is the
+  // moment a paused leader has to resume.
+  const unsubscribeVisible = onAppVisible(say, { minIntervalMs: 0 })
+
+  return () => {
+    clearInterval(timer)
+    unsubscribeVisible()
+  }
+}
+
 /**
  * Do the actual work of the feed: hold a stream and a reconciliation
  * poll, and tell the other tabs whatever we learn.
  */
 function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
   const stopStream = useStream ? connectStream(myEpoch) : () => {}
+  let paused = false
+  // A new leader has not heard from anybody yet; give the visible tabs
+  // one heartbeat's grace before concluding that nobody is there.
+  lastPresenceAt = Date.now()
 
   const publish = async () => {
     await pollChangeFeed()
     broadcastVersions(versions)
   }
 
+  // Gated on whether ANY tab in the browser is visible, not on this
+  // one. The leader works on behalf of every tab, and it is whichever
+  // tab won the lock — very often a background one while the user reads
+  // a different tab — so pausing on its own visibility would stop the
+  // reconciliation floor for a tab somebody is looking at.
+  const someoneIsLooking = () =>
+    (typeof document === 'undefined' || !document.hidden)
+    || Date.now() - lastPresenceAt < PRESENCE_TTL_MS
+
   const tick = async () => {
     if (myEpoch !== transportEpoch) return
-    // Deliberately NOT gated on this tab's own visibility, unlike every
-    // poller this replaced. The leader works on behalf of every tab in
-    // the browser, and the leader is whichever tab won the lock — very
-    // often a background one while the user reads a different tab. A
-    // hidden-tab pause here would stop the reconciliation floor for
-    // tabs the user is actively looking at.
-    //
-    // What made the pause worth having was N tabs each polling; there is
-    // one poller per browser now, so the cost it was protecting against
-    // no longer exists.
+    if (!someoneIsLooking()) {
+      // Nobody is looking at any tab. Stop until somebody does; the
+      // check that resumes us runs at once.
+      paused = true
+      return
+    }
     try {
       await publish()
     } catch {
@@ -476,10 +533,24 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
     pollTimer = setTimeout(tick, withJitter(POLLING_INTERVALS.changeManifest))
   }
 
+  const resume = () => {
+    if (myEpoch !== transportEpoch || !paused) return
+    paused = false
+    void tick()
+  }
+
+  const onPresence = (ev: MessageEvent) => {
+    if (ev.data?.present !== true) return
+    lastPresenceAt = Date.now()
+    resume()
+  }
+  openChannel()?.addEventListener('message', onPresence)
+
   void tick()
   const unsubscribeVisible = onAppVisible(() => {
     if (myEpoch !== transportEpoch) return
-    void publish().catch(() => {})
+    if (paused) resume()
+    else void publish().catch(() => {})
   })
 
   return () => {
@@ -488,6 +559,7 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
       pollTimer = null
     }
     unsubscribeVisible()
+    openChannel()?.removeEventListener('message', onPresence)
     stopStream()
   }
 }
@@ -504,9 +576,15 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
   let releaseLock: (() => void) | null = null
   let abandoned = false
 
+  const stopPresence = announcePresence(myEpoch)
+
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
   if (!locks?.request) {
-    return startLeaderWork(myEpoch, useStream)
+    const stopLeading = startLeaderWork(myEpoch, useStream)
+    return () => {
+      stopPresence()
+      stopLeading()
+    }
   }
 
   // Followers apply what the leader learns. A follower opens no stream
@@ -546,6 +624,7 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
 
   return () => {
     abandoned = true
+    stopPresence()
     openChannel()?.removeEventListener('message', onMessage)
     stopWork?.()
     stopWork = null
@@ -590,6 +669,7 @@ export function __resetChangeFeedForTests(): void {
   versions = {}
   seeded = false
   pushGeneration = 0
+  lastPresenceAt = 0
   try {
     channel?.close()
   } catch {
