@@ -38,6 +38,7 @@ export function FeatureSpec({
     lastChange,
     onToggle,
     onChangeOptions,
+    settings,
 }: {
     feature: FeatureDefinition
     allFeatures: FeatureDefinition[]
@@ -48,6 +49,8 @@ export function FeatureSpec({
     lastChange: FeatureChange | undefined
     onToggle: (next: boolean) => void
     onChangeOptions: (next: string[]) => void
+    /** A switch's own settings, for the few that have more than on/off. */
+    settings?: React.ReactNode
 }) {
     const { Icon, style, label: categoryLabel } = resolveCategoryStyle(meta, feature.category)
     const on = isOn(feature, values)
@@ -265,6 +268,13 @@ export function FeatureSpec({
                         </section>
                     )}
                 </div>
+
+                {settings && (
+                    <section>
+                        <SectionTitle>Settings</SectionTitle>
+                        <div className="mt-3">{settings}</div>
+                    </section>
+                )}
 
                 {(feature.dependsOn?.length ?? 0) > 0 && (
                     <section>

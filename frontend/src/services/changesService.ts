@@ -2,8 +2,8 @@
  * Change-manifest client.
  *
  * One request that answers "which of the things I am showing have
- * moved?" for every surface at once, in place of the nine idle polls
- * each of those surfaces used to run on its own timer.
+ * moved?" for every surface at once, in place of the seven idle polls
+ * those surfaces used to run on their own timers.
  */
 import { authFetch } from './apiClient'
 
@@ -12,8 +12,14 @@ const CHANGES_URL = '/api/v1/changes'
 /** Topic name → version counter. Absent topics are 0. */
 export type ChangeVersions = Record<string, number>
 
-interface ChangeManifestResponse {
+/** What changed, and how long to wait before asking again. */
+export interface ChangeManifest {
   topics: ChangeVersions
+  /**
+   * The admin's Live updates interval. Carried here rather than built
+   * into the bundle, so a change applies at each browser's next check.
+   */
+  checkAfterSeconds?: number
 }
 
 /**
@@ -28,7 +34,7 @@ interface ChangeManifestResponse {
  * hold is stale" and would send the client to refetch every surface at
  * the exact moment the backend is already struggling.
  */
-export async function fetchChangeManifest(): Promise<ChangeVersions> {
-  const body = await authFetch<ChangeManifestResponse>(CHANGES_URL)
-  return body?.topics ?? {}
+export async function fetchChangeManifest(): Promise<ChangeManifest> {
+  const body = await authFetch<ChangeManifest>(CHANGES_URL)
+  return { topics: body?.topics ?? {}, checkAfterSeconds: body?.checkAfterSeconds }
 }

@@ -1026,14 +1026,15 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "key": "realtimeChangeFeedEnabled",
         "name": "Live updates",
         "description": (
-            "Let the server tell open tabs when something changes — announcements, notifications, "
-            "your permissions, provider status — instead of every tab asking on a timer. One "
-            "connection per browser replaces nine repeating requests per tab."
+            "Let the server tell open tabs the moment something changes — announcements, "
+            "notifications, your permissions, provider status — over one connection per browser, "
+            "instead of waiting for the browser's next periodic check."
         ),
         "impact_when_off": (
-            "Tabs go back to asking on a schedule: they check once a minute for anything that "
-            "moved. Everything still works and stays correct, it just takes up to a minute to "
-            "appear and costs a request per minute per tab."
+            "Browsers rely on the periodic check alone: one request per browser on the interval "
+            "set below (every 60 seconds by default), paused while none of its tabs is visible. "
+            "Everything still works and stays correct; a change just takes up to that interval "
+            "to appear."
         ),
         "category_id": "experimental",
         "type": "boolean",
@@ -1041,9 +1042,10 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "options": None,
         "help_url": None,
         "admin_hint": (
-            "Turn on to cut idle request volume to roughly nothing. Safe to toggle at any time: "
-            "the periodic check remains underneath as a safety net either way, so switching this "
-            "off never loses an update — it only makes it arrive later."
+            "Turn on to make changes arrive as they happen. Safe to toggle at any time: the "
+            "periodic check remains underneath as a safety net either way, so switching this off "
+            "never loses an update — it only makes it arrive later. How often that check runs is "
+            "set below."
         ),
         # 4, not 0: 0 was already toursEnabled's, which this shipped on top
         # of, and main has since taken 1-3. Two rows claiming one position

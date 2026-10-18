@@ -1,7 +1,7 @@
 /**
- * changeFeed — one subscription in place of nine idle polls.
+ * changeFeed — one subscription in place of seven idle polls.
  *
- * Nine always-mounted surfaces each ran their own timer against their
+ * Seven always-mounted surfaces each ran their own timer against their
  * own endpoint, and every one of them was asking a question whose
  * answer is almost always no. This store asks that question once, for
  * all of them, and only wakes a surface when its answer changed.
@@ -170,10 +170,30 @@ let pushGeneration = 0
 export async function pollChangeFeed(): Promise<void> {
   const generationAtStart = pushGeneration
   const next = await fetchChangeManifest()
+  noteCheckInterval(next.checkAfterSeconds)
   if (pushGeneration !== generationAtStart) return
-  versions = next
+  versions = next.topics
   seeded = true
   reconcile()
+}
+
+/**
+ * The server's bounds on the check interval, mirrored here so that a
+ * malformed value cannot turn the timer into a tight loop or a silence.
+ */
+const MIN_CHECK_MS = 15_000
+const MAX_CHECK_MS = 600_000
+
+/**
+ * How long the leader waits between manifest checks: the admin's Live
+ * updates setting, as the last manifest reported it.
+ */
+let checkIntervalMs: number = POLLING_INTERVALS.changeManifest
+
+function noteCheckInterval(seconds: unknown): void {
+  // Absent (an older server), zero, negative or NaN: keep what we have.
+  if (typeof seconds !== 'number' || !(seconds > 0)) return
+  checkIntervalMs = Math.min(MAX_CHECK_MS, Math.max(MIN_CHECK_MS, seconds * 1000))
 }
 
 /** Latest known version map. Diagnostics and tests. */
@@ -530,7 +550,7 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
       // not the same as "nothing changed".
     }
     if (myEpoch !== transportEpoch) return
-    pollTimer = setTimeout(tick, withJitter(POLLING_INTERVALS.changeManifest))
+    pollTimer = setTimeout(tick, withJitter(checkIntervalMs))
   }
 
   const resume = () => {
@@ -648,9 +668,11 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
  *    process was full. Without it every one of those would be a surface
  *    silently stuck on stale data.
  *
- * The poll stays at the cadence the *slowest* of the nine original polls
- * ran at, so even fully degraded — no stream, no leader election — this
- * is one request per minute for the whole app rather than nine.
+ * The poll runs on the admin's Live updates interval, which each manifest
+ * carries (60s unless changed, 15s to 10 minutes), and stops while no tab
+ * in the browser is visible. So even fully degraded — no stream, no
+ * leader election — a tab makes one request per interval rather than
+ * the seven its surfaces used to.
  */
 export function startChangeFeed(options?: { stream?: boolean }): () => void {
   const myEpoch = ++transportEpoch
@@ -670,6 +692,7 @@ export function __resetChangeFeedForTests(): void {
   seeded = false
   pushGeneration = 0
   lastPresenceAt = 0
+  checkIntervalMs = POLLING_INTERVALS.changeManifest
   try {
     channel?.close()
   } catch {

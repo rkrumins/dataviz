@@ -42,7 +42,7 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToTopic('announcements', refresh)
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 7 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 7 } })
     await pollChangeFeed()
     await settle()
 
@@ -53,11 +53,11 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToTopic('announcements', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 7 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 7 } })
     await pollChangeFeed()
     await settle()
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 8 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 8 } })
     await pollChangeFeed()
     await settle()
 
@@ -68,7 +68,7 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToTopic('announcements', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 7 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 7 } })
     await pollChangeFeed()
     await settle()
     await pollChangeFeed()
@@ -84,11 +84,11 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToTopic('announcements', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 4000 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 4000 } })
     await pollChangeFeed()
     await settle()
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 0 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 0 } })
     await pollChangeFeed()
     await settle()
 
@@ -106,18 +106,18 @@ describe('changeFeed', () => {
     )
     subscribeToTopic('announcements', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
     await pollChangeFeed()
     await settle()
 
     // v2 lands: the refresh starts and parks.
-    fetchChangeManifest.mockResolvedValue({ announcements: 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 2 } })
     await pollChangeFeed()
     await settle()
     expect(refresh).toHaveBeenCalledTimes(1)
 
     // v3 commits while that refresh is still running.
-    fetchChangeManifest.mockResolvedValue({ announcements: 3 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 3 } })
     await pollChangeFeed()
     await settle()
 
@@ -137,11 +137,11 @@ describe('changeFeed', () => {
       .mockResolvedValue(undefined)
     subscribeToTopic('announcements', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
     await pollChangeFeed()
     await settle()
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 2 } })
     await pollChangeFeed()
     await settle()
     expect(refresh).toHaveBeenCalledTimes(1)
@@ -158,16 +158,16 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToTopic('providers:status', refresh, { minIntervalMs: 60_000 })
 
-    fetchChangeManifest.mockResolvedValue({ 'providers:status': 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { 'providers:status': 1 } })
     await pollChangeFeed()
     await settle()
 
-    fetchChangeManifest.mockResolvedValue({ 'providers:status': 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { 'providers:status': 2 } })
     await pollChangeFeed()
     await settle()
     expect(refresh).toHaveBeenCalledTimes(1)
 
-    fetchChangeManifest.mockResolvedValue({ 'providers:status': 3 })
+    fetchChangeManifest.mockResolvedValue({ topics: { 'providers:status': 3 } })
     await pollChangeFeed()
     await settle()
     expect(refresh).toHaveBeenCalledTimes(1) // inside the floor
@@ -180,11 +180,11 @@ describe('changeFeed', () => {
     const refresh = vi.fn()
     subscribeToUserTopic('notifications', refresh, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ 'notif:usr_abc': 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { 'notif:usr_abc': 1 } })
     await pollChangeFeed()
     await settle()
 
-    fetchChangeManifest.mockResolvedValue({ 'notif:usr_abc': 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { 'notif:usr_abc': 2 } })
     await pollChangeFeed()
     await settle()
 
@@ -197,13 +197,13 @@ describe('changeFeed', () => {
       minIntervalMs: 0,
     })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
     await pollChangeFeed()
     await settle()
 
     unsubscribe()
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 2 } })
     await pollChangeFeed()
     await settle()
 
@@ -218,10 +218,10 @@ describe('changeFeed', () => {
     subscribeToTopic('announcements', boom, { minIntervalMs: 0 })
     subscribeToTopic('announcements', ok, { minIntervalMs: 0 })
 
-    fetchChangeManifest.mockResolvedValue({ announcements: 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
     await pollChangeFeed()
     await settle()
-    fetchChangeManifest.mockResolvedValue({ announcements: 2 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 2 } })
     await pollChangeFeed()
     await settle()
 
@@ -230,7 +230,7 @@ describe('changeFeed', () => {
   })
 
   it('exposes the latest versions for diagnostics', async () => {
-    fetchChangeManifest.mockResolvedValue({ announcements: 3, features: 4 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 3, features: 4 } })
     await pollChangeFeed()
     expect(currentVersions()).toEqual({ announcements: 3, features: 4 })
   })

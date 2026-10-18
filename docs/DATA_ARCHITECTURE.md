@@ -327,7 +327,7 @@ erDiagram
 |-------|---------|------------|
 | `feature_flags` | Global feature toggle values | `config` (JSON), `version` (optimistic concurrency) |
 | `feature_registry_meta` | Admin UI experimental notice | `experimental_notice_enabled`, `experimental_notice_title`, `experimental_notice_message` |
-| `platform_settings` | Platform-wide defaults | node identity and name properties, profiling retention and alert policy |
+| `platform_settings` | Platform-wide defaults | node identity and name properties, profiling retention and alert policy, how often browsers check for changes |
 
 ### Feature Definition Tables
 

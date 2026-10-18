@@ -5,8 +5,7 @@
  *
  * 1. **One place to tune intervals.** Every poll across the app reads
  *    its baseline from here so an operator can re-balance the load
- *    floor (announcements every 30s instead of 15s, etc.) without
- *    grepping for `setInterval(`.
+ *    floor without grepping for `setInterval(`.
  *
  * 2. **Jitter helper.** Adds up to ±`frac` random noise to a base
  *    interval so 1000 clients don't all poll at the same instant.
@@ -15,31 +14,14 @@
  *    flat. For 1000 users at 15s baseline that's `~67 req/s spike → ~67
  *    req/s flat` — same average but no thundering herd.
  *
- * The values here are baselines. The announcements poll is also
- * admin-configurable via the backend's announcement config (overrides
- * the constant below) so ops can dial it remotely without a deploy.
+ * The values here are baselines. The change manifest's is also
+ * admin-configurable: every manifest carries the Live updates interval,
+ * which overrides the constant below, so ops can dial it remotely
+ * without a deploy.
  */
 
 /** Baseline interval constants. All values in milliseconds. */
 export const POLLING_INTERVALS = {
-  /**
-   * Active announcements (banner). Backend's admin config can
-   * override this per-deployment via `/announcements/config`; this is
-   * the fallback used until the config response lands. 60s (was 15s):
-   * this was the highest-frequency idle poll in the app — at fleet
-   * scale it dominated baseline request volume for a surface where a
-   * minute of announcement latency is invisible. Ops can still dial
-   * it down remotely via the admin config when a faster banner is
-   * genuinely needed.
-   *
-   * This value used to be decorative. The admin config's own default
-   * was 15s (`announcement_config.poll_interval_seconds`) and the
-   * service's failure fallback was 15s too, so the moment
-   * `fetchConfig()` resolved — or failed — every tab dropped to 15s and
-   * the constant below stopped applying. Both are 60s now, so the three
-   * agree and this is genuinely the baseline.
-   */
-  announcements: 60_000,
   /**
    * Provider health/status, re-read while a provider is down and only
    * then (`lib/outageRecheck.ts`). Otherwise both follow the change feed.
@@ -50,14 +32,14 @@ export const POLLING_INTERVALS = {
   providerOutageRecheck: 60_000,
   /**
    * The change manifest (`GET /api/v1/changes`) — the one request that
-   * replaced nine.
+   * replaced seven — until the server says otherwise. Every manifest
+   * carries `checkAfterSeconds`, the admin's Live updates setting (15s to
+   * 10 minutes), and the feed follows it.
    *
-   * This is a reconciliation floor, not the mechanism: surfaces are woken
-   * by the feed, and this exists to catch anything the transport missed
-   * (a bump lost to a Redis blip, a stream that was disconnected). 60s is
-   * the cadence the *slowest* of the nine polls used to run at, so the
-   * worst case after this change is the best case before it — for one
-   * endpoint instead of nine.
+   * With live push on, this is a reconciliation floor rather than the
+   * mechanism: it catches what the stream missed (a delivery lost across
+   * a reconnect, a stream refused because a process was full). 60s is
+   * the interval most of the seven polls it replaced ran at.
    */
   changeManifest: 60_000,
   /**

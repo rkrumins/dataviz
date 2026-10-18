@@ -6,7 +6,6 @@
  */
 import { authFetch } from './apiClient'
 import { fetchWithTimeout } from './fetchWithTimeout'
-import { POLLING_INTERVALS } from '@/config/polling'
 
 const PUBLIC_URL = '/api/v1/announcements'
 const ADMIN_URL = '/api/v1/admin/announcements'
@@ -47,15 +46,17 @@ export interface AnnouncementUpdateRequest {
   ctaUrl?: string | null
 }
 
+/**
+ * The server still returns ``pollIntervalSeconds``, but nothing reads it:
+ * banners refresh through the change feed, on the Live updates interval.
+ */
 export interface AnnouncementConfigResponse {
-  pollIntervalSeconds: number
   defaultSnoozeMinutes: number
   updatedBy?: string | null
   updatedAt?: string | null
 }
 
 export interface AnnouncementConfigUpdateRequest {
-  pollIntervalSeconds?: number
   defaultSnoozeMinutes?: number
 }
 
@@ -99,26 +100,14 @@ export const announcementService = {
     })
   },
 
-  /**
-   * Fetch global banner config (public, no auth).
-   *
-   * The failure fallback matches ``POLLING_INTERVALS.announcements`` rather
-   * than undercutting it. It used to return 15s, so a config endpoint that
-   * 404'd or timed out quietly put every tab on a 4x faster poll than the
-   * tuned constant — the failure mode made the load problem worse instead of
-   * degrading to the documented baseline.
-   */
+  /** Fetch global banner config (public, no auth). */
   async getConfig(): Promise<AnnouncementConfigResponse> {
-    const fallback = {
-      pollIntervalSeconds: POLLING_INTERVALS.announcements / 1000,
-      defaultSnoozeMinutes: 30,
-    }
     try {
       const res = await fetchWithTimeout(`${PUBLIC_URL}/config`)
-      if (!res.ok) return fallback
+      if (!res.ok) return { defaultSnoozeMinutes: 30 }
       return res.json()
     } catch {
-      return fallback
+      return { defaultSnoozeMinutes: 30 }
     }
   },
 

@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
+from backend.app.changes import cadence
 from backend.app.changes import topics as change_topics
 from backend.app.changes.hub import get_hub
 from backend.app.changes.registry import get_registry
@@ -107,9 +108,15 @@ _stream_slots = asyncio.Semaphore(_MAX_CONCURRENT_STREAMS)
 
 
 class ChangeManifest(BaseModel):
-    """Topic → version. Absent topics are 0."""
+    """Topic → version, and when to ask again. Absent topics are 0."""
 
     topics: dict[str, int] = Field(default_factory=dict)
+    #: Seconds the client should wait before its next check: the admin's
+    #: Live updates setting. Sent here rather than built into the bundle
+    #: so a change applies at each browser's next check, with no reload.
+    check_after_seconds: int = Field(
+        cadence.DEFAULT_CHECK_SECONDS, alias="checkAfterSeconds",
+    )
 
 
 @router.get(
@@ -162,7 +169,10 @@ async def get_change_manifest(
             headers={"Retry-After": "5"},
         )
 
-    return ChangeManifest(topics=versions)
+    return ChangeManifest(
+        topics=versions,
+        checkAfterSeconds=await cadence.check_interval_seconds(),
+    )
 
 
 def _frame(event: str, data: dict) -> bytes:

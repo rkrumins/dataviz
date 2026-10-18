@@ -3,6 +3,7 @@
  * Accessible at /admin/announcements (admin role required).
  */
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -15,14 +16,17 @@ import {
   type AnnouncementCreateRequest,
   type AnnouncementUpdateRequest,
 } from '@/services/announcementService'
+import { platformSettingsService } from '@/services/platformSettingsService'
 import { useAnnouncementStore } from '@/store/announcements'
 import { useAuthStore } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 const ANN_LIST_QUERY_KEY = ['admin', 'announcements', 'list'] as const
 const ANN_CONFIG_QUERY_KEY = ['admin', 'announcements', 'config'] as const
+const LIVE_UPDATES_QUERY_KEY = ['admin', 'platform', 'live-updates'] as const
 
 type BannerType = 'info' | 'warning' | 'success'
 
@@ -116,6 +120,22 @@ export function AdminAnnouncements() {
     retry: false,
   })
 
+  // How quickly banners reach users is the Live updates setting now, not
+  // a banner setting: the banner refreshes through the change feed with
+  // everything else. Read here only to say so.
+  const liveUpdatesQuery = useQuery({
+    queryKey: LIVE_UPDATES_QUERY_KEY,
+    queryFn: () => platformSettingsService.getLiveUpdates(),
+    enabled: isAuthenticated,
+    staleTime: 30_000,
+    retry: false,
+  })
+  const liveUpdates = liveUpdatesQuery.data
+  const checkSeconds = liveUpdates
+    ? liveUpdates.checkIntervalSeconds ?? liveUpdates.defaultCheckIntervalSeconds
+    : null
+  const pushEnabled = useFeature('realtimeChangeFeedEnabled')
+
   // Form state
   const [formOpen, setFormOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -128,14 +148,12 @@ export function AdminAnnouncements() {
 
   // Global config state — form values derived from the config query.
   const [configOpen, setConfigOpen] = useState(false)
-  const [configPoll, setConfigPoll] = useState(15)
   const [configSnooze, setConfigSnooze] = useState(30)
   const [configSaving, setConfigSaving] = useState(false)
 
   // Mirror config values into the local form state when the query resolves.
   useEffect(() => {
     if (configQuery.data) {
-      setConfigPoll(configQuery.data.pollIntervalSeconds)
       setConfigSnooze(configQuery.data.defaultSnoozeMinutes)
     }
   }, [configQuery.data])
@@ -234,13 +252,12 @@ export function AdminAnnouncements() {
     setConfigSaving(true)
     try {
       const updated = await announcementService.updateConfig({
-        pollIntervalSeconds: Math.max(5, configPoll),
         defaultSnoozeMinutes: Math.max(0, configSnooze),
       })
       // Seed the query cache with the response so the UI reflects the new
       // values immediately instead of waiting for the next refetch.
       queryClient.setQueryData(ANN_CONFIG_QUERY_KEY, updated)
-      // Refresh the banner store so it picks up the new polling interval.
+      // Refresh the banner store so it picks up the new default snooze.
       useAnnouncementStore.getState().fetchConfig()
       notify('success', 'Banner settings saved — every browser picks them up on its next check.')
       setConfigOpen(false)
@@ -318,19 +335,20 @@ export function AdminAnnouncements() {
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
-                <label htmlFor="cfg-poll" className="block text-sm font-medium text-ink-secondary mb-1.5">
-                  Polling Interval <span className="text-ink-muted text-xs">(seconds, min 5)</span>
-                </label>
-                <input
-                  id="cfg-poll"
-                  type="number"
-                  min={5}
-                  max={3600}
-                  value={configPoll}
-                  onChange={(e) => setConfigPoll(Math.max(5, parseInt(e.target.value) || 5))}
-                  className="w-full px-3 py-2.5 rounded-xl border border-glass-border bg-canvas text-ink text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/30"
-                />
-                <p className="text-xs text-ink-muted mt-1">How frequently each user's browser checks for banner updates.</p>
+                <p className="text-sm font-medium text-ink-secondary mb-1.5">How quickly banners appear</p>
+                <p className="text-xs text-ink-muted leading-relaxed">
+                  {pushEnabled
+                    ? 'As they happen. A browser that misses one catches up at its next check for changes'
+                    : 'At each browser\'s next check for changes'}
+                  {checkSeconds !== null && `, every ${checkSeconds} seconds`}. The same
+                  check covers notifications, permissions and the rest, so it is set in one place.
+                </p>
+                <Link
+                  to="/admin/features?feature=realtimeChangeFeedEnabled"
+                  className="inline-block mt-2 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                >
+                  Change it in Features → Live updates
+                </Link>
               </div>
               <div>
                 <label htmlFor="cfg-snooze" className="block text-sm font-medium text-ink-secondary mb-1.5">

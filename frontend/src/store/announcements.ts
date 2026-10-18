@@ -1,16 +1,16 @@
 /**
  * Global announcement banner store.
  *
- * - Fetches active announcements from the public API.
- * - Fetches global config (polling interval, default snooze) from backend.
+ * - Fetches active announcements from the public API, when the change feed
+ *   says they moved; how quickly that is, is the Live updates check
+ *   interval (Administration → Features → Live updates).
+ * - Fetches global config (default snooze) from backend.
  * - Tracks snooze state: users can temporarily hide a banner for the
  *   admin-configured duration.  After expiry it reappears automatically.
- * - Polling interval is admin-configurable (persisted in the DB).
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { announcementService, type AnnouncementResponse } from '@/services/announcementService'
-import { POLLING_INTERVALS } from '@/config/polling'
 
 /** Map of announcement id → timestamp (ms) when snooze expires. */
 type SnoozeMap = Record<string, number>
@@ -33,8 +33,6 @@ interface AnnouncementState {
   announcements: AnnouncementResponse[]
   /** id → epoch ms when snooze expires. Persisted in localStorage. */
   snoozedUntil: SnoozeMap
-  /** Polling interval in seconds — fetched from backend config. */
-  pollIntervalSeconds: number
   /** Default snooze duration in minutes — fetched from backend config. */
   defaultSnoozeMinutes: number
   isLoading: boolean
@@ -53,10 +51,6 @@ export const useAnnouncementStore = create<AnnouncementState>()(
     (set, get) => ({
       announcements: [],
       snoozedUntil: {},
-      // 60s fallback (was a hardcoded 15s — the app's highest-frequency
-      // idle poll). Wires the previously-dead POLLING_INTERVALS.announcements
-      // constant; backend /announcements/config still overrides via fetchConfig.
-      pollIntervalSeconds: POLLING_INTERVALS.announcements / 1000,
       defaultSnoozeMinutes: 30,
       isLoading: false,
       error: null,
@@ -78,10 +72,7 @@ export const useAnnouncementStore = create<AnnouncementState>()(
       fetchConfig: async () => {
         try {
           const cfg = await announcementService.getConfig()
-          set({
-            pollIntervalSeconds: cfg.pollIntervalSeconds,
-            defaultSnoozeMinutes: cfg.defaultSnoozeMinutes,
-          })
+          set({ defaultSnoozeMinutes: cfg.defaultSnoozeMinutes })
         } catch {
           // keep defaults on error
         }

@@ -74,7 +74,7 @@ describe('change feed streaming transport', () => {
   beforeEach(() => {
     __resetChangeFeedForTests()
     fetchChangeManifest.mockReset()
-    fetchChangeManifest.mockResolvedValue({})
+    fetchChangeManifest.mockResolvedValue({ topics: {} })
     FakeEventSource.instances = []
     vi.stubGlobal('EventSource', FakeEventSource)
   })

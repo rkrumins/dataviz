@@ -43,6 +43,7 @@ import { ExperimentalNoticeBanner } from './ExperimentalNoticeBanner'
 import { FeatureHero } from './FeatureHero'
 import { FeatureList } from './FeatureList'
 import { FeatureSpec } from './FeatureSpec'
+import { LiveUpdatesInterval } from './LiveUpdatesInterval'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
 import { SkeletonCards } from './SkeletonCards'
 import { isOn } from './featureState'
@@ -81,7 +82,11 @@ export function AdminFeatures() {
 
   const [editNoticeOpen, setEditNoticeOpen] = useState(false)
   /** Which feature the spec pane is explaining. Null means "the first one". */
-  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  // `?feature=<key>` opens on that switch, so another page can link straight
+  // to it (the announcements page links to Live updates' check interval).
+  const [selectedKey, setSelectedKey] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get('feature'),
+  )
   /** The feature we are about to turn OFF, pending confirmation. */
   const [pendingOff, setPendingOff] = useState<FeatureDefinition | null>(null)
 
@@ -328,6 +333,7 @@ export function AdminFeatures() {
             lastChange={data?.lastChanges?.[selected.key]}
             onToggle={next => requestToggle(selected, next)}
             onChangeOptions={next => void applyChange(selected, next)}
+            settings={selected.key === 'realtimeChangeFeedEnabled' ? <LiveUpdatesInterval /> : undefined}
           />
         )}
       </div>

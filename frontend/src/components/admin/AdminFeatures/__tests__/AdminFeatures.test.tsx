@@ -10,10 +10,11 @@
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminFeatures } from '../index'
 import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import type { FeatureDefinition } from '@/services/featuresService'
+import { platformSettingsService } from '@/services/platformSettingsService'
 
 // jsdom has no matchMedia, and the page's ResetConfirmModal asks it whether the user prefers
 // reduced motion. A browser always answers; the test environment has to be told to.
@@ -33,7 +34,7 @@ beforeAll(() => {
 /** Resolves TRUE — "the save landed" — which is what makes the page speak. */
 const handleChange = vi.fn()
 
-const hookState = { savingKey: null as string | null }
+const hookState = { savingKey: null as string | null, extraFeatures: [] as FeatureDefinition[] }
 
 /** The impact probe is a network call; each test says what it should answer. */
 const impact = vi.fn()
@@ -44,6 +45,10 @@ vi.mock('@/services/featuresService', async importOriginal => {
         featuresService: { ...actual.featuresService, impact: (k: string) => impact(k) },
     }
 })
+
+vi.mock('@/services/platformSettingsService', () => ({
+    platformSettingsService: { getLiveUpdates: vi.fn(), setLiveUpdates: vi.fn() },
+}))
 
 const TRACE: FeatureDefinition = {
     key: 'traceEnabled',
@@ -77,7 +82,7 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
     SEARCH_MIN_FEATURES: 100, // keep the search box out of the way
     useAdminFeatures: () => ({
         data: {
-            schema: [TRACE, SIGNUP],
+            schema: [TRACE, SIGNUP, ...hookState.extraFeatures],
             categories: [
                 { id: 'lineage', label: 'Lineage', icon: 'GitBranch', color: 'amber', preview: false },
                 { id: 'auth', label: 'Authentication', icon: 'UserPlus', color: 'emerald', preview: false },
@@ -291,5 +296,85 @@ describe('Undo', () => {
         // And the reversal is confirmed too, without offering to undo the undo.
         await waitFor(() => expect(raised().map(n => n.message)).toEqual(['Saved']))
         expect(raised()[0].action).toBeUndefined()
+    })
+})
+
+describe('Live updates — how often browsers check for changes', () => {
+    const LIVE: FeatureDefinition = {
+        key: 'realtimeChangeFeedEnabled',
+        name: 'Live updates',
+        description: 'Let the server tell open tabs the moment something changes.',
+        category: 'lineage',
+        type: 'boolean',
+        default: false,
+        enforcedServerSide: false,
+        implemented: true,
+    }
+    const settings = (checkIntervalSeconds: number | null) => ({
+        checkIntervalSeconds,
+        defaultCheckIntervalSeconds: 60,
+        minCheckIntervalSeconds: 15,
+        maxCheckIntervalSeconds: 600,
+    })
+    const intervalInput = () => screen.findByLabelText('Check for changes every')
+
+    beforeEach(() => {
+        hookState.extraFeatures = [LIVE]
+        // The announcements page links here, straight to this switch.
+        window.history.replaceState(null, '', '/admin/features?feature=realtimeChangeFeedEnabled')
+        vi.mocked(platformSettingsService.getLiveUpdates).mockResolvedValue(settings(null))
+        vi.mocked(platformSettingsService.setLiveUpdates).mockReset()
+        vi.mocked(platformSettingsService.setLiveUpdates)
+            .mockImplementation(async req => settings(req.checkIntervalSeconds))
+    })
+
+    afterEach(() => {
+        hookState.extraFeatures = []
+        window.history.replaceState(null, '', '/')
+    })
+
+    it('opens on the switch a link names, with the interval beside it', async () => {
+        render(<AdminFeatures />)
+
+        expect(screen.getByRole('heading', { level: 2, name: 'Live updates' })).toBeInTheDocument()
+        expect(await intervalInput()).toHaveValue(60)
+    })
+
+    it('no other switch carries the setting', () => {
+        window.history.replaceState(null, '', '/admin/features')
+        render(<AdminFeatures />)
+
+        expect(screen.getByRole('heading', { level: 2, name: 'Lineage trace' })).toBeInTheDocument()
+        expect(screen.queryByLabelText('Check for changes every')).toBeNull()
+    })
+
+    it('saves a new interval, says when browsers pick it up, and can go back to the default', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+        const input = await intervalInput()
+        await user.clear(input)
+        await user.type(input, '30')
+        await user.click(screen.getByRole('button', { name: 'Save' }))
+
+        expect(platformSettingsService.setLiveUpdates).toHaveBeenCalledWith({ checkIntervalSeconds: 30 })
+        await waitFor(() => expect(raised().map(n => n.message)).toEqual([
+            'Browsers check every 30 seconds from their next check.',
+        ]))
+
+        await user.click(screen.getByRole('button', { name: 'Reset to 60s' }))
+        expect(platformSettingsService.setLiveUpdates).toHaveBeenLastCalledWith({ checkIntervalSeconds: null })
+        await waitFor(() => expect(input).toHaveValue(60))
+    })
+
+    it('refuses an interval the server would refuse', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+        const input = await intervalInput()
+        await user.clear(input)
+        await user.type(input, '5')
+
+        expect(screen.getByText('Enter a whole number of seconds from 15 to 600.')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+        expect(platformSettingsService.setLiveUpdates).not.toHaveBeenCalled()
     })
 })

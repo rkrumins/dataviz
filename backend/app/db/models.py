@@ -284,6 +284,11 @@ class PlatformSettingsORM(Base):
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)
+    #: How often browsers check the change feed for anything that moved
+    #: (Administration → Features → Live updates). NULL = unset, which is
+    #: ``changes.cadence.DEFAULT_CHECK_SECONDS``. Read through that
+    #: module's short cache, never per request.
+    change_check_interval_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 

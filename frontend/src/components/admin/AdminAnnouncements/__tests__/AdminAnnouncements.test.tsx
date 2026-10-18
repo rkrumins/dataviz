@@ -15,6 +15,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/announcementService', () => ({
@@ -27,6 +28,9 @@ vi.mock('@/services/announcementService', () => ({
         updateConfig: vi.fn(),
     },
 }))
+vi.mock('@/services/platformSettingsService', () => ({
+    platformSettingsService: { getLiveUpdates: vi.fn() },
+}))
 vi.mock('@/store/announcements', () => ({
     useAnnouncementStore: { getState: () => ({ fetchActive: vi.fn(), fetchConfig: vi.fn() }) },
 }))
@@ -34,7 +38,9 @@ vi.mock('@/store/auth', () => ({ useAuthStore: (sel: (s: unknown) => unknown) =>
 
 import { AdminAnnouncements } from '../index'
 import { announcementService, type AnnouncementResponse } from '@/services/announcementService'
+import { platformSettingsService } from '@/services/platformSettingsService'
 import { useNotificationStore } from '@/components/ui/notifications'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 function ann(over: Partial<AnnouncementResponse> = {}): AnnouncementResponse {
     return {
@@ -58,22 +64,27 @@ const messages = () => raised().map(n => n.message)
 function renderPage() {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
-        <QueryClientProvider client={client}><AdminAnnouncements /></QueryClientProvider>,
+        <MemoryRouter>
+            <QueryClientProvider client={client}><AdminAnnouncements /></QueryClientProvider>
+        </MemoryRouter>,
     )
 }
 
 beforeEach(() => {
     vi.clearAllMocks()
     useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
     vi.mocked(announcementService.listAll).mockResolvedValue([ann()])
-    vi.mocked(announcementService.getAdminConfig).mockResolvedValue({
-        pollIntervalSeconds: 15, defaultSnoozeMinutes: 30,
-    })
+    vi.mocked(announcementService.getAdminConfig).mockResolvedValue({ defaultSnoozeMinutes: 30 })
     vi.mocked(announcementService.update).mockResolvedValue(ann())
     vi.mocked(announcementService.create).mockResolvedValue(ann())
     vi.mocked(announcementService.remove).mockResolvedValue(undefined)
-    vi.mocked(announcementService.updateConfig).mockResolvedValue({
-        pollIntervalSeconds: 20, defaultSnoozeMinutes: 30,
+    vi.mocked(announcementService.updateConfig).mockResolvedValue({ defaultSnoozeMinutes: 30 })
+    vi.mocked(platformSettingsService.getLiveUpdates).mockResolvedValue({
+        checkIntervalSeconds: 45,
+        defaultCheckIntervalSeconds: 60,
+        minCheckIntervalSeconds: 15,
+        maxCheckIntervalSeconds: 600,
     })
 })
 
@@ -163,5 +174,30 @@ describe('AdminAnnouncements — banner settings', () => {
         await waitFor(() => expect(messages()).toEqual([
             'Banner settings saved — every browser picks them up on its next check.',
         ]))
+        // The polling interval it used to send changed nothing: banners
+        // refresh through the change feed.
+        expect(announcementService.updateConfig).toHaveBeenCalledWith({ defaultSnoozeMinutes: 30 })
+    })
+})
+
+describe('AdminAnnouncements — how quickly banners appear', () => {
+    it('says it is the Live updates check, and links to it, instead of offering a field', async () => {
+        const user = userEvent.setup()
+        renderPage()
+        await user.click(await screen.findByLabelText('Banner Settings'))
+
+        expect(await screen.findByText(/next check for changes, every 45 seconds/)).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /Features → Live updates/ }))
+            .toHaveAttribute('href', '/admin/features?feature=realtimeChangeFeedEnabled')
+        expect(screen.queryByLabelText(/Polling Interval/i)).toBeNull()
+    })
+
+    it('says banners arrive as they happen while live push is on', async () => {
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, realtimeChangeFeedEnabled: true } })
+        const user = userEvent.setup()
+        renderPage()
+        await user.click(await screen.findByLabelText('Banner Settings'))
+
+        expect(await screen.findByText(/^As they happen\. .* every 45 seconds/)).toBeInTheDocument()
     })
 })

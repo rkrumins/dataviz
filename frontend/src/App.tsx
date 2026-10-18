@@ -83,8 +83,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     //
     // The flag gates only the STREAM, not the feed: with it off the
     // periodic manifest check still runs, so every surface still updates
-    // — within a minute rather than within a second. That is why turning
-    // this off is a latency decision and never a correctness one.
+    // — within the admin's check interval (a minute by default) rather
+    // than within a second. That is why turning this off is a latency
+    // decision and never a correctness one.
     const stopChangeFeed = startChangeFeed({
       stream: featureEnabled('realtimeChangeFeedEnabled'),
     })

@@ -1,10 +1,13 @@
 /**
  * Platform Settings Service — deployment-wide defaults.
  *
- * Currently the node-identity mapping: the bottom of the resolution chain a
- * data source walks (itself -> its provider -> its workspace -> here). Setting
- * it is the right move when every graph in a deployment is shaped the same way;
- * anything narrower belongs on the provider or the workspace.
+ * The node-identity mapping: the bottom of the resolution chain a data source
+ * walks (itself -> its provider -> its workspace -> here). Setting it is the
+ * right move when every graph in a deployment is shaped the same way; anything
+ * narrower belongs on the provider or the workspace.
+ *
+ * And how often browsers check for changes (Live updates): the interval every
+ * manifest carries back to them.
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
@@ -29,6 +32,23 @@ export interface NodeIdentityDefaultsRequest {
     nameProperty?: string
 }
 
+export interface LiveUpdatesSettings {
+    /** Null when unset — the default applies. */
+    checkIntervalSeconds: number | null
+    /** The default and the bounds the server enforces, so an editor can
+     *  show what "unset" means and refuse what the server would. */
+    defaultCheckIntervalSeconds: number
+    minCheckIntervalSeconds: number
+    maxCheckIntervalSeconds: number
+    updatedAt?: string | null
+    updatedBy?: string | null
+}
+
+/** A number sets the interval; null clears it back to the default. */
+export interface LiveUpdatesRequest {
+    checkIntervalSeconds: number | null
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetchWithTimeout(`${API}${path}`, {
         headers: { 'Content-Type': 'application/json' },
@@ -50,6 +70,17 @@ export const platformSettingsService = {
         req: NodeIdentityDefaultsRequest,
     ): Promise<NodeIdentityDefaults> {
         return request<NodeIdentityDefaults>('/node-identity', {
+            method: 'PUT',
+            body: JSON.stringify(req),
+        })
+    },
+
+    getLiveUpdates(): Promise<LiveUpdatesSettings> {
+        return request<LiveUpdatesSettings>('/live-updates')
+    },
+
+    setLiveUpdates(req: LiveUpdatesRequest): Promise<LiveUpdatesSettings> {
+        return request<LiveUpdatesSettings>('/live-updates', {
             method: 'PUT',
             body: JSON.stringify(req),
         })

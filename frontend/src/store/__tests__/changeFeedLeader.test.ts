@@ -99,7 +99,7 @@ describe('change feed leader election', () => {
   beforeEach(() => {
     __resetChangeFeedForTests()
     fetchChangeManifest.mockReset()
-    fetchChangeManifest.mockResolvedValue({ announcements: 1 })
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
     FakeBroadcastChannel.instances = []
     InertEventSource.count = 0
     locks = new FakeLockManager()
@@ -188,7 +188,7 @@ describe('change feed follower', () => {
   beforeEach(() => {
     __resetChangeFeedForTests()
     fetchChangeManifest.mockReset()
-    fetchChangeManifest.mockResolvedValue({})
+    fetchChangeManifest.mockResolvedValue({ topics: {} })
     FakeBroadcastChannel.instances = []
     vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
     vi.stubGlobal('navigator', { locks: new FakeLockManager() })
@@ -262,7 +262,7 @@ describe('change feed while no tab is visible', () => {
   beforeEach(() => {
     __resetChangeFeedForTests()
     fetchChangeManifest.mockReset()
-    fetchChangeManifest.mockResolvedValue({})
+    fetchChangeManifest.mockResolvedValue({ topics: {} })
     FakeBroadcastChannel.instances = []
     vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
     vi.stubGlobal('navigator', { locks: new FakeLockManager() })
@@ -351,5 +351,89 @@ describe('change feed while no tab is visible', () => {
 
     expect(heard.some((m) => (m as { present?: boolean })?.present)).toBe(false)
     stop()
+  })
+})
+
+/**
+ * The check interval is the admin's Live updates setting, carried by every
+ * manifest, so changing it needs no reload. Whatever arrives, the timer
+ * must stay a timer: never a tight loop, never a silence.
+ */
+describe('change feed check interval', () => {
+  beforeEach(() => {
+    __resetChangeFeedForTests()
+    fetchChangeManifest.mockReset()
+    FakeBroadcastChannel.instances = []
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+    vi.stubGlobal('navigator', { locks: new FakeLockManager() })
+    vi.stubGlobal('EventSource', InertEventSource)
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    __resetChangeFeedForTests()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('waits as long as the server says', async () => {
+    fetchChangeManifest.mockResolvedValue({ topics: {}, checkAfterSeconds: 120 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    const started = fetchChangeManifest.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(110_000)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started)
+
+    // 120s plus up to 30% jitter.
+    await vi.advanceTimersByTimeAsync(47_000)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started + 1)
+    stop()
+  })
+
+  it.each([
+    ['absent', undefined],
+    ['zero', 0],
+    ['negative', -30],
+    ['not a number', Number.NaN],
+  ])('keeps the default when the server sends %s', async (_label, value) => {
+    fetchChangeManifest.mockResolvedValue({ topics: {}, checkAfterSeconds: value })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    const started = fetchChangeManifest.mock.calls.length
+
+    // Taken at face value, these would check at the 15s floor, or for NaN
+    // in a tight loop (`withJitter(NaN)` is 0).
+    await vi.advanceTimersByTimeAsync(59_000)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started)
+
+    // 60s plus up to 30% jitter.
+    await vi.advanceTimersByTimeAsync(19_001)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started + 1)
+    stop()
+  })
+
+  it('holds a value outside the bounds to them', async () => {
+    fetchChangeManifest.mockResolvedValue({ topics: {}, checkAfterSeconds: 1 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    let started = fetchChangeManifest.mock.calls.length
+    // Not after one second: 15s, plus up to 30% jitter.
+    await vi.advanceTimersByTimeAsync(14_000)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started)
+    await vi.advanceTimersByTimeAsync(5_501)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started + 1)
+    stop()
+
+    fetchChangeManifest.mockResolvedValue({ topics: {}, checkAfterSeconds: 86_400 })
+    const again = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    started = fetchChangeManifest.mock.calls.length
+    // Not after a day: ten minutes, plus up to 30% jitter.
+    await vi.advanceTimersByTimeAsync(599_000)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started)
+    await vi.advanceTimersByTimeAsync(181_001)
+    expect(fetchChangeManifest.mock.calls.length).toBe(started + 1)
+    again()
   })
 })
