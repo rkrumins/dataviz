@@ -87,6 +87,10 @@ starting points:
 - **Import a view** — bring in a View exported from another environment. See
   [Moving views between environments](/guide/import-export#moving-views-between-environments).
 
+To start from a [layout template](#layout-templates) instead, choose **Use template** on its card
+in **Templates**, in its details, or in the Dashboard's **Layout templates**. The wizard opens with
+the template's layers already applied on the **Layout** step.
+
 ## Step 2 — Basics: name it and choose who can see it
 
 1. Type a **View Name**. A name that says what the View shows (*Finance data
@@ -122,20 +126,26 @@ question your View answers:
 | Explore how things connect, without a fixed structure | **Graph** | Entities are positioned freely (a force-directed or DAG layout), so relationships stand out |
 | Browse what contains what — domain, schema, table, column | **Hierarchy** | Entities are nested inside their parents as a tree you expand and collapse |
 
-![The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with Quick Start Templates underneath](/docs-assets/guide/creating-views-layout-step.png)
+![The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with the starting templates underneath](/docs-assets/guide/creating-views-layout-step.png)
 
 If you choose **Context View**, the step continues with its layers — the
 columns of the canvas:
 
-1. Under **Choose a starting template**, pick a **Quick Start Templates** card.
-   **One layer per top-level type** (when offered) gives each top-level entity
-   type its own column; **From your schema** gives one column per level of the
-   semantic layer.
-2. Adjust the layers under **Configure Layers**: open a layer to change its
+1. Under **Choose a starting template**, pick a starting arrangement.
+   **Suggested for your data** offers **One layer per top-level type** (when
+   offered), which gives each top-level entity type its own column, and **From
+   your schema**, one column per level of the semantic layer. The **Template
+   library** below offers every [layout template](#layout-templates) you can
+   use, with tabs and a search; each card says how well it fits this data —
+   **Fits your data**, or **Matches 3 of 4 layers**.
+2. A library template's entity types are matched to this data's semantic layer.
+   A note above the layers names any it doesn't have: those layers start empty,
+   so pick types for them, or place entities in them by hand on the next step.
+3. Adjust the layers under **Configure Layers**: open a layer to change its
    **Name**, **Color**, **Description** and **Entity Types**, drag the handle
    to reorder, or choose **Add Layer**. **Switch template** starts over from
-   another template.
-3. Choose **Next**. The **Assignments** step opens.
+   another template; **Save as template** keeps these layers for reuse.
+4. Choose **Next**. The **Assignments** step opens.
 
 For **Graph** or **Hierarchy**, **Next** goes straight to **Entities**.
 
@@ -222,6 +232,61 @@ one.
 
 Sharing, versions and housekeeping are covered in
 [Managing & Sharing Views](/guide/managing-views).
+
+## Layout templates
+
+A **layout template** is a Context View's layer arrangement, kept for reuse: the layers' names,
+order, colours, icons and descriptions, the entity types each column collects, and any rules and
+groups. It never holds the entities a View placed. **Templates** in the sidebar is the library;
+its tabs are **All**, **Mine**, **Shared with me**, **Workspace**, **Organization** and
+**Built-in**.
+
+| Template | Who can use it | Who can change it |
+| --- | --- | --- |
+| **Built-in** | Everyone | Nobody: it ships with {brand} and each upgrade refreshes it. Duplicate it to make your own. Template managers can hide it for everyone. |
+| **Organization** | Everyone signed in | People with the **Manage templates** permission |
+| **Workspace** | Everyone in that workspace, and anyone it is shared with | Its owner and the workspace's editors; its owner or a workspace admin decides who can use it |
+| **Personal** | You, and the people and teams you share it with | You, and anyone you share it with as an editor |
+
+### Make a template
+
+1. On **Templates**, choose **New template**. The studio opens on **Start**: begin **Blank**, from
+   **Another template**, or from **One of my views**.
+2. **Basics** — give it a name and a description people will search and skim. A **Category**
+   groups it in the library.
+3. **Layers** — open a layer to change its **Name**, **Description**, **Entity types**, **Colour**
+   and **Icon**, drag the handle to reorder, or choose **Add layer**. Entity types are suggestions
+   for any semantic layer: the types of the ones you can read are offered, and any other name is
+   accepted.
+4. **Audience** — **Personal**, **Workspace** (then choose which) or **Organization**. A choice
+   you can't make stays visible and says why.
+5. **Review**, then **Create template**. From there you can **Share with people or teams**, or
+   **Use it for a new view**.
+
+To keep the layers of a View you already have, choose **Save layers as a template…** under **This
+view** in the View's import and export menu, **Save layers as template…** in its Explorer card's
+**⋯** menu, or **Save as template** on the wizard's **Layout** step.
+
+### Share a template with your team
+
+Open a template's **⋯** menu and choose **Share**. Choose who can use it — **Personal** or a
+**Workspace** — and add people or groups as a **Viewer** (uses it) or an **Editor** (also changes
+it). A group is how a team gets its own templates: everyone in it finds the template under
+**Shared with me**, and is told in their inbox. Organization templates are everyone's already, so
+they take no shares.
+
+### Edit, duplicate, hide or delete
+
+- **Edit** reopens the studio. Views already built from a template keep their own layers: changing
+  the template never changes them.
+- **Duplicate** makes a personal copy you can change — the way to adapt a built-in.
+- **Hide for everyone** (template managers, built-ins only) takes a built-in out of everyone's
+  library; **Show hidden built-ins** finds it again.
+- **Delete** says how many Views were built from the template and who loses it; **Undo** brings it
+  back, shares and all, for a few seconds afterwards.
+
+A View started from a template says so in its **Details**: **Layers started from** names the
+template, for anyone who can open it.
 
 ## Builder's checklist
 

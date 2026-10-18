@@ -75,8 +75,8 @@ ontology (containment, granularity, lineage semantics) that layer grouping and
 lineage aggregation depend on. Context-model **instances** are retired — layers
 and entity assignments now live on the view config
 (`view.config.layout.referenceLayout`). What remains as first-class,
-independently managed objects are the reusable **Quick Start Templates**, exposed
-through the context-model template endpoints below. Turning a view's layer
+independently managed objects are the reusable **layout templates**, exposed
+through the layout-template endpoints below. Turning a view's layer
 configuration into actual per-entity placements is the job of the
 [Assignment Engine](/docs/services-assignments).
 
@@ -105,13 +105,21 @@ graph endpoints. Representative routes (under `/api/v1/{ws_id}/graph`, requiring
 `/nodes/{urn}/children-with-edges`, the lineage walk `/trace/closure` (below),
 and aggregated edges.
 
-Context-model templates (the reusable layer configs behind lenses):
+Layout templates (the reusable layer configs behind lenses) — every signed-in user; what each
+may do with one is decided per template (see [RBAC](/docs/rbac#layout-templates)):
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/v1/{ws_id}/context-models/templates` | List Quick Start Templates available to a workspace (read-only). |
-| GET | `/api/v1/{ws_id}/context-models/templates/{template_id}` | Get a single template. |
-| GET/POST/PUT/DELETE | `/api/v1/admin/context-model-templates[/{id}]` | Full template CRUD (requires `system:admin`). |
+| GET | `/api/v1/layout-templates` | Every template the caller can use (`includeHidden` adds hidden built-ins, for template managers). |
+| POST | `/api/v1/layout-templates` | Keep a new one — personal, for a workspace, or for the organization. |
+| GET/PUT/DELETE | `/api/v1/layout-templates/{template_id}` | Read, edit (partial; also changes who can use it), soft-delete. |
+| POST | `/api/v1/layout-templates/{template_id}/restore` | Undo a delete — same id, same shares. |
+| PUT | `/api/v1/layout-templates/{template_id}/hidden` | Hide or show a built-in for everyone (`system:templates:manage`). |
+| GET/POST/PUT/DELETE | `/api/v1/layout-templates/{template_id}/grants[/{grant_id}]` | Share with people or groups, as viewer or editor. |
+
+A template keeps a view's layer structure — names, colours, icons, entity types, rules, logical
+groups — and never the entities a view placed: `layout_config.strip_placements` drops column
+anchors, legacy `entityAssignments` and exact-URN rules before anything is stored.
 
 ## Lineage walks: `POST /api/v1/{ws_id}/graph/trace/closure`
 

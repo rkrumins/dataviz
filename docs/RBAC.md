@@ -59,8 +59,8 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 23 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 17 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 24 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 18 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
 | `workspace_data_engineer` | 11 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
@@ -96,6 +96,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
 | `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
+| `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
 | `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
@@ -112,10 +113,12 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `workspace:view:publish` | workspace | Publish views to everyone in the organization (enterprise visibility). | `super_admin`, `org_admin` |
 | `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
 
-Two of these are deliberately separate from `system:admin`'s everyday reach:
-`system:analytics:read` (business metrics are not the audit log), and
+Three of these are deliberately separate from `system:admin`'s everyday reach:
+`system:analytics:read` (business metrics are not the audit log),
 `system:sso:hosts:manage` (an entry lets the service make requests to an internal address,
-which is a network decision, so only `super_admin` holds it by default).
+which is a network decision, so only `super_admin` holds it by default), and
+`system:templates:manage` (curating the template library can be delegated to whoever owns the
+house style, without handing them the platform).
 
 ### Which permissions open which screens
 
@@ -124,7 +127,7 @@ enforce, and the app shows or hides it to match:
 
 | Screen | Shown to holders of |
 |---|---|
-| **Dashboard**, **Explore**, **Workspaces** | Everyone signed in |
+| **Dashboard**, **Explore**, **Templates**, **Workspaces** | Everyone signed in |
 | **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
 | **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
 | **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
@@ -158,10 +161,9 @@ graph/canvas routers accept a `?viewId=` capability context
 (`backend/app/api/v1/capability_gate.py`) pinned to the view's
 resolved data source. Mutations always require
 `workspace:datasource:manage`. Workspace-metadata surfaces (assets
-rule-sets, context-model templates) use an unpinned variant of the
-gate — they have no data-source dimension, so a capability holder on
-ANY readable view in the workspace can read them; both routers are
-GET-only or manage-gated.
+rule-sets) use an unpinned variant of the gate — they have no
+data-source dimension, so a capability holder on ANY readable view in
+the workspace can read them; the router is GET-only or manage-gated.
 
 `workspace:view:publish` gates every transition **to or from**
 `enterprise` (including creating a view directly as enterprise) — the
@@ -253,6 +255,27 @@ simply publish.
 over a private view someone else created writes an `admin_viewed`
 entry to that view's activity log (deduped hourly per admin). The
 reach is unchanged; it is simply no longer invisible to the owner.
+
+### Layout templates
+
+A layout template (`/api/v1/layout-templates`) is decided per template by
+`backend/app/services/template_access.py`, which also renders the read rule as SQL for the list
+(`tests/test_layout_templates.py` holds the two together). Shares use `resource_grants` with
+`resource_type = 'layout_template'`, to people or groups, as `viewer` (use it) or `editor` (also
+edit it):
+
+| Audience (stored) | Who can use it | Edit | Delete, restore | Share, change audience |
+|---|---|---|---|---|
+| Built-in (`system_key` set) | everyone; a hidden one only `system:templates:manage` holders | nobody — duplicate it | nobody | nobody; managers hide or show it |
+| Organization (`enterprise`) | everyone signed in | `system:templates:manage` | `system:templates:manage` | audience: `system:templates:manage` |
+| Workspace (`workspace`) | its owner, `workspace:view:read` there, grantees | owner, `workspace:view:edit` there, editors | owner, `workspace:view:delete` there | owner, `workspace:admin` there |
+| Personal (`private`) | its owner and grantees | owner, editors | owner | owner |
+
+Creating a workspace template needs `workspace:view:create` there; an organization one needs
+`system:templates:manage`. Changing a template's audience needs rights over the one it has and the
+right to create in the new one. Unlike a private view, a personal template is **not** readable by
+administrators: a template is a layout, not data, so there is nothing behind it to audit. API keys
+cannot call these routes.
 
 ## Resolver behaviour
 

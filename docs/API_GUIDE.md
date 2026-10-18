@@ -270,12 +270,11 @@ Routes the explorer marks **deprecated** still answer, but build nothing new on 
 
 - Everything is under `/api/v1`.
 - The data plane is scoped to a workspace: `/api/v1/{ws_id}/graph/…`,
-  `/api/v1/{ws_id}/versioning/…`, `/api/v1/{ws_id}/assets/…`,
-  `/api/v1/{ws_id}/context-models/…`. Add `?dataSourceId=ds_…` to choose a data source —
+  `/api/v1/{ws_id}/versioning/…`, `/api/v1/{ws_id}/assets/…`. Add `?dataSourceId=ds_…` to choose a data source —
   without it, the workspace's primary data source answers — and `?branchId=…` to read or
   write a draft instead of the published graph.
-- Views are not workspace-scoped: `/api/v1/views/…`. Administration is under
-  `/api/v1/admin/…`.
+- Views and layout templates are not workspace-scoped: `/api/v1/views/…`,
+  `/api/v1/layout-templates/…`. Administration is under `/api/v1/admin/…`.
 - Ids carry a prefix: workspaces `ws_…`, data sources `ds_…`, views `view_…`.
   `GET /api/v1/admin/workspaces` lists the workspaces you belong to, each with its
   `dataSources`:

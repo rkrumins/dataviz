@@ -197,10 +197,14 @@ erDiagram
         text id PK
         text name
         text description
-        text workspace_id FK "nullable for templates"
+        text workspace_id FK "workspace templates only"
         text data_source_id FK "nullable"
         bool is_template
         text category
+        text visibility "private | workspace | enterprise"
+        text system_key UK "built-ins only"
+        text created_by
+        text deleted_at "soft delete"
         json layers_config
         json scope_filter
         json instance_assignments
