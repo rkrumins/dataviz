@@ -2491,6 +2491,7 @@ async def _versioning_not_enabled_handler(request, exc: _VersioningNotEnabled):
 
 
 from backend.app.services.versioning.errors import HTTP_MAPPED as _VERSIONING_HTTP_MAPPED
+from backend.app.services.versioning.errors import AccessDenied as _AccessDenied
 
 
 async def _versioning_error_handler(request, exc):
@@ -2503,6 +2504,16 @@ async def _versioning_error_handler(request, exc):
 
 for _cls in _VERSIONING_HTTP_MAPPED:
     app.add_exception_handler(_cls, _versioning_error_handler)
+
+
+@app.exception_handler(_AccessDenied)
+async def _access_denied_handler(request, exc: _AccessDenied):
+    """Backstop: a draft-access refusal no route mapped is a 403, never a 500. The mapped
+    subclasses above keep their own answers (the most specific handler wins)."""
+    return JSONResponse(
+        status_code=403,
+        content={"detail": {"type": "access_denied", "message": str(exc)}},
+    )
 
 
 # Fallback handlers for raw connectivity errors that bypass the breaker

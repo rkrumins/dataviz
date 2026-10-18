@@ -31,9 +31,11 @@ exist and can work in the workspace (**422 `ineligible_member`**), and `GET …/
 member's `name` and your own `myRole`.
 
 **A draft is read only by the people it is for:** its owner, workspace managers, members of a
-shared draft and the people on its pull request. To anyone else, a graph read with `?branchId=`
-naming it, and its neighbors, freshness and members, answer **404**, exactly as for a branch that
-doesn't exist.
+shared draft and the people on its pull request. To anyone else, every read of it answers **404**,
+exactly as for a branch that doesn't exist: a graph read with `?branchId=` naming it, its neighbors,
+freshness, members, state, diffs, commit log, entity history, merge preview, view changes and
+exports, where some of these answered 403 before. Imports into it are left out of the import list,
+and the import job and its preview answer 404.
 
 **Advancing the Published version needs `workspace:datasource:publish`.** Publishing a draft,
 merging a review (draft or fork), reverting or restoring `main`, and a sync or `/graph/resync` now

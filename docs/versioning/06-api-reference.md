@@ -107,7 +107,8 @@ that backs `dataSourceId`.
 |---|---|---|
 | `MergeConflict` | **409** | `{type: "merge_conflict", conflicts: […]}` |
 | `OntologyViolation` | **422** | `{type: "ontology_violation", violations: [{entity_id, kind, reason, rule}]}` |
-| `AccessDenied` | **403** | `{type: "access_denied", message}` |
+| `AccessDenied` | **403** | `{type: "access_denied", message}`. Routes outside this router answer it the same way |
+| `DraftNotReadable` | **404** | `"unknown branch"` — a read of a draft you can't read (someone else's private draft): the same answer as a branch that doesn't exist |
 | `NotDraftOwner` | **403** | `{type: "access_denied", code: "not_draft_owner", branchId, owner, message}` — a write to someone else's private draft; only its owner writes it. Also a change of a draft's visibility by anyone but its owner |
 | `DraftRoleRequired` | **403** | `{type: "access_denied", code: "not_owner_or_member", required, branchId, message}` — a shared draft refused the caller: `required` is `editor` to write it, or `maintainer` to publish, abandon or manage its members. A member through a group counts |
 | `GroupsUnavailable` | **503** | `{type: "groups_unavailable", retryable: true, message}`, `Retry-After: 2` — the caller's role on a shared draft turns on a group, and their groups can't be looked up right now. Retry; it is never read as "no groups" |
@@ -219,7 +220,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 |---|---|---|
 | `GET …/branches/{bid}/state` | `_READ` | `?asOfSeq` → `{nodes, edges, watermark}` (materialized, limited to what you may read) |
 | `GET …/commits/{cid}/state` | `_READ` | Time travel: the full state at a commit |
-| `GET …/entities/{eid}/history` | `_READ` | One entity's revisions, newest first, a page at a time: `?branchId&scope(all \| draft \| published)&limit(50, max 200)&before&include=payload&kind(node \| edge)` → `EntityHistoryResponse{entityId, kind, versions, userNames, hasMore, nextBefore}`. Send `nextBefore` back as `before` for the next page; a cursor the server didn't issue is **422 `invalid_cursor`**. Another person's private draft is **403** |
+| `GET …/entities/{eid}/history` | `_READ` | One entity's revisions, newest first, a page at a time: `?branchId&scope(all \| draft \| published)&limit(50, max 200)&before&include=payload&kind(node \| edge)` → `EntityHistoryResponse{entityId, kind, versions, userNames, hasMore, nextBefore}`. Send `nextBefore` back as `before` for the next page; a cursor the server didn't issue is **422 `invalid_cursor`**. A draft you can't read is a **404** |
 | `GET …/entities/{eid}/summary` | `_READ` | Who created the entity and who last changed it, on the line being read: `?branchId&kind&include=value` → `{entityId, kind, exists, version?, inherited, created?, updated?, revisions, changedOnMainSinceBranch, baseCommitSeq?, value?, userNames}`. `include=value` adds the entity and its concurrency token |
 | `GET …/branches/{bid}/diff` | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` — **id-keyed**: enough to *count* what changed, not to *show* it |
 | `GET …/branches/{bid}/diff-window` | `_READ` | The same window with **whole-payload before and after** (`DiffVsMainResponse`) — the renderable shape. Backs "what came in when I pulled": the window is `main` between the draft's old and new base, both recorded on the `pull` commit |
@@ -256,14 +257,14 @@ scripted run. The endpoints:
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST …/imports` | `_MANAGE` | `?format(ndjson)&reconcileMode(upsert \| replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens a draft (or adds to the one in `branchId`), streams the file to the object store, then queues the job: `status` is `pending` until a versioning worker's transfer lane claims it (the web tier never runs jobs). Never writes to `main` |
-| `GET …/imports` | `_READ` | The graph's import jobs |
+| `GET …/imports` | `_READ` | The graph's import jobs, without those into a draft you can't read |
 | `GET …/imports/template` | `_READ` | `?format` (default `csv`) → a starter file with the columns and a few example rows |
 | `POST …/imports/uploads` | `_MANAGE` | Start a resumable upload: `{fileName, size, format}` → **201** `{uploadId, fileName, size, format, partBytes, parts, received: [], jobId: null}`. Parts are 16 MiB. **413** when the file is too large for its format: 10 GiB for NDJSON, CSV and TSV, 100 MB for JSON and Excel |
 | `PUT …/imports/uploads/{uploadId}/parts/{n}` | `_MANAGE` | Part `n` (numbered from `0`) as the raw body → `{part, size}`. It must hold exactly its share (`partBytes`; the last part the rest), else **422**. Sending a part again replaces it |
 | `GET …/imports/uploads/{uploadId}` | `_MANAGE` | The upload, with `received`: the parts stored whole. **404** for another person's upload, or one swept after a day |
 | `POST …/imports/uploads/{uploadId}/complete` | `_MANAGE` | `?reconcileMode&branchId&viewId` → **202**, as `POST …/imports`; the import reads the parts in order. **409** while a part is missing; asking again answers with the same job |
-| `GET …/imports/{jobId}` | `_READ` | The job (camelCase). `queuedAhead`: for a job queued for the versioning worker, how many were queued before it; `null` otherwise |
-| `GET …/imports/{jobId}/preview` | `_READ` | `{job, summary, sample, previewDownloadUrl, rejectedDownloadUrl}` |
+| `GET …/imports/{jobId}` | `_READ` | The job (camelCase). `queuedAhead`: for a job queued for the versioning worker, how many were queued before it; `null` otherwise. An import into a draft you can't read is a **404** |
+| `GET …/imports/{jobId}/preview` | `_READ` | `{job, summary, sample, previewDownloadUrl, rejectedDownloadUrl}`. **404** as for `GET …/imports/{jobId}` |
 | `GET …/exports/plan` | `_READ` + **Export graph data** | `?format&asOfSeq&viewId&branchId&ids&types` → what the export would hold, before anything downloads: `{format, nodes, edges, exact, empty, asOfSeq, branchId, view, formatLimit, maxBytes}`; `view` is `{viewId, placements, found, entities}`. Counts are `null` when counting takes longer than `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20 s) |
 | `GET …/exports/stream` | `_READ` + **Export graph data** | The same parameters plus `props&filename` → the file, **streamed as it is written** from one pinned snapshot (flat memory at any size; no request time limit). Exports take turns — `GRAPH_EXPORT_CONCURRENCY` (2) per server; one waits up to `GRAPH_EXPORT_SLOT_WAIT_SECS` (15 minutes) for a turn, then gets **429 `EXPORTS_BUSY`** with `Retry-After`. **422 `EXCEL_ROW_LIMIT`** for an Excel file a sheet can't hold. For scripts and large graphs, prefer the job below |
 | `POST …/exports` | `_READ` + **Export graph data** | `?format&asOfSeq&viewId&branchId&props&ids&types&filename&idempotencyKey` → **202** `{jobId, resultUri, status}`. The workers write the same records into the object store, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB) — what the Export dialog does for a data source with version control. `filename` (no extension) names the download |

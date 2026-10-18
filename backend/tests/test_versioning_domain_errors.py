@@ -30,7 +30,7 @@ from backend.app.services.versioning.errors import (
     NotAFork,
     NotDraftOwner,
 )
-from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
+from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 
 
 def _raised(exc: Exception) -> HTTPException:
@@ -115,6 +115,21 @@ async def test_managing_someone_elses_private_draft_is_not_draft_owner():
 
 
 @pytest.mark.asyncio
+async def test_a_draft_the_caller_cannot_read_is_404_like_an_unknown_branch():
+    svc = GraphVersioningService.__new__(GraphVersioningService)
+
+    async def unreadable(s, branch, viewer):
+        return False
+    svc._branch_readable = unreadable
+    with pytest.raises(AccessDenied) as info:        # READ_DRAFT (doc 13): its existence doesn't leak
+        await svc._assert_branch_readable(None, SimpleNamespace(id="br_7"), Viewer("bob"))
+    err = _raised(info.value)
+    assert (err.status_code, err.detail) == (404, "unknown branch")
+    unknown = _raised(ValueError("unknown branch"))
+    assert (err.status_code, err.detail) == (unknown.status_code, unknown.detail)
+
+
+@pytest.mark.asyncio
 async def test_a_private_draft_is_written_only_by_its_owner():
     svc = GraphVersioningService.__new__(GraphVersioningService)
     draft = SimpleNamespace(id="br_5", kind="draft", owner="alice", is_shared=False)
@@ -160,3 +175,14 @@ async def test_the_app_registers_a_handler_for_every_mapped_error():
     assert resp.status_code == 503
     assert resp.headers["retry-after"] == "2"
     assert json.loads(bytes(resp.body))["detail"]["type"] == "lock_busy"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_access_denied_outside_the_versioning_router_is_403_not_500():
+    main = pytest.importorskip("backend.app.main")
+    assert main.app.exception_handlers.get(AccessDenied) is not None, "a plain AccessDenied would answer 500"
+    resp = await main.app.exception_handlers[AccessDenied](None, AccessDenied("author cannot approve their own PR"))
+    assert resp.status_code == 403
+    assert json.loads(bytes(resp.body))["detail"] == {"type": "access_denied",
+                                                      "message": "author cannot approve their own PR"}
+    assert main.app.exception_handlers[NotDraftOwner] is not main.app.exception_handlers[AccessDenied]

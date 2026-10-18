@@ -4,8 +4,8 @@ Postgres.
 Alice owns a private draft. Bob holds workspace manage, so he may read it, but every write to it is
 403 ``access_denied`` with code ``not_draft_owner``: a canvas save (``/graph/changes``), a node
 create through the graph routes with ``branchId``, a stage, a checkpoint, a pull, an import into it,
-a publish (in the request or queued as a job) and opening a merge request from it. Bob's abandon is
-refused too (``_require_manage``). None of these writes anything, and Alice can do every one.
+a publish (in the request or queued as a job), opening a merge request from it and abandoning it.
+None of these writes anything, and Alice can do every one.
 """
 import asyncio
 import os
@@ -90,8 +90,7 @@ async def _run() -> None:
             refused(await c.post(f"{V1}/graphs/{gid}/branches/{d}/publish", json={"message": "m"}, headers=bob))
             V.vconfig.SYNC_PUBLISH_MAX_CHANGES = orig_sync_max
             refused(await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={}, headers=bob))
-            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/abandon", headers=bob)
-            assert r.status_code == 403 and r.json()["detail"]["type"] == "access_denied", r.text
+            refused(await c.post(f"{V1}/graphs/{gid}/branches/{d}/abandon", headers=bob))
 
             # Nothing Bob sent landed: no commit, nothing staged, no job, no PR, still open.
             assert len((await c.get(f"{V1}/graphs/{gid}/commits", params=log, headers=alice)).json()["commits"]) == commits

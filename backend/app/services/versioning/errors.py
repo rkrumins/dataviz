@@ -46,6 +46,11 @@ class AccessDenied(RuntimeError):
     """Actor lacks the branch role required for an operation on a draft."""
 
 
+class DraftNotReadable(AccessDenied):
+    """READ_DRAFT (doc 13): the viewer may not read this draft. ``_domain_errors`` answers 404
+    "unknown branch", the same as a branch that doesn't exist, so its existence doesn't leak."""
+
+
 class NotDraftOwner(_HttpMapped, AccessDenied):
     """A write reached someone else's private draft. Only its owner writes it;
     workspace managers may read it, but not write it."""

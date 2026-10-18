@@ -63,7 +63,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
-from backend.app.services.versioning.errors import HTTP_MAPPED, IneligibleMember
+from backend.app.services.versioning.errors import HTTP_MAPPED, DraftNotReadable, IneligibleMember
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -493,6 +493,8 @@ def _domain_errors():
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+    except DraftNotReadable:         # before AccessDenied: a 404, as for a branch that doesn't exist
+        raise HTTPException(status_code=404, detail="unknown branch")
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
@@ -2076,20 +2078,16 @@ async def get_commit_state(
 
 
 async def _assert_line_readable(svc, graph_id: str, branch_id: Optional[str], viewer: Viewer) -> None:
-    """A draft named by ``branchId`` must be the caller's to read (403), and the graph's (404)."""
+    """A draft named by ``branchId`` must be the graph's and the caller's to read (404 either way)."""
     if branch_id:
-        with _domain_errors():
-            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        await _assert_draft_visible(svc, graph_id, branch_id, viewer)
 
 
 async def _assert_draft_visible(svc, graph_id: str, branch_id: str, viewer: Viewer) -> None:
     """READ_DRAFT (doc 13): a draft the caller can't read is a 404, the same as a branch that
     doesn't exist, so its existence doesn't leak."""
     with _domain_errors():
-        try:
-            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
-        except AccessDenied as exc:
-            raise ValueError("unknown branch") from exc
+        await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
@@ -2883,10 +2881,33 @@ async def list_imports(
     ws_id: str, graph_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    """Import job history for this graph/data source (the per-view/data-source surface)."""
-    return await ie.list_jobs(graph_id=graph_id, job_type="ingest")
+    """Import job history for this graph/data source (the per-view/data-source surface), without
+    the imports into drafts the caller can't read."""
+    readable: Dict[Optional[str], bool] = {}            # one check per draft, not per job
+    jobs = []
+    for job in await ie.list_jobs(graph_id=graph_id, job_type="ingest"):
+        if job.get("branchId") not in readable:
+            readable[job.get("branchId")] = await _import_visible(svc, graph_id, job, viewer)
+        if readable[job.get("branchId")]:
+            jobs.append(job)
+    return jobs
+
+
+async def _import_visible(svc, graph_id: str, job: Dict[str, Any], viewer: Viewer) -> bool:
+    """Whether the caller may see an import job: not one into a draft they can't read."""
+    if not job.get("branchId"):
+        return True
+    try:
+        await _assert_draft_visible(svc, graph_id, job["branchId"], viewer)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        return False
+    return True
 
 
 # NOTE: declared before `/imports/{job_id}` so the literal path wins over the path param.
@@ -2918,10 +2939,12 @@ async def get_import(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     job = await ie.get_job(job_id)
-    if job is None or job.get("graphId") != graph_id:
+    if job is None or job.get("graphId") != graph_id or not await _import_visible(svc, graph_id, job, viewer):
         raise HTTPException(status_code=404, detail="import job not found")
     return job
 
@@ -2931,12 +2954,15 @@ async def get_import_preview(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
     draft-vs-main diff served by the existing versioning endpoints."""
     preview = await ie.get_preview(job_id)
-    if preview is None or preview["job"].get("graphId") != graph_id:
+    if (preview is None or preview["job"].get("graphId") != graph_id
+            or not await _import_visible(svc, graph_id, preview["job"], viewer)):
         raise HTTPException(status_code=404, detail="import job not found")
     return preview
 
@@ -3005,7 +3031,7 @@ async def _check_export_access(
     viewer: Viewer, user: User, claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
 ) -> None:
     """What every export checks before it reads: a draft only its readers export (someone else's
-    private draft is 403), and a view only one the caller can read, of this data source (404)."""
+    private draft is 404), and a view only one the caller can read, of this data source (404)."""
     from backend.app.api.v1.endpoints.view_guards import readable_view
 
     if branch_id:

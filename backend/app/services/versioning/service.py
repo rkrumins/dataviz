@@ -43,8 +43,8 @@ from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftRoleRequired,
-                     ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, IneligibleMember,
+from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
+                     DraftRoleRequired, ForkLimit, ForkNotRestorable, GroupsUnavailable, HeadMoved, IneligibleMember,
                      JobActive, LiveForks, LockBusy, MainWriteForbidden, MassDeleteBlocked, NotAFork,
                      NotDraftOwner)
 from .ids import prefixed_id
@@ -5284,7 +5284,7 @@ class GraphVersioningService:
     async def _assert_branch_readable(self, s, branch: BranchORM, viewer: Optional["Viewer"]) -> None:
         """No-op when ``viewer`` is None (internal/test callers); else raise on a private draft."""
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
-            raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
+            raise DraftNotReadable(f"{viewer.actor} cannot view branch {branch.id}")
 
     async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
         """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
