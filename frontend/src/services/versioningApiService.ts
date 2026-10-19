@@ -43,6 +43,16 @@ export interface ResolveResponse {
   /** The in-flight (or failed) "enable version control" job — present only while the
    *  graph is still at genesis, so a reload lands back on live progress. */
   bootstrap?: BootstrapJob | null
+  /** 'frozen' while editing is paused: every save, publish and import is refused. */
+  lifecycleState?: 'live' | 'frozen'
+  /** Names the state a pause or resume expects to change (`setGraphFrozen`). */
+  lifecycleRev?: number
+}
+
+export interface GraphLifecycle {
+  graphId: string
+  state: 'live' | 'frozen'
+  rev: number
 }
 
 /** Result of provisioning a blank lineage model (data source + genesis graph). */
@@ -795,6 +805,15 @@ export function resolveAndOpenDraft(
 
 export function getGraph(wsId: string, graphId: string): Promise<Graph> {
   return vfetch<Graph>(`${base(wsId)}/graphs/${graphId}`)
+}
+
+/** Pause (or resume) editing of a graph; needs publish and manage. `expectedRev` is the
+ *  `lifecycleRev` the caller saw: 409 version_conflict if it has moved on. */
+export function setGraphFrozen(
+  wsId: string, graphId: string, frozen: boolean, expectedRev: number,
+): Promise<GraphLifecycle> {
+  return vfetch<GraphLifecycle>(
+    `${base(wsId)}/graphs/${graphId}/lifecycle/${frozen ? 'freeze' : 'unfreeze'}`, jsonBody({ expectedRev }))
 }
 
 export interface BootstrapResult {

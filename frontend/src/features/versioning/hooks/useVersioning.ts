@@ -553,6 +553,16 @@ export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
   })
 }
 
+/** Pause or resume editing of a graph. Refetched on a refusal too, so a stale revision is replaced. */
+export function useSetGraphFrozen(wsId?: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ graphId, frozen, expectedRev }: { graphId: string; frozen: boolean; expectedRev: number }) =>
+      api.setGraphFrozen(wsId!, graphId, frozen, expectedRev),
+    onSettled: () => qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all }),
+  })
+}
+
 export function useOpenDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({

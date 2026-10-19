@@ -9,6 +9,8 @@
  * is not hidden behind newer merged or closed ones.
  * Its Forks section lists the graph's forks, those in the trash included, with Delete and Restore for
  * managers; a fork whose purge is queued can no longer be restored.
+ * Its header says when editing is paused, and someone who both publishes and manages pauses or
+ * resumes it, naming the revision they saw.
  * The data hooks are stubbed; the card itself has its own spec.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -16,6 +18,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let canManage = true
+let canPublish = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
@@ -30,8 +33,10 @@ const refetchForks = vi.fn()
 const deleteFork = vi.fn()
 const restoreFork = vi.fn()
 const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
+const freezeMutate = vi.fn()
+let freezeError: Error | null
 
-vi.mock('@/store/auth', () => ({ usePermission: () => canManage }))
+vi.mock('@/store/auth', () => ({ usePermission: (p: string) => (p.endsWith(':publish') ? canPublish : canManage) }))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({
     resolve: () => (providerType ? { providerType } : undefined),
@@ -45,6 +50,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useCommitLog: () => ({ data: { commits: [] } }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
+  useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/versioningApiService')>(),
@@ -77,6 +83,7 @@ const renderTab = () =>
 
 beforeEach(() => {
   canManage = true
+  canPublish = true
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
   branches = []
@@ -90,6 +97,8 @@ beforeEach(() => {
   deleteFork.mockReset().mockResolvedValue(undefined)
   restoreFork.mockReset().mockResolvedValue(undefined)
   useDataSourcePullRequests.mockClear()
+  freezeMutate.mockReset()
+  freezeError = null
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -128,6 +137,38 @@ describe('DataSourceVersioningTab — status header', () => {
     ]
     renderTab()
     expect(screen.getByText(/main at commit #5 · 2 open drafts/)).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceVersioningTab — paused editing', () => {
+  it('says editing is paused, and a publisher resumes it at the revision they saw', () => {
+    resolved = { ...resolved, lifecycleState: 'frozen', lifecycleRev: 1 }
+    renderTab()
+    expect(screen.getByText('Editing is paused')).toBeInTheDocument()
+    expect(screen.queryByText('Version control is on')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Resume editing' }))
+    expect(freezeMutate).toHaveBeenCalledWith({ graphId: 'g1', frozen: false, expectedRev: 1 })
+  })
+
+  it('lets a publisher pause a live graph', () => {
+    renderTab()
+    expect(screen.getByText('Version control is on')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause editing' }))
+    expect(freezeMutate).toHaveBeenCalledWith({ graphId: 'g1', frozen: true, expectedRev: 0 })
+  })
+
+  it('shows a manager who cannot publish that editing is paused, with no button', () => {
+    canPublish = false
+    resolved = { ...resolved, lifecycleState: 'frozen', lifecycleRev: 1 }
+    renderTab()
+    expect(screen.getByText('Editing is paused')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /editing/i })).toBeNull()
+  })
+
+  it('says why a pause was refused', () => {
+    freezeError = new Error('the lifecycle has changed since you loaded it; reload and try again')
+    renderTab()
+    expect(screen.getByRole('alert')).toHaveTextContent('the lifecycle has changed since you loaded it')
   })
 })
 

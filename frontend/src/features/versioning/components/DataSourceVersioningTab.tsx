@@ -2,17 +2,17 @@
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
  * it, and surfaces the branch list, the graph's forks + recent commit history. Read-only overview
- * apart from deleting and restoring a fork; the editing loop lives on the canvas.
+ * apart from deleting and restoring a fork and pausing editing; the editing loop lives on the canvas.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph, useSetGraphFrozen } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
@@ -51,8 +51,11 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   itemCount?: number | null
 }) {
   const canManage = usePermission('workspace:datasource:manage', wsId)
+  const canPublish = usePermission('workspace:datasource:publish', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
+  const frozen = resolve.data?.lifecycleState === 'frozen'
+  const freeze = useSetGraphFrozen(wsId)
   // The drafts in play; merged and abandoned ones are read only once the Archived tab opens.
   const [showArchived, setShowArchived] = useState(false)
   const branchesQ = useBranches(wsId, graphId)
@@ -173,16 +176,27 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   return (
     <div className="space-y-6">
       {/* Status header */}
-      <div className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-        <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-          <GitBranch className="w-4 h-4 text-emerald-500" />
+      <div className={cn('flex items-center gap-3 rounded-xl border px-4 py-3',
+        frozen ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/20 bg-emerald-500/5')}>
+        <span className={cn('flex items-center justify-center w-8 h-8 rounded-lg border',
+          frozen ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/10 border-emerald-500/20')}>
+          {frozen ? <Pause className="w-4 h-4 text-amber-500" /> : <GitBranch className="w-4 h-4 text-emerald-500" />}
         </span>
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-ink">Version control is on</p>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink">{frozen ? 'Editing is paused' : 'Version control is on'}</p>
           <p className="text-[11px] text-ink-muted">
-            main at commit #{resolve.data?.mainHeadCommitSeq ?? 0} · {drafts.length} open draft{drafts.length === 1 ? '' : 's'}
+            {frozen
+              ? 'Drafts can’t be saved, published or imported until a publisher resumes editing. Viewing is unaffected.'
+              : <>main at commit #{resolve.data?.mainHeadCommitSeq ?? 0} · {drafts.length} open draft{drafts.length === 1 ? '' : 's'}</>}
           </p>
+          {freeze.error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400" role="alert">{freeze.error.message}</p>}
         </div>
+        {canManage && canPublish && graphId && (
+          <Button size="sm" variant="secondary" leftIcon={frozen ? Play : Pause} loading={freeze.isPending}
+            onClick={() => freeze.mutate({ graphId, frozen: !frozen, expectedRev: resolve.data?.lifecycleRev ?? 0 })}>
+            {frozen ? 'Resume editing' : 'Pause editing'}
+          </Button>
+        )}
       </div>
 
       {/* Where the graph lives; Rebuild and Check sync for managers */}
