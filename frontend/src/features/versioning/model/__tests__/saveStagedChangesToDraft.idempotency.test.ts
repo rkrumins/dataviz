@@ -14,7 +14,9 @@ vi.mock('@/services/viewTransferApiService', () => ({ newRequestId: vi.fn() }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 
 import { getPendingSave, resumePendingSave, saveStagedChangesToDraft } from '../saveStagedChangesToDraft'
-import { applyGraphChanges, IntegrityError } from '@/services/versioningApiService'
+import {
+  applyGraphChanges, BranchClosedError, GraphNotWritableError, IntegrityError, MainWriteForbiddenError,
+} from '@/services/versioningApiService'
 import { newRequestId } from '@/services/viewTransferApiService'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 
@@ -138,6 +140,22 @@ describe('saveStagedChangesToDraft — Idempotency-Key', () => {
     expect(mockApply).toHaveBeenCalledTimes(3)
     expect(opsOf(2).map((o) => o.id)).toEqual(['urn:a', 'urn:b'])
     expect(keyOf(2)).not.toBe(keyOf(0))
+  })
+
+  it.each([
+    ['409 graph_not_writable', () => new GraphNotWritableError('Editing is paused on this graph.')],
+    ['409 branch_closed', () => new BranchClosedError({ status: 'merged' })],
+    ['409 main_write_forbidden', () => new MainWriteForbiddenError()],
+    ['403', () => Object.assign(new Error('Forbidden'), { status: 403 })],
+  ])('a save refused with %s was not applied: the next save sends the edits as they are now, once', async (_, refusal) => {
+    mockApply.mockRejectedValueOnce(refusal())
+    await expect(saveStagedChangesToDraft([rename('urn:a', 'Foo'), rename('urn:b', 'B')], target)).rejects.toThrow()
+    expect(getPendingSave(null)).toBeNull()   // nor is it carried in the crash snapshot
+    // Edited (same staged id) and one discarded while the save could not go through.
+    await saveStagedChangesToDraft([rename('urn:a', 'Bar')], target)
+    expect(mockApply).toHaveBeenCalledTimes(2)
+    expect(opsOf(1)).toEqual([expect.objectContaining({ id: 'urn:a', payload: { description: 'Bar' } })])
+    expect(keyOf(1)).not.toBe(keyOf(0))
   })
 
   it('keeps the key after a server error (5xx), which may have applied the save (regression guard)', async () => {

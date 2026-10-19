@@ -7,7 +7,10 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { apply } = vi.hoisted(() => ({ apply: vi.fn() }))
-vi.mock('@/services/versioningApiService', () => ({ applyGraphChanges: apply }))
+vi.mock('@/services/versioningApiService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/versioningApiService')>(),
+  applyGraphChanges: apply,
+}))
 vi.mock('@/services/viewTransferApiService', () => {
   let n = 0
   return { newRequestId: () => `key-${++n}` }

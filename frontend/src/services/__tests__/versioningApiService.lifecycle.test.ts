@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
 
 import { fetchWithTimeout } from '../fetchWithTimeout'
-import { applyGraphChanges, setGraphFrozen } from '../versioningApiService'
+import { applyGraphChanges, GraphNotWritableError, setGraphFrozen } from '../versioningApiService'
 
 const answer = (status: number, body: unknown) =>
   vi.mocked(fetchWithTimeout).mockResolvedValue(
@@ -35,6 +35,7 @@ describe('a save to a paused graph', () => {
     const message = "Editing is paused on this graph. A publisher can resume it from the data source's Version control tab. Your change was not saved."
     answer(409, { detail: { type: 'graph_not_writable', state: 'frozen', reason: 'frozen', retryable: false, message } })
     const err = await applyGraphChanges('ws1', 'ds1', 'br_1', []).catch((e) => e)
+    expect(err).toBeInstanceOf(GraphNotWritableError)
     expect(err.message).toBe(message)
   })
 })

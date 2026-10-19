@@ -6,7 +6,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('@/services/versioningApiService', () => ({ applyGraphChanges: vi.fn() }))
+vi.mock('@/services/versioningApiService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/versioningApiService')>(),
+  applyGraphChanges: vi.fn(),
+}))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 
 import { saveStagedChangesToDraft } from '../saveStagedChangesToDraft'

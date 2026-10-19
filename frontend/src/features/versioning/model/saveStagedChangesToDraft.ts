@@ -12,8 +12,8 @@
  * user-drawn edges are re-pointed at the real endpoints.
  */
 import {
-  applyGraphChanges, BranchClosedError, DraftRoleRequiredError, IntegrityError, MainWriteForbiddenError,
-  MergeConflictError, NotDraftOwnerError, OntologyViolationError,
+  applyGraphChanges, BranchClosedError, DraftRoleRequiredError, GraphNotWritableError, IntegrityError,
+  MainWriteForbiddenError, MergeConflictError, NotDraftOwnerError, OntologyViolationError,
   type EntityView, type GraphChangeOp, type GraphChangesResult,
 } from '@/services/versioningApiService'
 import { newRequestId } from '@/services/viewTransferApiService'
@@ -67,7 +67,7 @@ export function clearPendingSave(scope: string | null): void {
 const refused = (e: unknown) => {
   const status = (e as { status?: unknown } | null)?.status
   return [MergeConflictError, IntegrityError, OntologyViolationError, BranchClosedError, NotDraftOwnerError,
-    DraftRoleRequiredError, MainWriteForbiddenError].some((cls) => e instanceof cls)
+    DraftRoleRequiredError, MainWriteForbiddenError, GraphNotWritableError].some((cls) => e instanceof cls)
     || (typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429)
 }
 
@@ -164,6 +164,8 @@ export async function saveStagedChangesToDraft(
     try {
       next = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
     } catch (e) {
+      // Refused: not applied, so never resent later — the next save sends the edits as they are then.
+      if (refused(e)) pendingSaves.delete(scope)
       // The settled save did commit: what it carried, unchanged since, leaves the staged list, so no
       // later save resends it. An edit made since stays staged (re-based), and on the canvas as made.
       if (settled) {

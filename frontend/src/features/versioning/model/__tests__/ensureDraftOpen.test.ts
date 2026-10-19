@@ -8,7 +8,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/services/versioningApiService', () => ({
+vi.mock('@/services/versioningApiService', async (importOriginal) => ({
+  GraphNotWritableError: (await importOriginal<typeof import('@/services/versioningApiService')>()).GraphNotWritableError,
   resolveAndOpenDraft: vi.fn(),
 }))
 
@@ -26,7 +27,8 @@ vi.mock('@/lib/queryClient', () => ({
   getQueryClient: () => ({ invalidateQueries }),
 }))
 
-import { resolveAndOpenDraft } from '@/services/versioningApiService'
+import { GraphNotWritableError, resolveAndOpenDraft } from '@/services/versioningApiService'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { useBranchStore } from '@/store/branchStore'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { ensureDraftOpen } from '../ensureDraftOpen'
@@ -125,6 +127,15 @@ describe('ensureDraftOpen', () => {
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
     expect(useBranchStore.getState().currentBranchId).toBeNull()
+  })
+
+  it("says editing is paused, in the server's words, when the graph is paused", async () => {
+    useNotificationStore.setState({ notifications: [] })
+    const message = "Editing is paused on this graph. A publisher can resume it from the data source's Version control tab."
+    resolveAndOpenDraftMock.mockRejectedValue(new GraphNotWritableError(message))
+
+    await expect(ensureDraftOpen()).resolves.toBeNull()
+    expect(useNotificationStore.getState().notifications).toEqual([expect.objectContaining({ type: 'error', message })])
   })
 
   it('returns null without any network call when versioning is admin-disabled', async () => {

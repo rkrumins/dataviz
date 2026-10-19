@@ -608,6 +608,15 @@ export class MainWriteForbiddenError extends Error {
   }
 }
 
+/** Editing is paused on the graph: nothing was written, and no draft opens until a publisher resumes
+ *  it. The message is the server's, which says who can. */
+export class GraphNotWritableError extends Error {
+  constructor(message?: string) {
+    super(message ?? 'Editing is paused on this graph.')
+    this.name = 'GraphNotWritableError'
+  }
+}
+
 // ============================================
 // Fetch helper — JSON + structured domain errors
 // ============================================
@@ -698,6 +707,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'main_write_forbidden') {
     return new MainWriteForbiddenError()
+  }
+  if (status === 409 && d?.type === 'graph_not_writable') {
+    return new GraphNotWritableError(d.message)
   }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
