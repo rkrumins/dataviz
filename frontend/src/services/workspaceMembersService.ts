@@ -29,6 +29,9 @@ export interface WorkspaceMemberResponse {
      *  countdown badges and warn before access lapses. */
     expiresAt: string | null
     subject: MemberSubject
+    /** Granted around the identity provider: its end is moved only when
+     *  confirmed as an exception again, and never cleared. */
+    idpException?: boolean
 }
 
 /** One route by which a user holds a role in the workspace — a direct
@@ -108,6 +111,8 @@ export interface WorkspaceMemberCreateRequest {
 export interface WorkspaceMemberExpiryUpdateRequest {
     expiresAt?: string | null
     expiresIn?: string | null
+    /** Confirms an exception to the identity provider stays one. */
+    exception?: boolean
 }
 
 
@@ -129,6 +134,9 @@ export interface WorkspaceGrantOptions {
         viaGroupId: string | null
         viaGroupName: string | null
     }[]
+    /** The data sources any role here reads — there are no per-source grants
+     *  inside a workspace. Absent on servers that predate it. */
+    dataSources?: { id: string; label: string | null; restricted: boolean }[]
 }
 
 function url(wsId: string, suffix: string = ''): string {

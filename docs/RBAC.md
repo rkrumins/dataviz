@@ -237,7 +237,10 @@ concentrated in a few sources rather than spread across all of them.
 over that source always need the permission. This gates the sensitive
 warehouse without dragging every view in the workspace back to
 admin-only. Admins toggle it in the workspace's Views tab, beside the
-policy itself.
+policy itself — and only admins: `PUT …/data-sources/{id}` refuses a
+change to `isRestricted` without `workspace:admin` (403), since a member
+who could lift the mark could step around it. Sending the value unchanged
+is fine, so members still edit everything else about a source.
 
 **Nobody is ever stuck.** Under `publish_policy = 'request'` — or over
 a restricted source — a member who owns a view's sharing settings but
@@ -675,6 +678,15 @@ request (200 instead of 201).
 an approver pointed the person to the identity-provider group that grants
 it. The requester withdraws with `POST /me/access-requests/{id}/withdraw`.
 
+**What a grant opens.** There are no per-source grants inside a
+workspace: every role in it reads every data source in it, restricted
+ones included (`is_restricted` gates publishing, not reading). So `GET
+…/members/grant-options` returns `dataSources` (`id`, `label`,
+`restricted`), and answering a request and Add member list them; choosing
+**Open to everyone** says so too, and that a hidden workspace can still be
+joined by anyone with a link. They're warnings, not refusals: the admin
+decides.
+
 **Who answers, and what they may grant.** Answering needs
 `workspace:members:add` in the request's workspace (`workspace:admin`
 implies it; Org Admins and Super Admins answer everywhere), and nobody
@@ -719,6 +731,15 @@ beside `rbac.access_request.approved`:
 * Granting in the app needs `exception: true` and is stored with
   `role_bindings.idp_exception`. Teams are not offered. The Members tab
   applies the same rule to people (groups can still be bound).
+* Exceptions are the admins' and always end
+  (`workspace_access.exception_refusal`): granting one — approving with
+  `exception: true`, or Add member — needs `workspace:admin` (403 for a
+  steward, who points to a group instead) and an end within
+  `EXCEPTION_MAX`, 90 days (422 without one, or past it). Keeping one
+  going takes the same again: approving a request to keep it, or `PUT
+  …/members/{binding}/expiry`, needs `exception: true` (409 otherwise) and
+  a new end within 90 days. Requests to keep an exception, and their
+  reminders, go to the workspace's admins only.
 * An exception ends once the provider covers it
   (`workspace_access.retire_covered_exceptions`, in the same savepoint at
   the end of `reconcile_sso_targets`). The reconciler can't add a binding

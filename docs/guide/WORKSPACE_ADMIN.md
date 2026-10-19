@@ -62,7 +62,7 @@ Two kinds of people look after who gets in:
 | Role | Can | Can't |
 | --- | --- | --- |
 | **Workspace admin** | Add users and groups at any workspace role whose permissions they hold, answer requests, remove people, and choose [how people get in](#how-people-get-in) | — |
-| **Workspace steward** | Add people as **Workspace viewer** or **Workspace member**, and answer requests at those levels — otherwise a **Workspace member** | Bind groups, remove people or change anyone's access, or change how people get in |
+| **Workspace steward** | Add people as **Workspace viewer** or **Workspace member**, and answer requests at those levels — otherwise a **Workspace member** | Bind groups, remove people or change anyone's access, let someone in as an exception, or change how people get in |
 
 A steward suits the team lead who knows who should be in, without handing them
 the workspace.
@@ -78,9 +78,15 @@ the workspace.
    **30d** or **90d** — access then revokes itself, which suits contractors
    and temporary cover.
 6. If the workspace's identity provider decides who is in, tick **Add them
-   here as an exception** to add a person (see [When the identity provider
-   decides](#when-the-identity-provider-decides)).
+   here as an exception** to add a person — admins only, and an exception
+   always ends, so **Permanent** isn't offered (see [When the identity
+   provider decides](#when-the-identity-provider-decides)).
 7. Select **Add to workspace**.
+
+The dialog lists the workspace's data sources, restricted ones first: any
+role here reads all of them — there are no per-source grants inside a
+workspace — so check the list before letting someone into a workspace that
+holds a sensitive one.
 
 **You should now see** the user or group in the members list with its role. A
 binding with a duration shows how long it has left, in an **Expires in …**
@@ -95,7 +101,9 @@ can ask to keep it ([Requesting Access](/guide/requesting-access#keep-access-tha
 To change when a binding ends, select **Change** beside its **Expires in …**
 badge and choose **End in 7 days**, **End in 30 days**, **End in 90 days** or
 **No end date** — counted from today. Only admins change it; a request the
-person made to keep the access reads as answered.
+person made to keep the access reads as answered. An exception keeps an end
+— **No end date** isn't offered — and the menu says it **Stays an
+exception**.
 
 ![a workspace's Members tab with the Add member dialog open, showing the User and Group toggle, the Role list and the Access duration choices](/docs-assets/guide/workspace-admin-members.png)
 
@@ -196,7 +204,7 @@ settings. Only admins see it.
 | --- | --- |
 | **Listed in Find a workspace** | On (the default): everyone who can sign in sees its name, description and who answers requests in **Find a workspace** — once an administrator has switched **Find a workspace** on ([Feature Switches](/guide/feature-switches)). Off: only its members see it there. |
 | **Who decides who is in** | **Approved in the app** (the default): admins and stewards answer requests and add people here. **Through your identity provider**: membership follows your identity provider's groups, approvers point people to the group that grants it, and anything granted here is an exception. |
-| **How people ask** | **Approvers decide** (the default): people ask, and admins and stewards answer. **Open to everyone**: anyone can join as a **Workspace viewer** at once, without approval — more is still asked for; not available while the identity provider decides who is in. **Closed to requests**: nobody can ask to join, and admins add people with **Add member**; people already in can still ask to keep access that's ending. |
+| **How people ask** | **Approvers decide** (the default): people ask, and admins and stewards answer. **Open to everyone**: anyone can join as a **Workspace viewer** at once, without approval — more is still asked for; not available while the identity provider decides who is in. A Viewer reads every data source here, restricted ones included, and a workspace hidden from Find a workspace can still be joined by anyone with a link — the card says so when either applies. **Closed to requests**: nobody can ask to join, and admins add people with **Add member**; people already in can still ask to keep access that's ending. |
 | **A note for people asking** | Shown to people as they ask — "Say which team you're on", for example. Up to 500 characters. |
 
 Select **Save** after changing them.
@@ -214,7 +222,10 @@ Then:
   and the request closes itself. It warns you when they have never signed in
   through the identity provider.
 - **Grant an exception** and **Add them here as an exception** let someone in
-  without the group — for a contractor, or while IT catches up. Exceptions are
+  without the group — for a contractor, or while IT catches up. Only admins
+  grant them — a steward points people to the group — and they always end,
+  within 90 days. Keeping one going, from a request to keep it or with
+  **Change**, keeps it an exception, with a new end within 90 days. Exceptions are
   labelled wherever access is listed, and end on their own once the person's
   identity provider groups grant the same access: at their next sign-in, an
   exception for the role a group grants becomes that group's grant — no gap —

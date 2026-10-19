@@ -17,6 +17,10 @@
  * A request to keep access that is about to end is answered with how much
  * longer — 30 days unless the approver chooses otherwise.
  *
+ * Exceptions are the workspace admins' alone, and always end — within 90
+ * days — including when someone asks to keep one. Whatever is granted, the
+ * dialog says which data sources it opens: every role reads all of them.
+ *
  * Every choice comes from the server's grant options, so nothing offered
  * here is refused for being more than the approver could grant.
  */
@@ -31,6 +35,7 @@ import { useAnswerActions, useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import type { AccessRequestResponse } from '@/services/accessRequestsService'
 import { cn } from '@/lib/utils'
 import { roleLabel } from './accessRequestCopy'
+import { WorkspaceReachNote } from './WorkspaceReachNote'
 
 type Decision = 'role' | 'team' | 'route' | 'exception'
 
@@ -40,6 +45,8 @@ const DURATIONS = [
     { value: '30d', label: '30 days' },
     { value: '90d', label: '90 days' },
 ] as const
+/** An exception always ends. */
+const ENDING = DURATIONS.filter(d => d.value !== '')
 
 export function ApproveRequestDialog({ request, onClose }: {
     request: AccessRequestResponse
@@ -54,6 +61,9 @@ export function ApproveRequestDialog({ request, onClose }: {
     const where = request.target.label ?? 'this workspace'
     // Asking to keep a grant: the only decision is how much longer.
     const extension = !!request.bindingId
+    const steward = options?.tier === 'steward'
+    // Keeping an exception going is the admins' call, and it keeps an end.
+    const keepsException = extension && !!request.idpException
 
     const [decision, setDecision] = useState<Decision | null>(null)
     const chosen: Decision = decision ?? (idp ? 'route' : 'role')
@@ -62,7 +72,10 @@ export function ApproveRequestDialog({ request, onClose }: {
     const pickedRole = role
         ?? (roles.some(r => r.name === request.requestedRole) ? request.requestedRole : roles[0]?.name ?? null)
     const [duration, setDuration] = useState<string | null>(null)
-    const pickedDuration = duration ?? (chosen === 'exception' || extension ? '30d' : '')
+    const exceptional = chosen === 'exception' || keepsException
+    const pickedDuration = exceptional && duration === ''
+        ? '30d'
+        : duration ?? (exceptional || extension ? '30d' : '')
     const [groupId, setGroupId] = useState<string | null>(null)
     const routes = useMemo(() => {
         const seen = new Map<string, NonNullable<typeof options>['idpRoutes']>()
@@ -74,13 +87,18 @@ export function ApproveRequestDialog({ request, onClose }: {
     const [note, setNote] = useState('')
 
     const pending = approve.isPending || route.isPending
-    const ready = extension || (chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole)
+    const ready = extension
+        ? !(keepsException && steward)
+        : chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole
 
     const submit = async () => {
         const trimmed = note.trim() || null
         try {
             if (extension) {
-                await approve.mutateAsync({ id: request.id, body: { expiresIn: pickedDuration || null, note: trimmed } })
+                await approve.mutateAsync({
+                    id: request.id,
+                    body: { expiresIn: pickedDuration || null, note: trimmed, exception: keepsException || undefined },
+                })
                 const label = DURATIONS.find(d => d.value === pickedDuration)?.label.toLowerCase()
                 notify('success', `${who} keeps their access to ${where}${pickedDuration ? ` for ${label}` : ' with no end date'}.`)
             } else if (chosen === 'route' && pickedGroup) {
@@ -110,7 +128,7 @@ export function ApproveRequestDialog({ request, onClose }: {
     const choices = idp
         ? [
             { value: 'route' as const, label: 'Point to a group', icon: KeyRound },
-            { value: 'exception' as const, label: 'Grant an exception', icon: AlertTriangle },
+            ...(steward ? [] : [{ value: 'exception' as const, label: 'Grant an exception', icon: AlertTriangle }]),
         ]
         : [
             { value: 'role' as const, label: 'Grant a role', icon: ShieldCheck },
@@ -158,8 +176,21 @@ export function ApproveRequestDialog({ request, onClose }: {
                             </blockquote>
                         )}
 
-                        {extension ? (
+                        {extension && keepsException && steward ? (
+                            <p role="alert" className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
+                                <AlertTriangle className="w-4 h-4 shrink-0" />
+                                This access is an exception to the identity provider. Only the workspace’s admins can keep
+                                an exception going — or point {who} to the group that grants it.
+                            </p>
+                        ) : extension ? (
                             <>
+                                {keepsException && (
+                                    <p className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
+                                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                                        This access is an exception to the identity provider. Keeping it keeps it as one —
+                                        for 90 days at most.
+                                    </p>
+                                )}
                                 <div>
                                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-2">
                                         <CalendarClock className="w-3.5 h-3.5" aria-hidden /> For how much longer
@@ -168,7 +199,7 @@ export function ApproveRequestDialog({ request, onClose }: {
                                         label="For how much longer"
                                         value={pickedDuration as (typeof DURATIONS)[number]['value']}
                                         onChange={setDuration}
-                                        options={DURATIONS}
+                                        options={keepsException ? ENDING : DURATIONS}
                                     />
                                     <p className="text-xs text-ink-muted mt-2">From today. They hear before it ends again.</p>
                                 </div>
@@ -197,7 +228,9 @@ export function ApproveRequestDialog({ request, onClose }: {
                                     routes.length === 0 ? (
                                         <p className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2 text-sm text-ink-secondary">
                                             No identity-provider group you could point them to reaches this workspace yet.
-                                            Ask whoever runs sign-in to map one, or grant an exception.
+                                            {steward
+                                                ? ' Ask whoever runs sign-in to map one; only the workspace’s admins can grant an exception.'
+                                                : ' Ask whoever runs sign-in to map one, or grant an exception.'}
                                         </p>
                                     ) : (
                                         <fieldset className="space-y-2">
@@ -227,7 +260,8 @@ export function ApproveRequestDialog({ request, onClose }: {
                                         <AlertTriangle className="w-4 h-4 shrink-0" />
                                         <span>
                                             Granted here, outside your identity provider: it won’t follow {who}’s groups,
-                                            and stays until it ends or someone removes it. People with access marks it as an exception.
+                                            and lasts 90 days at most, unless someone removes it first. People with access marks it
+                                            as an exception.
                                         </span>
                                     </p>
                                 )}
@@ -254,7 +288,7 @@ export function ApproveRequestDialog({ request, onClose }: {
                                                 label="For how long"
                                                 value={pickedDuration as (typeof DURATIONS)[number]['value']}
                                                 onChange={setDuration}
-                                                options={DURATIONS}
+                                                options={chosen === 'exception' ? ENDING : DURATIONS}
                                             />
                                         </div>
                                     </>
@@ -274,6 +308,8 @@ export function ApproveRequestDialog({ request, onClose }: {
                                         ))}
                                     </fieldset>
                                 )}
+
+                                {chosen !== 'route' && <WorkspaceReachNote sources={options?.dataSources} />}
 
                                 <label className="block">
                                     <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">A note for {who} (optional)</span>
@@ -300,7 +336,7 @@ export function ApproveRequestDialog({ request, onClose }: {
                             onClick={() => void submit()}
                             className={cn(
                                 'inline-flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold text-white shadow-md disabled:opacity-50',
-                                chosen === 'exception'
+                                exceptional
                                     ? 'bg-gradient-to-r from-amber-500 to-orange-600'
                                     : 'bg-gradient-to-r from-emerald-500 to-teal-600',
                             )}

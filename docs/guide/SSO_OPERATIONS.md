@@ -259,7 +259,9 @@ the setting changes how *requests* for that workspace are answered:
   request closes itself as approved, and the requester and the approver hear
   about it. A sign-in that grants something else leaves it open.
 - Letting someone in without the group is an **exception**: a role granted in
-  the app and labelled **Exception** wherever access is listed.
+  the app and labelled **Exception** wherever access is listed. Only the
+  workspace's admins grant one, and it always ends — within 90 days; keeping
+  it going confirms it as an exception again, with a new end.
 
 Before you switch a workspace over, write at least one rule for it — without
 one, there is no group to point people to, and every answer is an exception.

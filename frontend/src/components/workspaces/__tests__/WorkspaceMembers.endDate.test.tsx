@@ -1,6 +1,7 @@
 /**
  * An admin moves a time-limited grant's end from the Members tab — from
- * today, or to none. A steward can't.
+ * today, or to none. A steward can't. An exception to the identity provider
+ * always keeps an end: it's added with one, and moving it confirms it.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -60,5 +61,22 @@ describe('WorkspaceMembers — when access ends', () => {
         renderTab(false)
         expect(await screen.findByText('Max')).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /Change when/ })).not.toBeInTheDocument()
+    })
+
+    it('keeps an end on an exception, and confirms it stays one', async () => {
+        const user = userEvent.setup()
+        members.list.mockResolvedValue([{
+            bindingId: 'bnd_x', role: 'workspace_viewer', grantedAt: '2026-01-01T00:00:00Z', grantedBy: null,
+            expiresAt: new Date(Date.now() + 3 * 86_400_000).toISOString(), idpException: true,
+            subject: { type: 'user', id: 'usr_ana', displayName: 'Ana', secondary: 'ana@x.io' },
+        }])
+        renderTab(true)
+        await user.click(await screen.findByRole('button', { name: 'Change when Ana’s access ends' }))
+        expect(screen.getByText('Stays an exception')).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'No end date' })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'End in 30 days' }))
+        await waitFor(() => expect(members.updateExpiry).toHaveBeenCalledWith(
+            'ws_fin', 'bnd_x', { expiresIn: '30d', exception: true },
+        ))
     })
 })

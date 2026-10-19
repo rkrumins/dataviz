@@ -39,6 +39,7 @@ import { adminUserService, type AdminUserResponse } from '@/services/adminUserSe
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { searchDirectory } from '@/services/userDirectoryService'
 import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
+import { WorkspaceReachNote } from '@/components/access/WorkspaceReachNote'
 import { WorkspaceAccessSettings } from './WorkspaceAccessSettings'
 import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
@@ -166,7 +167,9 @@ function ExpiryBadge({ expiresAt }: { expiresAt: string }) {
 
 
 /** Move a time-limited grant's end: from today, or none. The person hears
- *  about it, and a request they made to keep it reads as answered. */
+ *  about it, and a request they made to keep it reads as answered. An
+ *  exception to the identity provider always keeps an end, and moving it
+ *  confirms it stays an exception. */
 const END_CHOICES = [
     { value: '7d', label: 'End in 7 days' },
     { value: '30d', label: 'End in 30 days' },
@@ -174,9 +177,10 @@ const END_CHOICES = [
     { value: null, label: 'No end date' },
 ] as const
 
-function ChangeEndMenu({ name, busy, onChange }: {
+function ChangeEndMenu({ name, busy, exception, onChange }: {
     name: string
     busy: boolean
+    exception: boolean
     onChange: (expiresIn: string | null) => void
 }) {
     const [open, setOpen] = useState(false)
@@ -199,7 +203,12 @@ function ChangeEndMenu({ name, busy, onChange }: {
                     align="start"
                     className="z-50 w-44 rounded-xl border border-glass-border bg-canvas-elevated p-1 shadow-lg animate-in fade-in zoom-in-95"
                 >
-                    {END_CHOICES.map(c => (
+                    {exception && (
+                        <p className="px-2.5 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                            Stays an exception
+                        </p>
+                    )}
+                    {END_CHOICES.filter(c => !exception || c.value !== null).map(c => (
                         <button
                             key={c.label}
                             type="button"
@@ -493,7 +502,10 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
     const handleChangeEnd = async (member: WorkspaceMemberResponse, expiresIn: string | null) => {
         setActionLoading(`end-${member.bindingId}`)
         try {
-            await workspaceMembersService.updateExpiry(workspaceId, member.bindingId, expiresIn ? { expiresIn } : {})
+            await workspaceMembersService.updateExpiry(workspaceId, member.bindingId, {
+                ...(expiresIn ? { expiresIn } : {}),
+                ...(member.idpException ? { exception: true } : {}),
+            })
             await fetchMembers()
             const name = member.subject.displayName ?? member.subject.id
             notify('success', expiresIn
@@ -815,6 +827,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                                                 <ChangeEndMenu
                                                     name={name}
                                                     busy={actionLoading === `end-${m.bindingId}`}
+                                                    exception={!!m.idpException}
                                                     onChange={expiresIn => void handleChangeEnd(m, expiresIn)}
                                                 />
                                             )}
@@ -1082,7 +1095,10 @@ function AddMemberModal({
     }, [subjectType, users, groups, search])
 
     const needsException = idpRun && subjectType === 'user'
-    const valid = !!selected && (!needsException || exception)
+    // Exceptions are the admins' alone, and always end.
+    const exceptionAllowed = needsException && canBindGroups
+    const duration = exceptionAllowed && !expiresIn ? '30d' : expiresIn
+    const valid = !!selected && (!needsException || (exceptionAllowed && exception))
     const conflict = selected ? existingForType.has(`${selected.id}:${role}`) : false
 
     return (
@@ -1267,14 +1283,18 @@ function AddMemberModal({
                 </div>
             </div>
 
+            <div className="mt-5">
+                <WorkspaceReachNote sources={options?.dataSources} />
+            </div>
+
             {/* Phase 7 — access duration */}
             <div className="mt-5 pt-5 border-t border-glass-border">
                 <p className="text-xs font-semibold text-ink mb-2">
                     Access duration
                 </p>
                 <div className="flex flex-wrap gap-2">
-                    {(['', '24h', '7d', '30d', '90d'] as const).map(opt => {
-                        const isSelected = expiresIn === opt
+                    {(exceptionAllowed ? ['24h', '7d', '30d', '90d'] as const : ['', '24h', '7d', '30d', '90d'] as const).map(opt => {
+                        const isSelected = duration === opt
                         const label = opt === '' ? 'Permanent' : opt
                         return (
                             <button
@@ -1294,9 +1314,11 @@ function AddMemberModal({
                     })}
                 </div>
                 <p className="text-[11px] text-ink-muted mt-2">
-                    {expiresIn
-                        ? `Access auto-revokes after ${expiresIn}. Useful for contractors and temporary cover.`
-                        : 'Binding stays active until manually revoked.'}
+                    {exceptionAllowed
+                        ? `An exception always ends: this one after ${duration}.`
+                        : expiresIn
+                            ? `Access auto-revokes after ${expiresIn}. Useful for contractors and temporary cover.`
+                            : 'Binding stays active until manually revoked.'}
                 </p>
             </div>
 
@@ -1317,7 +1339,16 @@ function AddMemberModal({
 
             {/* A workspace whose identity provider decides who is in: adding
                 a person here is an exception, and is labelled as one. */}
-            {needsException && (
+            {needsException && !exceptionAllowed && (
+                <p role="note" className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3 text-xs text-amber-800 dark:text-amber-300">
+                    <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+                    <span>
+                        This workspace’s access is decided by your identity provider. Ask IT to add them to its
+                        group — only the workspace’s admins can add someone here as an exception.
+                    </span>
+                </p>
+            )}
+            {exceptionAllowed && (
                 <label className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3 text-xs text-amber-800 dark:text-amber-300 cursor-pointer">
                     <input
                         type="checkbox"
@@ -1328,7 +1359,7 @@ function AddMemberModal({
                     <span>
                         <span className="font-semibold">Add them here as an exception.</span>{' '}
                         This workspace’s access is decided by your identity provider; this grant won’t follow
-                        their groups, and People with access marks it as an exception.
+                        their groups, ends within 90 days, and People with access marks it as an exception.
                     </span>
                 </label>
             )}
@@ -1349,7 +1380,7 @@ function AddMemberModal({
                         if (!selected) return
                         void onSubmit(
                             subjectType, selected.id, role, selected.label,
-                            expiresIn || null, reason.take(), needsException && exception,
+                            duration || null, reason.take(), exceptionAllowed && exception,
                         )
                     }}
                     disabled={!valid || conflict || submitting}

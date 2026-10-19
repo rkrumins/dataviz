@@ -302,10 +302,12 @@ a view are in [Who can see a View](/guide/managing-views#who-can-see-a-view).
    | The workspace | Your choices |
    | --- | --- |
    | **Approved in the app** | **Grant a role** — what they asked for, or another level you may grant, with no end date or for **7**, **30** or **90 days**. Or **Add to a team** — a team bound here whose every role you could grant, so they get what their colleagues have. |
-   | **Through your identity provider** | **Point to a group** — the identity-provider group that grants it; the request waits and closes itself when their access arrives. Or **Grant an exception** — access here that doesn't follow their groups, for 30 days unless you choose otherwise. |
+   | **Through your identity provider** | **Point to a group** — the identity-provider group that grants it; the request waits and closes itself when their access arrives. Or, for admins only, **Grant an exception** — access here that doesn't follow their groups, for **7**, **30** or **90 days** (30 unless you choose otherwise); an exception always ends. |
 
 3. Add a note if you like — they see it — and click **Approve**, **Add to
-   team**, **Point to group** or **Grant exception**.
+   team**, **Point to group** or **Grant exception**. Before you do, read the
+   list of the workspace's data sources the dialog shows: any role reads all
+   of them, restricted ones included.
 
 **You should now see** the request leave the open list. **All** shows every
 request with how it was answered.
@@ -313,7 +315,8 @@ request with how it was answered.
 A request **to keep access** reads "asks to keep **Member** — ends …". Click
 **Review**, choose how much longer — **30 days** unless you pick **7 days**,
 **90 days** or **No end date** — and click **Let them keep it**. The level stays
-what it is; within what you may grant.
+what it is; within what you may grant. Keeping an **exception** going is for
+admins only: it stays an exception, and **No end date** isn't offered.
 
 To decline, click **Deny** on the request, write a reason (the requester sees
 it), and click **Decline**.

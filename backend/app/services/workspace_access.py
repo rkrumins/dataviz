@@ -14,7 +14,9 @@ the identity provider grants it:
   granting everything that group carries, everywhere it is bound — so a team
   qualifies only if every one of its bindings is one the approver could make.
 * **The identity provider.** A workspace whose access its IdP decides is
-  reached through the IdP groups its mappings route into it.
+  reached through the IdP groups its mappings route into it. Only its admins
+  let someone in around the IdP — an exception — and never for good: every
+  exception ends within :data:`EXCEPTION_MAX` (:func:`exception_refusal`).
 * **Provenance.** Every grant says how it came about: added directly, an
   approved request, an exception, joining an open workspace, the identity
   provider's groups, a team, or an organization-wide role
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy import and_, or_, select
@@ -65,6 +67,8 @@ STEWARD_GRANTABLE_ROLES = frozenset({"workspace_viewer", "workspace_member"})
 ORG_WIDE_PERMISSIONS = ("system:admin", "system:org-admin", "system:org-viewer")
 #: The order requestable roles are offered in; custom roles follow by name.
 _ROLE_ORDER = ("workspace_viewer", "workspace_member", "workspace_data_engineer")
+#: The longest an exception runs before someone decides on it again.
+EXCEPTION_MAX = timedelta(days=90)
 
 
 def _now() -> datetime:
@@ -102,6 +106,32 @@ def can_grant(claims: PermissionClaims, ws_id: str, role_name: str, perms: Itera
     if level == "steward":
         return role_name in STEWARD_GRANTABLE_ROLES
     return False
+
+
+def exception_refusal(
+    claims: PermissionClaims, ws_id: str, expires_at: Optional[str],
+) -> Optional[tuple[int, str]]:
+    """Why the caller can't grant, or extend, an exception ending at
+    ``expires_at`` — ``(status, message)`` — or ``None`` when they can.
+    Stepping around the identity provider is the workspace admins' call,
+    and it always ends: within :data:`EXCEPTION_MAX`."""
+    if tier(claims, ws_id) != "admin":
+        return 403, (
+            "Only the workspace's admins can let someone in as an exception. "
+            "Point them to the identity provider's group instead."
+        )
+    if not expires_at:
+        return 422, "An exception needs an end date: 90 days at most"
+    try:
+        ends = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 422, "An exception needs an end date: 90 days at most"
+    if ends.tzinfo is None:
+        ends = ends.replace(tzinfo=timezone.utc)
+    # A minute's grace: "90d" is turned into a date before this runs.
+    if ends - _now() > EXCEPTION_MAX + timedelta(minutes=1):
+        return 422, "An exception can last 90 days at most"
+    return None
 
 
 def ceiling_refusal(claims: PermissionClaims, ws_id: str, role_name: str) -> str:

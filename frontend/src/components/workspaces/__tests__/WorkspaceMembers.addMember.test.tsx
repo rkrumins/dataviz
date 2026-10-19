@@ -119,4 +119,26 @@ describe('Add member — the user picker', () => {
         expect(screen.getByText(/already holds the Workspace member role here/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Add to workspace' })).toBeDisabled()
     })
+
+    it('adds an exception only with an end, and says what the grant reads', async () => {
+        const u = userEvent.setup()
+        vi.mocked(workspaceMembersService.grantOptions).mockResolvedValue({
+            tier: 'admin', accessMode: 'idp', groups: [], idpRoutes: [],
+            roles: [{ name: 'workspace_viewer', description: null, isSystem: true }],
+            dataSources: [{ id: 'ds_hr', label: 'HR warehouse', restricted: true }],
+        })
+        vi.mocked(workspaceMembersService.create).mockResolvedValue({} as never)
+        render(<WorkspaceMembers workspaceId="ws_1" />)
+        await u.click(await screen.findByRole('button', { name: 'Add member' }))
+        await u.click(await screen.findByRole('button', { name: /Person 7\b/ }))
+
+        expect(screen.getByRole('note')).toHaveTextContent('Any role here reads this workspace’s data source, which is restricted: HR warehouse.')
+        expect(screen.queryByRole('button', { name: 'Permanent' })).not.toBeInTheDocument()
+        expect(screen.getByText('An exception always ends: this one after 30d.')).toBeInTheDocument()
+        await u.click(screen.getByRole('checkbox', { name: /Add them here as an exception/ }))
+        await u.click(screen.getByRole('button', { name: 'Add to workspace' }))
+        await waitFor(() => expect(workspaceMembersService.create).toHaveBeenCalledWith(
+            'ws_1', expect.objectContaining({ subjectId: 'usr_7', expiresIn: '30d', exception: true }), expect.anything(),
+        ))
+    })
 })

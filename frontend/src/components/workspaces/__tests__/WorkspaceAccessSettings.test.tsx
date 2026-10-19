@@ -68,4 +68,23 @@ describe('WorkspaceAccessSettings', () => {
             directoryListed: true, accessMode: 'idp', requestPolicy: 'closed', accessNote: '',
         }))
     })
+
+    it('says what opening it to everyone opens', async () => {
+        const user = userEvent.setup()
+        get.mockResolvedValue({
+            id: 'ws_fin', directoryListed: false, accessMode: 'app', requestPolicy: 'approval', accessNote: null,
+            dataSources: [
+                { id: 'ds_hr', label: 'HR warehouse', isRestricted: true },
+                { id: 'ds_led', label: 'Ledger', isRestricted: false },
+            ],
+        })
+        renderCard()
+        await user.click(await screen.findByRole('radio', { name: /Open to everyone/ }))
+        const note = screen.getByRole('note')
+        expect(note).toHaveTextContent('Anyone who joins reads every data source here — the restricted one included: HR warehouse.')
+        expect(note).toHaveTextContent('It’s hidden from Find a workspace, but anyone with a link to it can still join.')
+        // Saving is not refused: it's said, then the admin decides.
+        await user.click(screen.getByRole('button', { name: 'Save' }))
+        await waitFor(() => expect(update).toHaveBeenCalledWith('ws_fin', expect.objectContaining({ requestPolicy: 'open' })))
+    })
 })

@@ -473,6 +473,8 @@ async def test_granting_in_the_app_is_an_exception_said_out_loud(world, db_sessi
             refused = await world.post(f"{ADMIN_URL}/{req['id']}/approve", json=body)
             assert refused.status_code == 409, body
             assert refused.json()["detail"]["type"] == "idp_managed"
+    # Exceptions are the admins' (see test_workspace_access_hardening).
+    async with acting_as(db_session, "wanda"):
         res = await world.post(f"{ADMIN_URL}/{req['id']}/approve", json={"exception": True, "expiresIn": "30d"})
     assert (res.status_code, res.json()["idpException"]) == (200, True)
     [binding] = await _ana_bindings(db_session)
@@ -591,7 +593,7 @@ async def test_adding_a_person_where_the_identity_provider_decides_is_an_excepti
     async with acting_as(db_session, "wanda"):
         refused = await world.post(url, json=person)
         assert (refused.status_code, refused.json()["detail"]["type"]) == (409, "idp_managed")
-        assert (await world.post(url, json={**person, "exception": True})).status_code == 201
+        assert (await world.post(url, json={**person, "exception": True, "expiresIn": "30d"})).status_code == 201
         # A group is bound as ever.
         assert (await world.post(
             url, json={"subjectType": "group", "subjectId": "grp_x", "role": "workspace_viewer"},
@@ -671,10 +673,16 @@ async def test_people_with_access_say_how_each_grant_came_about(world, db_sessio
     # Ana: an approved request; Eve: an exception.
     req = (await _submit(world, db_session)).json()
     async with acting_as(db_session, "wanda"):
-        assert (await world.post(f"{ADMIN_URL}/{req['id']}/approve", json={"exception": True})).status_code == 200
+        approved = await world.post(
+            f"{ADMIN_URL}/{req['id']}/approve", json={"exception": True, "expiresIn": "30d"},
+        )
+        assert approved.status_code == 200, approved.text
         added = await world.post(
             f"/api/v1/admin/workspaces/{WS}/members",
-            json={"subjectType": "user", "subjectId": "usr_eve", "role": "workspace_viewer", "exception": True},
+            json={
+                "subjectType": "user", "subjectId": "usr_eve", "role": "workspace_viewer",
+                "exception": True, "expiresIn": "30d",
+            },
         )
         assert added.status_code == 201, added.text
     (await db_session.get(WorkspaceORM, WS)).access_mode = "app"

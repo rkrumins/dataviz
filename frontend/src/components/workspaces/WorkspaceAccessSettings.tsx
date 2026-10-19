@@ -10,12 +10,14 @@
  *   the group that grants it, and anything granted here is an exception.
  * - **How people ask.** Approvers decide; open to everyone (anyone joins as
  *   a Viewer at once — not where the identity provider decides); or closed
- *   to requests, so admins add people themselves.
+ *   to requests, so admins add people themselves. Opening it says what that
+ *   opens: a Viewer reads every data source here, restricted ones included,
+ *   and a hidden workspace can still be joined by anyone with a link.
  * - **A note for people asking.** "Say which team you're on."
  */
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { DoorOpen, KeyRound, Loader2, Lock, ShieldCheck, SlidersHorizontal } from 'lucide-react'
+import { AlertTriangle, DoorOpen, KeyRound, Loader2, Lock, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -93,6 +95,7 @@ export function WorkspaceAccessSettings({ workspaceId }: { workspaceId: string }
     const dirty = !!ws && (
         listed !== savedListed || mode !== savedMode || policy !== savedPolicy || note.trim() !== savedNote
     )
+    const restricted = (ws?.dataSources ?? []).filter(d => d.isRestricted)
 
     const save = async () => {
         setSaving(true)
@@ -197,6 +200,25 @@ export function WorkspaceAccessSettings({ workspaceId }: { workspaceId: string }
                         )
                     })}
                 </div>
+                {policy === 'open' && (restricted.length > 0 || !listed) && (
+                    <div role="note" className="mt-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                        <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
+                        <div className="space-y-1">
+                            {restricted.length > 0 && (
+                                <span className="block">
+                                    Anyone who joins reads every data source here — the restricted
+                                    {restricted.length === 1 ? ' one' : ' ones'} included:{' '}
+                                    <span className="font-semibold">{restricted.map(d => d.label || d.id).join(', ')}</span>.
+                                </span>
+                            )}
+                            {!listed && (
+                                <span className="block">
+                                    It’s hidden from Find a workspace, but anyone with a link to it can still join.
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
             </fieldset>
 
             <label className="block">

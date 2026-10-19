@@ -161,6 +161,9 @@ class WorkspaceMemberResponse(BaseModel):
     # ISO-8601 UTC for an expiry. The FE renders a countdown badge.
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     subject: WorkspaceMemberSubject
+    # Granted around the identity provider: its end is moved only when
+    # confirmed as an exception again, and never cleared.
+    idp_exception: bool = Field(default=False, alias="idpException")
 
 
 class AccessProvenance(BaseModel):
@@ -295,11 +298,14 @@ class WorkspaceMemberExpiryUpdateRequest(BaseModel):
 
     ``expires_at=null`` or ``expires_in=null`` (both omitted) clears
     the expiry → the binding becomes permanent. Used to extend a
-    contractor's access without re-creating the binding.
+    contractor's access without re-creating the binding. ``exception``
+    confirms that a grant made as an exception to the identity provider
+    stays one — it then needs an end.
     """
     model_config = ConfigDict(populate_by_name=True)
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+    exception: bool = False
 
     @model_validator(mode="after")
     def _normalise_expiry(self) -> "WorkspaceMemberExpiryUpdateRequest":
@@ -709,16 +715,27 @@ class WorkspaceIdpRoute(BaseModel):
     via_group_name: Optional[str] = Field(default=None, alias="viaGroupName")
 
 
+class WorkspaceGrantSource(BaseModel):
+    """A data source in the workspace — every role here reads it."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    label: Optional[str] = None
+    restricted: bool = False
+
+
 class WorkspaceGrantOptions(BaseModel):
     """What the caller may hand out in this workspace: ``tier`` is
     ``'admin'`` or ``'steward'``; roles, teams and IdP routes are already
-    narrowed to what they could grant themselves."""
+    narrowed to what they could grant themselves. ``dataSources`` is what
+    any of them reaches: there are no per-source grants inside a
+    workspace."""
     model_config = ConfigDict(populate_by_name=True)
     tier: str
     access_mode: str = Field(alias="accessMode")
     roles: list[RequestableRole] = Field(default_factory=list)
     groups: list[WorkspaceGrantGroup] = Field(default_factory=list)
     idp_routes: list[WorkspaceIdpRoute] = Field(default_factory=list, alias="idpRoutes")
+    data_sources: list[WorkspaceGrantSource] = Field(default_factory=list, alias="dataSources")
 
 
 class WorkspaceDirectoryRequest(BaseModel):

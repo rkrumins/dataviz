@@ -2,8 +2,9 @@
  * Answering a request offers the decisions the workspace's way of letting
  * people in allows: a role (within what the approver may grant, with an end
  * date) or a team where it is decided here; a group to join, or an exception
- * said out loud, where the identity provider decides. A request to keep
- * access is answered with how much longer.
+ * said out loud, where the identity provider decides — the admins' alone,
+ * and always ending. A request to keep access is answered with how much
+ * longer. Whatever is granted, the dialog names the data sources it reads.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -137,16 +138,59 @@ describe('ApproveRequestDialog — the identity provider decides', () => {
         await waitFor(() => expect(requests.route).toHaveBeenCalledWith('ar_1', { idpGroup: 'finance-analysts', note: null }))
     })
 
-    it('grants an exception for 30 days unless told otherwise, said out loud', async () => {
+    it('grants an exception for 30 days unless told otherwise, said out loud, and always ending', async () => {
         const user = userEvent.setup()
         members.grantOptions.mockResolvedValue(options({ accessMode: 'idp' }))
         renderDialog(idpRequest)
         await user.click(await screen.findByRole('radio', { name: /Grant an exception/ }))
         expect(screen.getByText(/outside your identity provider/)).toBeInTheDocument()
         expect(screen.getByRole('radio', { name: '30 days' })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.queryByRole('radio', { name: 'No end date' })).not.toBeInTheDocument()
         await user.click(screen.getByRole('button', { name: 'Grant exception' }))
         await waitFor(() => expect(requests.approve).toHaveBeenCalledWith('ar_1', {
             role: 'workspace_member', expiresIn: '30d', exception: true, note: null,
         }))
+    })
+
+    it('leaves exceptions to the admins: a steward points to a group', async () => {
+        members.grantOptions.mockResolvedValue(options({ accessMode: 'idp', tier: 'steward' }))
+        renderDialog(idpRequest)
+        expect(await screen.findByText(/only the workspace’s admins can grant an exception/)).toBeInTheDocument()
+        expect(screen.queryByRole('radio', { name: /Grant an exception/ })).not.toBeInTheDocument()
+    })
+
+    it('keeps an exception going only as an exception, with an end — and only for an admin', async () => {
+        const user = userEvent.setup()
+        const keep = { ...idpRequest, bindingId: 'bnd_1', idpException: true, currentExpiresAt: '2026-10-25T00:00:00Z' }
+        members.grantOptions.mockResolvedValue(options({ accessMode: 'idp' }))
+        renderDialog(keep)
+        expect(await screen.findByText(/Keeping it keeps it as one/)).toBeInTheDocument()
+        expect(screen.queryByRole('radio', { name: 'No end date' })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Let them keep it' }))
+        await waitFor(() => expect(requests.approve).toHaveBeenCalledWith('ar_1', {
+            expiresIn: '30d', note: null, exception: true,
+        }))
+    })
+
+    it('tells a steward that keeping an exception is the admins’ call', async () => {
+        const keep = { ...idpRequest, bindingId: 'bnd_1', idpException: true }
+        members.grantOptions.mockResolvedValue(options({ accessMode: 'idp', tier: 'steward' }))
+        renderDialog(keep)
+        expect(await screen.findByRole('alert')).toHaveTextContent(/Only the workspace’s admins can keep an exception going/)
+        expect(screen.getByRole('button', { name: 'Let them keep it' })).toBeDisabled()
+    })
+})
+
+describe('ApproveRequestDialog — what a grant opens', () => {
+    it('names every data source the role reads, restricted ones first', async () => {
+        members.grantOptions.mockResolvedValue(options({
+            dataSources: [
+                { id: 'ds_led', label: 'Ledger', restricted: false },
+                { id: 'ds_hr', label: 'HR warehouse', restricted: true },
+            ],
+        }))
+        renderDialog()
+        const note = await screen.findByRole('note')
+        expect(note).toHaveTextContent('Any role here reads all 2 data sources in this workspace, restricted ones included: HR warehouse, Ledger.')
     })
 })

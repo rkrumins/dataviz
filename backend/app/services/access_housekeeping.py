@@ -166,6 +166,13 @@ async def nudge_waiting_requests(
         return 0, 0
     workspaces = await _live_workspaces(session, {r.target_id for r in rows})
     names = await user_repo.get_identities_by_ids(session, sorted({r.requester_id for r in rows}))
+    # Keeping an exception going is the admins' call alone.
+    binding_ids = sorted({r.binding_id for r in rows if r.binding_id})
+    exceptions = set((await session.execute(
+        select(RoleBindingORM.id).where(
+            RoleBindingORM.id.in_(binding_ids), RoleBindingORM.idp_exception.is_(True),
+        )
+    )).scalars().all()) if binding_ids else set()
     org_admins: Optional[set[str]] = None
     reminded = escalated = 0
     for row in rows:
@@ -181,7 +188,8 @@ async def nudge_waiting_requests(
         if row.reminded_at is None:
             row.reminded_at = now.isoformat()
             approvers = await notification_repo.users_who_can(
-                session, workspace_id=ws.id, permission="workspace:members:add",
+                session, workspace_id=ws.id,
+                permission="workspace:admin" if row.binding_id in exceptions else "workspace:members:add",
             )
             if not approvers:
                 if org_admins is None:

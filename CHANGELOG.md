@@ -55,6 +55,22 @@ they're in one.
   hear about it, and a request to keep it closes as approved.
 - `GET /access-requests/requestable-roles` returns `{roles, requestPolicy, joinRole}` instead of a
   bare list.
+- **Exceptions are the admins', and they always end.** Only a workspace's admins let someone in
+  around its identity provider — stewards point people to the group — and an exception needs an
+  end date, 90 days away at most. Keeping one going, from a request to keep it or with **Change**,
+  confirms it as an exception again with a new end; those requests, and their reminders, go to the
+  admins only.
+- **Letting someone in says what it opens.** Answering a request and **Add member** list the
+  workspace's data sources, restricted ones first: any role reads all of them. Choosing **Open to
+  everyone** says the same — a joiner reads restricted sources too — and, for a workspace hidden
+  from Find a workspace, that anyone with a link can still join. These warn; the admin decides.
+
+### Security
+
+- **Only a workspace's admins change whether a data source is restricted.** The mark is what
+  stops members publishing views over a source to everyone, but any member who could edit the
+  source could clear it, then publish. Changing it now needs `workspace:admin` (403 otherwise);
+  everything else about a source is still a member's to edit.
 
 ### Fixed
 
@@ -73,6 +89,8 @@ they're in one.
   than three days — or a week — are brought up on it too.
 - Downgrading drops the access reviews and every workspace's request policy; requests to keep
   access become ordinary requests for the same role.
+- Exceptions granted before this release keep the end they had, or none: find any without one
+  with an access review, or give it one with **Change**.
 
 ### Known limitations
 

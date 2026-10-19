@@ -226,7 +226,10 @@ async def _to_responses(
             ),
             idp_group=r.idp_group,
             idp_provider=providers.get(r.idp_group) if r.idp_group else None,
-            idp_exception=bool(r.idp_exception),
+            # A request to keep an exception is about one, answered or not.
+            idp_exception=bool(r.idp_exception or (
+                r.binding_id in bindings and bindings[r.binding_id].idp_exception
+            )),
             access_expires_at=r.access_expires_at,
             fulfilled_at=r.fulfilled_at,
             binding_id=r.binding_id,
@@ -523,7 +526,13 @@ async def ask_to_keep_access(
             "binding_id": binding.id,
         },
     )
-    _people, approvers = (await workspace_access.audience(session, [ws.id]))[ws.id]
+    if binding.idp_exception:
+        # Only admins keep an exception going.
+        approvers = await notification_repo.users_who_can(
+            session, workspace_id=ws.id, permission="workspace:admin",
+        )
+    else:
+        _people, approvers = (await workspace_access.audience(session, [ws.id]))[ws.id]
     recipients = approvers or await notification_repo.users_with_global_permission(
         session, "system:org-admin",
     )
@@ -811,6 +820,10 @@ async def approve_access_request(
                 "Its identity provider decides who is in this workspace. Point the request to "
                 "the provider's group, or confirm granting the role here as an exception."
             )
+        if idp_mode:
+            refusal = workspace_access.exception_refusal(claims, ws.id, body.expires_at)
+            if refusal:
+                raise HTTPException(status_code=refusal[0], detail=refusal[1])
         binding, outcome = await workspace_access.grant_role(
             session,
             subject_type="user",
@@ -910,7 +923,8 @@ async def _approve_extension(
 ) -> AccessRequestResponse:
     """Approve a request to keep access: the grant gets the end chosen
     (``expiresIn`` / ``expiresAt``; neither means no end), within what the
-    answerer could grant. An exception stays one."""
+    answerer could grant. An exception stays one — so keeping it is the
+    admins' decision, confirmed as an exception again, with a new end."""
     binding = await binding_repo.get_binding(session, row.binding_id)
     if binding is None or binding.scope_id != ws.id or binding.subject_id != row.requester_id:
         raise HTTPException(
@@ -918,6 +932,15 @@ async def _approve_extension(
             detail="That access has been removed; they can ask to join again",
         )
     await _grantable_role(session, claims, ws.id, binding.role_name)
+    if binding.idp_exception:
+        if not body.exception:
+            raise _idp_managed(
+                "This access is an exception to the identity provider. Confirm keeping it as "
+                "an exception, or point them to the provider's group."
+            )
+        refusal = workspace_access.exception_refusal(claims, ws.id, body.expires_at)
+        if refusal:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
     lapsed = _is_expired(binding.expires_at, now=datetime.now(timezone.utc))
     binding.expires_at = body.expires_at
     binding.expiry_reminded_at = None
