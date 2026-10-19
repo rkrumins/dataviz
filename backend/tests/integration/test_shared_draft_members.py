@@ -9,7 +9,10 @@ so an editor is refused those, a queued publish at request time. Frank is a main
 
 Groups are looked up by the service itself, only when a group row could decide the answer. When
 that lookup fails the answer is 503 ``groups_unavailable``, never a refusal, while the owner and a
-direct member write on without it.
+direct member write on without it. A member only through a group finds the draft in the branch list.
+
+An edit staged by someone who may no longer write the draft (removed, un-shared, out of the group)
+is withdrawn at the owner's next checkpoint: never committed, never published.
 
 Only the owner changes who a draft is shared with, and every change starts from no members: making
 it private removes them, and member rows left on a private draft grant nothing, not even after it is
@@ -296,6 +299,63 @@ async def _groups_unavailable(c, V, ds, gid, shared_draft, groups) -> None:
     assert groups.calls == [], groups.calls
 
 
+async def _listed_through_a_group(c, V, ds, gid, shared_draft, groups) -> None:
+    L = f"/api/v1/ws1/versioning/graphs/{gid}/branches"
+
+    async def listed(who):
+        r = await c.get(L, headers=_as(who, manage=False))
+        assert r.status_code == 200, r.text
+        return {b["branchId"]: b["myRole"] for b in r.json()}
+
+    # No shared draft of the graph has a group row: nobody's groups are looked up.
+    plain = await shared_draft(bob="editor")
+    groups.calls[:] = []
+    assert plain not in await listed("erin")
+    assert groups.calls == [], groups.calls
+
+    # Erin reads it through grp_eng, so her list holds it, her groups looked up once.
+    d = await shared_draft(grp_eng="viewer")
+    assert (await listed("erin")).get(d) == "viewer"
+    assert groups.calls == ["erin"], groups.calls
+    assert d not in await listed("carol")
+    # When groups can't be read, the list keeps her own rows: narrower, not a 503.
+    groups.down = True
+    assert d not in await listed("erin")
+
+
+async def _revoked_staging_is_withdrawn(c, V, ds, gid, shared_draft, monkeypatch) -> None:
+    V1 = "/api/v1/ws1/versioning"
+    d = await shared_draft(bob="editor", grp_eng="editor")
+    B = f"{V1}/graphs/{gid}/branches/{d}"
+    for who in ("bob", "erin", "alice"):
+        r = await c.post(f"{B}/changes", json=_stage(who), headers=_as(who))
+        assert r.status_code == 200, r.text
+    # Bob is removed and Erin leaves grp_eng before either commits: what they staged is not Alice's to save.
+    r = await c.delete(f"{B}/members/user/bob", headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    monkeypatch.setitem(_GROUPS, "erin", ())
+    r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))
+    assert r.status_code == 200 and r.json()["stagedChanges"] is True, r.text
+    st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
+    assert "urn:t:alice" in st and not {"urn:t:bob", "urn:t:erin"} & set(st), st
+    r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))     # nothing of theirs is left staged
+    assert r.status_code == 200 and r.json()["stagedChanges"] is False, r.text
+
+    # Made private with Bob's edit staged: Alice's publish leaves it out of main.
+    p = await shared_draft(bob="editor")
+    P = f"{V1}/graphs/{gid}/branches/{p}"
+    r = await c.post(f"{P}/changes", json=_stage("bob"), headers=_as("bob"))
+    assert r.status_code == 200, r.text
+    r = await c.patch(P, json={"isShared": False}, headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    r = await c.post(f"{P}/publish", json={"message": "m"}, headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    main = next(b["branchId"] for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()
+                if b["kind"] == "main")
+    st = (await c.get(f"{V1}/graphs/{gid}/branches/{main}/state", headers=_as("alice"))).json()["nodes"]
+    assert "urn:t:bob" not in st, st
+
+
 def _add(c, branch_url, who, subject, role, kind="user"):
     return c.post(f"{branch_url}/members", json={"subjectType": kind, "subjectId": subject, "role": role},
                   headers=_as(who))
@@ -412,6 +472,18 @@ def test_group_maintainer(data_sources, monkeypatch):
 def test_groups_unavailable(data_sources, monkeypatch):
     groups = _groups(monkeypatch)
     asyncio.run(_scenario(lambda *a: _groups_unavailable(*a, groups)))
+
+
+@_E2E
+def test_listed_through_a_group(data_sources, monkeypatch):
+    groups = _groups(monkeypatch)
+    asyncio.run(_scenario(lambda *a: _listed_through_a_group(*a, groups)))
+
+
+@_E2E
+def test_revoked_staging_is_withdrawn(data_sources, monkeypatch):
+    _groups(monkeypatch)
+    asyncio.run(_scenario(lambda *a: _revoked_staging_is_withdrawn(*a, monkeypatch)))
 
 
 @_E2E

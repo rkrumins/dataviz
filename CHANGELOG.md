@@ -21,12 +21,12 @@ their draft is unchanged. The canvas offers to copy the refused edits to a new d
 
 **A shared draft is written by its members, and only its owner shares or un-shares it.** Its
 editors write it, its maintainers also publish, abandon and manage its members, and a member through a
-group now counts over HTTP. Anyone else, workspace managers included, is refused with **403
+group now counts over HTTP, in the branch list too; a deleted group grants its ex-members nothing. Anyone else, workspace managers included, is refused with **403
 `access_denied`**, code `not_owner_or_member` and the `required` role, where before some routes
 answered 500. When a group decides and the groups can't be looked up, the answer is **503
 `groups_unavailable`** (retry), never a refusal. Making a draft private removes its members, and
-sharing it again starts from none; an edit a removed member left staged still folds with conflict
-detection, so it cannot silently overwrite the owner's later edit. Adding a member checks that they
+sharing it again starts from none; an edit someone left staged and may no longer make (removed, un-shared,
+out of the group) is withdrawn at the next checkpoint, so the owner never commits or publishes it. Adding a member checks that they
 exist and can work in the workspace (**422 `ineligible_member`**), and `GET …/members` now gives each
 member's `name` and your own `myRole`.
 

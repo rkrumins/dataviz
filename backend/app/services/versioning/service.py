@@ -429,14 +429,18 @@ class Viewer:
 
 
 async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
-    """The group ids *actor* belongs to, from the management DB (READONLY pool, so it never waits on
-    a second WEB-pool connection while the request holds one). A failed lookup is
+    """The live group ids *actor* belongs to, from the management DB (READONLY pool, so it never waits
+    on a second WEB-pool connection while the request holds one). A deleted group keeps its member
+    rows and the drafts' rows for it, so it is left out here. A failed lookup is
     :class:`GroupsUnavailable`, never "no groups": that would refuse a member."""
     from backend.app.db.engine import get_readonly_session
-    from backend.app.db.repositories import user_repo
+    from backend.app.db.models import GroupMemberORM, GroupORM
     try:
         async with get_readonly_session() as ms:
-            return tuple(await user_repo.get_groups_for_user(ms, actor))
+            return tuple((await ms.execute(
+                select(GroupMemberORM.group_id).join(GroupORM, GroupORM.id == GroupMemberORM.group_id)
+                .where(GroupMemberORM.user_id == actor, GroupORM.deleted_at.is_(None))
+            )).scalars().all())
     except Exception as exc:
         raise GroupsUnavailable() from exc
 
@@ -958,6 +962,19 @@ class GraphVersioningService:
                     .order_by(WorkingChangeORM.seq)
                 )
             ).scalars().all()
+            # Staged by someone who may no longer write the draft (removed, un-shared, out of the
+            # group): withdrawn, never folded into this commit, and so never published.
+            if branch.kind != "main":
+                barred = set()
+                for who in {c.actor for c in changes} - {actor}:
+                    try:
+                        await self._require_edit(s, branch, who, ())
+                    except AccessDenied:
+                        barred.add(who)
+                for c in changes:
+                    if c.actor in barred:
+                        await s.delete(c)
+                changes = [c for c in changes if c.actor not in barred]
             if not changes:
                 return None
 
@@ -970,8 +987,7 @@ class GraphVersioningService:
             # updates (not creates) and keeps hash continuity intact.
             composed = await self._composed_state(s, graph_id, branch_id)
             base_state = {eid: composed.get(eid) for eid in touched}
-            # Staged by someone else (a member, before an un-share): fold with OCC, never LWW.
-            if branch.is_shared or (branch.kind != "main" and any(c.actor != branch.owner for c in changes)):
+            if branch.is_shared:
                 # Resolve the value each edit was STAGED against (per base_content_hash, first
                 # occurrence per entity) so the fold's OCC ancestor is the editor's view, not the
                 # live head — catching a stale single-actor checkpoint, not just within-batch clashes.
@@ -5150,20 +5166,6 @@ class GraphVersioningService:
             stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
         if "all" not in status:
             stmt = stmt.where(BranchORM.status.in_(status))
-        if viewer is not None and not viewer.can_manage:
-            actor = viewer.actor
-            stmt = stmt.where(or_(
-                BranchORM.kind == "main",
-                BranchORM.owner == actor,
-                and_(BranchORM.is_shared, BranchORM.id.in_(
-                    select(BranchMemberORM.branch_id).where(BranchMemberORM.subject_type == "user",
-                                                            BranchMemberORM.subject_id == actor))),
-                BranchORM.id.in_(
-                    select(MergeRequestORM.source_branch_id).where(
-                        MergeRequestORM.graph_id == graph_id,
-                        or_(MergeRequestORM.actor == actor,
-                            MergeRequestORM.reviewers.contains([actor])))),
-            ))
         if cursor is not None:
             after_rank, after_at, after_id = cursor.split("|", 2)
             stmt = stmt.where(or_(
@@ -5171,12 +5173,40 @@ class GraphVersioningService:
                 and_(rank == int(after_rank),
                      tuple_(BranchORM.created_at, BranchORM.id) < tuple_(after_at, after_id))))
         async with self._session() as s:
+            groups = None
+            if viewer is not None and not viewer.can_manage:
+                actor = viewer.actor
+                member = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == actor)
+                # A member through a group reads the draft too. Their groups are looked up once, and
+                # only when a shared draft of the graph has a group row; a failed lookup keeps their
+                # own rows, as in _my_roles.
+                if await s.scalar(select(BranchMemberORM.branch_id).join(
+                        BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
+                        BranchORM.graph_id == graph_id, BranchORM.is_shared,
+                        BranchMemberORM.subject_type == "group").limit(1)):
+                    try:
+                        groups = set(await _load_actor_groups(actor))
+                    except GroupsUnavailable:
+                        groups = set()
+                if groups:
+                    member = or_(member, and_(BranchMemberORM.subject_type == "group",
+                                              BranchMemberORM.subject_id.in_(groups)))
+                stmt = stmt.where(or_(
+                    BranchORM.kind == "main",
+                    BranchORM.owner == actor,
+                    and_(BranchORM.is_shared, BranchORM.id.in_(select(BranchMemberORM.branch_id).where(member))),
+                    BranchORM.id.in_(
+                        select(MergeRequestORM.source_branch_id).where(
+                            MergeRequestORM.graph_id == graph_id,
+                            or_(MergeRequestORM.actor == actor,
+                                MergeRequestORM.reviewers.contains([actor])))),
+                ))
             rows = (await s.execute(
                 stmt.order_by(rank, BranchORM.created_at.desc(), BranchORM.id.desc()).limit(limit + 1)
             )).scalars().all()
             out = [self._branch_meta(b) for b in rows[:limit]]
             if viewer is not None:
-                roles = await self._my_roles(s, rows[:limit], viewer.actor)
+                roles = await self._my_roles(s, rows[:limit], viewer.actor, groups)
                 for m in out:
                     m["my_role"] = roles.get(m["branch_id"])
         nxt = None
@@ -5186,18 +5216,18 @@ class GraphVersioningService:
         return out, nxt
 
     @staticmethod
-    async def _my_roles(s, branches: Sequence[BranchORM], actor: str) -> Dict[str, str]:
+    async def _my_roles(s, branches: Sequence[BranchORM], actor: str,
+                        groups: Optional[set] = None) -> Dict[str, str]:
         """*actor*'s role on each of *branches* that gives one — :meth:`_branch_role` for a page,
-        in one query for the shared drafts' member rows. The actor's groups are looked up once,
-        and only when a group row could raise a role; when that lookup fails a row keeps its
-        user role, so a groups outage never takes the whole list down."""
+        in one query for the shared drafts' member rows. The actor's groups are ``groups`` when
+        already loaded, else looked up once, and only when a group row could raise a role; when that
+        lookup fails a row keeps its user role, so a groups outage never takes the whole list down."""
         roles = {b.id: "owner" for b in branches if b.kind != "main" and b.owner == actor}
         shared = [b.id for b in branches if b.is_shared and b.id not in roles]
         if not shared:
             return roles
         rows = (await s.execute(select(BranchMemberORM).where(
             BranchMemberORM.branch_id.in_(shared)))).scalars().all()
-        groups = None
         for bid in shared:
             mine = [r for r in rows if r.branch_id == bid]
             best = max((r.role for r in mine if r.subject_type == "user" and r.subject_id == actor),

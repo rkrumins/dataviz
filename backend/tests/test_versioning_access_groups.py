@@ -4,7 +4,8 @@
 and only when a group row could decide the answer: the owner, a private draft and a direct member
 whose own row already meets the role asked for never touch the management DB. A lookup that fails
 is ``GroupsUnavailable`` (503), never "no groups", so an outage can't read as a refusal. Rows left
-on a private draft grant nothing. The draft's member rows and the group lookup are faked here.
+on a private draft grant nothing, and so does a deleted group. The draft's member rows and the group
+lookup are faked here, except where a deleted group is looked up.
 """
 from types import SimpleNamespace
 
@@ -123,3 +124,29 @@ async def test_the_lookup_raises_groups_unavailable_when_the_management_db_is_do
     monkeypatch.setattr(engine, "get_readonly_session", down)
     with pytest.raises(GroupsUnavailable):
         await service._load_actor_groups("erin")
+
+
+async def test_a_deleted_group_grants_its_ex_members_nothing(db_session, monkeypatch):
+    """Deleting a group keeps its member rows and the draft's row for it, so the lookup leaves it out."""
+    from contextlib import asynccontextmanager
+    from backend.app.db import engine
+    from backend.app.db.models import GroupMemberORM, UserORM
+    from backend.app.db.repositories import group_repo
+
+    db_session.add(UserORM(id="erin", email="erin@example.com", password_hash="x",
+                           first_name="Erin", last_name="E", status="active"))
+    live = await group_repo.create_group(db_session, name="Eng")
+    gone = await group_repo.create_group(db_session, name="Contractors")
+    db_session.add_all([GroupMemberORM(group_id=g.id, user_id="erin") for g in (live, gone)])
+    await group_repo.soft_delete_group(db_session, gone.id)
+    await db_session.commit()
+
+    @asynccontextmanager
+    async def readonly():
+        yield db_session
+    monkeypatch.setattr(engine, "get_readonly_session", readonly)
+    assert await service._load_actor_groups("erin") == (live.id,)
+    s = _Session([_row("group", gone.id, "maintainer")])
+    assert await _SVC._branch_role(s, _draft(), "erin", need="viewer") is None
+    with pytest.raises(DraftRoleRequired):
+        await _SVC._require_manage(s, _draft(), "erin", ())
