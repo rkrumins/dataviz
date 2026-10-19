@@ -15,16 +15,20 @@ can be put back:
   a separate database, so if the rest fails the graph is put back (:func:`_execute`);
 * the aggregation state, so drift and reconciliation invalidate the right caches.
 
-Access. Owners, and the people and teams a view is shared with, keep it wherever it lives.
-Views shared with the whole workspace switch audience to the new workspace's members; the mover
-chooses which of the people and teams losing them keep view-only access to exactly those views
-— a grant, never a membership, so nothing else in the new workspace opens to them.
+Access. Owners, and the people and groups a view is shared with, keep it wherever it lives, and
+published views stay published. Views shared with the whole workspace switch audience to the new
+workspace: its own membership — people, groups, identity-provider mappings — decides who reads
+them. Nothing is copied to stretch the old workspace's audience across: a per-person copy would
+grow with people × views, and would outlive an identity provider removing someone. Instead the
+move says who loses access, before (the preview lists them, and a move that takes anyone's
+access needs the preview's token) and after (they are told how to ask to join; both sides'
+admins are told who), and records it.
 
 Two ways to move. Someone who administers both workspaces moves it directly. Someone who
 administers only the source asks, and the destination's admins accept (which runs the same
-move) or decline. The proposer decides who keeps access; the reviewer sees a fresh preview and
-what changed since the ask. A move can be undone for :data:`UNDO_DAYS` while it is the source's
-latest and nothing new has been built on it in its new home.
+move) or decline, reading a fresh preview and what changed since the ask. A move can be undone
+for :data:`UNDO_DAYS` while it is the source's latest and nothing new has been built on it in its
+new home.
 
 Every read is :func:`preflight`, shared by the preview and the move itself, so what a person
 confirmed is what happens — and the preview's ``token`` refuses a move whose picture changed
@@ -43,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +60,7 @@ from backend.app.db.models import (
     DataSourceTransferORM,
     GroupMemberORM,
     GroupORM,
+    IdpGroupRoleMappingORM,
     ProviderORM,
     ResourceGrantORM,
     RoleBindingORM,
@@ -94,11 +99,11 @@ from backend.common.models.management import (
     TransferDestination,
     TransferIdentity,
     TransferIssue,
+    TransferLostAccess,
     TransferPersonRef,
     TransferPreview,
     TransferPrimary,
     TransferSubject,
-    TransferSubjectRef,
     TransferVersioning,
     TransferView,
     TransferViewCounts,
@@ -267,7 +272,7 @@ class _View:
 
 @dataclass
 class _Loser:
-    """A person or team who reads moved views today and would lose them."""
+    """A person or group who reads moved views today and would lose them."""
     type: str
     id: str
     role: str
@@ -275,6 +280,19 @@ class _Loser:
     name: str = ""
     email: Optional[str] = None
     member_count: Optional[int] = None
+    #: Where their access comes from: ``app`` (granted here), ``group``, or ``idp`` (an identity
+    #: provider decides: an SSO role mapping, or a group it fills) — which says how to restore it.
+    via: str = "app"
+
+    def recorded(self) -> dict:
+        """As the move records it: who lost access is audit history, names included."""
+        out = {"type": self.type, "id": self.id, "name": self.name, "role": self.role,
+               "views": len(self.views), "via": self.via}
+        if self.email:
+            out["email"] = self.email
+        if self.member_count is not None:
+            out["memberCount"] = self.member_count
+        return out
 
 
 @dataclass
@@ -297,6 +315,9 @@ class Preflight:
     facts: Optional[dict]
     token: str = ""
     reach_b: set = field(default_factory=set)
+    #: Everyone who stops reading moved views: people who lose them directly and the members of
+    #: groups that do, less anyone who reads views in the destination or across the organization.
+    affected: set = field(default_factory=set)
 
     @property
     def has_views(self) -> bool:
@@ -340,13 +361,15 @@ async def _org_wide_people(session: AsyncSession) -> set[str]:
 
 async def _access_plan(
     session: AsyncSession, source_id: str, target_id: str, live: list[_View],
-) -> tuple[dict[tuple[str, str], _Loser], dict, set[str]]:
-    """Who reads the moved views today and would not after: ``(losers, counts, reach_b)``.
+) -> tuple[dict[tuple[str, str], _Loser], dict, set[str], set[str]]:
+    """Who reads the moved views today and would not after: ``(losers, counts, reach_b,
+    affected)``.
 
     Only views shared with the whole workspace change audience. Private views stay with their
     owners and the people they're shared with, published ones with everyone; explicit grants
     are keyed by view and keep working wherever the view lives. ``reach_b`` is everyone who can
-    open the destination (directly, through a team, or by an organization-wide role).
+    open the destination (directly, through a group, or by an organization-wide role);
+    ``affected`` everyone who would stop reading moved views (see :class:`Preflight`).
     """
     shared_ws = [v for v in live if v.visibility == "workspace"]
     grants: dict[str, set[tuple[str, str]]] = {}
@@ -381,11 +404,16 @@ async def _access_plan(
     members: dict[str, set[str]] = {}
     user_groups: dict[str, set[str]] = {}
     group_names: dict[str, str] = {}
+    idp_filled: set[str] = set()
     if group_ids:
-        live_groups = {gid: name for gid, name in (await session.execute(
-            select(GroupORM.id, GroupORM.name)
+        live_groups: dict[str, str] = {}
+        for gid, name, source in (await session.execute(
+            select(GroupORM.id, GroupORM.name, GroupORM.source)
             .where(GroupORM.id.in_(sorted(group_ids)), GroupORM.deleted_at.is_(None))
-        )).all()}
+        )).all():
+            live_groups[gid] = name
+            if source == "scim":
+                idp_filled.add(gid)
         group_names.update(live_groups)
         if live_groups:
             for gid, uid in (await session.execute(
@@ -427,6 +455,23 @@ async def _access_plan(
             losers[key] = _Loser(type=b.subject_type, id=b.subject_id,
                                  role=workspace_access.role_label(b.role_name), views=lost)
 
+    # Where each loser's access comes from, which says how it can be restored: an identity
+    # provider fills a group through SCIM or a group mapping, and grants a person a role through
+    # an SSO role mapping (their binding is then ``source='sso'``).
+    lost_groups = sorted(i for t, i in losers if t == "group")
+    if lost_groups:
+        idp_filled |= set((await session.execute(
+            select(IdpGroupRoleMappingORM.target_group_id).where(
+                IdpGroupRoleMappingORM.target_type == "group_membership",
+                IdpGroupRoleMappingORM.target_group_id.in_(lost_groups),
+            ))).scalars().all())
+    for (t, i), loser in losers.items():
+        if t == "group":
+            loser.via = "idp" if i in idp_filled else "group"
+        else:
+            sources = {b.source for b in in_a if b.subject_type == "user" and b.subject_id == i}
+            loser.via = "idp" if sources == {"sso"} else "app"
+
     # Names, in one query per kind.
     user_ids = sorted(i for t, i in losers if t == "user")
     if user_ids:
@@ -439,7 +484,7 @@ async def _access_plan(
             loser.email = email
     for (t, i), loser in losers.items():
         if t == "group":
-            loser.name = group_names.get(i, "A team")
+            loser.name = group_names.get(i, "A group")
             loser.member_count = len(members.get(i, ()))
         elif not loser.name:
             loser.name = "A former member"
@@ -452,7 +497,11 @@ async def _access_plan(
         "gainsViews": len(shared_ws),
         "adminViews": sum(1 for v in live if v.visibility == "private"),
     }
-    return losers, counts, b_users | org_wide
+    affected = {i for t, i in losers if t == "user"}
+    for t, i in losers:
+        if t == "group":
+            affected |= members.get(i, set())
+    return losers, counts, b_users | org_wide, affected - b_readers - org_wide
 
 
 async def _connected_in(session: AsyncSession, ds: WorkspaceDataSourceORM, ws_id: str) -> bool:
@@ -636,7 +685,7 @@ async def preflight(
             f"Moving this source, or asking to, takes administering {source.name}.", "blocker"))
 
     live = [v for v in views if v.live]
-    losers, counts, reach_b = await _access_plan(session, source.id, target.id, live)
+    losers, counts, reach_b, affected = await _access_plan(session, source.id, target.id, live)
 
     # The source's place as a default, on both sides.
     was_primary = bool(ds.is_primary)
@@ -791,7 +840,7 @@ async def preflight(
         notes=notes, losers=losers, counts=counts, was_primary=was_primary,
         was_default=was_default, becomes_primary=becomes_primary,
         pin_destination_default=pin_dest, pin_destination_label=pin_label,
-        identity_pin=identity_pin, facts=facts, reach_b=reach_b,
+        identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected,
     )
     pre.token = _token(target.id, views, losers, was_default, becomes_primary, pin_dest, identity_pin)
     return pre
@@ -810,9 +859,9 @@ async def _person_names(session: AsyncSession, user_ids: Iterable[str]) -> dict[
     }
 
 
-def _preview(pre: Preflight, *, keep: Optional[set] = None, mode: Optional[str] = None,
+def _preview(pre: Preflight, *, mode: Optional[str] = None,
              owners: Optional[dict] = None) -> TransferPreview:
-    """The preflight as the API returns it. ``keep`` marks who keeps access (None: everyone)."""
+    """The preflight as the API returns it."""
     live = [v for v in pre.views if v.live]
     owners = owners or {}
     facts = pre.facts
@@ -843,10 +892,9 @@ def _preview(pre: Preflight, *, keep: Optional[set] = None, mode: Optional[str] 
             loses=[
                 TransferSubject(type=loser.type, id=loser.id, name=loser.name, email=loser.email,
                                 memberCount=loser.member_count, role=loser.role,
-                                views=len(loser.views),
-                                keep=True if keep is None else key in keep)
-                for key, loser in sorted(pre.losers.items(), key=lambda kv: (kv[0][0] != "group",
-                                                                             kv[1].name.lower()))
+                                views=len(loser.views), via=loser.via)
+                for loser in sorted(pre.losers.values(), key=lambda l: (l.type != "group",
+                                                                        l.name.lower()))
             ],
         ),
         versioning=TransferVersioning(
@@ -865,18 +913,41 @@ def _preview(pre: Preflight, *, keep: Optional[set] = None, mode: Optional[str] 
     )
 
 
-def _keep_set(refs: Optional[list[TransferSubjectRef]], losers: dict) -> set[tuple[str, str]]:
-    """Who keeps access: everyone losing it when ``refs`` is None, else exactly those named
-    who would lose it (naming someone who loses nothing changes nothing)."""
-    if refs is None:
-        return set(losers)
-    return {(r.type, r.id) for r in refs} & set(losers)
+def _lost_counts(types: Iterable[str]) -> dict:
+    """``{people, groups}`` from the kinds of who loses access."""
+    kinds = list(types)
+    groups = sum(1 for t in kinds if t == "group")
+    return {"people": len(kinds) - groups, "groups": groups}
+
+
+def _who(lost: dict) -> str:
+    """"3 people and 1 group"."""
+    return " and ".join(part for part in (
+        lost["people"] and _plural(lost["people"], "person", "people"),
+        lost["groups"] and _plural(lost["groups"], "group")) if part) or "No one"
+
+
+def _check_token(pre: Preflight, token: Optional[str]) -> None:
+    """The preview is where a move says who loses access, so one that takes anyone's away must
+    carry the token of the preview its caller read; a token from an older picture is refused."""
+    if not token:
+        if pre.losers:
+            lost = _lost_counts(t for t, _ in pre.losers)
+            raise HTTPException(status_code=422, detail={
+                "error": "preview_required",
+                "message": f"{_who(lost)} would lose access to views that move. Read the move's "
+                           "preview, then send its token.",
+            })
+        return
+    if token != pre.token:
+        raise _conflict("preview_stale", "Something changed since you reviewed this move. "
+                                         "Here's the latest.")
 
 
 # ── the move ─────────────────────────────────────────────────────────
 
 
-async def _apply(session: AsyncSession, pre: Preflight, *, actor: str, keep: set,
+async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
                  graph_id: Optional[str], transfer_id: str) -> dict:
     """Every app-database write of a move, in one transaction. Returns the manifest undo replays."""
     ds, source, target = pre.ds, pre.source, pre.target
@@ -922,7 +993,6 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str, keep: set
             session, view_id=vid, workspace_id=target.id, action="moved", actor=actor,
             summary=summary, changes={"from": source.id, "to": target.id, "transferId": transfer_id})
 
-    grant_ids = await _grant_kept(session, pre, keep, actor)
     await session.execute(
         update(AggregationDataSourceStateORM)
         .where(AggregationDataSourceStateORM.data_source_id == ds.id)
@@ -934,7 +1004,6 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str, keep: set
         "graphId": graph_id,
         "viewIds": moved,
         "pinnedViewIds": pinned,
-        "grantIds": grant_ids,
         "wasPrimary": pre.was_primary,
         "wasDefault": pre.was_default,
         "becamePrimary": pre.becomes_primary,
@@ -944,36 +1013,11 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str, keep: set
             "views": len(moved),
             "trashed": sum(1 for v in pre.views if v.trashed),
             "followsDefault": len(pinned),
-            "grants": len(grant_ids),
-            "keptSubjects": len(keep),
         },
+        # Who stopped reading the moved views, as it stood when the move ran.
+        "lostAccess": _lost_counts(t for t, _ in pre.losers),
+        "lost": [loser.recorded() for _, loser in sorted(pre.losers.items())],
     }
-
-
-async def _grant_kept(session: AsyncSession, pre: Preflight, keep: set, actor: str) -> list[str]:
-    """View-only grants for the people and teams kept, on exactly the views they'd lose."""
-    wanted = {key: pre.losers[key].views for key in keep if key in pre.losers}
-    view_ids = sorted({v for views in wanted.values() for v in views})
-    existing: set[tuple[str, str, str]] = set()
-    for chunk in _chunks(view_ids):
-        existing |= set((await session.execute(
-            select(ResourceGrantORM.resource_id, ResourceGrantORM.subject_type,
-                   ResourceGrantORM.subject_id)
-            .where(ResourceGrantORM.resource_type == "view", ResourceGrantORM.resource_id.in_(chunk))
-        )).all())
-    added: list[ResourceGrantORM] = []
-    for (subject_type, subject_id), views in wanted.items():
-        for vid in views:
-            if (vid, subject_type, subject_id) in existing:
-                continue
-            grant = ResourceGrantORM(resource_type="view", resource_id=vid,
-                                     subject_type=subject_type, subject_id=subject_id,
-                                     role_name="viewer", granted_by=actor)
-            session.add(grant)
-            added.append(grant)
-    if added:
-        await session.flush()
-    return [g.id for g in added]
 
 
 async def _ask_new_publishers(session: AsyncSession, pre: Preflight, actor: str) -> None:
@@ -1040,7 +1084,6 @@ async def _execute(
     pre: Preflight,
     *,
     actor: str,
-    keep: set,
     transfer: Optional[DataSourceTransferORM],
     plan: dict,
 ) -> DataSourceTransferORM:
@@ -1053,7 +1096,7 @@ async def _execute(
     transfer_id = transfer.id if transfer is not None else f"xfer_{uuid.uuid4().hex[:12]}"
     graph_id = await _relocate_graph_first(ds_id, target_id)
     try:
-        manifest = await _apply(session, pre, actor=actor, keep=keep, graph_id=graph_id,
+        manifest = await _apply(session, pre, actor=actor, graph_id=graph_id,
                                 transfer_id=transfer_id)
         now = _now()
         if transfer is None:
@@ -1074,9 +1117,11 @@ async def _execute(
             row.manifest = json.dumps(manifest)
             await session.flush()
         details = _details(row, source, target, views=len(manifest["viewIds"]),
-                           kept=manifest["counts"]["keptSubjects"])
+                           lost=manifest["lostAccess"])
         await _record_both(session, "workspace.data_source.moved", ds, source, target, details)
-        await _notify_moved(session, row, ds, source, target, actor=actor, view_ids=manifest["viewIds"])
+        await _notify_moved(session, row, ds, source, target, actor=actor,
+                            view_ids=manifest["viewIds"], lost=manifest["lostAccess"],
+                            affected=pre.affected)
         await session.commit()
     except BaseException as exc:
         with contextlib.suppress(Exception):
@@ -1130,19 +1175,15 @@ async def move(session: AsyncSession, *, ds_id: str, from_ws_id: str, claims: Pe
         from backend.app.auth.dependencies import assert_session_alive_or_503
         await assert_session_alive_or_503(claims, permission=_ADMIN, user_id=user_id)
     _refuse(pre.blockers)
-    if req.preview_token and req.preview_token != pre.token:
-        raise _conflict("preview_stale", "Something changed since you reviewed this move. "
-                                         "Here's the latest.")
-    keep = _keep_set(req.keep, pre.losers)
-    plan = _plan(pre, keep)
-    return await _execute(session, pre, actor=user_id, keep=keep, transfer=None, plan=plan)
+    _check_token(pre, req.preview_token)
+    return await _execute(session, pre, actor=user_id, transfer=None, plan=_plan(pre))
 
 
-def _plan(pre: Preflight, keep: set) -> dict:
+def _plan(pre: Preflight) -> dict:
+    """What a move was decided on: the views it takes, and who it leaves without them."""
     return {
-        "keep": [{"type": t, "id": i} for t, i in sorted(keep)],
         "viewIds": pre.view_ids,
-        "losers": sorted(f"{t}:{i}" for t, i in pre.losers),
+        "losers": [loser.recorded() for _, loser in sorted(pre.losers.items())],
     }
 
 
@@ -1152,13 +1193,12 @@ def _plan(pre: Preflight, keep: set) -> dict:
 async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
                   claims: PermissionClaims, user_id: str,
                   req: DataSourceMoveRequest) -> DataSourceTransferORM:
-    """Ask the destination's admins to take a source. Who keeps access is decided here."""
+    """Ask the destination's admins to take a source."""
     await _expire_lapsed(session)
     ds = await source_in(session, ds_id, from_ws_id, lock=True)
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
                           purpose="propose")
-    keep = _keep_set(req.keep, pre.losers)
-    plan = _plan(pre, keep)
+    plan = _plan(pre)
     waiting = await transfer_repo.pending_for_source(session, ds.id)
     if (waiting is not None and waiting.created_by == user_id
             and waiting.to_workspace_id == pre.target.id and _recent(waiting.created_at)
@@ -1172,6 +1212,7 @@ async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
         raise _conflict("request_waiting", "A request to move it is already waiting for an answer.",
                         permanent)
     _refuse(permanent)
+    _check_token(pre, req.preview_token)
     prov = current_provenance()
     row, created = await transfer_repo.create_pending(
         session, data_source_id=ds.id, data_source_label=_label(ds),
@@ -1184,7 +1225,7 @@ async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
                         "A request to move it is already waiting for an answer.")
     await _record_both(session, "workspace.data_source.transfer_requested", ds, pre.source,
                        pre.target, _details(row, pre.source, pre.target, views=len(pre.views),
-                                            kept=len(keep)))
+                                            lost=_lost_counts(t for t, _ in pre.losers)))
     recipients = await notification_repo.users_who_can(
         session, workspace_id=pre.target.id, permission=_ADMIN)
     if not recipients:
@@ -1247,10 +1288,7 @@ async def accept(session: AsyncSession, *, transfer_id: str, claims: PermissionC
     if preview_token != pre.token:
         raise _conflict("preview_stale", "Something changed since you reviewed this request. "
                                          "Here's the latest.")
-    plan = _load(row.plan)
-    keep = _keep_set([TransferSubjectRef(**k) for k in plan.get("keep") or []], pre.losers)
-    moved = await _execute(session, pre, actor=user_id, keep=keep, transfer=row, plan=plan)
-    return moved
+    return await _execute(session, pre, actor=user_id, transfer=row, plan=_load(row.plan))
 
 
 async def decline(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
@@ -1427,10 +1465,10 @@ async def undo(session: AsyncSession, *, transfer_id: str, claims: PermissionCla
         await _cancel_pending(session, ds.id, actor=user_id,
                               note=f"Its move to {target.name} was undone.")
         details = _details(row, source, target, views=len(manifest.get("viewIds") or []),
-                           kept=(manifest.get("counts") or {}).get("keptSubjects", 0))
+                           lost=manifest.get("lostAccess") or _lost_counts(()))
         await _record_both(session, "workspace.data_source.move_undone", ds, source, target, details)
         await _notify_undone(session, row, ds, source, target, actor=user_id,
-                             view_ids=manifest.get("viewIds") or [])
+                             view_ids=manifest.get("viewIds") or [], lost=manifest.get("lost") or [])
         await session.commit()
     except BaseException as exc:
         with contextlib.suppress(Exception):
@@ -1501,11 +1539,6 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
             session, view_id=vid, workspace_id=source.id, action="moved", actor=actor,
             summary=summary, changes={"from": target.id, "to": source.id, "transferId": row.id,
                                       "undo": True})
-    for chunk in _chunks(list(manifest.get("grantIds") or [])):
-        await session.execute(
-            delete(ResourceGrantORM)
-            .where(ResourceGrantORM.id.in_(chunk), ResourceGrantORM.role_name == "viewer")
-            .execution_options(synchronize_session=False))
     await session.execute(
         update(AggregationDataSourceStateORM)
         .where(AggregationDataSourceStateORM.data_source_id == ds.id)
@@ -1517,7 +1550,7 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
 
 
 def _details(row: DataSourceTransferORM, source: WorkspaceORM, target: WorkspaceORM, *,
-             views: int, kept: int) -> dict:
+             views: int, lost: dict) -> dict:
     details = {
         "transferId": row.id,
         "fromWorkspaceId": source.id,
@@ -1526,7 +1559,7 @@ def _details(row: DataSourceTransferORM, source: WorkspaceORM, target: Workspace
         "toWorkspaceName": target.name,
         "via": row.kind,
         "views": views,
-        "keptAccess": kept,
+        "lostAccess": lost,
     }
     if row.kind == "request" and row.created_by:
         details["proposedBy"] = row.created_by
@@ -1611,8 +1644,11 @@ async def _creators(session: AsyncSession, view_ids: list[str]) -> dict[str, int
 
 async def _notify_moved(session: AsyncSession, row: DataSourceTransferORM,
                         ds: WorkspaceDataSourceORM, source: WorkspaceORM, target: WorkspaceORM,
-                        *, actor: str, view_ids: list[str]) -> None:
+                        *, actor: str, view_ids: list[str], lost: dict, affected: set) -> None:
     label = _label(ds)
+    impact = (f" {_who(lost)} from {source.name} lost access to its views shared there, and "
+              f"were told how to ask to join {target.name}." if lost["people"] or lost["groups"]
+              else "")
     admins = (await notification_repo.users_who_can(session, workspace_id=source.id, permission=_ADMIN)
               | await notification_repo.users_who_can(session, workspace_id=target.id, permission=_ADMIN))
     if row.kind == "request" and row.created_by:
@@ -1626,7 +1662,7 @@ async def _notify_moved(session: AsyncSession, row: DataSourceTransferORM,
     await notification_repo.notify(
         session, user_ids=admins, kind="data_source.moved",
         title=f'"{label}" moved from {source.name} to {target.name}',
-        body=f"{_plural(len(view_ids), 'view')} moved with it.",
+        body=f"{_plural(len(view_ids), 'view')} moved with it.{impact}",
         link=f"/workspaces/{target.id}?ds={ds.id}", actor_id=actor,
         resource_type="data_source_transfer", resource_id=row.id)
     for creator, n in (await _creators(session, view_ids)).items():
@@ -1639,17 +1675,34 @@ async def _notify_moved(session: AsyncSession, row: DataSourceTransferORM,
                  "You keep access to them.",
             link=f"/workspaces/{target.id}?tab=views", actor_id=actor,
             resource_type="data_source_transfer", resource_id=row.id)
+    # The people who can no longer open what they could: where it went, and the way back in —
+    # the destination's own page offers to ask to join.
+    await notification_repo.notify(
+        session, user_ids=affected - admins, kind="data_source.access_lost",
+        title=f'"{label}" moved to {target.name}',
+        body=f"Its views that were shared with {source.name} are now {target.name}'s, and you "
+             f"can no longer open them. Ask to join {target.name} if you need them.",
+        link=f"/workspaces/{target.id}", actor_id=actor,
+        resource_type="data_source_transfer", resource_id=row.id)
 
 
 async def _notify_undone(session: AsyncSession, row: DataSourceTransferORM,
                          ds: WorkspaceDataSourceORM, source: WorkspaceORM, target: WorkspaceORM,
-                         *, actor: str, view_ids: list[str]) -> None:
+                         *, actor: str, view_ids: list[str], lost: list[dict]) -> None:
     label = _label(ds)
     people = (await notification_repo.users_who_can(session, workspace_id=source.id, permission=_ADMIN)
               | await notification_repo.users_who_can(session, workspace_id=target.id, permission=_ADMIN)
               | set(await _creators(session, view_ids)))
     if row.created_by:
         people.add(row.created_by)
+    # Whoever the move took the views from has them back: the people it named, and the members
+    # of the groups it named, as those groups stand now.
+    people |= {x["id"] for x in lost if x.get("type") == "user"}
+    lost_groups = sorted(x["id"] for x in lost if x.get("type") == "group")
+    for chunk in _chunks(lost_groups):
+        people |= set((await session.execute(
+            select(GroupMemberORM.user_id).where(GroupMemberORM.group_id.in_(chunk))
+        )).scalars().all())
     await notification_repo.notify(
         session, user_ids=people, kind="data_source.move_undone",
         title=f'The move of "{label}" to {target.name} was undone',
@@ -1832,7 +1885,8 @@ async def to_responses(session: AsyncSession, rows: list[DataSourceTransferORM],
             resolutionNote=r.resolution_note, completedAt=r.completed_at,
             undoneBy=person(r.undone_by), undoneAt=r.undone_at,
             viewCount=counts.get("views", len(plan.get("viewIds") or [])),
-            keptAccess=counts.get("keptSubjects", len(plan.get("keep") or [])),
+            lostAccess=TransferLostAccess(**(manifest.get("lostAccess") or _lost_counts(
+                x.get("type") for x in plan.get("losers") or []))),
             undoUntil=((completed + timedelta(days=UNDO_DAYS)).isoformat()
                        if completed and r.status == "completed" else None),
             canAccept=pending and admin_to,
@@ -1846,31 +1900,35 @@ async def to_responses(session: AsyncSession, rows: list[DataSourceTransferORM],
 
 async def detail(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
                  user_id: str) -> DataSourceTransferDetail:
-    """A transfer, and — while it waits — the move it would make now, with the proposer's
-    choices and what changed since they asked."""
+    """A transfer, and — while it waits — the move it would make now and what changed since the
+    ask; once it happened, who lost access, so the destination's admins can let in who needs it."""
     await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id)
     response = (await to_responses(session, [row], claims, user_id=user_id))[0]
     if row.status != "pending":
-        return DataSourceTransferDetail(transfer=response)
+        return DataSourceTransferDetail(transfer=response, lost=[
+            TransferSubject(type=x["type"], id=x["id"], name=x.get("name") or x["id"],
+                            email=x.get("email"), memberCount=x.get("memberCount"),
+                            role=x.get("role") or "", views=x.get("views") or 0,
+                            via=x.get("via") or "app")
+            for x in _load(row.manifest).get("lost") or []])
     ds = await data_source_repo.get_data_source_orm(session, row.data_source_id)
     if ds is None:
         return DataSourceTransferDetail(transfer=response)
     pre = await preflight(session, ds=ds, to_ws_id=row.to_workspace_id, claims=claims,
                           purpose="accept", transfer=row)
     plan = _load(row.plan)
-    keep = {(k.get("type"), k.get("id")) for k in plan.get("keep") or []}
     owners = await _person_names(session, {v.created_by for v in pre.views[:_VIEW_LIST_CAP]})
     asked_views = set(plan.get("viewIds") or [])
-    asked_losers = set(plan.get("losers") or [])
+    asked_losers = {(x.get("type"), x.get("id")) for x in plan.get("losers") or []}
     now_views = set(pre.view_ids)
     return DataSourceTransferDetail(
         transfer=response,
-        preview=_preview(pre, keep=keep, owners=owners),
+        preview=_preview(pre, owners=owners),
         changesSinceRequest=TransferChanges(
             viewsAdded=len(now_views - asked_views),
             viewsRemoved=len(asked_views - now_views),
-            newPeople=len({f"{t}:{i}" for t, i in pre.losers} - asked_losers),
+            newPeople=len(set(pre.losers) - asked_losers),
         ),
     )
 

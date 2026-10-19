@@ -16,7 +16,7 @@ import type {
     DataSourceTransferResponse, TransferIssue, TransferStatus, TransferSubject,
 } from '@/services/dataSourceTransferService'
 
-/** How a person or team is told apart in the keep-access choices. */
+/** How a person or group is told apart in a list of who loses access. */
 export const subjectKey = (s: Pick<TransferSubject, 'type' | 'id'>) => `${s.type}:${s.id}`
 
 /** A workspace's name, or how to refer to one the reader can't see. */
@@ -26,6 +26,12 @@ export function workspaceLabel(name: string | null | undefined): string {
 
 export function plural(n: number, one: string, many = `${one}s`): string {
     return `${n.toLocaleString()} ${n === 1 ? one : many}`
+}
+
+/** "3 people and 1 group" — who loses access, or "No one". */
+export function whoLoses(people: number, groups: number): string {
+    return [people && plural(people, 'person', 'people'), groups && plural(groups, 'group')]
+        .filter(Boolean).join(' and ') || 'No one'
 }
 
 /** Whether `iso` falls within the last `days` days. */

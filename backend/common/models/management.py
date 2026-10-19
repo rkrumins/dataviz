@@ -1646,23 +1646,16 @@ class WorkspaceDataSourceImpactResponse(BaseModel):
 
 # ─── Moving a data source between workspaces ──────────────────────────────────
 
-class TransferSubjectRef(BaseModel):
-    """A person or a team, by id."""
-    type: Literal["user", "group"]
-    id: str
-
-
 class DataSourceMoveRequest(BaseModel):
     """Re-home a data source into another workspace, with its views.
 
-    ``keep`` names the people and teams who would lose access to the moved
-    views and keep it, view-only, on exactly those views. None keeps everyone's;
-    an empty list keeps nobody's. ``previewToken`` is the token of the preview
-    the caller confirmed: if anything it showed has changed since, the move is
-    refused (``preview_stale``) rather than doing something nobody read."""
+    ``previewToken`` is the token of the preview the caller confirmed: if
+    anything it showed has changed since, the move is refused
+    (``preview_stale``) rather than doing something nobody read. It is required
+    whenever anyone would lose access to moved views (``preview_required``):
+    the preview is where that is said."""
 
     target_workspace_id: str = Field(alias="targetWorkspaceId", max_length=200)
-    keep: Optional[List[TransferSubjectRef]] = None
     preview_token: Optional[str] = Field(None, alias="previewToken", max_length=64)
 
     class Config:
@@ -1729,7 +1722,7 @@ class TransferViewCounts(BaseModel):
 
 
 class TransferSubject(BaseModel):
-    """A person or team who reads moved views today and would lose them."""
+    """A person or group who reads moved views today and would lose them."""
     type: Literal["user", "group"]
     id: str
     name: str
@@ -1737,7 +1730,9 @@ class TransferSubject(BaseModel):
     memberCount: Optional[int] = None
     role: str                     # their role in the source workspace, in words
     views: int                    # how many moved views they'd lose
-    keep: bool = True
+    #: Where the access came from, which says how to restore it: ``app`` (granted
+    #: in the app), ``group``, or ``idp`` (an identity provider decides).
+    via: Literal["app", "group", "idp"] = "app"
 
 
 class TransferAccess(BaseModel):
@@ -1800,6 +1795,12 @@ class TransferDestination(BaseModel):
     reason: Optional[str] = None
 
 
+class TransferLostAccess(BaseModel):
+    """How many people and groups stopped (or, for a request, would stop) reading moved views."""
+    people: int = 0
+    groups: int = 0
+
+
 class DataSourceTransferResponse(BaseModel):
     id: str
     kind: Literal["move", "request"]
@@ -1818,7 +1819,7 @@ class DataSourceTransferResponse(BaseModel):
     undoneBy: Optional[TransferPersonRef] = None
     undoneAt: Optional[str] = None
     viewCount: int = 0
-    keptAccess: int = 0
+    lostAccess: TransferLostAccess = Field(default_factory=lambda: TransferLostAccess())
     undoUntil: Optional[str] = None
     canAccept: bool = False
     canDecline: bool = False
@@ -1838,6 +1839,8 @@ class DataSourceTransferDetail(BaseModel):
     transfer: DataSourceTransferResponse
     preview: Optional[TransferPreview] = None
     changesSinceRequest: Optional[TransferChanges] = None
+    #: Once the move happened: who lost access, as it stood then.
+    lost: List[TransferSubject] = []
 
 
 class WorkspaceImpactResponse(BaseModel):

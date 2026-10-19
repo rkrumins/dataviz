@@ -1,8 +1,8 @@
 /**
  * ReviewTransferDialog — the destination's admin answering a request.
  *
- * Pinned here: what changed since the request is said up front; the
- * proposer's choices read as they were made; Accept is pinned to the preview
+ * Pinned here: what changed since the request is said up front; who loses
+ * access is listed with where it came from; Accept is pinned to the preview
  * on screen and stays shut while anything stands in the way; a 409 shows the
  * latest instead of moving anything; Decline carries the note the proposer
  * will read; and an answered request says how it ended, with nothing to do.
@@ -37,8 +37,8 @@ const PLAN = preview({
     access: {
         creators: 1, sharedWith: 0, everyone: 0, gainsPeople: 12, gainsViews: 1, adminViews: 0,
         loses: [
-            subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, keep: true }),
-            subject({ keep: false }),
+            subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, via: 'idp' }),
+            subject(),
         ],
     },
 })
@@ -55,17 +55,18 @@ beforeEach(() => {
 })
 
 describe('ReviewTransferDialog', () => {
-    it('says what changed, shows the proposer’s choices, and accepts against the preview on screen', async () => {
+    it('says what changed, shows who loses access, and accepts against the preview on screen', async () => {
         const user = userEvent.setup()
         const { onClose } = renderDialog()
 
         expect(await screen.findByRole('heading', { name: 'Finance wants to move “Orders” to Risk' })).toBeInTheDocument()
         expect(screen.getByText(/2 new views will move too/)).toBeInTheDocument()
-        expect(screen.getByText(/1 person or team not in the proposal will lose access/)).toBeInTheDocument()
+        expect(screen.getByText(/1 more person or group will lose access/)).toBeInTheDocument()
         expect(screen.getByText('“Risk owns this now”')).toBeInTheDocument()
         const row = (name: string) => within(screen.getByText(name).closest('li') as HTMLElement)
-        expect(row('Analysts').getByText('Keeps access')).toBeInTheDocument()
-        expect(row('Bob Ito').getByText('Loses access')).toBeInTheDocument()
+        // Where the access came from says how to give it back: the IdP decides for Analysts.
+        expect(row('Analysts').getByText('Identity provider')).toBeInTheDocument()
+        expect(row('Bob Ito').queryByText('Identity provider')).not.toBeInTheDocument()
         expect(screen.queryByRole('switch')).not.toBeInTheDocument()
 
         await user.click(screen.getByRole('button', { name: 'Accept and move' }))

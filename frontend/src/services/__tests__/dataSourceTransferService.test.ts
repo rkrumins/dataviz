@@ -51,26 +51,25 @@ describe('dataSourceTransferService', () => {
         expect(lastCall().url).toBe('/api/v1/admin/workspaces/ws1/data-sources/ds1/transfers')
     })
 
-    it('moves with the keep list, the preview token and the reason', async () => {
+    it('moves with the preview token and the reason', async () => {
         await svc.move('ws1', 'ds1', {
             targetWorkspaceId: 'ws2',
-            keep: [{ type: 'group', id: 'grp_1' }],
             previewToken: 'tok',
         }, 'Team reorganisation')
         expect(lastCall()).toEqual({
             url: '/api/v1/admin/workspaces/ws1/data-sources/ds1/move',
             method: 'POST',
-            body: { targetWorkspaceId: 'ws2', keep: [{ type: 'group', id: 'grp_1' }], previewToken: 'tok' },
+            body: { targetWorkspaceId: 'ws2', previewToken: 'tok' },
             reason: encodeURIComponent('Team reorganisation'),
         })
     })
 
     it('sends a request to the transfer-requests route, with no reason header when none was given', async () => {
-        await svc.propose('ws1', 'ds1', { targetWorkspaceId: 'ws2', keep: [] })
+        await svc.propose('ws1', 'ds1', { targetWorkspaceId: 'ws2', previewToken: 'tok' })
         expect(lastCall()).toMatchObject({
             url: '/api/v1/admin/workspaces/ws1/data-sources/ds1/transfer-requests',
             method: 'POST',
-            body: { targetWorkspaceId: 'ws2', keep: [] },
+            body: { targetWorkspaceId: 'ws2', previewToken: 'tok' },
             reason: null,
         })
     })

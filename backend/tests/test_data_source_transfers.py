@@ -9,8 +9,9 @@ What a move must get right, roughly in the order it would hurt to get wrong:
   workspace's feed stops listing views it no longer holds; the versioned graph and the
   aggregation state are re-filed too.
 * **Access follows a rule people can read.** Owners and people a view is shared with keep it;
-  a workspace-shared view's audience becomes the new workspace's, and the mover chooses who
-  among the people losing it keeps view-only access to exactly those views.
+  a workspace-shared view's audience becomes the new workspace's, and nothing is copied to
+  stretch the old one across. Who loses access is said before the move (it takes the preview's
+  token) and after (they're told how to ask to join), and recorded.
 * **Authority is checked in both workspaces.** Moving a source with views re-homes other
   people's work, so it takes administering both; an admin of only the source asks instead,
   and the destination's admins answer, reading a preview that can't go stale under them.
@@ -27,10 +28,12 @@ from sqlalchemy import select, update
 
 from backend.app.db.models import (
     DataSourceTransferORM,
+    IdpGroupRoleMappingORM,
     NotificationORM,
     OutboxEventORM,
     ProviderORM,
     ResourceGrantORM,
+    RoleBindingORM,
     ViewActivityLogORM,
     ViewORM,
     WorkspaceDataSourceORM,
@@ -88,19 +91,17 @@ async def _preview(client, to: str = B, ds: str = DS) -> dict:
     return r.json()
 
 
-async def _move(client, to: str = B, keep=None, ds: str = DS, token: bool = True):
+async def _move(client, to: str = B, ds: str = DS, token: bool = True):
     body: dict = {"targetWorkspaceId": to}
-    if keep is not None:
-        body["keep"] = keep
     if token:
         body["previewToken"] = (await _preview(client, to, ds))["token"]
     return await client.post(f"{_src(ds=ds)}/move", json=body, headers=REASON)
 
 
-async def _propose(client, keep=None):
+async def _propose(client, token: bool = True):
     body: dict = {"targetWorkspaceId": B}
-    if keep is not None:
-        body["keep"] = keep
+    if token:
+        body["previewToken"] = (await _preview(client))["token"]
     return await client.post(f"{_src()}/transfer-requests", json=body, headers=REASON)
 
 
@@ -118,6 +119,13 @@ async def _views(session) -> dict:
 
 async def _bell(session) -> set:
     return set((await session.execute(select(NotificationORM.user_id, NotificationORM.kind))).all())
+
+
+async def _told(session, kind: str) -> dict:
+    """``{recipient: body}`` for one kind of notice."""
+    return dict((await session.execute(
+        select(NotificationORM.user_id, NotificationORM.body).where(NotificationORM.kind == kind)
+    )).all())
 
 
 async def _events(session, event_type: str) -> list[dict]:
@@ -166,13 +174,28 @@ async def test_the_preview_names_who_would_lose_access(test_client, db_session, 
     # Val's grant on the Shared view carries over, so she loses only the other two.
     assert loses[("user", PEOPLE["val"])]["views"] == 2
     assert loses[("user", PEOPLE["ada"])]["role"] == "Admin"
-    assert all(s["keep"] for s in loses.values())
+    assert {k: s["via"] for k, s in loses.items()} == {
+        ("group", TEAM): "group", ("user", PEOPLE["ada"]): "app", ("user", PEOPLE["val"]): "app"}
     assert {k: access[k] for k in ("creators", "sharedWith", "everyone", "gainsViews",
                                    "gainsPeople", "adminViews")} == {
         "creators": 1, "sharedWith": 1, "everyone": 1, "gainsViews": 3,
         "gainsPeople": 4,          # Bea, Cy, Mia and Rui read Risk's views
         "adminViews": 2,
     }
+
+
+async def test_the_preview_says_where_lost_access_came_from(test_client, db_session, world):
+    """Access an identity provider decides is put back there, not copied: the preview says which
+    is which — an SSO role mapping, or a group it fills."""
+    await db_session.execute(update(RoleBindingORM).where(
+        RoleBindingORM.subject_id == PEOPLE["val"]).values(source="sso"))
+    db_session.add(IdpGroupRoleMappingORM(idp_group="finance-analysts",
+                                          target_type="group_membership", target_group_id=TEAM))
+    await db_session.commit()
+    async with acting_as(db_session, "cy"):
+        loses = (await _preview(test_client))["access"]["loses"]
+    assert {(s["type"], s["id"]): s["via"] for s in loses} == {
+        ("group", TEAM): "idp", ("user", PEOPLE["val"]): "idp", ("user", PEOPLE["ada"]): "app"}
 
 
 async def test_the_token_changes_when_what_moves_changes(test_client, db_session, world):
@@ -338,10 +361,11 @@ async def test_a_move_takes_everything_with_it(test_client, db_session, world):
     before = await _views(db_session)
 
     async with acting_as(db_session, "cy"):
-        r = await _move(test_client, keep=[{"type": "group", "id": TEAM}])
+        r = await _move(test_client)
     assert r.status_code == 200, r.text
     moved = r.json()
-    assert (moved["status"], moved["viewCount"], moved["keptAccess"]) == ("completed", 7, 1)
+    assert (moved["status"], moved["viewCount"], moved["lostAccess"]) == (
+        "completed", 7, {"people": 2, "groups": 1})
     assert moved["canUndo"] and moved["reason"] == "Team reorganisation"
 
     ds = await _fresh(db_session, WorkspaceDataSourceORM, DS)
@@ -357,10 +381,10 @@ async def test_a_move_takes_everything_with_it(test_client, db_session, world):
     assert ("view_team", B, "created") in log                      # its history went with it
     assert {v for v, ws, action in log if action == "moved" and ws == B} == {*VIEW_IDS, LOOSE}
 
-    granted = set((await db_session.execute(select(
-        ResourceGrantORM.resource_id, ResourceGrantORM.subject_id, ResourceGrantORM.role_name
-    ).where(ResourceGrantORM.subject_type == "group"))).all())
-    assert granted == {(v, TEAM, "viewer") for v in ("view_team", "view_shared", "view_asked")}
+    # Nothing is shared to stretch Finance's audience across: the one share there was carries on.
+    assert (await db_session.execute(select(
+        ResourceGrantORM.resource_id, ResourceGrantORM.subject_id))).all() == [
+        ("view_shared", PEOPLE["val"])]
 
     assert await db_session.scalar(select(AggregationDataSourceStateORM.workspace_id).where(
         AggregationDataSourceStateORM.data_source_id == DS)) == B
@@ -370,16 +394,43 @@ async def test_a_move_takes_everything_with_it(test_client, db_session, world):
     assert set(world.invalidations[0]["defaults_changed"]) == {A, B}
 
 
-async def test_kept_access_is_view_only_and_only_to_the_moved_views(test_client, db_session, world):
+async def test_who_loses_access_is_told_how_to_get_it_back(test_client, db_session, world):
+    """Risk's membership decides who reads the moved views. The people who stop reading them hear
+    where they went and how to ask to join; both sides' admins hear who; the move records it."""
     async with acting_as(db_session, "cy"):
-        assert (await _move(test_client, keep=[{"type": "group", "id": TEAM}])).status_code == 200
+        moved = (await _move(test_client)).json()
+        detail = (await test_client.get(f"{TRANSFERS}/{moved['id']}")).json()
 
-    assert await _can_read(db_session, "tom", "view_team")         # kept, through his team
-    assert not await _can_read(db_session, "val", "view_team")     # let go
-    assert await _can_read(db_session, "val", "view_shared")       # her own grant carried over
+    assert not await _can_read(db_session, "tom", "view_team")     # his group read it in Finance
+    assert not await _can_read(db_session, "val", "view_team")
+    assert await _can_read(db_session, "val", "view_shared")       # her own share carried over
     assert await _can_read(db_session, "max", "view_private")      # owners keep their views
-    assert await _can_read(db_session, "rui", "view_team")         # Risk's audience gains it
-    assert not await _can_read(db_session, "rui", "view_private")
+    assert await _can_read(db_session, "rui", "view_team")         # Risk's audience reads it now
+
+    # Ada administers Finance: she hears it as an admin, with everyone else who lost access.
+    lost = await _told(db_session, "data_source.access_lost")
+    assert set(lost) == {PEOPLE["tom"], PEOPLE["val"]}
+    assert "Ask to join Risk" in lost[PEOPLE["val"]]
+    assert "2 people and 1 group from Finance lost access" in (
+        await _told(db_session, "data_source.moved"))[PEOPLE["bea"]]
+    assert {(x["type"], x["id"], x["via"]) for x in detail["lost"]} == {
+        ("group", TEAM, "group"), ("user", PEOPLE["ada"], "app"), ("user", PEOPLE["val"], "app")}
+    assert {e["details"]["lostAccess"]["people"] for e in await _events(
+        db_session, "workspace.data_source.moved")} == {2}
+
+
+async def test_taking_anyones_access_takes_reading_the_preview(test_client, db_session, world):
+    """The preview is where a move says who loses access, so a move or a request that takes
+    anyone's needs its token. One that takes no one's — nothing built on the source — doesn't."""
+    async with acting_as(db_session, "cy"):
+        blind = await _move(test_client, token=False)
+        empty = await _move(test_client, ds=DS2, token=False)
+    async with acting_as(db_session, "ada"):
+        unread = await _propose(test_client, token=False)
+    assert (blind.status_code, unread.status_code, empty.status_code) == (422, 422, 200)
+    assert blind.json()["detail"]["error"] == "preview_required"
+    assert blind.json()["detail"]["message"].startswith("2 people and 1 group would lose access")
+    assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
 
 
 async def test_both_workspaces_and_the_people_affected_hear_about_it(test_client, db_session, world):
@@ -447,9 +498,9 @@ async def test_a_failed_move_puts_the_graph_back(test_client, db_session, world,
     async def boom(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(data_source_transfer, "_grant_kept", boom)
+    monkeypatch.setattr(data_source_transfer, "_ask_new_publishers", boom)
     async with acting_as(db_session, "cy"):
-        assert (await _move(test_client, token=False)).status_code == 500
+        assert (await _move(test_client)).status_code == 500
 
     assert world.relocations == [(DS, B, True), (DS, A, False)]
     assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
@@ -467,7 +518,7 @@ async def test_a_clash_that_races_the_check_is_a_conflict(test_client, db_sessio
 
     monkeypatch.setattr(data_source_transfer, "_connected_in", never)
     async with acting_as(db_session, "cy"):
-        r = await _move(test_client, token=False)
+        r = await _move(test_client)
     assert r.status_code == 409 and r.json()["detail"]["error"] == "already_connected"
     assert world.relocations == [(DS, B, True), (DS, A, False)]
 
@@ -477,17 +528,18 @@ async def test_a_clash_that_races_the_check_is_a_conflict(test_client, db_sessio
 
 async def test_an_admin_of_one_side_asks_and_the_other_side_answers(test_client, db_session, world):
     async with acting_as(db_session, "ada"):
-        r = await _propose(test_client, keep=[])
+        r = await _propose(test_client)
     assert r.status_code == 201, r.text
     asked = r.json()
     assert (asked["status"], asked["kind"], asked["canCancel"], asked["canAccept"]) == (
         "pending", "request", True, False)
     assert asked["expiresAt"] and asked["reason"] == "Team reorganisation"
+    assert asked["lostAccess"] == {"people": 2, "groups": 1}
     assert {(PEOPLE["bea"], "data_source.transfer_requested"),
             (PEOPLE["cy"], "data_source.transfer_requested")} <= await _bell(db_session)
     assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
 
-    async with acting_as(db_session, "ada"):
+    async with acting_as(db_session, "cy"):                         # one open request a source
         again = await _propose(test_client)
     assert again.status_code == 409 and again.json()["detail"]["error"] == "request_waiting"
 
@@ -499,13 +551,13 @@ async def test_an_admin_of_one_side_asks_and_the_other_side_answers(test_client,
     assert [t["id"] for t in incoming] == [asked["id"]] and incoming[0]["canAccept"]
     assert incoming[0]["fromWorkspace"]["name"] == "Finance"       # a party sees both names
     assert detail["changesSinceRequest"] == {"viewsAdded": 0, "viewsRemoved": 0, "newPeople": 0}
-    assert not any(s["keep"] for s in detail["preview"]["access"]["loses"])
+    assert len(detail["preview"]["access"]["loses"]) == 3          # Risk's admins read who
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["status"] == "completed"
     assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == B
     assert (PEOPLE["ada"], "data_source.transfer_accepted") in await _bell(db_session)
     assert not (await db_session.execute(select(ResourceGrantORM.id).where(
-        ResourceGrantORM.subject_type == "group"))).first()          # she kept nobody's access
+        ResourceGrantORM.subject_type == "group"))).first()          # nothing shared across
 
 
 async def test_a_review_that_went_stale_is_refused(test_client, db_session, world):
@@ -631,7 +683,7 @@ async def test_undo_puts_everything_back(test_client, db_session, world):
     ])
     await db_session.commit()
     async with acting_as(db_session, "cy"):
-        moved = (await _move(test_client, keep=[{"type": "group", "id": TEAM}])).json()
+        moved = (await _move(test_client)).json()
         r = await test_client.post(f"{TRANSFERS}/{moved['id']}/undo", headers=REASON)
     assert r.status_code == 200, r.text
     assert (r.json()["status"], r.json()["canUndo"]) == ("undone", False)
@@ -641,8 +693,8 @@ async def test_undo_puts_everything_back(test_client, db_session, world):
     after = await _views(db_session)
     assert {v: after[v][0] for v in after} == {v: A for v in after}
     assert after[LOOSE][1] is None                                  # back to following the default
-    assert not (await db_session.execute(select(ResourceGrantORM.id).where(
-        ResourceGrantORM.subject_type == "group"))).first()
+    assert await _can_read(db_session, "tom", "view_team")          # Finance's audience again
+    assert {PEOPLE["tom"], PEOPLE["val"]} <= set(await _told(db_session, "data_source.move_undone"))
     assert {ws for (ws,) in (await db_session.execute(
         select(ViewActivityLogORM.workspace_id))).all()} == {A}
     assert await db_session.scalar(select(AggregationDataSourceStateORM.workspace_id).where(
@@ -696,9 +748,11 @@ async def test_a_retried_move_gets_the_move_it_made(test_client, db_session, wor
     """The first try went through and its answer was lost on the way back: trying again answers
     with that move instead of "not found", and moves nothing twice."""
     async with acting_as(db_session, "cy"):
-        first = await _move(test_client, token=False)
-        again = await _move(test_client, token=False)
-        elsewhere = await _move(test_client, to=C, token=False)
+        body = {"targetWorkspaceId": B, "previewToken": (await _preview(test_client))["token"]}
+        first = await test_client.post(f"{_src()}/move", json=body, headers=REASON)
+        again = await test_client.post(f"{_src()}/move", json=body, headers=REASON)
+        elsewhere = await test_client.post(f"{_src()}/move", json={**body, "targetWorkspaceId": C},
+                                           headers=REASON)
     assert (again.status_code, again.json()["id"]) == (200, first.json()["id"])
     assert elsewhere.status_code == 404                    # a different move is not a retry
     assert world.relocations == [(DS, B, True)]
@@ -707,9 +761,13 @@ async def test_a_retried_move_gets_the_move_it_made(test_client, db_session, wor
 
 async def test_a_retried_answer_gets_the_answer_it_gave(test_client, db_session, world):
     async with acting_as(db_session, "ada"):
-        asked = (await _propose(test_client)).json()
-        again = await _propose(test_client)
-        other = await _propose(test_client, keep=[])
+        body = {"targetWorkspaceId": B, "previewToken": (await _preview(test_client))["token"]}
+        asked = (await test_client.post(f"{_src()}/transfer-requests", json=body,
+                                        headers=REASON)).json()
+        again = await test_client.post(f"{_src()}/transfer-requests", json=body, headers=REASON)
+    await add_view(db_session, "view_new", ws=A, ds=DS)            # a new ask, not a retry
+    async with acting_as(db_session, "ada"):
+        other = await _propose(test_client)
     assert (again.status_code, again.json()["id"]) == (201, asked["id"])
     assert other.status_code == 409 and other.json()["detail"]["error"] == "request_waiting"
 

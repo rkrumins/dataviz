@@ -5,9 +5,11 @@
  *   1. Destination — where it can go, and whether that is a move or a request.
  *   2. What moves  — the views, the version history, the settings, and
  *                    anything that has to be resolved first.
- *   3. Access      — who keeps, gains and would lose access, and the choice of
- *                    who keeps it. Skipped when no views move.
- *   4. Confirm     — the move in plain sentences, and why.
+ *   3. Access      — who keeps, gains and loses access. The destination's own
+ *                    membership decides who reads the moved views, so this is
+ *                    what that means, not a choice. Skipped when no views move.
+ *   4. Confirm     — the move in plain sentences, and why. When anyone loses
+ *                    access, the person says they understand before it goes.
  *
  * Someone who runs both workspaces moves it now and can undo it for a week;
  * someone who runs only this one sends a request the destination's admins
@@ -32,13 +34,13 @@ import { formatUtc } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import type {
-    DataSourceTransferResponse, TransferDestination, TransferMode, TransferPreview, TransferSubject,
+    DataSourceTransferResponse, TransferDestination, TransferMode, TransferPreview,
 } from '@/services/dataSourceTransferService'
 import { AccessPlanList } from './AccessPlanList'
 import { DestinationStep } from './DestinationStep'
 import { TransferPreviewSummary } from './TransferPreviewSummary'
 import { UndoMoveDialog } from './UndoMoveDialog'
-import { plural, subjectKey, workspaceLabel } from './transferCopy'
+import { plural, whoLoses, workspaceLabel } from './transferCopy'
 import {
     useMoveDestinations, useMovePreview, useTransferActions, useTransferHistory,
 } from './useDataSourceTransfers'
@@ -84,8 +86,8 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
     const [step, setStep] = useState<StepId>(presetDestinationId ? 'preview' : 'destination')
     const [destId, setDestId] = useState<string | null>(presetDestinationId ?? null)
     const [destMode, setDestMode] = useState<TransferMode | null>(null)
-    // Only what the person changed; everyone else keeps the preview's default.
-    const [keepOverrides, setKeepOverrides] = useState<Record<string, boolean>>({})
+    // The preview whose impact the person said they understand: a new picture asks again.
+    const [ackToken, setAckToken] = useState<string | null>(null)
     const [phase, setPhase] = useState<'steps' | 'working' | 'done' | 'undone'>('steps')
     const [result, setResult] = useState<DataSourceTransferResponse | null>(null)
     const [submitError, setSubmitError] = useState<string | null>(null)
@@ -119,9 +121,10 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
     const stepIndex = steps.indexOf(current)
     const go = (id: StepId) => startTransition(() => setStep(id))
 
-    const isKept = (s: TransferSubject) => keepOverrides[subjectKey(s)] ?? s.keep
     const loses = pv?.access.loses ?? []
-    const kept = loses.filter(isKept)
+    const lostGroups = loses.filter(s => s.type === 'group').length
+    const losing = whoLoses(loses.length - lostGroups, lostGroups)
+    const acknowledged = loses.length === 0 || (!!pv && ackToken === pv.token)
 
     const canProceed = current === 'destination'
         ? !!destId && !!destMode
@@ -131,23 +134,19 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
     const chooseDestination = (d: TransferDestination) => {
         setDestId(d.id)
         setDestMode(d.mode)
-        setKeepOverrides({})
+        setAckToken(null)
         setStale(null)
     }
 
     const submit = async () => {
-        if (!pv || !destId || !mode || blocked) return
+        if (!pv || !destId || !mode || blocked || !acknowledged) return
         setSubmitError(null)
         setStale(null)
         setPhase('working')
         const vars = {
             wsId,
             dsId,
-            body: {
-                targetWorkspaceId: destId,
-                keep: kept.map(s => ({ type: s.type, id: s.id })),
-                previewToken: pv.token,
-            },
+            body: { targetWorkspaceId: destId, previewToken: pv.token },
             reason: draft.take(),
         }
         try {
@@ -230,7 +229,7 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
                     <ConfirmFooter
                         mode={mode}
                         toName={toName}
-                        disabled={blocked}
+                        disabled={blocked || !acknowledged}
                         onBack={() => go(steps[Math.max(stepIndex - 1, 0)])}
                         onCancel={onClose}
                         onSubmit={() => void submit()}
@@ -310,9 +309,6 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
                             access={pv.access}
                             fromName={fromName}
                             toName={toName}
-                            isKept={isKept}
-                            onToggle={(s, keep) => setKeepOverrides(o => ({ ...o, [subjectKey(s)]: keep }))}
-                            onSetAll={keep => setKeepOverrides(Object.fromEntries(loses.map(s => [subjectKey(s), keep])))}
                             requestMode={mode === 'request'}
                         />
                     </div>
@@ -325,7 +321,25 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
                             title={mode === 'request' ? `Ask ${toName} to take it` : `Move it to ${toName}`}
                             subtitle="Read it through once — this is exactly what will happen."
                         />
-                        <Receipt preview={pv} label={label} fromName={fromName} toName={toName} kept={kept.length} />
+                        <Receipt preview={pv} label={label} fromName={fromName} toName={toName} losing={losing} />
+                        {loses.length > 0 && (
+                            <label className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3.5 py-2.5 cursor-pointer select-none">
+                                <input
+                                    type="checkbox"
+                                    checked={acknowledged}
+                                    onChange={e => setAckToken(e.target.checked ? pv.token : null)}
+                                    className="mt-0.5 accent-amber-500 cursor-pointer"
+                                />
+                                <span className="text-sm text-ink">
+                                    I understand {losing} lose access to views that move.
+                                    <span className="block text-xs text-ink-muted mt-0.5">
+                                        {mode === 'request'
+                                            ? `${toName}’s admins see who before they accept.`
+                                            : `They’re told how to ask to join ${toName}, and both workspaces’ admins are told who.`}
+                                    </span>
+                                </span>
+                            </label>
+                        )}
                         <ReasonField
                             draft={draft}
                             audience="workspace"
@@ -384,22 +398,24 @@ function PreviewSkeleton() {
 }
 
 /** The move in sentences — what a careful person would want to read last. */
-function Receipt({ preview: pv, label, fromName, toName, kept }: {
+function Receipt({ preview: pv, label, fromName, toName, losing }: {
     preview: TransferPreview
     label: string
     fromName: string
     toName: string
-    kept: number
+    /** "3 people and 1 group", or "No one". */
+    losing: string
 }) {
     const c = pv.viewCounts
-    const losing = pv.access.loses.length
     const lines = [
         c.total
             ? `${plural(c.total, 'view')} move with it${c.trashed ? `, including ${c.trashed} in the trash` : ''}.`
             : 'No views are built on it.',
         pv.versioning ? `Its version history comes too — ${plural(pv.versioning.commits, 'revision')}.` : null,
         'Aggregation, freshness settings and statistics come with it, so nothing is rebuilt.',
-        losing ? `${kept} of ${plural(losing, 'person or team', 'people and teams')} keep view-only access; ${losing - kept} lose it.` : null,
+        pv.access.loses.length
+            ? `${losing} in ${fromName} lose access to the views shared there; ${toName}’s members read them instead.`
+            : null,
         pv.primary.becomesPrimary ? `It becomes ${toName}’s primary data source.` : null,
         pv.primary.wasPrimary ? `${fromName} has no primary data source until someone picks one.` : null,
     ].filter((l): l is string => !!l)
@@ -498,7 +514,7 @@ function Terminal({ result, undone, label, fromName, toName }: {
                 </h3>
                 <p className="text-sm text-ink-muted mt-1 max-w-md">
                     {undone
-                        ? 'Its views went back with it, and the access the move gave is gone.'
+                        ? `Its views went back with it, and ${fromName}’s members can read them again.`
                         : request
                             ? `Its admins have until ${formatUtc(result.expiresAt)} to accept. You’ll hear in your Inbox either way.`
                             : 'Its views, version history and settings came with it.'}
@@ -509,9 +525,9 @@ function Terminal({ result, undone, label, fromName, toName }: {
                     <span className="rounded-full border border-black/[0.08] dark:border-white/[0.10] px-3 py-1 text-xs text-ink-secondary tabular-nums">
                         {plural(result.viewCount, 'view')} moved
                     </span>
-                    {result.keptAccess > 0 && (
+                    {result.lostAccess.people + result.lostAccess.groups > 0 && (
                         <span className="rounded-full border border-black/[0.08] dark:border-white/[0.10] px-3 py-1 text-xs text-ink-secondary tabular-nums">
-                            {plural(result.keptAccess, 'person or team', 'people and teams')} kept access
+                            {whoLoses(result.lostAccess.people, result.lostAccess.groups)} told how to ask to join
                         </span>
                     )}
                 </div>

@@ -15,7 +15,7 @@ import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import type { DataSourceTransferResponse } from '@/services/dataSourceTransferService'
 import { useTransferActions } from './useDataSourceTransfers'
-import { plural, workspaceLabel } from './transferCopy'
+import { plural, whoLoses, workspaceLabel } from './transferCopy'
 
 export function UndoMoveDialog({ transfer, onClose, onUndone }: {
     transfer: DataSourceTransferResponse
@@ -67,8 +67,8 @@ export function UndoMoveDialog({ transfer, onClose, onUndone }: {
                     <div className="px-6 pb-2 space-y-4">
                         <ul className="space-y-1.5 text-sm text-ink-secondary">
                             <li>“{label}” leaves {to} and goes back to {from}, with {plural(transfer.viewCount, 'view')}.</li>
-                            {transfer.keptAccess > 0 && (
-                                <li>The view-only access the move gave {plural(transfer.keptAccess, 'person or team', 'people and teams')} is removed.</li>
+                            {transfer.lostAccess.people + transfer.lostAccess.groups > 0 && (
+                                <li>{from}’s members can read its views again; the {whoLoses(transfer.lostAccess.people, transfer.lostAccess.groups)} who lost access are told.</li>
                             )}
                         </ul>
                         <ReasonField draft={draft} audience="workspace" onSubmit={confirm} onEscape={onClose} />

@@ -25,11 +25,6 @@ export type TransferStatus = 'pending' | 'completed' | 'declined' | 'cancelled' 
 /** A list filter: requests still waiting, or every one. */
 export type TransferFilter = 'open' | 'all'
 
-export interface TransferSubjectRef {
-    type: 'user' | 'group'
-    id: string
-}
-
 export interface TransferWorkspaceRef {
     id: string
     /** Null when the reader can't open that workspace: its name stays its own. */
@@ -83,7 +78,13 @@ export interface TransferViewCounts {
     publishRequested: number
 }
 
-/** A person or team who reads moved views today and would lose them. */
+/**
+ * Where someone's access came from, which says how to give it back: `app` (granted in the app),
+ * `group`, or `idp` (the identity provider decides — map their IdP group in the destination).
+ */
+export type TransferAccessVia = 'app' | 'group' | 'idp'
+
+/** A person or group who reads moved views today and would lose them. */
 export interface TransferSubject {
     type: 'user' | 'group'
     id: string
@@ -94,7 +95,13 @@ export interface TransferSubject {
     role: string
     /** How many moved views they would lose. */
     views: number
-    keep: boolean
+    via: TransferAccessVia
+}
+
+/** How many people and groups stopped (or, for a request, would stop) reading moved views. */
+export interface TransferLostAccess {
+    people: number
+    groups: number
 }
 
 export interface TransferAccess {
@@ -172,7 +179,7 @@ export interface DataSourceTransferResponse {
     undoneBy: TransferPersonRef | null
     undoneAt: string | null
     viewCount: number
-    keptAccess: number
+    lostAccess: TransferLostAccess
     undoUntil: string | null
     canAccept: boolean
     canDecline: boolean
@@ -190,16 +197,19 @@ export interface TransferChanges {
 
 export interface DataSourceTransferDetail {
     transfer: DataSourceTransferResponse
-    /** Fresh, while the request is open; `access.loses[].keep` is the proposer's plan. */
+    /** Fresh, while the request is open. */
     preview: TransferPreview | null
     changesSinceRequest: TransferChanges | null
+    /** Once the move happened: who lost access, as it stood then. */
+    lost: TransferSubject[]
 }
 
 export interface TransferMoveRequest {
     targetWorkspaceId: string
-    /** Who keeps view-only access to the moved views. Null keeps everyone's; [] nobody's. */
-    keep?: TransferSubjectRef[] | null
-    /** The preview the person confirmed: if it has changed since, the server says so (409). */
+    /**
+     * The preview the person confirmed. Required when anyone loses access (422
+     * `preview_required`); if the picture changed since, the server says so (409).
+     */
     previewToken?: string | null
 }
 

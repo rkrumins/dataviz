@@ -7,7 +7,7 @@ export const FINANCE = { id: 'ws_fin', name: 'Finance' }
 export const RISK = { id: 'ws_risk', name: 'Risk' }
 
 export function subject(over: Partial<TransferSubject> = {}): TransferSubject {
-    return { type: 'user', id: 'usr_bob', name: 'Bob Ito', email: 'bob@example.com', role: 'Viewer', views: 2, keep: true, ...over }
+    return { type: 'user', id: 'usr_bob', name: 'Bob Ito', email: 'bob@example.com', role: 'Viewer', views: 2, via: 'app', ...over }
 }
 
 export function issue(over: Partial<TransferIssue> = {}): TransferIssue {
@@ -30,7 +30,7 @@ export function preview(over: Partial<TransferPreview> = {}): TransferPreview {
         access: {
             creators: 1, sharedWith: 0, everyone: 0, gainsPeople: 12, gainsViews: 1, adminViews: 0,
             loses: [
-                subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, role: 'Viewer', views: 1 }),
+                subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, role: 'Viewer', views: 1, via: 'group' }),
                 subject(),
             ],
         },
@@ -61,7 +61,7 @@ export function transfer(over: Partial<DataSourceTransferResponse> = {}): DataSo
         undoneBy: null,
         undoneAt: null,
         viewCount: 2,
-        keptAccess: 1,
+        lostAccess: { people: 1, groups: 1 },
         undoUntil: new Date(Date.now() + 6 * 86_400_000).toISOString(),
         canAccept: false,
         canDecline: false,

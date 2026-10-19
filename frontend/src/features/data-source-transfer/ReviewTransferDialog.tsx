@@ -2,9 +2,9 @@
  * ReviewTransferDialog — answering a request to move a data source here.
  *
  * The reviewer reads what the proposer read, fresh: what moves, what stands
- * in the way, and who the proposer chose to keep access. Anything that
- * changed since they asked is said up front, because consent to last week's
- * preview is not consent to today's. Accepting is pinned to the preview on
+ * in the way, and who loses access when the views become this workspace's.
+ * Anything that changed since they asked is said up front, because consent to
+ * last week's preview is not consent to today's. Accepting is pinned to the preview on
  * screen: if it changes before the click lands, nothing moves and the
  * dialog shows the latest. Declining says why, to the person who asked.
  */
@@ -156,17 +156,11 @@ export function ReviewTransferDialog({ transferId, onClose }: { transferId: stri
                                 {preview && (
                                     <>
                                         <TransferPreviewSummary preview={preview} />
-                                        <section aria-label="Who keeps access" className="space-y-3">
+                                        <section aria-label="Who can see it afterwards" className="space-y-3">
                                             <h3 className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-                                                Who keeps access, as {who} proposed
+                                                Who can see it afterwards
                                             </h3>
-                                            <AccessPlanList
-                                                access={preview.access}
-                                                fromName={from}
-                                                toName={to}
-                                                isKept={s => s.keep}
-                                                readOnly
-                                            />
+                                            <AccessPlanList access={preview.access} fromName={from} toName={to} />
                                         </section>
                                     </>
                                 )}
@@ -253,7 +247,7 @@ function ChangesSince({ who, changes }: { who: string; changes: TransferChanges 
         changes.viewsAdded ? `${plural(changes.viewsAdded, 'new view')} will move too` : null,
         changes.viewsRemoved ? `${plural(changes.viewsRemoved, 'view')} no longer will` : null,
         changes.newPeople
-            ? `${plural(changes.newPeople, 'person or team', 'people and teams')} not in the proposal will lose access`
+            ? `${plural(changes.newPeople, 'more person or group', 'more people and groups')} will lose access`
             : null,
     ].filter((p): p is string => !!p)
     if (!parts.length) return null

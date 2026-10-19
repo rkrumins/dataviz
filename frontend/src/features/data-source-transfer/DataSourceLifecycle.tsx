@@ -18,7 +18,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
 import type { DataSourceTransferResponse } from '@/services/dataSourceTransferService'
 import { UndoMoveDialog } from './UndoMoveDialog'
-import { daysUntil, historyMoments, isWithinDays, plural, workspaceLabel } from './transferCopy'
+import { daysUntil, historyMoments, isWithinDays, plural, whoLoses, workspaceLabel } from './transferCopy'
 import { useTransferActions, useTransferHistory } from './useDataSourceTransfers'
 
 /** A decline stays worth mentioning for about as long as a request lives. */
@@ -74,6 +74,12 @@ export function DataSourceLifecycle({ wsId, dataSourceId, onChanged }: {
                     Moved here from <span className="font-semibold">{workspaceLabel(moved.fromWorkspace.name)}</span>
                     {moved.completedAt && <span className="text-ink-muted"> by {(moved.kind === 'request' ? moved.resolvedBy : moved.createdBy)?.name ?? 'someone'}, {timeAgo(moved.completedAt)}</span>}
                     {moved.reason && <span className="text-ink-muted"> — “{moved.reason}”</span>}
+                    {moved.lostAccess.people + moved.lostAccess.groups > 0 && (
+                        <span className="block text-[11px] text-ink-muted mt-0.5">
+                            {whoLoses(moved.lostAccess.people, moved.lostAccess.groups)} in {workspaceLabel(moved.fromWorkspace.name)} lost
+                            access to its views there, and were told how to ask to join.
+                        </span>
+                    )}
                     {moved.canUndo ? (
                         <Action onClick={() => setUndoing(moved)}>
                             <Undo2 className="w-3 h-3" aria-hidden /> Undo

@@ -32,6 +32,7 @@ import {
     ShieldAlert,
     Sparkles,
     Undo2,
+    UserMinus,
     UserPlus,
     XCircle,
     type LucideIcon,
@@ -127,8 +128,9 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         tile: 'bg-emerald-500/10',
     },
     // Moving a data source between workspaces: the ask reaches the destination's
-    // admins; the answer reaches whoever asked; the move itself, and an undo,
-    // reach both workspaces' admins and the owners of the views that moved.
+    // admins; the answer reaches whoever asked, as does a request that lapsed;
+    // the move itself, and an undo, reach both workspaces' admins, the owners of
+    // the views that moved, and the people who lost access to them.
     'data_source.transfer_requested': {
         Icon: ArrowRightLeft,
         icon: 'text-sky-500',
@@ -158,6 +160,16 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: Undo2,
         icon: 'text-amber-500',
         tile: 'bg-amber-500/10',
+    },
+    'data_source.access_lost': {
+        Icon: UserMinus,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'data_source.transfer_expired': {
+        Icon: Clock,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

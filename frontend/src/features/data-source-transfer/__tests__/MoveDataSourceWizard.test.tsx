@@ -2,8 +2,9 @@
  * MoveDataSourceWizard — the guided move of a data source and its views.
  *
  * Pinned here: the steps run Destination → What moves → Access → Confirm; a
- * blocker keeps Next shut; exactly the people whose switch is on keep access,
- * and the preview's token and the reason go with the move; a 409 (the preview
+ * blocker keeps Next shut; who loses access is shown, not chosen, and the move
+ * waits until the person says they understand it; the preview's token and the
+ * reason go with the move; a 409 (the preview
  * changed) goes back to show the latest instead of failing; someone who runs
  * only this workspace sends a request instead; a preset destination skips its
  * step and a source with no views skips Access; and the terminal offers Undo
@@ -54,6 +55,7 @@ function renderWizard(props: Partial<MoveDataSourceWizardProps> = {}) {
 }
 
 const next = () => screen.getByRole('button', { name: /^Next/ })
+const understand = () => screen.getByRole('checkbox', { name: /^I understand 1 person and 1 group lose access/ })
 
 async function toConfirm(user: ReturnType<typeof userEvent.setup>) {
     await user.click(await screen.findByRole('radio', { name: /^Risk/ }))
@@ -78,27 +80,28 @@ beforeEach(() => {
 })
 
 describe('MoveDataSourceWizard', () => {
-    it('moves it with exactly the access the person chose, the preview’s token and their reason', async () => {
+    it('moves it once the person says they understand who loses access, with the token and their reason', async () => {
         const user = userEvent.setup()
         const { onDone } = renderWizard()
 
         // Unavailable workspaces are listed apart, saying why.
         expect(await screen.findByText(/1 workspace can’t take it/)).toBeInTheDocument()
         await toConfirm(user)
-        expect(screen.getByText('2 of 2')).toBeInTheDocument()
-
-        await user.click(screen.getByRole('switch', { name: 'Keep Bob Ito’s access' }))
-        expect(screen.getByText('1 of 2')).toBeInTheDocument()
+        // Who loses access is a fact to read, not a choice to make.
+        expect(screen.getByText('1 person and 1 group')).toBeInTheDocument()
+        expect(screen.queryByRole('switch')).not.toBeInTheDocument()
         await user.click(next())
 
-        expect(await screen.findByText(/1 of 2 people and teams keep view-only access; 1 lose it/)).toBeInTheDocument()
+        expect(await screen.findByText(/1 person and 1 group in Finance lose access/)).toBeInTheDocument()
+        const move = screen.getByRole('button', { name: 'Move to Risk' })
+        expect(move).toBeDisabled()
+        await user.click(understand())
+        expect(move).toBeEnabled()
         await user.click(screen.getByRole('button', { name: 'Team reorganisation' }))
-        await user.click(screen.getByRole('button', { name: 'Move to Risk' }))
+        await user.click(move)
 
         await waitFor(() => expect(svc.move).toHaveBeenCalledWith('ws_fin', 'ds_orders', {
-            targetWorkspaceId: 'ws_risk',
-            keep: [{ type: 'group', id: 'grp_analysts' }],
-            previewToken: 'tok_1',
+            targetWorkspaceId: 'ws_risk', previewToken: 'tok_1',
         }, 'Team reorganisation'))
         expect(await screen.findByRole('heading', { name: '“Orders” now lives in Risk' })).toBeInTheDocument()
         expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ id: 'xfer_1' }))
@@ -121,7 +124,8 @@ describe('MoveDataSourceWizard', () => {
         renderWizard()
         await toConfirm(user)
         await user.click(next())
-        await user.click(await screen.findByRole('button', { name: 'Move to Risk' }))
+        await user.click(await screen.findByRole('checkbox', { name: /^I understand/ }))
+        await user.click(screen.getByRole('button', { name: 'Move to Risk' }))
 
         expect(await screen.findByText(/Something changed — here’s the latest/)).toBeInTheDocument()
         expect(screen.getByText('Two new views were built on it since.')).toBeInTheDocument()
@@ -135,8 +139,9 @@ describe('MoveDataSourceWizard', () => {
         await user.click(await screen.findByRole('radio', { name: /^Operations/ }))
         await user.click(next())
         await user.click(await screen.findByRole('button', { name: /^Next/ }))
-        expect(await screen.findByText(/Operations’s admins will see who you chose/)).toBeInTheDocument()
+        expect(await screen.findByText(/told how to ask to join Operations once its admins accept/)).toBeInTheDocument()
         await user.click(next())
+        await user.click(await screen.findByRole('checkbox', { name: /^I understand/ }))
 
         await user.click(await screen.findByRole('button', { name: 'Send request' }))
         await waitFor(() => expect(svc.propose).toHaveBeenCalledWith('ws_fin', 'ds_orders', expect.objectContaining({
@@ -171,7 +176,8 @@ describe('MoveDataSourceWizard', () => {
         renderWizard()
         await toConfirm(user)
         await user.click(next())
-        await user.click(await screen.findByRole('button', { name: 'Move to Risk' }))
+        await user.click(await screen.findByRole('checkbox', { name: /^I understand/ }))
+        await user.click(screen.getByRole('button', { name: 'Move to Risk' }))
         await screen.findByRole('heading', { name: '“Orders” now lives in Risk' })
 
         await user.click(screen.getByRole('button', { name: /Open in Risk/ }))
