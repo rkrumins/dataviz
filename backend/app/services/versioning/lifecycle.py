@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text, update
 
 from .db import graphver_session
 from .models import (
@@ -32,6 +32,7 @@ from .models import (
     EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
+    JobORM,
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
@@ -124,3 +125,99 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
         "falkorGraphName": (ps.falkor_graph_name if ps else None),
         "falkorGraphOwned": bool(ps.owns_falkor_graph) if ps else False,
     }
+
+
+# ---------------------------------------------------------------- moving a data source --
+_ACTIVE_JOB = ("pending", "running")
+
+
+class GraphBusy(Exception):
+    """A job is writing this graph right now; moving it would strand the job in the old workspace."""
+
+    def __init__(self, job_type: str):
+        super().__init__(job_type)
+        self.job_type = job_type
+
+
+async def relocation_facts(data_source_id: str) -> Optional[dict]:
+    """What moving `data_source_id` to another workspace takes with it. None when version control
+    was never enabled.
+
+    Looked up by data source alone: the graph's own ``workspace_id`` is exactly what a move
+    rewrites, and a copy left stale by an earlier move must not hide the graph from this one.
+    """
+    async with graphver_session() as s:
+        graph = (await s.execute(
+            select(GraphORM).where(
+                GraphORM.data_source_id == data_source_id,
+                GraphORM.deleted_at.is_(None),
+            ))).scalars().first()
+        if graph is None:
+            return None
+        gid = graph.id
+        active = (await s.execute(
+            select(JobORM.job_type).where(JobORM.graph_id == gid, JobORM.status.in_(_ACTIVE_JOB))
+        )).scalars().all()
+        commits = await s.scalar(
+            select(func.count()).select_from(CommitORM).where(CommitORM.graph_id == gid)) or 0
+        # Open drafts only: a merged or abandoned draft is history, not someone's work in flight.
+        drafts = (await s.execute(
+            select(BranchORM.id, BranchORM.name, BranchORM.owner).where(
+                BranchORM.graph_id == gid,
+                BranchORM.kind == "draft",
+                BranchORM.status.in_(("open", "publishing")),
+            ))).all()
+        reviews = await s.scalar(
+            select(func.count()).select_from(MergeRequestORM).where(
+                MergeRequestORM.target_graph_id == gid,
+                MergeRequestORM.status.notin_(("merged", "closed")))) or 0
+        forks = await s.scalar(
+            select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None))) or 0
+    return {
+        "graphId": gid,
+        "activeJobs": sorted(set(active)),
+        "commits": int(commits),
+        "openDrafts": [{"id": d[0], "name": d[1] or "Untitled draft", "owner": d[2] or ""}
+                       for d in drafts],
+        "openReviews": int(reviews),
+        "forks": int(forks),
+    }
+
+
+async def relocate_graph(data_source_id: str, workspace_id: str, *,
+                         check_busy: bool = True) -> Optional[str]:
+    """File `data_source_id`'s versioned graph, and every job ever run on it, under
+    `workspace_id`. Returns the graph id, or None when the source isn't versioned.
+
+    The versioning API decides tenancy from ``graphs.workspace_id`` and the bootstrap's status,
+    retry and abandon from ``jobs.workspace_id`` — a graph left behind would stay writable from
+    the workspace the source left and unreachable from the one it joined. It SETS the workspace
+    rather than swapping one for another, so running it again (or moving the source again) heals
+    a split left by a failure between the two stores.
+
+    Takes the lock merges and publishes take (``_lock_graph``), so none lands mid-move, and
+    refuses with :class:`GraphBusy` while a job is pending or running unless `check_busy` is
+    False — which only compensation passes, to put back what a failed move just changed.
+    """
+    async with graphver_session() as s:
+        if s.bind.dialect.name == "postgresql":
+            # Wait briefly for a merge in flight; never queue a request behind a long one.
+            await s.execute(text("SET LOCAL lock_timeout = '5s'"))
+        graph = (await s.execute(
+            select(GraphORM).where(GraphORM.data_source_id == data_source_id).with_for_update()
+        )).scalars().first()
+        if graph is None:
+            return None
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph.id))))
+        if check_busy:
+            busy = (await s.execute(
+                select(JobORM.job_type).where(
+                    JobORM.graph_id == graph.id, JobORM.status.in_(_ACTIVE_JOB)).limit(1)
+            )).scalars().first()
+            if busy:
+                raise GraphBusy(busy)
+        graph.workspace_id = workspace_id
+        await s.execute(
+            update(JobORM).where(JobORM.graph_id == graph.id).values(workspace_id=workspace_id))
+        return graph.id
