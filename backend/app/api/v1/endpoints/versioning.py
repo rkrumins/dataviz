@@ -788,6 +788,19 @@ class ResolveResponse(_ApiModel):
     # The in-flight (or failed) "enable version control" job, when the graph is still at
     # genesis — so a reload lands back on live progress instead of the enable CTA.
     bootstrap: Optional[dict] = None
+    # live | frozen (editing paused), and the rev a freeze or unfreeze compares against.
+    lifecycle_state: str = Field(default="live", alias="lifecycleState")
+    lifecycle_rev: int = Field(default=0, alias="lifecycleRev")
+
+
+class LifecycleRequest(_ApiModel):
+    expected_rev: int = Field(alias="expectedRev", ge=0)
+
+
+class LifecycleResponse(_ApiModel):
+    graph_id: str = Field(alias="graphId")
+    state: str
+    rev: int
 
 
 class GraphResponse(_ApiModel):
@@ -1989,6 +2002,47 @@ async def reconcile_projection(
     finally:
         _reconcile_inflight.discard(graph_id)
     return DriftReportModel.model_validate(dataclasses.asdict(report))
+
+
+async def _set_frozen(svc, session: AsyncSession, meta: dict, graph_id: str, expected_rev: int,
+                      frozen: bool) -> dict:
+    with _domain_errors():
+        res = await svc.set_frozen(graph_id=graph_id, frozen=frozen, expected_rev=expected_rev)
+    if res["changed"]:              # a repeat changes nothing, so it records nothing
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(
+            session, "workspace.versioning.frozen" if frozen else "workspace.versioning.unfrozen",
+            meta["data_source_id"], {"graphId": graph_id, "rev": res["rev"]})
+    return res
+
+
+@router.post("/graphs/{graph_id}/lifecycle/freeze", response_model=LifecycleResponse)
+async def freeze_graph(
+    ws_id: str, graph_id: str, body: LifecycleRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Pause editing: every content write to the graph answers 409 ``graph_not_writable`` until
+    it is unfrozen; reads, exports and projection go on. ``expectedRev`` is the ``lifecycleRev``
+    the caller saw (409 ``version_conflict`` when it moved); freezing a frozen graph is a no-op.
+    Open while version control is turned off, so a safety freeze always works."""
+    return await _set_frozen(svc, session, meta, graph_id, body.expected_rev, frozen=True)
+
+
+@router.post("/graphs/{graph_id}/lifecycle/unfreeze", response_model=LifecycleResponse)
+async def unfreeze_graph(
+    ws_id: str, graph_id: str, body: LifecycleRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Resume editing of a frozen graph; as :func:`freeze_graph` otherwise."""
+    return await _set_frozen(svc, session, meta, graph_id, body.expected_rev, frozen=False)
 
 
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)

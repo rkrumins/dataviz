@@ -820,6 +820,16 @@ The route chip reads "Serving from: platform copy · shard 2", "original graph",
 - No existing graph has `gv:src:` entities.
 - `storage_bytes_est` for already-converted graphs comes from INGEST's offline backfill.
 
+**Stage 2's freeze** (`20261018_1200_gv_lifecycle`, already shipped) stores only `live` and `frozen`
+in `lifecycle_state`, with `lifecycle_rev` and `lifecycle_changed_at`, and derives `trashed` and
+`purging` from `deleted_at` and the purge job. For L0:
+- 1300 must `ADD COLUMN IF NOT EXISTS` and widen `ck_graphs_lifecycle_state` to the §3 domain.
+- Backfill rule 6 keeps a stored `frozen`; rule 2 takes `prior_state` from the stored `live` or
+  `frozen`; frozen rows get `prior_state='live'`.
+- `deleted_at` stays authoritative for trash while Stage 2 pods may still run.
+- Keep or replace `lifecycle_changed_at`: the idle-draft sweep skips a graph until one full TTL
+  after its unfreeze.
+
 **Capacity**
 - Source and platform keys co-reside until release.
 - Placement refuses above 80% of maxmemory.

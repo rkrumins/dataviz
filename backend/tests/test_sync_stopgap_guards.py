@@ -41,6 +41,9 @@ def _resync_svc(human, calls):
     async def _syncable(_gid):
         return None
 
+    async def _writable(_s, _gid):                                   # a live graph
+        return None
+
     async def _main(_s, _gid):
         return "br_main"
 
@@ -57,6 +60,7 @@ def _resync_svc(human, calls):
 
     svc._assert_syncable = _syncable                                # type: ignore[assignment]
     svc._session = _NoSession                                       # type: ignore[assignment]
+    svc._assert_writable = _writable                                # type: ignore[assignment]
     svc._main_branch_id = _main                                     # type: ignore[assignment]
     svc._last_sync_seq = _last                                      # type: ignore[assignment]
     svc._human_commit_in_sync_base = _human                         # type: ignore[assignment]

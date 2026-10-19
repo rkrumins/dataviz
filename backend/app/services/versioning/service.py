@@ -5065,8 +5065,8 @@ class GraphVersioningService:
         open_draft_if_absent: bool = True, originating_view_id: Optional[str] = None,
     ) -> Optional[Dict[str, object]]:
         """Resolve a data source to its versioned graph plus the caller's editing
-        draft — the UI's boot lookup. Returns the graph's ``main`` head and the
-        actor's newest open draft (opening one when absent if requested), or ``None``
+        draft — the UI's boot lookup. Returns the graph's ``main`` head, its lifecycle state and
+        rev, and the actor's newest open draft (opening one when absent if requested), or ``None``
         when no versioned graph backs the data source (optionally scoped to a
         workspace for tenant isolation)."""
         async with self._session() as s:
@@ -5077,6 +5077,7 @@ class GraphVersioningService:
             if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
                 return None
             graph_id, main_head, graph_kind = g.id, g.main_head_commit_seq, g.kind
+            lifecycle_state, lifecycle_rev = g.lifecycle_state, g.lifecycle_rev
             main_id = await self._main_branch_id(s, graph_id)
             draft_q = select(BranchORM).where(
                 BranchORM.graph_id == graph_id, BranchORM.owner == actor,
@@ -5113,7 +5114,7 @@ class GraphVersioningService:
         return {
             "graph_id": graph_id, "main_branch_id": main_id,
             "main_head_commit_seq": main_head, "my_draft": my_draft,
-            "kind": graph_kind,
+            "kind": graph_kind, "lifecycle_state": lifecycle_state, "lifecycle_rev": lifecycle_rev,
         }
 
     async def list_branches(

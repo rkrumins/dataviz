@@ -142,6 +142,12 @@ failed import waits for any other import on its draft (409 `job_active`).
   resumes from there when retried after a restore. A save that already landed still answers with
   its commit. The same 409 with `state: "frozen"` refuses every such write to a graph whose editing
   is paused; it holds only once every web and versioning-worker pod runs this release.
+- A publisher (`workspace:datasource:publish` and `manage`) pauses editing of a versioned graph with
+  `POST …/graphs/{gid}/lifecycle/freeze` and resumes it with `…/lifecycle/unfreeze`, both
+  `{expectedRev}` → `{graphId, state, rev}`. An `expectedRev` that is no longer the graph's
+  `lifecycleRev` (on `/resolve`) answers **409 `version_conflict`** `{resource: "lifecycle",
+  currentVersion}`; repeating the state the graph is in answers 200 and changes nothing. A freeze
+  works while version control is turned off; an unfreeze does not.
 
 ---
 

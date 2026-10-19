@@ -62,7 +62,7 @@ Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLIS
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
 | `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**, and delete or restore a fork; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
-| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, and the graph router's `/resync`. A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission`. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; API keys keep those writes |
+| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, the graph router's `/resync`, and pausing or resuming editing (`…/lifecycle/freeze`, `…/lifecycle/unfreeze`). A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission`. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; API keys keep those writes |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
 > changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
@@ -79,7 +79,7 @@ so a read-only canvas can boot. Every other versioning route is membership-only.
 
 | Switch (Administration → Features) | Key | Closes |
 |---|---|---|
-| **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/decision`, `/bootstrap/abandon` and `/resync`. Reads stay open |
+| **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile`, `POST …/exports` and `…/lifecycle/freeze`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/decision`, `/bootstrap/abandon` and `/resync`. Reads stay open |
 | **Export graph data** | `graphExportEnabled` | Export plan, stream, job creation and download, on both routers |
 | **Build lineage from scratch** | `blankModelsEnabled` | `POST /blank-graphs` |
 | **Edit mode** | `editModeEnabled` | `POST /graph/changes` |
@@ -139,6 +139,8 @@ Other refusals you will meet on these routers:
 | **409** | `live_forks` | The delete of a fork that has live forks of its own; `{graphId, forks}`. Delete those first |
 | **409** | `graph_moved` | A data source move whose versioned graph another move already took to a third workspace; `{graphId}` |
 | **409** | `fork_not_restorable` | The restore of a fork whose purge is queued (`reason: "purging"`), or whose parent is gone or in the trash (`reason: "parent_deleted"`; restore the parent first); `{graphId, reason}` |
+| **409** | `graph_not_writable` | A content write to a graph that isn't live: a save, opening, staging, checkpointing, pulling, publishing or merging a draft, a PR merged into it, revert, restore, bulk ingest, sync and resync, a fork of it, or an import or publish job. `{state, reason, retryable: false}`; `state` is `frozen` (editing is paused), `trashed` or `purging`. Reads, exports, projection and abandoning a draft still work |
+| **409** | `version_conflict` | A freeze or unfreeze whose `expectedRev` is no longer current; `{resource: "lifecycle", currentVersion}`. Reload and retry |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
 
 > **Invariant.** A conflict or violation is **atomic**: the service raises before any partial write,
@@ -165,8 +167,10 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 |---|---|---|
 | `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, falkorGraphName?, falkorProvider?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. `workspaceId` must equal the path (else **400**); `falkorProvider` defaults to the data source's provider. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
 | `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `kind`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`) |
-| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running or failed. **404** when no versioned graph backs the data source |
-| `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`) |
+| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?, lifecycleState, lifecycleRev}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running or failed. `lifecycleState` is `live` or `frozen` (editing is paused), and `lifecycleRev` is what a freeze or unfreeze names. **404** when no versioned graph backs the data source |
+| `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`); on a frozen graph that has none, **409 `graph_not_writable`** |
+| `POST …/lifecycle/freeze` | `_PUBLISH` | Pause editing: every content write answers **409 `graph_not_writable`** until it is unfrozen. `{expectedRev}` → `{graphId, state, rev}`. A stale `expectedRev` → **409 `version_conflict`**; an already frozen graph → **200**, unchanged. Waits for saves in flight, and past the lock wait answers **503 `lock_busy`**. Open while version control is turned off. Recorded in the activity log |
+| `POST …/lifecycle/unfreeze` | `_PUBLISH` | Resume editing; otherwise as freeze. Closed while version control is turned off |
 
 > **Note.** "Enable version control" (**bootstrap**) and the authoritative **re-sync** from the
 > provider are on the *graph* router ([§4](#cascade-preview--bootstrapresync)), because they snapshot

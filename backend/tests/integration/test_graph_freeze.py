@@ -17,6 +17,8 @@
   fails after the windows it committed and, once unfrozen and retried, lands every row once.
 * A trashed graph reports ``trashed``, one with a purge job ``purging``; a frozen graph trashed and
   restored comes back frozen.
+* Over HTTP a publisher freezes and unfreezes; a save, a publish, an import and a fork answer 409
+  ``graph_not_writable`` while frozen, reads answer 200, and resolve reports the state and its rev.
 """
 import asyncio
 import json
@@ -164,6 +166,9 @@ async def _reads(svc):
         row = await s.get(GraphORM, gid)
         assert (row.lifecycle_state, row.lifecycle_rev) == ("frozen", 1)
         assert row.lifecycle_changed_at is not None
+    res = await svc.resolve_graph(data_source_id=g["ds"], actor="u", workspace_id="ws1",
+                                  open_draft_if_absent=False)
+    assert (res["lifecycle_state"], res["lifecycle_rev"]) == ("frozen", 1)
     nodes = (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
     assert {p["displayName"] for p in nodes.values()} == {"A", "B"}
     nodes = (await svc.materialize_state(graph_id=gid, branch_id=draft))["nodes"]
@@ -422,3 +427,53 @@ async def _trash(svc):
 
 def test_trash_and_purge_report_their_state_and_restore_keeps_frozen():
     _e2e(_trash)
+
+
+async def _http(svc):
+    from httpx import ASGITransport, AsyncClient
+
+    from .test_api_graph_draft_journey import _StubCache, _StubManager, _build_app
+    from .test_versioning_resolve import _seed_data_source
+
+    app, G = _build_app()
+    orig_pm, orig_cache = G.provider_manager, G.get_graph_cache
+    G.provider_manager, G.get_graph_cache = _StubManager(), lambda: _StubCache()
+    ds = "ds_" + os.urandom(4).hex()
+    await _seed_data_source(ds)
+    V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
+    save = {"ops": [{"op": "create", "kind": "node", "id": "urn:h:1", "payload": {
+        "urn": "urn:h:1", "entityType": "Table", "displayName": "H"}}], "message": "save"}
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post(f"{V1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})
+            gid = r.json()["graphId"]
+            draft = (await c.post(f"{V1}/graphs/{gid}/branches", json={})).json()["branchId"]
+            on_draft = {"dataSourceId": ds, "branchId": draft}
+
+            r = await c.post(f"{V1}/graphs/{gid}/lifecycle/freeze", json={"expectedRev": 0})
+            assert (r.status_code, r.json()) == (200, {"graphId": gid, "state": "frozen", "rev": 1}), r.text
+            for path, kw in [(f"{GP}/changes", {"params": on_draft, "json": save}),
+                             (f"{V1}/graphs/{gid}/branches/{draft}/publish", {"json": {"message": "ship"}}),
+                             (f"{V1}/graphs/{gid}/imports", {"content": b""}),
+                             (f"{V1}/graphs/{gid}/forks", {})]:
+                r = await c.post(path, **kw)
+                assert r.status_code == 409, (path, r.text)
+                assert (r.json()["detail"]["type"], r.json()["detail"]["state"]) == (
+                    "graph_not_writable", "frozen"), (path, r.text)
+
+            assert (await c.get(f"{GP}/nodes", params=on_draft)).status_code == 200
+            assert (await c.get(f"{V1}/graphs/{gid}/branches/{draft}/state")).status_code == 200
+            r = await c.get(f"{V1}/resolve", params={"dataSourceId": ds})
+            assert r.status_code == 200, r.text
+            assert (r.json()["lifecycleState"], r.json()["lifecycleRev"]) == ("frozen", 1)
+
+            r = await c.post(f"{V1}/graphs/{gid}/lifecycle/unfreeze", json={"expectedRev": 1})
+            assert (r.status_code, r.json()) == (200, {"graphId": gid, "state": "live", "rev": 2}), r.text
+            r = await c.post(f"{GP}/changes", params=on_draft, json=save)
+            assert r.status_code == 200 and r.json()["commitId"], r.text
+    finally:
+        G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
+
+
+def test_http_frozen_graph_refuses_saves_publish_and_import_with_409(data_sources):
+    _e2e(_http)

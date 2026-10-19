@@ -8,7 +8,7 @@ Two flavours:
   default, while all GETs stay open (reads keep working for read-only canvases,
   admin debugging and scripts). A small allowlist keeps the ops surfaces that
   maintain already-versioned data usable while the feature is hidden: projection
-  rebuild/reconcile and exports (read-shaped, produces files).
+  rebuild/reconcile, exports (read-shaped, produces files) and a freeze (a safety stop).
 * ``require_versioning_enabled`` — explicit per-route dependency for write routes
   that live on OTHER routers (e.g. ``/graph/bootstrap``, ``/graph/resync``).
 * ``require_branch_scope`` — the view, layout and library routes that take a
@@ -50,7 +50,9 @@ VERSIONING_FLAG = "versioningEnabled"
 # is OFF (they maintain existing versioned data; they are already _MANAGE-gated):
 #   projection/rebuild + projection/reconcile — projection health ops
 #   exports — read-shaped (produces a file download)
-_WRITE_ALLOWLIST_SUFFIXES = ("/projection/rebuild", "/projection/reconcile", "/exports")
+#   lifecycle/freeze — a safety freeze must work while the feature is hidden (unfreeze stays gated)
+_WRITE_ALLOWLIST_SUFFIXES = ("/projection/rebuild", "/projection/reconcile", "/exports",
+                             "/lifecycle/freeze")
 
 _MUTATING = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
