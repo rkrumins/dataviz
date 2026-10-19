@@ -20,6 +20,8 @@ export type ReasonContext =
     | 'versioning'
     | 'duplicates'
     | 'cache'
+    | 'move'
+    | 'move-undo'
 
 export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
     aggregation: [
@@ -69,6 +71,13 @@ export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
         'Restored from a backup',
         'Views show stale data',
     ],
+    move: [
+        'Team reorganisation',
+        'Onboarded into the wrong workspace',
+        'Consolidating data sources',
+        'Ownership handed over',
+    ],
+    'move-undo': ['Moved by mistake', 'Destination wasn’t ready', 'Wrong workspace'],
 }
 
 /** Who can read a reason once it is saved — said under the field, because a

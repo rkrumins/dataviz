@@ -7,6 +7,7 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import type { AccessRequestStatus, WorkspaceAccessMode } from './accessRequestsService'
+import type { DataSourceTransferResponse } from './dataSourceTransferService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -518,15 +519,14 @@ export const workspaceService = {
     },
 
     /**
-     * Re-home a data source into another workspace.
-     *
-     * The server refuses (409) unless ZERO views are built on it — including
-     * trashed ones. That isn't caution: views.data_source_id is ON DELETE SET
-     * NULL, and a view left in workspace A pointing at a source now owned by
-     * workspace B would read B's data through A's RBAC check.
+     * Re-home a data source into another workspace — the quick pull used by the
+     * Add Data Source and Create Workspace wizards for a source nothing is built
+     * on. A source WITH views moves through the move wizard
+     * (`dataSourceTransferService`), which decides who keeps access; the server
+     * moves its views with it and needs admin rights in both workspaces for that.
      */
-    moveDataSource(workspaceId: string, dataSourceId: string, targetWorkspaceId: string): Promise<DataSourceResponse> {
-        return request<DataSourceResponse>(
+    moveDataSource(workspaceId: string, dataSourceId: string, targetWorkspaceId: string): Promise<DataSourceTransferResponse> {
+        return request<DataSourceTransferResponse>(
             `${ADMIN_API}/${workspaceId}/data-sources/${dataSourceId}/move`,
             { method: 'POST', body: JSON.stringify({ targetWorkspaceId }) },
         )

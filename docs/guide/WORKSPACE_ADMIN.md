@@ -268,8 +268,8 @@ How you move it depends on what you run:
 1. On the **Data Sources** tab, select the source to open it, open its **⋯** menu and
    choose **Move to another workspace…**.
 2. **Destination** — pick where it goes. Each workspace says what you can do there:
-   move it now, or ask its admins. Workspaces it can't go to are listed under **Not
-   available** with the reason, such as **Already has this graph**.
+   move it now, or ask its admins. Workspaces it can't go to are folded under ***N*
+   workspaces can't take it**, each with the reason, such as **Already has this graph**.
 3. **What moves** — check how many views move (and how many are in the trash or
    follow the workspace's default source), its version history, and what you should
    know. Anything under **Resolve before moving** — an aggregation run or a
@@ -312,8 +312,8 @@ instead. A move made by accepting a request can only be undone by the destinatio
 admins.
 
 Every move, request and undo appears in both workspaces' **Activity** and in each
-moved view's own activity, and **History** on the source's panel lists where it has
-lived.
+moved view's own activity, and **Where it has lived** on the source's panel lists
+each move.
 
 [screenshot-pending]: # "workspace-admin-moved-from — a moved source's panel, showing where it came from, with Undo"
 

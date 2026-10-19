@@ -42,7 +42,7 @@ cancelled when its source is deleted or moved some other way.
 **Undo, for a week.** A completed move can be undone for 7 days — the workspace, the primary
 source, the views and the access the move added — while it is the source's latest move and
 nothing new has been built on it in its new workspace. The source's panel says where it came from,
-offers **Undo**, and keeps its **History** of where it has lived. Each moved view's activity says
+offers **Undo**, and lists each move under **Where it has lived**. Each moved view's activity says
 where it went.
 
 ### Changed

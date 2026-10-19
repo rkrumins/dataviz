@@ -43,6 +43,7 @@ import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
+import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -80,6 +81,10 @@ export function WorkspaceDetailPage() {
 
     // ── Add DS wizard state ────────────────────────────────
     const [showAddDs, setShowAddDs] = useState(false)
+
+    // ── Move wizard: a source of ours going elsewhere, or one pulled in here ──
+    const [moving, setMoving] = useState<Pick<MoveDataSourceWizardProps,
+        'sourceWorkspace' | 'dataSource' | 'presetDestinationId'> | null>(null)
 
     // ── Delete confirm state ───────────────────────────────
 
@@ -768,7 +773,24 @@ export function WorkspaceDetailPage() {
                 catalogItems={allowedCatalogItems}
                 providers={providers}
                 ontologies={ontologies}
+                onMoveWithViews={item => {
+                    if (!wsId || !item.boundWorkspaceId || !item.boundDataSourceId) return
+                    setMoving({
+                        sourceWorkspace: { id: item.boundWorkspaceId, name: item.boundWorkspaceName ?? 'another workspace' },
+                        dataSource: { id: item.boundDataSourceId, label: item.name },
+                        presetDestinationId: wsId,
+                    })
+                }}
             />
+
+            {moving && (
+                <MoveDataSourceWizard
+                    isOpen
+                    {...moving}
+                    onClose={() => setMoving(null)}
+                    onDone={() => { reload(); setTrashKey(k => k + 1) }}
+                />
+            )}
 
             {/* One dialog, two registers. Removing is disruptive but REVERSIBLE, so it shows the
                 full blast radius and then asks for nothing but a click — and the notification carries an
@@ -810,6 +832,24 @@ export function WorkspaceDetailPage() {
                 onDeletePermanent={workspace.dataSources.length > 1 && selectedDs
                     ? () => deletion.openPermanent(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
+                // Moving its views is a workspace admin's call; a source with nothing
+                // built on it moves for whoever manages data sources in both places.
+                // The server decides either way, and the wizard says why when it won't.
+                onMove={selectedDs && wsId && (canManageMembers
+                    || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0))
+                    ? () => {
+                        setMoving({
+                            sourceWorkspace: { id: wsId, name: workspace.name },
+                            dataSource: {
+                                id: selectedDs.id,
+                                label: selectedDs.label || dsProviderMap[selectedDs.id]?.catalogItemName || 'this data source',
+                            },
+                        })
+                        // The wizard sits under the drawer's layer, so the drawer steps aside.
+                        setSelectedDsId(null)
+                    }
+                    : undefined}
+                onMovedAway={() => { setSelectedDsId(null); reload() }}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
                 onSetPrimary={() => { if (selectedDsId) handleSetPrimary(selectedDsId) }}
