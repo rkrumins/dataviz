@@ -15,9 +15,13 @@ the identity provider grants it:
   qualifies only if every one of its bindings is one the approver could make.
 * **The identity provider.** A workspace whose access its IdP decides is
   reached through the IdP groups its mappings route into it.
+* **Provenance.** Every grant says how it came about: added directly, an
+  approved request, an exception, the identity provider's groups, a team,
+  or an organization-wide role (:class:`ProvenanceReader`).
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Iterable, Optional
@@ -33,6 +37,8 @@ from backend.app.db.models import (
     IdpProviderORM,
     RoleBindingORM,
     RoleORM,
+    RolePermissionORM,
+    UserORM,
     WorkspaceORM,
 )
 from backend.app.db.repositories import (
@@ -309,6 +315,131 @@ async def idp_routes(session: AsyncSession, ws_id: str) -> list[dict]:
                     "via_group_name": group_names.get(m.target_group_id),
                 })
     return sorted(routes, key=lambda r: (r["idp_group"].lower(), r.get("role") or ""))
+
+
+async def org_wide_grants(
+    session: AsyncSession,
+) -> list[tuple[str, RoleBindingORM, Optional[GroupORM], Optional[GroupMemberORM]]]:
+    """``(user, binding, group, membership)`` for everyone who reaches every
+    workspace through an organization-wide role: current global bindings of
+    the roles carrying :data:`ORG_WIDE_PERMISSIONS`, groups expanded."""
+    roles = sorted(set((await session.execute(
+        select(RolePermissionORM.role_name)
+        .where(RolePermissionORM.permission_id.in_(ORG_WIDE_PERMISSIONS))
+    )).scalars().all()))
+    if not roles:
+        return []
+    now = _now()
+    bindings = [
+        b for b in (await session.execute(
+            select(RoleBindingORM).where(
+                RoleBindingORM.scope_type == "global", RoleBindingORM.role_name.in_(roles),
+            )
+        )).scalars().all()
+        if not _is_expired(b.expires_at, now=now)
+    ]
+    group_ids = sorted({b.subject_id for b in bindings if b.subject_type == "group"})
+    groups: dict[str, GroupORM] = {}
+    members: dict[str, list[GroupMemberORM]] = {}
+    if group_ids:
+        groups = {g.id: g for g in (await session.execute(
+            select(GroupORM).where(GroupORM.id.in_(group_ids), GroupORM.deleted_at.is_(None))
+        )).scalars().all()}
+        for m in (await session.execute(
+            select(GroupMemberORM).where(GroupMemberORM.group_id.in_(list(groups)))
+        )).scalars().all():
+            members.setdefault(m.group_id, []).append(m)
+    out = []
+    for b in bindings:
+        if b.subject_type == "user":
+            out.append((b.subject_id, b, None, None))
+        else:
+            out.extend((m.user_id, b, groups[b.subject_id], m) for m in members.get(b.subject_id, []))
+    return out
+
+
+class ProvenanceReader:
+    """Says how each grant came about, as ``AccessProvenance`` fields.
+
+    Built once per page (:func:`provenance_reader`) from the identity
+    provider mappings, provider names, and the groups each person's
+    provider asserted at their last sign-in — so an IdP grant names the
+    group that actually let them in, not every group that could have.
+    """
+
+    def __init__(self, mappings, providers: dict[str, str], asserted: dict[str, set[str]]):
+        self._mappings = list(mappings)
+        self._providers = providers
+        self._asserted = asserted
+
+    def binding(self, b: RoleBindingORM, user_id: str) -> dict:
+        """A role binding held by the person themselves."""
+        if b.source == "sso":
+            return self._idp(user_id, [
+                m for m in self._mappings
+                if m.target_type == "role_binding"
+                and (m.scope_type, m.scope_id, m.role_name) == (b.scope_type, b.scope_id, b.role_name)
+            ], at=b.granted_at)
+        origin = "exception" if b.idp_exception else "request" if b.access_request_id else "direct"
+        return {"origin": origin, "by": b.granted_by, "at": b.granted_at, "request_id": b.access_request_id}
+
+    def membership(self, m: Optional[GroupMemberORM], group: Optional[GroupORM], user_id: str) -> dict:
+        """A grant through a group: its identity provider filled it, or
+        someone added them to the team."""
+        at = m.added_at if m else None
+        if m is not None and m.source == "sso":
+            return self._idp(user_id, [
+                x for x in self._mappings
+                if x.target_type == "group_membership" and x.target_group_id == m.group_id
+            ], at=at)
+        if group is not None and group.source == "scim":
+            return {"origin": "idp", "at": at, "idp_groups": [group.name]}
+        return {
+            "origin": "team",
+            "source": group.name if group else None,
+            "by": m.added_by if m else None,
+            "at": at,
+            "request_id": m.access_request_id if m else None,
+        }
+
+    def org_role(self, b: RoleBindingORM, user_id: str, m: Optional[GroupMemberORM] = None,
+                 group: Optional[GroupORM] = None) -> dict:
+        """An organization-wide role: named, with how they came to hold it."""
+        how = self.binding(b, user_id) if group is None else self.membership(m, group, user_id)
+        return {**how, "origin": "org_role", "source": b.role_name}
+
+    def _idp(self, user_id: str, mappings: list, *, at: Optional[str]) -> dict:
+        groups = {m.idp_group for m in mappings}
+        asserted = self._asserted.get(user_id)
+        if asserted and groups & asserted:
+            groups &= asserted
+        providers = {
+            self._providers.get(m.provider_id) for m in mappings
+            if m.idp_group in groups and m.provider_id
+        } - {None}
+        return {
+            "origin": "idp",
+            "at": at,
+            "idp_groups": sorted(groups),
+            "idp_provider": providers.pop() if len(providers) == 1 else None,
+        }
+
+
+async def provenance_reader(session: AsyncSession, user_ids: Iterable[str]) -> ProvenanceReader:
+    ids = sorted(set(user_ids))
+    asserted: dict[str, set[str]] = {}
+    if ids:
+        for uid, meta in (await session.execute(
+            select(UserORM.id, UserORM.metadata_).where(UserORM.id.in_(ids))
+        )).all():
+            try:
+                groups = json.loads(meta or "{}").get("idp_groups")
+            except (ValueError, TypeError, AttributeError):
+                groups = None
+            if isinstance(groups, list):
+                asserted[uid] = {str(g) for g in groups}
+    mappings = (await session.execute(select(IdpGroupRoleMappingORM))).scalars().all()
+    return ProvenanceReader(mappings, await provider_names(session), asserted)
 
 
 async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> int:

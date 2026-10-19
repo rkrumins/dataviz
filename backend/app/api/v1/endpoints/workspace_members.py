@@ -31,6 +31,7 @@ from backend.app.services.permission_service import PermissionClaims, simulate_f
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    AccessProvenance,
     ImpactPreviewResponse,
     ImpactPreviewUser,
     RequestableRole,
@@ -50,12 +51,17 @@ from backend.common.models.rbac import (
 # Precedence for the single "effective role" badge. Higher wins; a role
 # not listed (a custom workspace role) ranks below the built-ins but is
 # still carried in ``roles`` and every ``grant`` — the badge is a
-# convenience, never the whole picture.
+# convenience, never the whole picture. An organization-wide role badges
+# what it amounts to here: Super Admin and Org Admin above a workspace
+# admin, Org Auditor alongside a viewer.
 _WS_ROLE_RANK = {
+    "super_admin": 6,
+    "org_admin": 5,
     "workspace_admin": 4,
     "workspace_steward": 3,
     "workspace_member": 2,
     "workspace_viewer": 1,
+    "org_auditor": 1,
 }
 
 
@@ -197,47 +203,58 @@ async def list_effective_access(
     grant per route that got them there. A user in three bound groups
     (and perhaps bound directly too) appears ONCE, with a grant per
     route, so "who can actually get in, and how" reads off one list.
+
+    People who reach every workspace through an organization-wide role
+    are listed too (``via="org"``), and every grant says how it came
+    about (``provenance``): added directly, an approved request, an
+    exception, the identity provider's groups, a team, or that role.
     """
     await _ensure_workspace_exists(session, ws_id)
     bindings = await binding_repo.list_for_scope(
         session, scope_type="workspace", scope_id=ws_id,
     )
 
-    # Names for every bound group, in one query, so a grant can say which
-    # group it came through.
+    # Every bound group, in one query, so a grant can say which group it
+    # came through and whether the identity provider fills it.
     group_ids = [b.subject_id for b in bindings if b.subject_type == "group"]
-    group_names: dict[str, str] = {}
+    groups: dict[str, GroupORM] = {}
     if group_ids:
-        rows = await session.execute(
-            select(GroupORM.id, GroupORM.name).where(GroupORM.id.in_(group_ids))
-        )
-        group_names = {gid: name for gid, name in rows.all()}
+        rows = await session.execute(select(GroupORM).where(GroupORM.id.in_(group_ids)))
+        groups = {g.id: g for g in rows.scalars().all()}
 
-    grants_by_user: dict[str, list[WorkspaceAccessGrant]] = {}
-    direct_ids: set[str] = set()
-    via_group_ids: set[str] = set()
-
+    # (user, binding, via, group, membership) for every route in.
+    routes: list[tuple] = []
     for b in bindings:
         if b.subject_type == "user":
-            grants_by_user.setdefault(b.subject_id, []).append(
-                WorkspaceAccessGrant(
-                    role=b.role_name, via="direct", binding_id=b.id,
-                    expires_at=b.expires_at,
-                )
-            )
-            direct_ids.add(b.subject_id)
+            routes.append((b.subject_id, b, "direct", None, None))
         elif b.subject_type == "group":
-            gname = group_names.get(b.subject_id)
-            members = await group_repo.list_group_members(session, b.subject_id)
-            for m in members:
-                grants_by_user.setdefault(m.user_id, []).append(
-                    WorkspaceAccessGrant(
-                        role=b.role_name, via="group", binding_id=b.id,
-                        group_id=b.subject_id, group_name=gname,
-                        expires_at=b.expires_at,
-                    )
-                )
-                via_group_ids.add(m.user_id)
+            for m in await group_repo.list_group_members(session, b.subject_id):
+                routes.append((m.user_id, b, "group", groups.get(b.subject_id), m))
+    routes += [
+        (uid, b, "org", group, m)
+        for uid, b, group, m in await workspace_access.org_wide_grants(session)
+    ]
+    reader = await workspace_access.provenance_reader(session, [r[0] for r in routes])
+
+    grants_by_user: dict[str, list[WorkspaceAccessGrant]] = {}
+    ids_by_via: dict[str, set[str]] = {"direct": set(), "group": set(), "org": set()}
+    for uid, b, via, group, m in routes:
+        if via == "direct":
+            how = reader.binding(b, uid)
+        elif via == "group":
+            how = reader.membership(m, group, uid)
+        else:
+            how = reader.org_role(b, uid, m, group)
+        grants_by_user.setdefault(uid, []).append(
+            WorkspaceAccessGrant(
+                role=b.role_name, via=via, binding_id=b.id,
+                group_id=b.subject_id if b.subject_type == "group" else None,
+                group_name=group.name if group else None,
+                expires_at=b.expires_at,
+                provenance=AccessProvenance(**how),
+            )
+        )
+        ids_by_via[via].add(uid)
 
     # One batched identity lookup for the whole page — names, emails,
     # avatars, and the deleted flag (a deleted account that still holds
@@ -260,12 +277,14 @@ async def list_effective_access(
                 deleted=ident["deleted"] if ident else False,
                 roles=roles,
                 effective_role=_effective_role(roles),
-                # Direct routes first, then by group name, then role —
-                # stable and readable in the drawer.
+                # Direct routes first, then through groups, then
+                # organization-wide; by group name, then role — stable
+                # and readable in the drawer.
                 grants=sorted(
                     grants,
                     key=lambda g: (
-                        g.via != "direct", (g.group_name or "").lower(), g.role,
+                        ("direct", "group", "org").index(g.via),
+                        (g.group_name or "").lower(), g.role,
                     ),
                 ),
             )
@@ -276,8 +295,9 @@ async def list_effective_access(
     return WorkspaceAccessResponse(
         users=users,
         total_users=len(users),
-        direct_users=len(direct_ids),
-        via_group_users=len(via_group_ids),
+        direct_users=len(ids_by_via["direct"]),
+        via_group_users=len(ids_by_via["group"]),
+        org_wide_users=len(ids_by_via["org"]),
     )
 
 

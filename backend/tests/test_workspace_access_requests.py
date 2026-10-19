@@ -16,6 +16,8 @@
   is an exception, said out loud; pointing the person to a mapped group waits
   until the access arrives at a sign-in, which closes the request.
 * The Members tab holds stewards to the same ceilings.
+* Every grant says how it came about — on People with access, where people
+  who reach every workspace are listed too, and on My Access.
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ from backend.app.db.models import (
     OutboxEventORM,
     RoleBindingORM,
     UserIdentityORM,
+    UserORM,
     WorkspaceORM,
 )
 from backend.app.db.repositories import access_request_repo, idp_group_mapping_repo, idp_provider_repo
@@ -639,3 +642,101 @@ async def test_deleting_a_workspace_closes_its_open_requests(world, db_session):
     assert res.status_code < 300, res.text
     row = await db_session.get(AccessRequestORM, req["id"])
     assert (row.status, row.resolution_note, row.resolved_by) == ("denied", "The workspace was deleted", "usr_wanda")
+
+
+# ── How every grant came about ───────────────────────────────────────
+
+
+async def _person(session, uid: str) -> None:
+    session.add(UserORM(
+        id=uid, email=f"{uid}@example.com", password_hash="x", first_name=uid[4:].title(),
+        last_name="T", status="active", created_at="2024-01-01T00:00:00Z", updated_at="2024-01-01T00:00:00Z",
+    ))
+    await session.flush()
+
+
+async def test_people_with_access_say_how_each_grant_came_about(world, db_session):
+    provider = await _idp_run(db_session)
+    for uid in ("usr_tess", "usr_ivy", "usr_eve"):
+        await _person(db_session, uid)
+    # Tess: a team someone added her to.
+    await _team(db_session, "grp_close")
+    db_session.add(GroupMemberORM(group_id="grp_close", user_id="usr_tess", added_by="usr_wanda"))
+    # Ivy: her identity provider's group; her last sign-in asserted two groups.
+    (await db_session.get(UserORM, "usr_ivy")).metadata_ = json.dumps({"idp_groups": ["finance-analysts", "everyone"]})
+    await db_session.flush()
+    await reconcile_sso_targets(db_session, user_id="usr_ivy", idp_groups=["finance-analysts"], provider_id=provider.id)
+    # Ana: an approved request; Eve: an exception.
+    req = (await _submit(world, db_session)).json()
+    async with acting_as(db_session, "wanda"):
+        assert (await world.post(f"{ADMIN_URL}/{req['id']}/approve", json={"exception": True})).status_code == 200
+        added = await world.post(
+            f"/api/v1/admin/workspaces/{WS}/members",
+            json={"subjectType": "user", "subjectId": "usr_eve", "role": "workspace_viewer", "exception": True},
+        )
+        assert added.status_code == 201, added.text
+    (await db_session.get(WorkspaceORM, WS)).access_mode = "app"
+    await db_session.flush()
+
+    async with acting_as(db_session, "bob"):
+        res = await world.get(f"/api/v1/admin/workspaces/{WS}/members/effective")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    how = {u["userId"]: [(g["via"], g["provenance"]) for g in u["grants"]] for u in body["users"]}
+
+    [(via, max_)] = how["usr_max"]
+    assert (via, max_["origin"], max_["by"]) == ("direct", "direct", None)
+    [(via, tess)] = how["usr_tess"]
+    assert (via, tess["origin"], tess["source"], tess["by"]) == ("group", "team", "Grp_Close", "usr_wanda")
+    [(via, ivy)] = how["usr_ivy"]
+    assert (via, ivy["origin"], ivy["idpGroups"], ivy["idpProvider"]) == (
+        "direct", "idp", ["finance-analysts"], "Entra ID",
+    )
+    [(via, ana)] = how["usr_ana"]
+    assert (ana["origin"], ana["by"], ana["requestId"]) == ("exception", "usr_wanda", req["id"])
+    [(via, eve)] = how["usr_eve"]
+    assert (eve["origin"], eve["by"], eve["requestId"]) == ("exception", "usr_wanda", None)
+
+    # Organization-wide people are listed, marked as such.
+    [(via, olga)] = how["usr_olga"]
+    assert (via, olga["origin"], olga["source"]) == ("org", "org_role", "org_admin")
+    assert body["orgWideUsers"] == 1
+    assert next(u for u in body["users"] if u["userId"] == "usr_olga")["effectiveRole"] == "org_admin"
+
+
+async def test_an_approved_request_reads_as_one_on_people_with_access(world, db_session):
+    req = (await _submit(world, db_session)).json()
+    async with acting_as(db_session, "bob"):
+        await world.post(f"{ADMIN_URL}/{req['id']}/approve")
+        users = (await world.get(f"/api/v1/admin/workspaces/{WS}/members/effective")).json()["users"]
+    [grant] = next(u for u in users if u["userId"] == "usr_ana")["grants"]
+    assert (grant["provenance"]["origin"], grant["provenance"]["by"], grant["provenance"]["requestId"]) == (
+        "request", "usr_bob", req["id"],
+    )
+
+
+async def test_my_access_says_how_each_binding_came_about_and_drops_lapsed_ones(world, db_session):
+    await _team(db_session, "grp_close", role="workspace_viewer")
+    db_session.add(GroupMemberORM(group_id="grp_close", user_id="usr_ana", added_by="usr_wanda"))
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id="usr_ana", role_name="workspace_member",
+        scope_type="workspace", scope_id=WS_OTHER, expires_at=days_ago(1),
+    ))
+    await db_session.flush()
+    req = (await _submit(world, db_session, role="workspace_data_engineer")).json()
+    async with acting_as(db_session, "wanda"):
+        await world.post(f"{ADMIN_URL}/{req['id']}/approve", json={"expiresIn": "7d"})
+    async with acting_as(db_session, "ana"):
+        res = await world.get("/api/v1/me/access")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    # The lapsed Operations grant is gone; the approved one says how, and until when.
+    [direct] = body["directBindings"]
+    assert (direct["role"], direct["scope"]["id"], direct["provenance"]["origin"]) == (
+        "workspace_data_engineer", WS, "request",
+    )
+    assert direct["expiresAt"] and direct["provenance"]["requestId"] == req["id"]
+    [inherited] = body["inheritedBindings"]
+    assert (inherited["viaGroup"]["id"], inherited["provenance"]["origin"], inherited["provenance"]["by"]) == (
+        "grp_close", "team", "usr_wanda",
+    )

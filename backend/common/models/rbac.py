@@ -163,21 +163,51 @@ class WorkspaceMemberResponse(BaseModel):
     subject: WorkspaceMemberSubject
 
 
+class AccessProvenance(BaseModel):
+    """How a grant came about — the answer to "why can this person get in?".
+
+    ``origin`` is one of:
+
+    * ``direct`` — someone added them (``by``, ``at``);
+    * ``request`` — an approved access request (``requestId``; ``by``
+      approved it);
+    * ``exception`` — granted in the app for a workspace whose access its
+      identity provider decides (``by``; ``requestId`` when it answered one);
+    * ``idp`` — their identity provider's groups (``idpGroups``, and
+      ``idpProvider`` when one provider maps them);
+    * ``team`` — an app-managed group someone added them to (``source``
+      names it; ``by``, ``at`` and ``requestId`` as for a grant);
+    * ``org_role`` — an organization-wide role (``source`` names it).
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    origin: str
+    source: Optional[str] = None
+    by: Optional[str] = None
+    at: Optional[str] = None
+    request_id: Optional[str] = Field(default=None, alias="requestId")
+    idp_groups: list[str] = Field(default_factory=list, alias="idpGroups")
+    idp_provider: Optional[str] = Field(default=None, alias="idpProvider")
+
+
 class WorkspaceAccessGrant(BaseModel):
     """One route by which a user holds a role in the workspace.
 
     A user can hold several: a direct binding and membership of two
     groups that are each bound would be three grants. ``via`` is
     ``"direct"`` for a user binding, ``"group"`` for one inherited
-    through a group; the group fields are set only in the latter case.
+    through a group, ``"org"`` for an organization-wide role that reaches
+    every workspace (``bindingId`` is then the global binding); the group
+    fields are set whenever a group carried it. ``provenance`` says how
+    the grant came about.
     """
     model_config = ConfigDict(populate_by_name=True)
     role: str
-    via: str  # "direct" | "group"
+    via: str  # "direct" | "group" | "org"
     binding_id: str = Field(alias="bindingId")
     group_id: Optional[str] = Field(default=None, alias="groupId")
     group_name: Optional[str] = Field(default=None, alias="groupName")
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    provenance: Optional[AccessProvenance] = None
 
 
 class WorkspaceAccessUser(BaseModel):
@@ -222,6 +252,9 @@ class WorkspaceAccessResponse(BaseModel):
     # ``totalUsers``.
     direct_users: int = Field(default=0, alias="directUsers")
     via_group_users: int = Field(default=0, alias="viaGroupUsers")
+    # People who reach every workspace through an organization-wide role
+    # (Super Admin, Org Admin, Org Auditor) — listed, marked as such.
+    org_wide_users: int = Field(default=0, alias="orgWideUsers")
 
 
 class WorkspaceMemberCreateRequest(BaseModel):
@@ -442,7 +475,8 @@ class UserAccessBinding(BaseModel):
     """One row in the user's access map.
 
     A binding is direct when ``viaGroup`` is None; otherwise it points
-    at the group the user inherited from.
+    at the group the user inherited from. ``provenance`` says how it came
+    about; ``expiresAt`` when it ends, if it does.
     """
     model_config = ConfigDict(populate_by_name=True)
     binding_id: str = Field(alias="bindingId")
@@ -451,6 +485,8 @@ class UserAccessBinding(BaseModel):
     granted_at: str = Field(alias="grantedAt")
     granted_by: Optional[str] = Field(default=None, alias="grantedBy")
     via_group: Optional[_ViaGroup] = Field(default=None, alias="viaGroup")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    provenance: Optional[AccessProvenance] = None
 
 
 class UserAccessSubject(BaseModel):

@@ -17,6 +17,7 @@ do, and how did she get that?" without re-implementing the logic.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -25,13 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import GroupORM, RoleBindingORM, WorkspaceORM
+from backend.app.db.models import GroupMemberORM, GroupORM, RoleBindingORM, WorkspaceORM
 from backend.app.db.repositories import (
     group_repo,
     permission_repo,
     role_repo,
     user_repo,
 )
+from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.db.repositories.role_repo import (
     RoleImmutableError,
     RoleInUseError,
@@ -47,6 +49,7 @@ from backend.common.role_defaults import (
     default_permissions,
     locked_permissions,
 )
+from backend.app.services import workspace_access
 from backend.app.services.permission_service import (
     compute_implied_by,
     resolve as resolve_claims,
@@ -54,6 +57,7 @@ from backend.app.services.permission_service import (
 )
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    AccessProvenance,
     ImpactPreviewResponse,
     ImpactPreviewUser,
     PermissionResponse,
@@ -477,6 +481,7 @@ def _binding_to_response(
     *,
     scope_label: Optional[str],
     via_group: Optional[GroupORM],
+    provenance: dict,
 ) -> UserAccessBinding:
     return UserAccessBinding(
         binding_id=b.id,
@@ -489,6 +494,8 @@ def _binding_to_response(
         granted_at=b.granted_at,
         granted_by=b.granted_by,
         via_group=_ViaGroup(id=via_group.id, name=via_group.name) if via_group else None,
+        expires_at=b.expires_at,
+        provenance=AccessProvenance(**provenance),
     )
 
 
@@ -503,6 +510,9 @@ async def compute_user_access(
     (``GET /me/access`` in ``me.py``, gated only by
     ``get_current_user``). Single source of truth for the binding +
     effective-permission unions so the two surfaces never drift.
+
+    Lapsed bindings are left out — they grant nothing — and every binding
+    says how it came about (``provenance``) and when it ends.
     """
     user_orm = await user_repo.get_user_by_id(session, user_id)
     if user_orm is None:
@@ -511,15 +521,20 @@ async def compute_user_access(
     user_roles = await user_repo.get_user_roles(session, user_orm.id)
     primary_role = "admin" if "admin" in user_roles else (user_roles[0] if user_roles else "user")
 
+    now = datetime.now(timezone.utc)
+
     # Direct bindings (subject_type='user', subject_id=user_id)
-    direct_rows = (
-        await session.execute(
-            select(RoleBindingORM).where(
-                RoleBindingORM.subject_type == "user",
-                RoleBindingORM.subject_id == user_orm.id,
+    direct_rows = [
+        b for b in (
+            await session.execute(
+                select(RoleBindingORM).where(
+                    RoleBindingORM.subject_type == "user",
+                    RoleBindingORM.subject_id == user_orm.id,
+                )
             )
-        )
-    ).scalars().all()
+        ).scalars().all()
+        if not _is_expired(b.expires_at, now=now)
+    ]
 
     # Group memberships
     group_ids = await group_repo.get_user_groups(session, user_orm.id)
@@ -536,7 +551,7 @@ async def compute_user_access(
                 )
             )
         ).scalars().all()
-        inherited_rows = list(rows)
+        inherited_rows = [b for b in rows if not _is_expired(b.expires_at, now=now)]
 
     # Resolve workspace labels for both binding lists in one shot.
     ws_ids = {
@@ -545,11 +560,21 @@ async def compute_user_access(
     }
     ws_labels = await _resolve_workspace_labels(session, ws_ids)
 
+    # How each binding came about: the person's memberships (who added
+    # them to a group, or the identity provider) and their IdP groups.
+    memberships = {
+        m.group_id: m for m in (await session.execute(
+            select(GroupMemberORM).where(GroupMemberORM.user_id == user_orm.id)
+        )).scalars().all()
+    }
+    reader = await workspace_access.provenance_reader(session, [user_orm.id])
+
     direct_bindings = [
         _binding_to_response(
             b,
             scope_label=ws_labels.get(b.scope_id) if b.scope_id else None,
             via_group=None,
+            provenance=reader.binding(b, user_orm.id),
         )
         for b in direct_rows
     ]
@@ -558,6 +583,9 @@ async def compute_user_access(
             b,
             scope_label=ws_labels.get(b.scope_id) if b.scope_id else None,
             via_group=group_meta.get(b.subject_id),
+            provenance=reader.membership(
+                memberships.get(b.subject_id), group_meta.get(b.subject_id), user_orm.id,
+            ),
         )
         for b in inherited_rows
         # Only surface bindings whose group still exists; orphans
