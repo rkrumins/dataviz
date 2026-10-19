@@ -12,6 +12,7 @@
  * message with the HTTP ``status`` on it, so a 409 (something changed, or
  * something is in the way) can be told from a refusal or an outage.
  */
+import { TIMEOUTS } from '@/config/timeouts'
 import { authFetch } from './apiClient'
 import { withReason } from './activityReason'
 
@@ -221,8 +222,8 @@ function sourceApi(wsId: string, dsId: string): string {
     return `/api/v1/admin/workspaces/${encodeURIComponent(wsId)}/data-sources/${encodeURIComponent(dsId)}`
 }
 
-function post<T>(url: string, body: unknown, reason?: string | null): Promise<T> {
-    return authFetch<T>(url, withReason({ method: 'POST', body: JSON.stringify(body) }, reason))
+function post<T>(url: string, body: unknown, reason?: string | null, timeoutMs?: number): Promise<T> {
+    return authFetch<T>(url, { ...withReason({ method: 'POST', body: JSON.stringify(body) }, reason), timeoutMs })
 }
 
 export const dataSourceTransferService = {
@@ -240,7 +241,7 @@ export const dataSourceTransferService = {
 
     /** Move it now — for someone who runs both workspaces. */
     move(wsId: string, dsId: string, body: TransferMoveRequest, reason?: string | null): Promise<DataSourceTransferResponse> {
-        return post(`${sourceApi(wsId, dsId)}/move`, body, reason)
+        return post(`${sourceApi(wsId, dsId)}/move`, body, reason, TIMEOUTS.DATA_SOURCE_MOVE_MS)
     },
 
     /** Ask the destination's admins to take it. */
@@ -272,7 +273,7 @@ export const dataSourceTransferService = {
 
     /** Accept a request, which runs the move. `previewToken` is the preview the reviewer read. */
     accept(id: string, previewToken: string, reason?: string | null): Promise<DataSourceTransferResponse> {
-        return post(`${ADMIN_API}/${encodeURIComponent(id)}/accept`, { previewToken }, reason)
+        return post(`${ADMIN_API}/${encodeURIComponent(id)}/accept`, { previewToken }, reason, TIMEOUTS.DATA_SOURCE_MOVE_MS)
     },
 
     /** Decline a request. The note reaches the person who asked, and the activity log. */
@@ -287,6 +288,6 @@ export const dataSourceTransferService = {
 
     /** Put the source back where it was, while that can still be done exactly. */
     undo(id: string, reason?: string | null): Promise<DataSourceTransferResponse> {
-        return post(`${ADMIN_API}/${encodeURIComponent(id)}/undo`, {}, reason)
+        return post(`${ADMIN_API}/${encodeURIComponent(id)}/undo`, {}, reason, TIMEOUTS.DATA_SOURCE_MOVE_MS)
     },
 }

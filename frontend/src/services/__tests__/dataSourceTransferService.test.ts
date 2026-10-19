@@ -19,13 +19,14 @@ import { httpStatusOf } from '../graphRequestFailure'
 const ok = (body: unknown = {}) => new Response(JSON.stringify(body), { status: 200 })
 
 function lastCall() {
-    const [url, init] = fetchWithTimeoutMock.mock.calls.at(-1) as [string, RequestInit | undefined]
+    const [url, init] = fetchWithTimeoutMock.mock.calls.at(-1) as [string, (RequestInit & { timeoutMs?: number }) | undefined]
     const headers = new Headers(init?.headers)
     return {
         url,
         method: init?.method ?? 'GET',
         body: init?.body ? JSON.parse(init.body as string) : undefined,
         reason: headers.get('X-Activity-Reason'),
+        timeoutMs: init?.timeoutMs,
     }
 }
 
@@ -61,6 +62,8 @@ describe('dataSourceTransferService', () => {
             method: 'POST',
             body: { targetWorkspaceId: 'ws2', previewToken: 'tok' },
             reason: encodeURIComponent('Team reorganisation'),
+            // A big move legitimately takes most of the server's two minutes: the browser waits longer.
+            timeoutMs: 150_000,
         })
     })
 
@@ -93,6 +96,7 @@ describe('dataSourceTransferService', () => {
             method: 'POST',
             body: { previewToken: 'tok' },
             reason: encodeURIComponent('Our team now owns it'),
+            timeoutMs: 150_000,
         })
 
         await svc.decline('xfer_1', 'Not ours')
@@ -101,6 +105,7 @@ describe('dataSourceTransferService', () => {
             method: 'POST',
             body: { note: 'Not ours' },
             reason: encodeURIComponent('Not ours'),
+            timeoutMs: undefined,
         })
 
         await svc.cancel('xfer_1')
@@ -111,6 +116,7 @@ describe('dataSourceTransferService', () => {
             url: '/api/v1/admin/data-source-transfers/xfer_1/undo',
             method: 'POST',
             reason: encodeURIComponent('Moved by mistake'),
+            timeoutMs: 150_000,
         })
     })
 
