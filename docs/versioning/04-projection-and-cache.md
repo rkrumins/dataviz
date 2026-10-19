@@ -386,11 +386,16 @@ provider per request:
   the engine degrades gracefully, `:165`); as-of views are read-only (a `_commit` with `as_of` set
   raises). Its `get_stats`/`get_schema_stats` recompute counts with the projector's own label
   sanitizer so they match FalkorDB once main projects.
-- **`VersionedWriteProvider`** (`versioned_write_provider.py:40`) wraps any provider: reads and
-  lifecycle delegate transparently via `__getattr__` (`:62`), but **every write also lands as an
-  audited commit** before hitting the inner provider — making versioning the system of record.
-  `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:67-84`) so every recorded
-  commit enforces containment/ontology rules. Disabled with `GRAPHVER_VERSIONED_WRITES=0`.
+- **`VersionedWriteProvider`** (`versioned_write_provider.py:64`) wraps any provider: reads and
+  lifecycle delegate transparently via `__getattr__` (`:86`), but **a write lands only as an
+  audited commit** on main in Postgres and never reaches the inner provider; `_record` (`:141`)
+  then nudges the projector, the one writer of the graph's FalkorDB data, to carry it there.
+  Until it does, ContextEngine serves main from Postgres (read-your-writes). A data source with
+  no versioned graph refuses the write (`VersioningNotEnabled`, 409; `_graph_id`, `:119`).
+  `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:99-117`) so every recorded
+  commit enforces containment/ontology rules. ContextEngine always wraps a versioned graph's
+  provider (`context_engine.py:230`); `GRAPHVER_VERSIONED_WRITES=0` opts out only data sources
+  without version control, whose writes then go to the provider directly.
 
 ---
 

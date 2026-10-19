@@ -10,7 +10,8 @@
 * An edge Postgres does not hold is not found, and nothing commits.
 * A request that omits dataSourceId gets the workspace's primary data source; when it is
   versioned, the engine still commits the write to Postgres (main, or the draft named by
-  branchId) and never writes FalkorDB.
+  branchId) and never writes FalkorDB. When the primary has no version control the write is
+  refused before it reaches FalkorDB, unless GRAPHVER_VERSIONED_WRITES=0.
 
 The inner provider stands in for FalkorDB and records every write; the projector is the only
 FalkorDB writer. Unit coverage: ``tests/test_versioning_single_writer.py``.
@@ -22,7 +23,7 @@ import pytest
 from sqlalchemy import func, select
 
 from backend.app.providers import versioned_write_provider as vwp
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import config as vconfig, db, models
 from backend.app.services.versioning.models import NodeVersionORM
 from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 from backend.common.models.graph import GraphEdge, GraphNode
@@ -235,4 +236,20 @@ def test_a_draft_write_without_a_data_source_id_lands_on_the_draft(e2e, primary)
         assert await svc.entity_value(graph_id=gid, entity_id="e1", branch_id=draft) is None
         assert await svc.entity_value(graph_id=gid, entity_id="e1") is not None   # main untouched
         assert inner.calls == []
+    e2e(body)
+
+
+def test_a_write_without_a_data_source_id_to_an_unversioned_primary_is_refused(e2e, primary,
+                                                                               monkeypatch):
+    # The primary is named before the write wrap, so a primary without version control is
+    # wrapped and refused like an explicit dataSourceId; GRAPHVER_VERSIONED_WRITES=0 opts it out.
+    async def body(svc, ds, gid):
+        unversioned, inner = "ds_" + os.urandom(4).hex(), _Falkor()
+        monkeypatch.setattr(vconfig, "VERSIONED_WRITES_ENABLED", True)
+        eng = await primary(unversioned, inner)
+        with pytest.raises(vwp.VersioningNotEnabled):
+            await eng.provider.create_node(GraphNode(urn="N", entityType="Table", displayName="N"))
+        assert inner.calls == []
+        monkeypatch.setattr(vconfig, "VERSIONED_WRITES_ENABLED", False)
+        assert (await primary(unversioned, inner)).provider is inner
     e2e(body)
