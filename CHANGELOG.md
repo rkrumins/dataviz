@@ -104,6 +104,10 @@ who reach every workspace.
 - Deleting a workspace declines its open access requests ("The workspace was deleted") instead of
   leaving them waiting.
 - My access no longer lists grants that have ended.
+- A link to a workspace you can't open says so, and offers **Request access**; the page used to
+  show its loading skeleton for good, and **Access revoked** could never appear either.
+- My access no longer flashes an **Access denied** card at people who can't read the permission
+  catalogue — most people — on every visit.
 
 ### Upgrading
 
