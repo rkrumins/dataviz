@@ -41,6 +41,8 @@ import { WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
 import { WorkspaceDirectory } from '@/components/workspaces/WorkspaceDirectory'
 import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
 import { useRequestsToAnswer } from '@/hooks/useWorkspaceAccess'
+import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
+import { useIncomingTransfers } from '@/features/data-source-transfer/useDataSourceTransfers'
 
 function providerLabel(type: string): string {
     if (type === 'neo4j') return 'Neo4j'
@@ -432,6 +434,9 @@ export function WorkspacesPage() {
         s.can('system:org-admin')
         || Object.keys(s.permissions.ws).some(ws => s.can('workspace:members:add', ws)))
     const { requests: waiting } = useRequestsToAnswer('open', { enabled: canAnswer })
+    // Data sources waiting to move into a workspace the reader runs wait here too.
+    const { transfers: incoming } = useIncomingTransfers('open', { enabled: canAnswer })
+    const waitingCount = waiting || incoming ? (waiting?.length ?? 0) + (incoming?.length ?? 0) : null
     const tabParam = searchParams.get('tab')
     const tab: 'mine' | 'discover' | 'requests' =
         canAnswer && tabParam === 'requests'
@@ -443,7 +448,7 @@ export function WorkspacesPage() {
     const tabs = [
         { id: 'mine' as const, label: 'Your workspaces', count: isLoading ? null : workspaces.length },
         ...(directoryOn ? [{ id: 'discover' as const, label: 'Find a workspace', count: null }] : []),
-        ...(canAnswer ? [{ id: 'requests' as const, label: 'Requests', count: waiting?.length ?? null }] : []),
+        ...(canAnswer ? [{ id: 'requests' as const, label: 'Requests', count: waitingCount }] : []),
     ]
 
     // Live counts per health state. Without these the Health menu offered filters
@@ -543,7 +548,12 @@ export function WorkspacesPage() {
 
             {tab === 'discover' && <WorkspaceDirectory />}
 
-            {tab === 'requests' && <ReviewRequestsPanel />}
+            {tab === 'requests' && (
+                <div className="space-y-4">
+                    <TransferRequestsPanel />
+                    <ReviewRequestsPanel />
+                </div>
+            )}
 
             {tab === 'mine' && (
                 <>

@@ -18,6 +18,7 @@
  */
 import { useState } from 'react'
 import {
+    ArrowRightLeft,
     Bell,
     Building2,
     CheckCheck,
@@ -30,6 +31,7 @@ import {
     Share2,
     ShieldAlert,
     Sparkles,
+    Undo2,
     UserPlus,
     XCircle,
     type LucideIcon,
@@ -123,6 +125,39 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: CheckCircle2,
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
+    },
+    // Moving a data source between workspaces: the ask reaches the destination's
+    // admins; the answer reaches whoever asked; the move itself, and an undo,
+    // reach both workspaces' admins and the owners of the views that moved.
+    'data_source.transfer_requested': {
+        Icon: ArrowRightLeft,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'data_source.transfer_accepted': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'data_source.transfer_declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'data_source.transfer_cancelled': {
+        Icon: XCircle,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
+    },
+    'data_source.moved': {
+        Icon: ArrowRightLeft,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
+    'data_source.move_undone': {
+        Icon: Undo2,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

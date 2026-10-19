@@ -44,6 +44,7 @@ import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
+import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -575,6 +576,9 @@ export function WorkspaceDetailPage() {
                             </p>
                         </div>
                     </div>
+
+                    {/* Sources waiting to move in, or to leave — what an admin must answer. */}
+                    {canManageMembers && wsId && <TransferRequestsPanel variant="banner" workspaceId={wsId} />}
 
                     {/* Workspace-level default, above the grid it governs. */}
                     <WorkspaceNodeIdentityDefaults
