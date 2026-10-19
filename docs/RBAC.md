@@ -307,15 +307,35 @@ into a workspace you don't run would be a way to plant data in it:
 | Undo a move, for 7 days, while nothing new is built on it | a direct move: `workspace:admin` in both; an accepted request: `workspace:admin` in the destination |
 
 Org Admins and Super Admins pass every row through their shortcuts. API keys reach none of these
-routes.
+routes (they are not on the key surface).
 
-What happens to access. Grants (`resource_grants`) are keyed by view, so the people and teams a
-view is shared with keep it, and creators keep their own views. A `workspace` view's audience
-becomes the destination's `workspace:view:read` holders, and a `private` view's admin reach becomes
-the destination's admins. Whoever moves the source, or asks, chooses which of the people and teams
-losing access keep it: they get `viewer` grants on exactly the moved views they would lose — never a
-role binding, so nothing else in the destination opens to them — and an undo removes those grants
-again. A pending publication request is put to the destination's publishers.
+Guards around those rules:
+
+- **Fail closed.** A direct move of a source with views runs the same session-revocation probe as
+  every `workspace:admin` route, so a session whose revocation can't be checked is refused with a
+  503. Transfer detail, accept, decline, cancel and undo require `workspace:admin` in some
+  workspace before the transfer is looked up, so someone who administers nothing gets the same 403
+  whether or not it exists.
+- **No probing.** A preview, request or move naming a workspace the caller couldn't find — they
+  can't open it, and it isn't listed in Find a workspace while that's on — answers 404, as for one
+  that doesn't exist.
+- **No stranded views.** Creating a view checks its data source is live and in the view's
+  workspace, holding the source's row `FOR KEY SHARE` until the view is saved: a move (which holds
+  it `FOR UPDATE`) either waits for the view and takes it along, or has finished and the view is
+  refused.
+
+What happens to access. The destination's own membership governs the moved views — nothing is
+copied to stretch the old workspace's audience across. Grants (`resource_grants`) are keyed by view,
+so the people and groups a view is shared with keep it, and creators keep their own views. A
+`workspace` view's audience becomes the destination's `workspace:view:read` holders, and a `private`
+view's admin reach becomes the destination's admins. The people and groups who read the views only
+through the old workspace lose them; the preview lists them with where their access came from
+(`app`, `group`, or `idp` — an SSO role mapping, or a group the identity provider fills), and a move
+or request that takes anyone's access needs the preview's token (`preview_required`). Afterwards
+they are told how to ask to join, both workspaces' admins are told who, and the move records them.
+Access is given back the usual way — a role or group in the destination, or an identity-provider
+mapping where the provider decides — never by copying it, which would outlive the provider removing
+someone. A pending publication request is put to the destination's publishers.
 
 ## Resolver behaviour
 

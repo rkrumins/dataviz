@@ -273,19 +273,30 @@ How you move it depends on what you run:
 3. **What moves** — check how many views move (and how many are in the trash or
    follow the workspace's default source), its version history, and what you should
    know. Anything under **Resolve before moving** — an aggregation run or a
-   version-history job in progress, say — has to finish before you can continue.
-4. **Access** — see who **keeps access**, who **gains access** and who **would lose
-   access**. Owners and anyone a view is shared with keep it automatically. For each
-   person or team that would lose access, choose whether they keep it: they keep
-   view-only access to exactly the moved views, and nothing else in the new workspace
-   opens to them.
-5. **Confirm** — read the summary, say why you're moving it, and select **Move to
-   *workspace*** (or **Send request**).
+   version-history job in progress, say — has to finish before you can continue. A
+   source with more than 50,000 views can't be moved in one go.
+4. **Access** — see who **keeps access**, who **gains access** and who **loses
+   access**. After the move, the new workspace's own members, groups and
+   identity-provider mappings decide who reads the views. Owners and anyone a view is
+   shared with keep it, and views published to everyone stay published. The people
+   and groups who read the views only because they're in the old workspace lose
+   them; each says where their access came from — the app, a group, or your
+   identity provider (**Identity provider**).
+5. **Confirm** — read the summary, say why you're moving it and, if anyone loses
+   access, tick **I understand … lose access**. Then select **Move to *workspace***
+   (or **Send request**).
 
 **You should now see** "*Source* now lives in *workspace*", with **Open in
 *workspace*** and **Undo**.
 
-[screenshot-pending]: # "workspace-admin-move-access — the Access step of moving a data source, with a team kept"
+Everyone who lost access gets an Inbox notice saying where the views went, with a
+link to the new workspace where they can **Ask to join**. Both workspaces' admins are
+told who lost access, and the source's panel says how many. To give someone access
+again, add them or their group to the new workspace — or, where your identity
+provider decides, map their identity-provider group to it, so the provider keeps
+deciding.
+
+[screenshot-pending]: # "workspace-admin-move-access — the Access step of moving a data source, listing who loses access"
 
 ### Answer a transfer request
 
@@ -293,8 +304,8 @@ When another workspace asks to move a source into yours, its admins hear about i
 their Inbox, and the request appears on **Workspaces → Requests** and as a banner on
 the workspace's **Data Sources** tab.
 
-1. Select **Review**. You see exactly what would move and who keeps access — as the
-   person who asked decided it — and anything that has changed since they asked.
+1. Select **Review**. You see exactly what would move, who would lose access, and
+   anything that has changed since they asked.
 2. Select **Accept and move**, or **Decline** with a reason they'll see.
 
 Requests expire after 14 days. The person who asked can cancel theirs from the
@@ -305,15 +316,16 @@ source's panel.
 ### Undo a move
 
 For 7 days after a move, the source's panel says where it came from and offers
-**Undo**. Undo puts everything back as it was: the workspace, the primary source, the
-views, and the access the move added. It isn't offered once a view has been built on
+**Undo**. Undo puts everything back as it was: the workspace, the primary source and
+the views, so the old workspace's members read them again — and the people who lost
+access are told it's back. It isn't offered once a view has been built on
 the source in its new workspace, or once the source has moved again — move it back
 instead. A move made by accepting a request can only be undone by the destination's
 admins.
 
-Every move, request and undo appears in both workspaces' **Activity** and in each
-moved view's own activity, and **Where it has lived** on the source's panel lists
-each move.
+Every move, request, undo and request that expired unanswered appears in both
+workspaces' **Activity** and in each moved view's own activity, and **Where it has
+lived** on the source's panel lists each move.
 
 [screenshot-pending]: # "workspace-admin-moved-from — a moved source's panel, showing where it came from, with Undo"
 

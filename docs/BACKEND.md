@@ -21,7 +21,7 @@ One FastAPI application serves the HTTP API; the other backend processes run in 
 | API (`viz-service`) | `backend/app/main.py` (`app`), under gunicorn | 8000 | Every `/api/v1` route below |
 | Aggregation control plane | `backend/app/services/aggregation/controlplane.py` | 8091 | Aggregation jobs, scheduling and recovery; the API forwards its aggregation endpoints here |
 | Aggregation worker | `backend/app/services/aggregation/__main__.py` | 8090 (health) | Builds `:AGGREGATED` rollup edges |
-| Versioning worker | `backend/app/services/versioning/__main__.py` | — | Projects version-controlled graphs into FalkorDB; runs the import, export, publish and Enable-version-control jobs the API queues (lanes `projection`, `transfer`, `bootstrap`) |
+| Versioning worker | `backend/app/services/versioning/__main__.py` | — | Projects version-controlled graphs into FalkorDB; runs the import, export, publish and Enable-version-control jobs the API queues (lanes `projection`, `transfer`, `bootstrap`); its reaper purges deleted sources' graphs after their grace period and re-files a graph left under a workspace its data source isn't in (a move that failed half-way) |
 | Stats service | `backend/insights_service/__main__.py` | 8092 (health) | Keeps per-data-source stats fresh |
 | `upgrade` job | `backend/scripts/upgrade.py` | — | Builds and migrates the database schema |
 
