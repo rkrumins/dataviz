@@ -831,6 +831,82 @@ class WorkspaceDataSourceORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# data_source_transfers  (a data source moving between workspaces)     #
+# ------------------------------------------------------------------ #
+
+class DataSourceTransferORM(Base):
+    """One relocation of a data source, with its views, to another workspace.
+
+    A direct move (``kind='move'``) is born ``completed``. A request
+    (``kind='request'``) is born ``pending`` and is accepted (which runs the
+    move), declined, cancelled or expired. Either may later be ``undone``.
+
+    ``plan`` is what the mover or proposer decided — who keeps access to the
+    moved views — and is never edited. ``manifest`` is written when the move
+    happens: exactly what it changed, which is what undo replays.
+
+    No foreign keys: deleting a workspace is a hard DELETE and a source is
+    eventually purged, and the record of where a source has lived must
+    outlive both. One open request per source (``uq_dsx_one_pending``).
+    """
+    __tablename__ = "data_source_transfers"
+
+    id = Column(Text, primary_key=True, default=lambda: f"xfer_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    data_source_label = Column(Text, nullable=True)   # the name at the time
+    from_workspace_id = Column(Text, nullable=False)
+    to_workspace_id = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)               # move | request
+    status = Column(Text, nullable=False)
+    plan = Column(Text, nullable=False, default="{}")  # JSON
+    manifest = Column(Text, nullable=True)             # JSON, written on completion
+    reason = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    expires_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    completed_at = Column(Text, nullable=True)
+    undone_by = Column(Text, nullable=True)
+    undone_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_dsx_ds_created", "data_source_id", "created_at"),
+        Index("idx_dsx_to_status", "to_workspace_id", "status"),
+        Index("idx_dsx_from_status", "from_workspace_id", "status"),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_dsx_one_pending", "data_source_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        CheckConstraint("kind IN ('move', 'request')", name="ck_dsx_kind"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'declined', 'cancelled', 'expired', 'undone')",
+            name="ck_dsx_status",
+        ),
+        CheckConstraint("from_workspace_id <> to_workspace_id", name="ck_dsx_distinct_workspaces"),
+        CheckConstraint(
+            "(status = 'pending' AND kind = 'request' AND expires_at IS NOT NULL "
+            "AND resolved_at IS NULL AND completed_at IS NULL) "
+            "OR (status IN ('declined', 'cancelled', 'expired') AND kind = 'request' "
+            "AND resolved_at IS NOT NULL AND completed_at IS NULL) "
+            "OR (status = 'completed' AND completed_at IS NOT NULL AND undone_at IS NULL) "
+            "OR (status = 'undone' AND completed_at IS NOT NULL AND undone_at IS NOT NULL)",
+            name="ck_dsx_state_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceTransfer id={self.id!r} ds={self.data_source_id!r} "
+            f"{self.from_workspace_id!r}->{self.to_workspace_id!r} status={self.status!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # context_models  (how to visualize/organize the graph)               #
 # ------------------------------------------------------------------ #
 
@@ -1092,7 +1168,7 @@ class ViewActivityLogORM(Base):
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
             "'admin_viewed', 'imported', 'exported', 'version_saved', "
-            "'version_restored')",
+            "'version_restored', 'moved')",
             name="ck_val_action_enum",
         ),
     )

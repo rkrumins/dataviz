@@ -41,6 +41,8 @@ ACTIONS = frozenset({
     # Moving a view between environments, and the history of its design.
     # An export is recorded because it is the door a view's contents leave by.
     "imported", "exported", "version_saved", "version_restored",
+    # Moving with its data source to another workspace (and moving back).
+    "moved",
 })
 
 

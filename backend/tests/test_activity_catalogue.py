@@ -315,3 +315,35 @@ def test_outage_session_and_break_glass_events_read_plainly():
     assert catalogue.label_of("auth.config.password_fallback_extended") == (
         "Extended emergency password access"
     )
+
+
+_TRANSFER = {
+    "target_label": "Orders",
+    "details": {"fromWorkspaceId": "ws_a", "fromWorkspaceName": "Finance",
+                "toWorkspaceId": "ws_b", "toWorkspaceName": "Risk"},
+}
+
+
+@pytest.mark.parametrize("event_type, leaving, arriving", [
+    ("workspace.data_source.moved",
+     "Moved data source Orders to Risk", "Moved data source Orders in from Finance"),
+    ("workspace.data_source.move_undone",
+     "Undid the move of Orders: it came back from Risk",
+     "Undid the move of Orders: it went back to Finance"),
+    ("workspace.data_source.transfer_requested",
+     "Asked Risk to take data source Orders", "Finance asked to move data source Orders here"),
+    ("workspace.data_source.transfer_declined",
+     "Risk declined data source Orders", "Declined data source Orders from Finance"),
+    ("workspace.data_source.transfer_cancelled",
+     "Cancelled the request to move Orders to Risk",
+     "The request to move Orders here from Finance was cancelled"),
+])
+def test_a_transfer_reads_from_the_side_it_is_filed_under(event_type, leaving, arriving):
+    """A transfer is recorded once in each workspace, and each copy reads from its own side."""
+    assert catalogue.summarize(event_type, {**_TRANSFER, "workspace_id": "ws_a"}) == ("info", leaving)
+    assert catalogue.summarize(event_type, {**_TRANSFER, "workspace_id": "ws_b"}) == ("info", arriving)
+    # Never raises, even on an empty payload.
+    assert catalogue.summarize(event_type, {})[0] == "info"
+    out = catalogue.project(event_type=event_type, payload={**_TRANSFER, "workspace_id": "ws_b",
+                                                            "data_source_id": "ds_1"})
+    assert (out["workspace_id"], out["audience"]) == ("ws_b", "workspace")
