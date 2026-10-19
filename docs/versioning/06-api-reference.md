@@ -62,7 +62,7 @@ Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLIS
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
 | `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**, and delete or restore a fork; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
-| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, the graph router's `/resync`, and pausing or resuming editing (`…/lifecycle/freeze`, `…/lifecycle/unfreeze`). A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission`. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; API keys keep those writes |
+| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, the graph router's `/resync`, and pausing or resuming editing (`…/lifecycle/freeze`, `…/lifecycle/unfreeze`). A `workspace_member` does not hold it, and no API key can: they get **403** `missing_permission`. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; an API key makes those writes only where the person who owns it holds publish |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
 > changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
@@ -112,7 +112,7 @@ that backs `dataSourceId`.
 | `NotDraftOwner` | **403** | `{type: "access_denied", code: "not_draft_owner", branchId, owner, message}` — a write to someone else's private draft; only its owner writes it. Also a change of a draft's visibility by anyone but its owner |
 | `DraftRoleRequired` | **403** | `{type: "access_denied", code: "not_owner_or_member", required, branchId, message}` — a shared draft refused the caller: `required` is `editor` to write it, or `maintainer` to publish, abandon or manage its members. A member through a group counts |
 | `SelfReview` | **403** | `{type: "access_denied", code: "self_review", prId, message}` — an approve by the PR's author or its source draft's owner: an approval is someone else's review |
-| `PublishRequired` | **403** | `{type: "access_denied", code: "publish_required", required: "workspace:datasource:publish", message}` — a person without publish wrote a versioned graph's `main` directly (bulk-ingest, or a graph-router write with no draft). Edit in a draft instead. API keys are not refused |
+| `PublishRequired` | **403** | `{type: "access_denied", code: "publish_required", required: "workspace:datasource:publish", message}` — a person without publish wrote a versioned graph's `main` directly (bulk-ingest, or a graph-router write with no draft). Edit in a draft instead. An API key is refused the same way unless the person who owns it holds publish |
 | `GroupsUnavailable` | **503** | `{type: "groups_unavailable", retryable: true, message}`, `Retry-After: 2` — the caller's role on a shared draft turns on a group, and their groups can't be looked up right now. Retry; it is never read as "no groups" |
 | `IneligibleMember` | **422** | `{type: "ineligible_member", subjectId, reason, message}` — who was to be added to a draft can't be: `reason` is `owner`, `unknown_user`, `unknown_group`, `no_read` (no workspace read) or `no_manage` (an editor or maintainer without workspace manage) |
 | `ApprovalRequired` | **409** | `{type: "approval_required", pending: […], stale: […]}` — `pending` are the requested reviewers without a standing approval; `stale` are those of them who approved an earlier version (a content commit landed on the draft since) and must approve again |
@@ -410,8 +410,8 @@ draft, unless they manage the workspace, are a member or take part in its pull r
 
 Without a draft, a write to a versioned data source commits to `main`, so a person needs `_PUBLISH`
 for it: `/save`, `/nodes/create`, `POST /edges`, `PATCH`/`DELETE /edges/{id}` and
-`/commands/batch` answer **403** `publish_required` otherwise (`require_main_writer`). API keys keep
-these writes. A draft write, and any write to a data source without version control, is unaffected.
+`/commands/batch` answer **403** `publish_required` otherwise (`require_main_writer`). An API key
+makes these writes only where the person who owns it holds `_PUBLISH`. A draft write, and any write to a data source without version control, is unaffected.
 
 ### Per-branch cache scoping
 

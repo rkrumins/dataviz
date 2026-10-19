@@ -18,7 +18,8 @@ Two flavours:
 
 ``sync_override_gate`` is unrelated to the flag: it lets only a workspace admin pass the
 sync safety overrides (``force``, ``allowMassDelete``) on both sync routes. Nor is
-``require_publish_for_main``: a person writes a versioned graph's main directly only with publish.
+``require_publish_for_main``: a versioned graph's main is written directly only by a person with
+publish, or with an API key whose owner has it.
 
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
@@ -113,11 +114,16 @@ async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch
 
 def require_publish_for_main(claims: PermissionClaims, ws_id: str) -> None:
     """403 ``publish_required`` when a person without ``workspace:datasource:publish`` writes a
-    versioned graph's main directly: the graph routes with no draft, and bulk ingest. API keys keep
-    those writes (automation); none can hold publish. A denial decided against a workspace map
-    nothing could supply is a 503, as in ``requires()``."""
-    if claims.key_scope is not None or has_permission(
-            claims, "workspace:datasource:publish", workspace_id=ws_id):
+    versioned graph's main directly: the graph routes with no draft, and bulk ingest. No API key can
+    hold publish, so a key passes only where the person who owns it holds it (``KeyScope``); an
+    owner whose grants could not be read never got the key's claims (503 at authentication). A
+    denial decided against a workspace map nothing could supply is a 503, as in ``requires()``."""
+    key = claims.key_scope
+    if key is not None:
+        allowed = key.owner_publishes(ws_id)
+    else:
+        allowed = has_permission(claims, "workspace:datasource:publish", workspace_id=ws_id)
+    if allowed:
         return
     if not claims.ws_available:
         raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")

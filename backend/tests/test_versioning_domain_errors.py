@@ -110,7 +110,7 @@ def test_a_person_writing_main_without_publish_is_403_publish_required():
     assert "draft" in err.detail["message"]
 
 
-def test_writing_main_directly_spares_api_keys_and_publishers():
+def test_writing_main_directly_needs_publish_held_by_the_person_or_the_keys_owner():
     from backend.app.api.v1.versioning_gate import require_publish_for_main
     from backend.app.services.versioning.errors import PublishRequired
     from backend.app.services.permission_service import KeyScope, PermissionClaims
@@ -120,8 +120,16 @@ def test_writing_main_directly_spares_api_keys_and_publishers():
         require_publish_for_main(person, "ws1")
     require_publish_for_main(PermissionClaims(
         sid="s", ws_perms={"ws1": manage + ("workspace:datasource:publish",)}), "ws1")
-    require_publish_for_main(PermissionClaims(
-        sid="", ws_perms={"ws1": manage}, key_scope=KeyScope(key_id="k", data="write")), "ws1")
+
+    def key(**owner):                               # a key holds manage at most, never publish
+        return PermissionClaims(sid="", ws_perms={"ws1": manage},
+                                key_scope=KeyScope(key_id="k", data="write", **owner))
+    with pytest.raises(PublishRequired):            # its owner manages but cannot publish
+        require_publish_for_main(key(), "ws1")
+    with pytest.raises(PublishRequired):            # its owner publishes, but elsewhere
+        require_publish_for_main(key(owner_publish_workspaces=frozenset({"ws2"})), "ws1")
+    require_publish_for_main(key(owner_publish_workspaces=frozenset({"ws1"})), "ws1")
+    require_publish_for_main(key(owner_publishes_everywhere=True), "ws1")
     with pytest.raises(HTTPException) as unknown:     # no grants could be read: ask again, not 403
         require_publish_for_main(PermissionClaims(sid="s", ws_available=False), "ws1")
     assert unknown.value.status_code == 503

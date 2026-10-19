@@ -220,6 +220,34 @@ async def test_an_org_level_owner_reaches_every_workspace_without_listing_them(d
     assert not has_permission_any_workspace(claims, "system:org-admin")
 
 
+async def test_a_key_records_where_its_owner_may_publish_data_sources(db_session):
+    """A key never holds ``workspace:datasource:publish``, but whether its owner does decides
+    whether it may write a versioned graph's main directly (``require_publish_for_main``): the
+    owner's own grants, not narrowed to the key's profile or selection."""
+    await _world(db_session)
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=OWNER, role_name="workspace_admin",
+        scope_type="workspace", scope_id="ws_c",
+    ))
+    await db_session.commit()
+    claims = await _claims(db_session, data="write", resources={"workspaces": ["ws_a"]})
+    scope = claims.key_scope
+    assert not has_permission(claims, "workspace:datasource:publish", workspace_id="ws_c")
+    assert scope.owner_publishes("ws_c")                       # an admin there
+    assert not scope.owner_publishes("ws_a")                   # only a member here
+    assert not scope.owner_publishes("ws_b")                   # only a viewer here
+    assert not scope.owner_publishes("ws_created_tomorrow")
+
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=OWNER, role_name="super_admin",
+        scope_type="global", scope_id=None,
+    ))
+    await db_session.commit()
+    claims = await _claims(db_session, data="write", resources={"workspaces": ["ws_a"]})
+    assert claims.key_scope.owner_publishes("ws_a")
+    assert claims.key_scope.owner_publishes("ws_created_tomorrow")
+
+
 async def test_a_key_on_selected_resources_takes_no_shortcut_from_its_owner(db_session):
     await _world(db_session)
     db_session.add(RoleBindingORM(

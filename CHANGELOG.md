@@ -94,8 +94,10 @@ failed import waits for any other import on its draft (409 `job_active`).
   `POST /graph/edges`, `PATCH`/`DELETE /graph/edges/{id}`, `/graph/commands/batch`, `/graph/save` —
   and `POST …/bulk-ingest` answer **403** `{type: "access_denied", code: "publish_required",
   required: "workspace:datasource:publish"}` and write nothing. Edit in a draft (pass its
-  `branchId`) and publish it or send it for review. API keys are unchanged: a key still writes `main`
-  through these routes. Drafts, and data sources without version control, are unaffected.
+  `branchId`) and publish it or send it for review. An API key follows the person who owns it:
+  existing keys owned by people without publish lose these direct writes to `main` and get the same
+  403. Grant the owner `workspace_publisher`, or have the script write to a draft. Drafts, and data
+  sources without version control, are unaffected.
 - A draft's maintainers can no longer change `isShared` (403 `not_draft_owner`); only its owner can.
 - Making a draft private now removes its members. Member rows left on a private draft by an earlier
   un-share no longer grant anything, and are removed the next time the draft is shared.

@@ -716,6 +716,19 @@ class KeyScope:
     #: rather than read-only (``system:org-viewer``) — whether catalogue
     #: visibility is filtered at all, exactly as it is for the owner.
     org_unrestricted: bool = False
+    #: Where the OWNER holds ``workspace:datasource:publish`` — their own
+    #: grants, not narrowed to the key, which can never hold it: everywhere
+    #: through an organisation-wide role, or in these workspaces. A key may
+    #: write a versioned graph's main directly only where its owner could
+    #: (``versioning_gate.require_publish_for_main``).
+    owner_publishes_everywhere: bool = False
+    owner_publish_workspaces: frozenset[str] = frozenset()
+
+    def owner_publishes(self, workspace_id: Optional[str]) -> bool:
+        return (
+            self.owner_publishes_everywhere
+            or workspace_id in self.owner_publish_workspaces
+        )
 
     @property
     def view_permissions(self) -> frozenset[str]:
@@ -929,6 +942,13 @@ async def resolve_for_api_key(
         org_perms=org_perms,
         org_unrestricted=scope.all_resources and bool(
             {"system:admin", "system:org-admin"} & set(owner.global_perms)
+        ),
+        owner_publishes_everywhere=has_permission(
+            owner, "workspace:datasource:publish", workspace_id=_EVERY_WORKSPACE,
+        ),
+        owner_publish_workspaces=frozenset(
+            ws for ws in owner.ws_perms
+            if has_permission(owner, "workspace:datasource:publish", workspace_id=ws)
         ),
     )
     return PermissionClaims(

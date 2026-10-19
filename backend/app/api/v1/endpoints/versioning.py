@@ -2531,7 +2531,7 @@ async def bulk_ingest(
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
     ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
-    very large loads plugs in here.) It writes main, so a person needs publish; a key does not."""
+    very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's."""
     require_publish_for_main(claims, ws_id)
     rows: List[dict] = []
     content = await request.body()

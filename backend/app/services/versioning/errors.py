@@ -92,7 +92,7 @@ class SelfReview(_HttpMapped, AccessDenied):
 
 class PublishRequired(_HttpMapped, AccessDenied):
     """A person without ``workspace:datasource:publish`` wrote a versioned graph's main directly
-    (a graph route with no draft, or a bulk ingest). API keys keep direct main writes."""
+    (a graph route with no draft, or a bulk ingest), in person or with their API key."""
 
     status_code = 403
 

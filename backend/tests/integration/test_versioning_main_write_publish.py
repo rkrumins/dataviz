@@ -3,10 +3,10 @@
 The graph router's writes with no draft (``/nodes/create``, ``/edges``, ``PATCH``/``DELETE
 /edges/{id}``, ``/commands/batch``, ``/save``) and ``…/bulk-ingest`` commit straight to ``main``. A
 person without ``workspace:datasource:publish`` gets 403 ``publish_required`` and nothing lands; a
-publisher's write lands; an API key keeps direct main writes whatever its permissions (automation,
-until ingest moves to drafts); and a manage-only owner's write to their draft is unaffected. Main
-is written down both of its paths: from Postgres while the projection is behind, and through the
-write-through wrapper once it has caught up.
+publisher's write lands; an API key (none holds publish) writes main only when the person who owns
+it holds publish; and a manage-only owner's write to their draft, in person or with their key, is
+unaffected. Main is written down both of its paths: from Postgres while the projection is behind,
+and through the write-through wrapper once it has caught up.
 """
 import asyncio
 import os
@@ -20,12 +20,14 @@ pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 
 V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
-MIA, PAT, KEY = {"X-User": "mia"}, {"X-User": "pat"}, {"X-User": "key"}
+MIA, PAT = {"X-User": "mia"}, {"X-User": "pat"}
+MIA_KEY, PAT_KEY = {"X-User": "mia", "X-Key": "mia-key"}, {"X-User": "pat", "X-Key": "pat-key"}
 
 
 def _app():
     """The real routers. ``mia`` holds read and manage (a workspace_member); ``pat`` holds publish
-    as well (a workspace_publisher); ``key`` is an API key with read and manage, as every key is."""
+    as well (a workspace_publisher). With ``X-Key`` the request is made with a key that person
+    owns: read and manage, as every key holds at most, and where its owner may publish."""
     from fastapi import Request
     from types import SimpleNamespace
     from backend.app.auth.dependencies import get_current_user, get_optional_user, get_permission_claims
@@ -43,7 +45,11 @@ def _app():
         perms = ("workspace:datasource:read", "workspace:datasource:manage")
         if who == "pat":
             perms += ("workspace:datasource:publish",)
-        scope = KeyScope(key_id="k", data="write", all_resources=True) if who == "key" else None
+        scope = None
+        if request.headers.get("X-Key"):
+            scope = KeyScope(key_id="k", data="write", all_resources=True, owner_publish_workspaces=frozenset(
+                {"ws1"} if "workspace:datasource:publish" in perms else ()))
+            perms = ("workspace:datasource:read", "workspace:datasource:manage")
         return PermissionClaims(sid="", global_perms=(), ws_perms={"ws1": perms}, key_scope=scope)
 
     app.dependency_overrides[get_current_user] = header_user
@@ -67,18 +73,18 @@ async def _main_head(svc, gid):
 async def _main_writes(c, ds, who, edge_id, a, b):
     """Every graph-router write to main, as ``who``, around the edge ``edge_id`` from ``a`` to ``b``;
     each answer in order."""
-    q = {"dataSourceId": ds}
+    q, name = {"dataSourceId": ds}, who.get("X-Key", who["X-User"])
     return [
         await c.post(f"{GP}/nodes/create", params=q, headers=who,
-                     json={"entityType": "Table", "displayName": f"{who['X-User']} node"}),
+                     json={"entityType": "Table", "displayName": f"{name} node"}),
         await c.post(f"{GP}/edges", params=q, headers=who,
                      json={"sourceUrn": b, "targetUrn": a, "edgeType": "LINEAGE"}),
         await c.patch(f"{GP}/edges/{edge_id}", params=q, headers=who,
-                      json={"properties": {"by": who["X-User"]}}),
+                      json={"properties": {"by": name}}),
         await c.post(f"{GP}/commands/batch", params=q, headers=who, json={"commands": [
             {"op": "create_node", "payload": {"entityType": "Table", "displayName": "batch"}}]}),
         await c.post(f"{GP}/save", params=q, headers=who, json={"nodes": [
-            {"urn": f"urn:s:{who['X-User']}", "entityType": "Table", "displayName": "saved"}],
+            {"urn": f"urn:s:{name}", "entityType": "Table", "displayName": "saved"}],
             "edges": []}),
         await c.delete(f"{GP}/edges/{edge_id}", params=q, headers=who),
     ]
@@ -110,22 +116,25 @@ async def _run_graph_writes() -> None:
             gid = r.json()["graphId"]
             await svc.apply_ops(graph_id=gid, actor="seed", message="seed", ops=_seed("e1", "N", "M"))
 
-            # Mia manages but cannot publish: every write to main is refused, and nothing lands.
+            # Mia manages but cannot publish: every write to main is refused, in person or with her
+            # key, and nothing lands.
             before = await _main_head(svc, gid)
-            for r in await _main_writes(c, ds, MIA, "e1", "N", "M"):
-                _refused(r)
+            for who in (MIA, MIA_KEY):
+                for r in await _main_writes(c, ds, who, "e1", "N", "M"):
+                    _refused(r)
             assert await _main_head(svc, gid) == before
             assert not (await svc.entity_value(graph_id=gid, entity_id="e1")).get("properties")
 
-            # Her own draft takes the same edit.
+            # Her own draft takes the same edit, in person and with her key.
             d = (await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=MIA)).json()["branchId"]
-            r = await c.post(f"{GP}/nodes/create", params={"dataSourceId": ds, "branchId": d}, headers=MIA,
-                             json={"entityType": "Table", "displayName": "draft node"})
-            assert r.status_code == 200 and r.json()["success"] is True, r.text
+            for who in (MIA, MIA_KEY):
+                r = await c.post(f"{GP}/nodes/create", params={"dataSourceId": ds, "branchId": d},
+                                 headers=who, json={"entityType": "Table", "displayName": "draft node"})
+                assert r.status_code == 200 and r.json()["success"] is True, r.text
             assert await _main_head(svc, gid) == before
 
-            # A publisher, and an API key without publish, write main directly.
-            for who, eid in ((PAT, "e_pat"), (KEY, "e_key")):
+            # A publisher, in person and with their key, writes main directly.
+            for who, eid in ((PAT, "e_pat"), (PAT_KEY, "e_key")):
                 a, b = f"A_{eid}", f"B_{eid}"
                 await svc.apply_ops(graph_id=gid, actor="seed", message="edge", ops=_seed(eid, a, b))
                 head = await _main_head(svc, gid)
@@ -136,7 +145,8 @@ async def _run_graph_writes() -> None:
                 assert answers[3].json()["succeeded"] == 1, answers[3].text
                 assert await _main_head(svc, gid) != head
                 assert await svc.entity_value(graph_id=gid, entity_id=eid) is None
-                assert await svc.entity_value(graph_id=gid, entity_id=f"urn:s:{who['X-User']}") is not None
+                saved = f"urn:s:{who.get('X-Key', who['X-User'])}"
+                assert await svc.entity_value(graph_id=gid, entity_id=saved) is not None
     finally:
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
         await db.dispose_engine()
@@ -157,14 +167,15 @@ async def _run_bulk_ingest() -> None:
                 assert r.status_code == 201, r.text
                 return r.json()["graphId"]
 
-            for who in (PAT, KEY):
+            for who in (PAT, PAT_KEY):
                 gid = await graph()
                 r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=who)
                 assert r.status_code == 200 and r.json()["ingested"] == 3, r.text
 
             gid = await graph()
             before = await _main_head(svc, gid)
-            _refused(await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=MIA))
+            for who in (MIA, MIA_KEY):
+                _refused(await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=who))
             assert await _main_head(svc, gid) == before
             assert (await svc.materialize_state(graph_id=gid, branch_id=await svc.main_branch_id(gid)))["nodes"] == {}
     finally:
