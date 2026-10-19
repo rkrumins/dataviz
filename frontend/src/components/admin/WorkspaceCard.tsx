@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users, Check, Plug, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { compact } from '@/lib/formatMetric'
 import type { WorkspaceUsage } from '@/services/contentInsightsService'
 import { WorkspaceUsageLine } from './workspace/WorkspaceUsageLine'
 import { timeAgo } from '@/lib/timeAgo'
@@ -65,12 +66,6 @@ interface WorkspaceCardProps {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-    return n.toLocaleString()
-}
 
 const GRADIENT_ACCENTS = [
     'from-indigo-500 to-violet-500',
@@ -233,9 +228,10 @@ export function WorkspaceCard({
             <div className="mx-5 mb-3 grid grid-cols-4 gap-px rounded-lg overflow-hidden border border-glass-border bg-glass-border">
                 {[
                     { value: dsProviders.length, label: 'Sources', icon: CircleDot, color: 'text-indigo-500' },
-                    { value: stats.nodes > 0 ? compactNum(stats.nodes) : '\u2014', label: 'Nodes', icon: CircleDot, color: 'text-emerald-500' },
-                    { value: stats.edges > 0 ? compactNum(stats.edges) : '\u2014', label: 'Edges', icon: ArrowRightLeft, color: 'text-violet-500' },
-                    { value: viewCount > 0 ? viewCount : '\u2014', label: 'Views', icon: Eye, color: 'text-cyan-500' },
+                    { value: stats.nodes > 0 ? compact(stats.nodes) : '\u2014', label: 'Nodes', icon: CircleDot, color: 'text-emerald-500' },
+                    { value: stats.edges > 0 ? compact(stats.edges) : '\u2014', label: 'Edges', icon: ArrowRightLeft, color: 'text-violet-500' },
+                    // The summary's count, so a zero is a real zero rather than "unknown".
+                    { value: viewCount, label: 'Views', icon: Eye, color: 'text-cyan-500' },
                 ].map(s => (
                     <div key={s.label} className="bg-canvas-elevated p-2 text-center">
                         <div className="text-sm font-bold text-ink">{s.value}</div>

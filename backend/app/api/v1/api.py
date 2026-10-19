@@ -9,7 +9,7 @@ from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
     graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
-    assets, context_models, catalog, views, features,
+    assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
@@ -103,11 +103,6 @@ api_router.include_router(
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],
-)
-api_router.include_router(
-    context_models.template_router, prefix="/admin/context-model-templates",
-    tags=["admin:context-model-templates"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
@@ -409,6 +404,11 @@ api_router.include_router(
 api_router.include_router(
     views.router, prefix="/views", tags=["views"],
 )
+# Layout templates — any signed-in user; what each may see and do is decided
+# per template (services/template_access.py).
+api_router.include_router(
+    layout_templates.router, prefix="/layout-templates", tags=["layout-templates"],
+)
 
 # ── Versioned graph editing (workspace-scoped) ───────────────────────
 # The ONLY path between the frontend and the graphver Postgres store; the
@@ -455,10 +455,5 @@ api_router.include_router(
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(
     assets.router, prefix="/{ws_id}/assets", tags=["assets:workspace"],
-    dependencies=[Depends(require_ws_read_or_view)],
-)
-# Context models: /api/v1/{ws_id}/context-models
-api_router.include_router(
-    context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
     dependencies=[Depends(require_ws_read_or_view)],
 )

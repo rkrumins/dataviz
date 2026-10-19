@@ -553,9 +553,13 @@ async def lifespan(_app: FastAPI):
         logger.info("Synodic Visualization Service stopped (was degraded)")
         return
 
-    # 2. Seed Quick Start Templates (idempotent — skips if already present)
-    async with get_async_session() as session:
-        await seed_templates(session)
+    # 2. Seed the built-in layout templates (upsert by system_key). Guarded like
+    #    the feature seeds below: a failure here must not stop the service.
+    try:
+        async with get_async_session() as session:
+            await seed_templates(session)
+    except Exception as exc:
+        logger.warning("Built-in template seed warning: %s", exc)
 
     # 2a. Seed feature system — each seed gets its own session so a failure
     #      in one (e.g. multi-worker IntegrityError) doesn't roll back the others.

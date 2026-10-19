@@ -114,7 +114,7 @@ Each service page lists its own real endpoint paths. As orientation:
 
 - Graph reads, lineage, and search live under `/api/v1/{ws_id}/graph/...`.
 - Assignment compute lives under `/api/v1/{ws_id}/graph/assignments/compute`.
-- Context-model templates live under `/api/v1/{ws_id}/context-models/...`.
+- Layout templates live under `/api/v1/layout-templates/...`.
 - Insights (admin, cache-only) lives under `/api/v1/admin/insights/...`.
 
 ## Configuration

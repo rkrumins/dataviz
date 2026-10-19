@@ -41,7 +41,7 @@ export interface PlatformTotals {
     dataSources: Metric
     activity: Metric
     ontologies: Metric
-    contextModels: Metric
+    layoutTemplates: Metric
     catalogItems: Metric
     groups: Metric
 }
@@ -378,7 +378,7 @@ export interface WorkspaceAnalyticsDetail {
         activity: Metric
         members: Metric
         dataSources: Metric
-        contextModels: Metric
+        layoutTemplates: Metric
     }
     series: {
         buckets: string[]

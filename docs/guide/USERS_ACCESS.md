@@ -499,6 +499,15 @@ To correct a locked field, fix it in your directory, or set a display name. When
 two providers are linked, the one you **most recently signed in with** owns the
 fields — the same rule group memberships already follow.
 
+### Preferences
+
+**Preferences**, in the same profile menu, changes how the app works for you.
+It's saved in the browser you're using, so set it again on another device.
+
+| Preference | Notes |
+|---|---|
+| **Needs attention** | Off by default. On, your Dashboard lists the worst open profiling findings — a source far outside its usual movement, an entity type that vanished, a source gone quiet — each with **Open** and **Mark seen**. It's for people who look after data sources: it needs the permission to see profiling results, and the switch says so when you don't have it. |
+
 ---
 
 ## The "My Access" page

@@ -1,10 +1,11 @@
 /**
  * ViewCardOverflowMenu — "..." overflow menu on view cards with
- * lifecycle actions: Delete, Change Visibility, Share.
+ * lifecycle actions: Delete, Change Visibility, Share — and, for a Context
+ * View, keeping its layers as a layout template.
  */
 import { useState, useRef, useEffect, useCallback, useContext } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone, LayoutTemplate,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
@@ -19,6 +20,9 @@ import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
+import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
+import type { ViewLayerConfig } from '@/types/schema'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -35,6 +39,8 @@ interface ViewCardOverflowMenuProps {
   onDelete: () => void
   onShare: () => void
   onVisibilityChange?: (visibility: 'private' | 'workspace' | 'enterprise') => void
+  /** A Context View's layers: offers keeping them as a layout template. */
+  templateLayers?: ViewLayerConfig[]
 }
 
 export function ViewCardOverflowMenu({
@@ -49,6 +55,7 @@ export function ViewCardOverflowMenu({
   onDelete,
   onShare,
   onVisibilityChange,
+  templateLayers,
 }: ViewCardOverflowMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
@@ -58,6 +65,8 @@ export function ViewCardOverflowMenu({
   const [activityOpen, setActivityOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [versionsOpen, setVersionsOpen] = useState(false)
+  const [savingAsTemplate, setSavingAsTemplate] = useState(false)
+  const templatesOn = useLayoutTemplatesEnabled()
   const portability = useViewPortability()
   const exportEnabled = portability.canExport
   // Updating a view from a file runs in the wizard, which only exists inside the app layout.
@@ -133,6 +142,13 @@ export function ViewCardOverflowMenu({
       />
       {exportOpen && (
         <ExportViewDialog views={[{ id: viewId, name: viewName }]} onClose={() => setExportOpen(false)} />
+      )}
+      {savingAsTemplate && templateLayers && (
+        <SaveAsTemplateDialog
+          sourceName={viewName}
+          layers={templateLayers}
+          onClose={() => setSavingAsTemplate(false)}
+        />
       )}
       {versionsOpen && (
         <ViewVersionsDrawer
@@ -235,6 +251,16 @@ export function ViewCardOverflowMenu({
                 >
                   <FileDown className="w-3.5 h-3.5" />
                   Export…
+                </button>
+              )}
+              {templatesOn && templateLayers && templateLayers.length > 0 && (
+                <button
+                  onClick={() => { setSavingAsTemplate(true); setIsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <LayoutTemplate className="w-3.5 h-3.5" />
+                  Save layers as template…
                 </button>
               )}
               {importEnabled && !editDisabled && (

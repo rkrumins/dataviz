@@ -10,16 +10,18 @@ have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
 import logging
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import WorkspaceORM, WorkspaceDataSourceORM, ViewORM
+from backend.app.db.models import ContextModelORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
+from backend.app.api.v1.view_read_scope import readable_clause
 from backend.app.auth.dependencies import (
     get_current_user,
     get_permission_claims,
@@ -31,10 +33,10 @@ from backend.app.common.single_flight import read_stats_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (
     workspace_repo, provider_repo, ontology_definition_repo, data_source_repo,
-    binding_repo, role_repo, user_repo,
+    binding_repo, role_repo, user_repo, view_repo, profiling_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
-from backend.app.services import workspace_visibility
+from backend.app.services import profiling_series, template_access, workspace_visibility
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
@@ -55,6 +57,11 @@ from backend.common.models.management import (
     WorkspaceCreateRequest,
     WorkspaceUpdateRequest,
     WorkspaceResponse,
+    WorkspaceSourceSummary,
+    WorkspaceSummaryResponse,
+    WorkspaceSummaryTrendResponse,
+    WorkspaceSummaryRow,
+    WorkspaceSummaryTotals,
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
@@ -73,11 +80,19 @@ router = APIRouter()
 
 
 def _reaches_every_workspace(claims: PermissionClaims) -> bool:
-    """Global admin — or an API key over everything whose owner's
-    organisation-wide role gives it permissions in every workspace
-    (``KeyScope.org_perms``), which its claims do not list one by one."""
+    """Global admin; an organisation-wide operator — ``system:org-admin`` or
+    ``system:org-viewer``, whose roles reach every workspace without a binding
+    in each, so listing only their bound workspaces under-reported the estate
+    they run; or an API key over everything whose owner's organisation-wide role
+    gives it permissions in every workspace (``KeyScope.org_perms``), which its
+    claims do not list one by one (a key's claims carry no global permission)."""
     key = claims.key_scope
-    return has_permission(claims, "system:admin") or bool(key is not None and key.org_perms)
+    return (
+        has_permission(claims, "system:admin")
+        or "system:org-admin" in claims.global_perms
+        or "system:org-viewer" in claims.global_perms
+        or bool(key is not None and key.org_perms)
+    )
 
 
 def _can_read_workspace(claims: PermissionClaims, ws_id: str) -> bool:
@@ -101,6 +116,30 @@ async def _as_seen_by(session: AsyncSession, claims: PermissionClaims, workspace
     ]
 
 
+async def _visible_workspaces(session: AsyncSession, claims: PermissionClaims):
+    """Every workspace the caller may list, each with only the data sources
+    they cover. The one rule behind the list, the bulk stats and the summary,
+    so their numbers can never describe different estates."""
+    workspaces = await workspace_repo.list_workspaces(session)
+    if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not _reaches_every_workspace(claims):
+        workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
+    return await _as_seen_by(session, claims, workspaces)
+
+
+async def _with_view_counts(session: AsyncSession, user: User, claims: PermissionClaims, workspaces):
+    """Each workspace's live views the caller can open — the count the summary
+    gives, through the same read rule. Left unset when that rule can't be worked
+    out (workspace grants unavailable): the list itself must still load."""
+    try:
+        readable, _scope = await readable_clause(session, user, claims)
+    except HTTPException:
+        return workspaces
+    counts = await view_repo.count_views_grouped(
+        session, ViewORM.workspace_id, readable=readable, ids=[w.id for w in workspaces],
+    )
+    return [w.model_copy(update={"view_count": counts.get(w.id, 0)}) for w in workspaces]
+
+
 def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
     if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not _can_read_workspace(claims, ws_id):
         raise HTTPException(
@@ -119,7 +158,7 @@ async def list_workspaces(
     limit: Optional[int] = Query(None, ge=1, le=200),
     offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None, max_length=200),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -134,15 +173,10 @@ async def list_workspaces(
     pager can render the right number of pages. Callers that page never load
     the whole estate just to show ten rows.
     """
-    enforce = rbac_flag("RBAC_ENFORCE_WORKSPACES")
-    unrestricted = not enforce or _reaches_every_workspace(claims)
-
     if limit is None:
-        workspaces = await workspace_repo.list_workspaces(session)
-        if not unrestricted:
-            workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
-        return await _as_seen_by(session, claims, workspaces)
+        return await _with_view_counts(session, user, claims, await _visible_workspaces(session, claims))
 
+    unrestricted = not rbac_flag("RBAC_ENFORCE_WORKSPACES") or _reaches_every_workspace(claims)
     permitted_ids = None if unrestricted else list(claims.ws_perms.keys())
     page, total = await workspace_repo.list_workspaces_page(
         session,
@@ -153,6 +187,162 @@ async def list_workspaces(
     )
     response.headers["X-Total-Count"] = str(total)
     return await _as_seen_by(session, claims, page)
+
+
+@router.get("/summary", response_model=WorkspaceSummaryResponse)
+async def get_workspaces_summary(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The estate's numbers as the caller can see them — the one definition
+    the dashboard, the workspaces page and the admin overview all read, so
+    they can never quote different totals.
+
+    Declared before ``/{workspace_id}``, which would otherwise take "summary"
+    for an id. The workspaces are the list's (``_visible_workspaces``) and the
+    counts the bulk endpoint's (``_cached_stats_entries``): a source whose
+    statistics are cold or expired is pending — counted as a source, refreshed
+    in the background, left out of the sums rather than counted as empty.
+    Nodes, edges and entity types are totalled once per physical graph, since
+    a graph mounted in two workspaces is still one graph; each workspace row
+    counts its own sources. Views are the live views the caller can read,
+    counted exactly as the Explorer counts them.
+    """
+    workspaces = await _visible_workspaces(session, claims)
+    sources = [ds for ws in workspaces for ds in ws.data_sources]
+    entries = await _cached_stats_entries(session, sources)
+    readable, _scope = await readable_clause(session, user, claims)
+    views_by_ws = await view_repo.count_views_grouped(
+        session, ViewORM.workspace_id, readable=readable,
+    )
+    views_by_ds = await view_repo.count_views_grouped(
+        session, ViewORM.data_source_id, readable=readable, ids=[ds.id for ds in sources],
+    )
+
+    # Physical graph → (the freshest counted entry, the workspaces mounting it).
+    graphs: dict = {}
+    rows: List[WorkspaceSummaryRow] = []
+    for ws in workspaces:
+        row = WorkspaceSummaryRow(
+            id=ws.id, name=ws.name, isDefault=ws.is_default,
+            dataSources=len(ws.data_sources), views=views_by_ws.get(ws.id, 0),
+        )
+        types: set = set()
+        for ds in ws.data_sources:
+            entry = entries[ds.id]
+            pending = entry["status"] == "computing"
+            row.active_data_sources += 1 if ds.is_active else 0
+            row.sources[ds.id] = WorkspaceSourceSummary(
+                nodes=entry["nodeCount"], edges=entry["edgeCount"],
+                pending=pending, views=views_by_ds.get(ds.id, 0),
+            )
+            if pending:
+                row.pending_data_sources += 1
+                continue
+            row.nodes += entry["nodeCount"]
+            row.edges += entry["edgeCount"]
+            types.update(entry["entityTypeCounts"])
+            key = (ds.provider_id, ds.graph_name) if ds.provider_id and ds.graph_name else (ds.id,)
+            graph = graphs.setdefault(key, {"entry": entry, "workspaces": set()})
+            if (entry.get("updatedAt") or "") > (graph["entry"].get("updatedAt") or ""):
+                graph["entry"] = entry
+            graph["workspaces"].add(ws.id)
+        row.entity_types = sorted(types)
+        rows.append(row)
+
+    totals = WorkspaceSummaryTotals(
+        workspaces=len(workspaces),
+        dataSources=len(sources),
+        activeDataSources=sum(r.active_data_sources for r in rows),
+        pendingDataSources=sum(r.pending_data_sources for r in rows),
+        nodes=sum(g["entry"]["nodeCount"] for g in graphs.values()),
+        edges=sum(g["entry"]["edgeCount"] for g in graphs.values()),
+        entityTypes=sorted({t for g in graphs.values() for t in g["entry"]["entityTypeCounts"]}),
+        views=sum(views_by_ws.values()),
+        sharedGraphs=sum(1 for g in graphs.values() if len(g["workspaces"]) > 1),
+    )
+    every = not rbac_flag("RBAC_ENFORCE_WORKSPACES") or _reaches_every_workspace(claims)
+    return WorkspaceSummaryResponse(
+        coverage="all" if every else "granted", totals=totals, workspaces=rows,
+    )
+
+
+#: Days the Dashboard's trend covers, today included.
+TREND_DAYS = 30
+
+
+@router.get("/summary/trend", response_model=WorkspaceSummaryTrendResponse)
+async def get_workspaces_summary_trend(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The summary's totals over the last ``TREND_DAYS`` days — the same
+    estate and the same counting rules, for the Dashboard's sparklines.
+
+    Entities and relationships come from the day rollups profiling keeps, each
+    observation filed under its physical graph first, so a graph mounted in two
+    workspaces counts once here as it does in the summary. A graph keeps its
+    last known size through days it wasn't measured; a day before anything was
+    measured is None, not zero. Workspaces, sources and views are counted by
+    the day they were created, among those that exist now. Read-only: unlike
+    the summary it never queues a stats refresh.
+    """
+    now = datetime.now(timezone.utc)
+    days = [(now.date() - timedelta(days=n)).isoformat() for n in range(TREND_DAYS - 1, -1, -1)]
+    workspaces = await _visible_workspaces(session, claims)
+    sources = [ds for ws in workspaces for ds in ws.data_sources]
+
+    graph_of = {
+        ds.id: f"{ds.provider_id}/{ds.graph_name}" if ds.provider_id and ds.graph_name else ds.id
+        for ds in sources
+    }
+    observations, _truncated = await profiling_repo.read_observations(
+        session, scope="all", scope_id=None, visible=list(graph_of),
+        frm=days[0], to=now.isoformat(), grain="day",
+    )
+    series = profiling_series.build_series(
+        [replace(o, data_source_id=graph_of[o.data_source_id]) for o in observations],
+    )
+    measured = {
+        bucket[:10]: (n, e)
+        for bucket, n, e in zip(series["buckets"], series["totals"].get("nodes", []), series["totals"].get("edges", []))
+    }
+    nodes: list = []
+    edges: list = []
+    last = (None, None)
+    for day in days:
+        last = measured.get(day, last)
+        nodes.append(last[0])
+        edges.append(last[1])
+
+    def cumulative(created: list) -> list:
+        born = sorted(c[:10] for c in created)
+        return [sum(1 for b in born if b <= day) for day in days]
+
+    readable, _scope = await readable_clause(session, user, claims)
+    views_before = await view_repo.count_views(session, readable=readable, created_before=days[0])
+    created = await view_repo.view_histogram(
+        session, field="created", grain="hour", after=days[0],
+        before=(now.date() + timedelta(days=1)).isoformat(), readable=readable,
+    )
+    per_day: dict = {}
+    for hour, n in created:
+        per_day[hour[:10]] = per_day.get(hour[:10], 0) + n
+    views, running = [], views_before
+    for day in days:
+        running += per_day.get(day, 0)
+        views.append(running)
+
+    return WorkspaceSummaryTrendResponse(
+        days=days,
+        workspaces=cumulative([ws.created_at for ws in workspaces]),
+        dataSources=cumulative([ds.created_at for ds in sources]),
+        views=views,
+        nodes=nodes,
+        edges=edges,
+    )
 
 
 @router.post("", response_model=WorkspaceResponse, status_code=201)
@@ -224,6 +414,13 @@ async def update_workspace(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update workspace metadata (name, description, is_active)."""
+    if req.default_layout_template_id:
+        template = await session.get(ContextModelORM, req.default_layout_template_id)
+        if template is None or not template_access.can_be_workspace_default(template, workspace_id):
+            raise HTTPException(status_code=422, detail=(
+                "A workspace's default layout template must be one every member can use: "
+                "a built-in, an organization template, or this workspace's own."
+            ))
     old_ws = await session.get(WorkspaceORM, workspace_id)
     old_identity = (
         getattr(old_ws, "identity_property", None),
@@ -1006,6 +1203,62 @@ async def set_projection_mode(
 # Cached Stats (DB-only — zero provider dependency)                    #
 # ================================================================== #
 
+async def _cached_stats_entries(session: AsyncSession, data_sources) -> dict:
+    """``{ds_id: entry}`` from the stats cache — the one classification the
+    bulk endpoint and the summary share. Cold, expired and stale rows enqueue a
+    background refresh; cold or expired entries report ``status=computing``
+    with zero counts so callers can skip them."""
+    import json
+
+    from backend.app.db.repositories.stats_repo import list_data_source_stats
+    from backend.app.services.stats_cache import age_seconds, classify_tier, parse_iso
+
+    cache_by_ds = {
+        c.data_source_id: c
+        for c in await list_data_source_stats(session, [d.id for d in data_sources])
+    }
+
+    def _counts(raw) -> dict:
+        if not raw or raw == "{}":
+            return {}
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+
+    entries: dict = {}
+    for ds in data_sources:
+        cache = cache_by_ds.get(ds.id)
+        tier = None
+        if cache is not None:
+            tier = classify_tier(age_seconds(parse_iso(cache.updated_at)))
+        if cache is None or tier == "expired":
+            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
+            entries[ds.id] = {
+                "status": "computing",
+                "nodeCount": 0,
+                "edgeCount": 0,
+                "entityTypeCounts": {},
+            }
+            continue
+        if tier == "stale":
+            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
+        entries[ds.id] = {
+            "status": tier,
+            "nodeCount": cache.node_count or 0,
+            "edgeCount": cache.edge_count or 0,
+            "entityTypeCounts": _counts(cache.entity_type_counts),
+            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
+            # NULL means "not measured" (the store would not answer, the
+            # provider is not FalkorDB, or the row predates collection).
+            # Zero would read as "this graph has no properties", which is
+            # exactly backwards for the graphs this figure warns about.
+            "propertyKeyCount": cache.property_key_count,
+            "updatedAt": cache.updated_at,
+        }
+    return entries
+
+
 @router.get("/datasources/cached-stats")
 async def get_cached_stats_bulk(
     workspace_id: Optional[str] = Query(None),
@@ -1022,71 +1275,20 @@ async def get_cached_stats_bulk(
     per-datasource endpoint remains the source for the full composite
     (schemaStats / ontologyMetadata / graphSchema).
 
-    Visibility mirrors ``list_workspaces``: system admins see every
-    workspace, everyone else only those their bindings reach. Cold,
+    Visibility is the list's (``_visible_workspaces``) and the
+    classification the summary's (``_cached_stats_entries``): cold,
     expired, and stale cache rows enqueue a background refresh — the
     same self-healing the per-datasource endpoint does — and cold or
     expired entries report ``status=computing`` with zero counts so
     callers can skip them.
     """
-    import json
-
-    from backend.app.db.repositories.stats_repo import list_data_source_stats
-    from backend.app.services.stats_cache import age_seconds, classify_tier, parse_iso
-
-    workspaces = await workspace_repo.list_workspaces(session)
-    if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not has_permission(claims, "system:admin"):
-        workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
+    workspaces = await _visible_workspaces(session, claims)
     if workspace_id is not None:
         workspaces = [w for w in workspaces if w.id == workspace_id]
 
-    ds_rows = await data_source_repo.list_data_sources_for_workspaces(
-        session, [w.id for w in workspaces]
-    )
-    cache_by_ds = {
-        c.data_source_id: c
-        for c in await list_data_source_stats(session, [d.id for d in ds_rows])
-    }
-
-    def _counts(raw) -> dict:
-        if not raw or raw == "{}":
-            return {}
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return {}
-
-    data: dict = {}
-    for ds in ds_rows:
-        key = f"{ds.workspace_id}/{ds.id}"
-        cache = cache_by_ds.get(ds.id)
-        tier = None
-        if cache is not None:
-            tier = classify_tier(age_seconds(parse_iso(cache.updated_at)))
-        if cache is None or tier == "expired":
-            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
-            data[key] = {
-                "status": "computing",
-                "nodeCount": 0,
-                "edgeCount": 0,
-                "entityTypeCounts": {},
-            }
-            continue
-        if tier == "stale":
-            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
-        data[key] = {
-            "status": tier,
-            "nodeCount": cache.node_count or 0,
-            "edgeCount": cache.edge_count or 0,
-            "entityTypeCounts": _counts(cache.entity_type_counts),
-            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
-            # NULL means "not measured" (the store would not answer, the
-            # provider is not FalkorDB, or the row predates collection).
-            # Zero would read as "this graph has no properties", which is
-            # exactly backwards for the graphs this figure warns about.
-            "propertyKeyCount": cache.property_key_count,
-            "updatedAt": cache.updated_at,
-        }
+    sources = [ds for ws in workspaces for ds in ws.data_sources]
+    entries = await _cached_stats_entries(session, sources)
+    data: dict = {f"{ds.workspace_id}/{ds.id}": entries[ds.id] for ds in sources}
 
     # build_meta (not a hand-rolled dict): the FE's isCacheEnvelope guard
     # requires status/source/age_seconds/ttl_seconds/missing_fields on

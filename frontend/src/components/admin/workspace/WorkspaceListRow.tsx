@@ -5,6 +5,7 @@ import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBad
 import { getProviderLogo } from '../ProviderLogos'
 import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { cn } from '@/lib/utils'
+import { compact } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 
@@ -26,12 +27,6 @@ function shortDate(iso: string): string {
 }
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { useIntentPrefetch } from '@/hooks/useIntentPrefetch'
-
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
-    return String(n)
-}
 
 interface WorkspaceListRowProps {
     ws: WorkspaceResponse
@@ -134,12 +129,12 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
 
             <div className="flex items-center gap-1 text-xs text-ink-secondary">
                 <CircleDot className="w-3 h-3 text-emerald-500" />
-                <span className="font-semibold">{stats.nodes > 0 ? compactNum(stats.nodes) : '\u2014'}</span>
+                <span className="font-semibold">{stats.nodes > 0 ? compact(stats.nodes) : '\u2014'}</span>
             </div>
 
             <div className="flex items-center gap-1 text-xs text-ink-secondary">
                 <ArrowRightLeft className="w-3 h-3 text-violet-500" />
-                <span className="font-semibold">{stats.edges > 0 ? compactNum(stats.edges) : '\u2014'}</span>
+                <span className="font-semibold">{stats.edges > 0 ? compact(stats.edges) : '\u2014'}</span>
             </div>
 
             <div className="flex items-center gap-1 text-xs text-ink-secondary">

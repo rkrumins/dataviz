@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   LayoutDashboard,
   Compass,
+  LayoutTemplate,
   Boxes,
   DatabaseZap,
   Layers,
@@ -27,6 +28,7 @@ import { useAnalyticsAccess } from '@/hooks/useAnalyticsAccess'
 import { useSidebarSpec } from '@/store/navCatalogue'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -53,6 +55,7 @@ interface NavItemConfig {
 const NAV_ITEMS_CONFIG: Omit<NavItemConfig, 'badge'>[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, description: 'Overview and workspace activity', color: { bg: 'bg-indigo-500/10', text: 'text-indigo-500', border: 'border-indigo-500/20', hoverBg: 'group-hover:bg-indigo-500/10' } },
   { id: 'explore', label: 'Explore', icon: Compass, description: 'Browse and open saved views', color: { bg: 'bg-violet-500/10', text: 'text-violet-500', border: 'border-violet-500/20', hoverBg: 'group-hover:bg-violet-500/10' } },
+  { id: 'templates', label: 'Templates', icon: LayoutTemplate, description: 'Reusable layer layouts for Context Views', color: { bg: 'bg-fuchsia-500/10', text: 'text-fuchsia-500', border: 'border-fuchsia-500/20', hoverBg: 'group-hover:bg-fuchsia-500/10' } },
   { id: 'workspaces', label: 'Workspaces', icon: Boxes, description: 'Manage isolated data environments', color: { bg: 'bg-blue-500/10', text: 'text-blue-500', border: 'border-blue-500/20', hoverBg: 'group-hover:bg-blue-500/10' } },
   { id: 'ingestion', label: 'Ingestion', icon: DatabaseZap, description: 'Connect sources and import data', color: { bg: 'bg-emerald-500/10', text: 'text-emerald-500', border: 'border-emerald-500/20', hoverBg: 'group-hover:bg-emerald-500/10' } },
   { id: 'schema', label: 'Semantic Layers', icon: Layers, description: 'Define and manage ontology models', color: { bg: 'bg-amber-500/10', text: 'text-amber-500', border: 'border-amber-500/20', hoverBg: 'group-hover:bg-amber-500/10' } },
@@ -521,6 +524,7 @@ export function SidebarNav() {
     switch (tabId) {
       case 'dashboard': navigate('/dashboard'); break
       case 'explore': navigate('/explorer'); break
+      case 'templates': navigate('/templates'); break
       case 'workspaces': navigate('/workspaces'); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
@@ -540,6 +544,8 @@ export function SidebarNav() {
   // renders. ``useSidebarSpec`` resolves the live spec from the store.
   const dashboardVisible  = useNavPermission(useSidebarSpec('dashboard'))
   const exploreVisible    = useNavPermission(useSidebarSpec('explore'))
+  const templatesAllowed  = useNavPermission(useSidebarSpec('templates'))
+  const templatesOn       = useLayoutTemplatesEnabled()
   const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
   const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
   const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
@@ -551,6 +557,7 @@ export function SidebarNav() {
   const visibility: Record<NavigationTab, boolean> = {
     dashboard:  dashboardVisible,
     explore:    exploreVisible,
+    templates:  templatesAllowed && templatesOn,
     workspaces: workspacesVisible,
     ingestion:  ingestionVisible,
     schema:     schemaVisible,

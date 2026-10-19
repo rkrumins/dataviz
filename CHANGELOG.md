@@ -9,6 +9,230 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Layout templates: reuse a Context View's layers, for yourself, your team or everyone
+
+### Added
+
+**A Templates library.** **Templates** in the sidebar holds every layer layout you can start a
+Context View from: the built-ins that ship with {brand}, your organization's, your workspaces', your
+own and the ones shared with you. Tabs count each collection (**All**, **Mine**, **Shared with me**,
+**Workspace**, **Organization**, **Built-in**); search covers names, descriptions and layer names;
+categories and sorting (recently updated, most used, A–Z) narrow the rest. Each card shows the
+layout's columns in their colours, who it is for, who made it and how many of the views you can open
+were built from it, and offers only what you may do with it. Open one for every layer — its entity
+types, rules and groups — who can use it, and the views built from it. A banner at the top sums up
+the library, like the ones Explore and Workspaces open with: templates, the views using them, this
+week's updates, your favorites and, for managers, the requests waiting on them, each tile one click
+from what it counts.
+
+**Make, edit and duplicate in a guided studio.** **New template** starts blank, from another
+template or from one of your Context Views; then name it, shape its layers (order, colour, icon,
+description, and the entity types each column collects, suggested from your semantic layers),
+choose who it is for and check it before saving. A view's layers can also be kept as a template
+from the Context View's import/export menu (**This view → Save layers as a template…**), the
+Explorer card's menu and the view wizard's Layout step. A template keeps a view's structure and
+never the entities it placed: column anchors, hand placements and exact-URN rules stay behind.
+
+**For yourself, a workspace, the organization — and teams.** A **Personal** template is yours; a
+**Workspace** template is everyone's in that workspace; an **Organization** template is everyone's,
+curated by people with the new **Manage templates** permission (`system:templates:manage`, held by
+Super Admins and Org Admins, and delegable). Share a personal or workspace template with
+people or groups — a share with a group is how a team gets its own — to use it or also edit it;
+they find it under **Shared with me** and hear about it in their inbox. Administrators do not see
+anyone's personal templates: a template is a layout, not data, and there is nothing behind it to
+audit.
+
+**Built-ins belong to the product.** Seven ship — Data Engineering Flow, Analytics Pipeline, Data
+Mesh, ETL Classic, Medallion, Source to target and Data flow — refreshed by every upgrade and
+read-only: duplicate one to change it. A template manager can hide one for everyone, and bring it
+back with **Show hidden built-ins**.
+
+**Use template.** From a card, a template's details or the Dashboard, **Use template** opens the
+view wizard with its layers on the Layout step. That step offers the whole library beside what your
+data suggests and says how well each template fits ("Matches 3 of 4 layers"); applying one keeps
+every structural field, resolves its entity types to your semantic layer's spelling and names the
+types it couldn't match, instead of leaving columns silently empty. The new view records where it
+started — its details read **Layers started from …** — and the template counts the views built from
+it.
+
+**Delete, with Undo.** Deleting a template first says how many views were built from it (they keep
+their layers) and who loses it, and can be undone for a few seconds afterwards: it comes back with
+the same shares.
+
+**Versions, and updates that reach the views built from a template.** Changing a template's
+layers makes a new version — the studio asks **What changed?** and can tell the people whose views
+were built from it — while a rename does not. Every version stays readable: a template's details
+list them with their notes, compare any with the current one, and let its editors **Restore** one.
+A view records the version it was built from, and each of its columns the template layer it came
+from, so when the template moves on, people who can edit the view see **v3 available** and can
+**Review update**: what only the template changed is taken, what only the view changed is kept,
+both-changed fields keep the view's value unless you choose the template's, and a layer holding
+placed entities or edited in the view is never dropped unless you say so. **Apply** saves a version
+of the view (*Template update applied*) with **Undo**; **Keep my layers** marks it up to date.
+
+**Featured, favorites and recently used.** Template managers feature built-ins and organization
+templates; the library opens on a **Featured** shelf and a **Recently used** one (the templates you
+last built a view from), and the Dashboard lists featured templates first. A heart makes a
+template one of your **Favorites**, a new tab.
+
+**How well each template fits your data.** **Fit for** puts a ring on every card — how many of its
+layers find their entity types in a workspace's data, starting with the active one — and **Best
+match** sorts by it. **Recently used by me** is a sort too.
+
+**Offer a template to everyone.** The owner of a personal or workspace template (or anyone who may
+change who can use it) can ask for it to become an Organization template. Template managers hear
+about it, may read it until one of them answers — from its details or the new **Requests** tab —
+and approve it (it becomes theirs to look after) or decline it, with a note for whoever asked.
+
+**A workspace's default template.** A workspace admin can make a built-in, an organization
+template or the workspace's own the one its new views start from. The wizard opens with it
+applied and offers **Start empty instead**; the template's card reads **Default · Finance**.
+
+**Templates as files.** **Export as file** saves a template's layout — name, description, category
+and layers, nothing more — as `<name>.layout-template.json`; **Import** on Templates (or
+`/templates?import=1`) reads one, shows its layers and how they fit your data, keeps a name your
+library already has apart, and asks who it is for.
+
+**Preview with real data.** The studio's Layers and Review steps can fill each column with a few
+real entities from a workspace you can read, placed the way a view built from the template would
+place them, with how many there are in all.
+
+**Faster to find and to shape.** On Templates, `/` searches, `n` starts a template, `i` imports
+one, the arrow keys move between cards, `Enter` opens one, `u` starts a view from it, `f` makes it
+a favorite and `?` lists them all. In the studio a layer moves by its handle — dragged, or
+`Alt`+`↑`/`↓`. The command palette offers **New layout template**, **Import a layout template**
+and **Browse templates**.
+
+**One switch for all of it.** **Layout templates** (`layoutTemplatesEnabled`), under
+**Administration → Features → View Modes**, turns templates on or off for everyone. It ships on.
+Off, **Templates** leaves the sidebar, the Dashboard, search and the command palette, the View
+wizard offers only the layouts the data suggests, **Save layers as a template** and template updates
+disappear from views, and the server refuses every template route and
+`PUT /api/v1/views/{id}/template-version` (`403`, `feature_disabled`). Nothing is deleted: views built
+from a template keep their layers, and turning it back on brings every template back as it was.
+
+**The API.** `/api/v1/layout-templates` lists the templates you can use (`includeHidden` adds the
+hidden built-ins, for managers), reads, creates, edits (partially; changing who can use one needs
+rights over its current audience and the new one), deletes and restores them, hides or shows a
+built-in, and manages shares. It also lists and restores versions (`/{id}/versions`), features
+(`PUT /{id}/featured`), favorites (`POST|DELETE /{id}/favourite`), and handles requests to offer a
+template to everyone (`POST|DELETE /{id}/promotion-request`, `…/approve`, `…/decline`,
+`GET /promotion-requests`). A template carries `version`, `featured`, `isFavourite`, `lastUsedAt`,
+`defaultFor` and, for those it concerns, `promotionRequest`. `PUT /api/v1/views/{id}/template-version`
+marks a view up to date with its template; `PUT /api/v1/admin/workspaces/{id}` takes
+`defaultLayoutTemplateId`. Every change is recorded in the activity log
+(`visualization.layout_template.*`). API keys can't call these routes.
+
+### Changed
+
+- **The Dashboard's template section** shows the library's most used templates, each one click from
+  a new view, with **Browse all**. A template in search results opens the template, instead of
+  scrolling the Dashboard. The onboarding step **Start a view from a template** opens the library
+  and is ticked when a view is created from one.
+- **Creating a view keeps `contextModelId` only when its creator can use that template**; any other
+  id is stored as none, where it used to fail on the database's foreign key. A view built from a
+  template also records `contextModelVersion`.
+- **A view's `contextModelName`** no longer names a deleted template, or someone else's personal
+  one, and the Explorer card no longer shows a template's name where the view's semantic layer
+  belongs.
+
+### Removed
+
+- `GET|POST|PUT|DELETE /api/v1/admin/context-model-templates` and
+  `GET /api/v1/{ws_id}/context-models/templates[/{template_id}]` — use `/api/v1/layout-templates`.
+  The workspace route returned every template whatever its workspace, and API keys could read
+  templates through it; they no longer can.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261018_1200_layout_templates` adds
+  `context_models.system_key`, `deleted_at` and `deleted_by` with a unique index on `system_key`,
+  lets `resource_grants` hold `layout_template` shares, and grants `system:templates:manage` to
+  Super Admin and Org Admin. Every existing template becomes an Organization template, and the four
+  the old seeder wrote become built-ins (for each name, its oldest row). It waits at most 5 seconds
+  for a lock; if it gives up, nothing has changed and you run it again.
+- On start, the server adds the three new built-ins and refreshes the others. A built-in someone
+  hid stays hidden.
+- Migration `20261018_1300_tpl_lifecycle` adds template versions (`context_models.version` and
+  `layout_template_versions`, with version 1 recorded for every existing template), favorites
+  (`layout_template_favourites`), the columns for requests to offer a template to everyone,
+  `views.context_model_version` (1 for views already built from a template) and
+  `workspaces.default_layout_template_id`, and lets a view version's source be `template`. Like the
+  migration before it, it waits at most 5 seconds for a lock and can simply be run again.
+
+### Known limitations
+
+- Deleted templates are kept — for Undo, and for the views that name them — and never purged.
+- The shares of a deleted workspace's templates stay in `resource_grants`, as a deleted view's do.
+- The studio edits layers; rules and logical groups are kept as they were authored on the canvas.
+- Entity types match by name: a template written for another semantic layer fits only where the
+  type names agree, and the wizard says which ones don't.
+- Someone whose share of a workspace template was taken away may still be told about its next
+  version; nobody is told about a personal template's.
+- Applying an update to a view is two requests. If the second fails, the view has the new layers
+  but still offers the update: review it again (there is nothing left to change) or **Keep my
+  layers**.
+- The live preview shows at most 6 entities of each of 8 entity types.
+
+---
+
+## [Unreleased] — The Dashboard, Workspaces and Administration quote the same numbers
+
+### Added
+
+- **The Dashboard's cards show how their numbers moved.** Each carries a 30-day sparkline and its
+  change ("+3 in 30 days"), from `GET /api/v1/admin/workspaces/summary/trend` (the summary's totals
+  day by day, a shared graph counted once). A click opens what is behind the number: sources ranked
+  by size, with their status and **Refresh stats** for those who run them; the most favorited,
+  recently updated and your recent views; workspaces; semantic layers.
+- **Needs attention.** For people who can read profiling and turn it on, the Dashboard lists the
+  worst open findings — a source far outside its usual movement, a vanished type, a silent source —
+  with **Open** and **Mark seen**. It's off by default, because the Dashboard is where business
+  users land: **Preferences**, a new page in the profile menu, turns it on for that browser.
+
+### Fixed
+
+- **One set of numbers.** The Dashboard, **Workspaces** and **Administration → Global Overview**
+  now read one server summary (`GET /api/v1/admin/workspaces/summary`), so they agree on workspaces,
+  data sources, entities, relationships and views. The Dashboard used to count workspaces and
+  sources from a list loaded once at sign-in, take every workspace's views from whichever workspace
+  was active, and add up graph sizes its own way.
+- **A graph used by several workspaces is counted once** in the totals, and the overview says so.
+- **Views are the views you can open**, counted exactly as the Explorer counts them — in total, per
+  workspace and per data source.
+- **A source still being measured** is left out of the sums and shown as *counting…*; the totals
+  fill in on their own.
+- **Paused sources no longer read as active** ("3 of 4 sources active"), and the hard-coded
+  "· 1 active" is gone.
+- **"Data Assets" is now "Data Sources"**, with its entities and relationships beneath — the same
+  figures as Administration's.
+- **Large numbers read the same everywhere**: 1,500 is "1.5k" on every page (the Workspaces list
+  said "2k"), and 999,999 is "1.0M", not "1000k". A real zero reads "0"; a dash now means a source
+  is still being counted.
+- **When the overview can't be loaded**, Administration says its counts are unknown instead of
+  showing zeros.
+- **Reset to default keeps a built-in role's permissions.** Resetting Super Admin, Org Admin or Org
+  Auditor dropped **Analytics**, **Publish views** and (Super Admin) **SSO hosts**, and those roles
+  read as **Customized** when nobody had touched them.
+- **The workspace list's view counts** are the views you can open; they counted every view.
+- **Analytics' "Context models" is now "Layout templates"**, counting the templates people made —
+  not built-ins, not deleted ones.
+
+### Changed
+
+- **Org Admins and Org Auditors see every workspace** — in the workspace list, on
+  workspace pages and in the totals — not only the ones they are bound to, matching what their roles
+  already let them do there.
+- **Your business areas shows four workspaces at a time** — one full row on a wide screen, two rows
+  of two on a laptop — instead of six that left the last row half empty.
+
+### Upgrading
+
+- A built-in role that was reset to default before this release lacks the permissions above and
+  now reads **Customized**: choose **Reset to default** again to restore them.
+
+---
+
 ## [Unreleased] — API keys: scripts and services that act as you, limited to what you choose
 
 ### Added

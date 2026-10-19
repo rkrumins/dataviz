@@ -47,11 +47,13 @@ logger = logging.getLogger(__name__)
 
 SOURCES = frozenset({
     "baseline", "create", "wizard", "import", "restore", "promote", "export", "manual", "snapshot",
+    "template",
 })
 
 #: The sources a client may claim when it asks for a checkpoint on a layout write. The rest are
-#: taken by the server itself and must not be forgeable from outside.
-CLIENT_SOURCES = frozenset({"create", "wizard"})
+#: taken by the server itself and must not be forgeable from outside. ``template`` is the save
+#: that applies a layout template's update to a view built from it.
+CLIENT_SOURCES = frozenset({"create", "wizard", "template"})
 
 
 def _now() -> str:

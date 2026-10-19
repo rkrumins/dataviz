@@ -70,6 +70,8 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
+import { usePreferencesStore } from '@/store/preferences'
 import { useFeature, useFeatureList } from '@/store/features'
 import { usePermission } from '@/store/auth'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
@@ -154,6 +156,8 @@ export interface ViewWizardProps {
     /** Import journey: a view package already uploaded, read from there with no file to choose:
      *  "Finish importing views" on the data source it was copied into (`initialDataSourceId`). */
     importUploadId?: string
+    /** Build journey: start from this layout template — applied on the Layout step. */
+    initialTemplateId?: string
 }
 
 export interface ScopeContext {
@@ -224,6 +228,13 @@ export interface WizardFormData {
     /** Blank models only: the Quick Start template the user picked on Layout.
      *  Undefined until an explicit choice is made — gates Next in blank mode. */
     layoutTemplateId?: string
+    /** The library template (`/layout-templates`) the layers came from, recorded on
+     *  the new view as where it started. Unlike `layoutTemplateId`, never a
+     *  suggestion computed in the browser. */
+    contextModelId?: string
+    /** That template's version whose layers were applied — what its later
+     *  versions are compared with. */
+    contextModelVersion?: number
 }
 
 export type WizardStep =
@@ -1053,6 +1064,7 @@ function ViewWizardBody({
     blankOntologyId,
     onBackToFile,
     importLive = false,
+    initialTemplateId,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
@@ -1111,6 +1123,19 @@ function ViewWizardBody({
         // Checked against the draft the data went into, so what it brought counts as found.
         ...(importDataBranch ? { branchId: importDataBranch } : {}),
     }), [importTargetViewId, resolvedWorkspaceId, resolvedDataSourceId, importDataBranch])
+    // The template a new view starts from: the one "Use template" named, else the
+    // workspace's default. Applied once per wizard, however often the Layout step
+    // is revisited — another template chosen since, or an empty start, sticks.
+    const workspaceDefaultId = useWorkspacesStore(
+        s => s.workspaces.find(w => w.id === resolvedWorkspaceId)?.defaultLayoutTemplateId ?? undefined,
+    )
+    const templatesOn = useLayoutTemplatesEnabled()
+    const workspaceDefault = templatesOn && mode === 'create' && !isImport && !isBlank && !initialTemplateId && workspaceDefaultId
+        ? { templateId: workspaceDefaultId, workspaceName: scopeContext.workspaceName }
+        : undefined
+    const startTemplateId = mode === 'create' && !isImport ? (initialTemplateId ?? workspaceDefault?.templateId) : undefined
+    const [startTemplateApplied, setStartTemplateApplied] = useState(false)
+    const markStartTemplateApplied = useCallback(() => setStartTemplateApplied(true), [])
     const importTargetLabel = isImportUpdate
         ? `“${importSession?.targetView?.name ?? 'the view'}”`
         : `${scopeContext.workspaceName} · ${scopeContext.dataSourceLabel}`
@@ -1649,6 +1674,10 @@ function ViewWizardBody({
                         // would just 403.
                         visibility: wantsPublication ? 'workspace' : formData.visibility,
                         tags: formData.tags.length > 0 ? formData.tags : undefined,
+                        // Where the layers came from; the server keeps it only when the
+                        // creator can use that template.
+                        contextModelId: formData.layoutType === 'reference' ? formData.contextModelId : undefined,
+                        contextModelVersion: formData.layoutType === 'reference' ? formData.contextModelVersion : undefined,
                     })
                     if (!result.success || !result.data) {
                         setStageStates(s => ({ ...s, create: 'failed' }))
@@ -1657,6 +1686,9 @@ function ViewWizardBody({
                     }
                     createdViewId = result.data.id
                     createdViewIdRef.current = createdViewId
+                    if (formData.layoutType === 'reference' && formData.contextModelId) {
+                        usePreferencesStore.getState().completeOnboardingStep('template_deployed')
+                    }
 
                     // The view exists now, so the ask has something to
                     // attach to. Failure here must not fail the create —
@@ -1737,6 +1769,12 @@ function ViewWizardBody({
                     // not overwrite tags set elsewhere since the form loaded, nor
                     // write a draft's staged import's tags to the view.
                     tags: tagsChanged ? formData.tags : undefined,
+                    // A library template applied in this edit: the view now starts from it.
+                    // Edits leave the form's template unset otherwise, so the view keeps its own.
+                    ...(formData.layoutType === 'reference' && formData.contextModelId && {
+                        contextModelId: formData.contextModelId,
+                        contextModelVersion: formData.contextModelVersion,
+                    }),
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {
@@ -2160,6 +2198,9 @@ function ViewWizardBody({
                     dataSourceId={formData.dataSourceId}
                     blank={isBlank}
                     imported={isImport}
+                    initialTemplateId={startTemplateApplied ? undefined : startTemplateId}
+                    onInitialTemplateApplied={markStartTemplateApplied}
+                    workspaceDefault={workspaceDefault}
                 />
             )}
             {currentStep === 'assignment' && (

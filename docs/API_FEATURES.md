@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 28 switches
+every route with its request and answer, how a change is saved safely, and all 34 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -188,7 +188,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 28 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 34 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -215,6 +215,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | View modes | `allowedViewModes` | All four: Graph (`graph`), Hierarchy (`hierarchy`), Context View (`reference`), Layered Lineage (`layered-lineage`) | A list, not a switch: `POST /views` and `PUT /views/{view_id}` refuse a view type that isn't in it | Views already built in a removed type keep working. At least one must stay |
+| Layout templates | `layoutTemplatesEnabled` | On | Every `/layout-templates` route, and `PUT /views/{view_id}/template-version` | Views built from a template keep their layers and stay readable and editable. Nothing is deleted while it is off |
 
 ### Authentication
 

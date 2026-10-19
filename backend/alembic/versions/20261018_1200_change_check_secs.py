@@ -28,7 +28,16 @@ def _columns(inspector, table: str) -> set:
     return {c["name"] for c in inspector.get_columns(table)}
 
 
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for a lock. ``platform_settings`` is read on
+    requests: a long transaction there makes this revision give up, to be run
+    again, rather than queue every later read behind it."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
+
 def upgrade() -> None:
+    _bound_lock_wait()
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if not inspector.has_table(_SETTINGS):
@@ -40,6 +49,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if not inspector.has_table(_SETTINGS):

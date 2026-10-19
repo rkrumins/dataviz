@@ -4,9 +4,14 @@ The upgrade job applies its revisions in one transaction, so every lock is
 held until the whole upgrade commits — and a failed upgrade changes nothing.
 Within that:
 
-* the ledger's ``api_key_id`` column and its index are the upgrade's last
+* the ledger's ``api_key_id`` column and its index were the upgrade's last
   step, so the ledger's exclusive lock — reads included — lasts only for its
-  own build, not for every revision after it;
+  own build. Only cheap revisions may follow it (``20261018_1200_layout_templates``
+  adds three nullable columns and swaps a CHECK; ``20261018_1300_tpl_lifecycle``
+  adds nullable columns, two empty tables and a v1 row per template, and swaps
+  a CHECK; ``20260815_1200_announce_poll_60s`` updates one row;
+  ``20261018_1200_change_check_secs`` adds one nullable column), since on a
+  database upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -28,6 +33,14 @@ from alembic.script import ScriptDirectory
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _EARLIER = "20261013_1200_activity_api_key.py"
 _LAST = "20261014_1200_aal_api_key.py"
+#: The revisions after the ledger's, in the order they run. The last is the
+#: chain's head.
+_AFTER_LEDGER = (
+    "20261018_1200_layout_templates",
+    "20261018_1300_tpl_lifecycle",
+    "20260815_1200_announce_poll_60s",
+    "20261018_1200_change_check_secs",
+)
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -36,6 +49,9 @@ _ON_LIVE_TABLES = {
     _EARLIER: ("downgrade",),
     "20261013_1300_api_key_scale.py": ("upgrade", "downgrade"),
     _LAST: ("upgrade", "downgrade"),
+    "20261018_1200_layout_templates.py": ("upgrade", "downgrade"),
+    "20261018_1300_tpl_lifecycle.py": ("upgrade", "downgrade"),
+    "20261018_1200_change_check_secs.py": ("upgrade", "downgrade"),
 }
 
 
@@ -111,50 +127,14 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_nothing_that_locks_a_live_table_runs_after_the_ledger():
-    """The ledger is last among the revisions that take a lock.
-
-    Was ``get_heads() == [the ledger]``. The reason behind that assertion
-    is the one worth keeping: the upgrade runs in a single transaction, so
-    the ledger's exclusive lock — reads included — is held until the whole
-    upgrade commits, and putting it last keeps that to its own build
-    rather than to every revision after it.
-
-    Pinning the literal tip also pinned something it did not mean to: that
-    no revision may ever be added after the API-key work. A branch that
-    adds one has only bad options, and the tidy-looking one is the actual
-    bug — re-parenting it *before* the ledger means alembic never runs it
-    on any database already stamped at the ledger, because alembic only
-    walks forward. Silently, and permanently. Main's own earlier merge
-    note makes the same point from the other side: re-parent forward,
-    because the target is already stamped and there is nothing to stamp
-    back.
-
-    So this now asserts what the docstring at the top of this file
-    actually claims. It still fails for the case that matters — a revision
-    locking ``users``, ``user_identities`` or the ledger landing after it
-    — and it still fails if the chain forks.
-    """
+def test_the_chain_ends_in_cheap_revisions_after_the_ledger_revision():
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
-
-    heads = script.get_heads()
-    assert len(heads) == 1, f"the migration chain has forked: {heads}"
-
-    ledger = _LAST[:-3]
-    after = [
-        rev.revision
-        for rev in script.iterate_revisions(heads[0], ledger)
-        if rev.revision != ledger
-    ]
-    locks_a_live_table = {name[:-3] for name in _ON_LIVE_TABLES}
-
-    offenders = sorted(set(after) & locks_a_live_table)
-    assert not offenders, (
-        f"{offenders} lock a live table and run after the ledger, so the "
-        f"ledger's exclusive lock is held for their work too"
-    )
+    assert script.get_heads() == [_AFTER_LEDGER[-1]]
+    chain = [_LAST[:-3], *_AFTER_LEDGER]
+    for parent, child in zip(chain, chain[1:]):
+        assert script.get_revision(child).down_revision == parent, child
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

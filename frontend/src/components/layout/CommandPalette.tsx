@@ -18,12 +18,14 @@ import {
   LayoutTemplate,
   BookOpen,
   Loader2,
+  Upload,
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBrand } from '@/store/branding'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useGlobalSearch, CATEGORY_ORDER, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
@@ -108,6 +110,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
   const { pathname } = useLocation()
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
+  const templatesOn = useLayoutTemplatesEnabled()
 
   // Workspaces (for the zero-search "Switch Workspace" group)
   const workspaces = useWorkspacesStore((s) => s.workspaces)
@@ -162,13 +165,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
         navigate(`/schema/${hit.ontology.id}`)
         break
       case 'Template':
-        // Templates have no dedicated detail route — land the user on the
-        // dashboard where the templates section lives, then scroll into view.
-        navigate('/dashboard')
-        requestAnimationFrame(() => {
-          document.getElementById('dashboard-templates')
-            ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        })
+        navigate(`/templates/${hit.template.id}`)
         break
     }
     onClose()
@@ -403,6 +400,22 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   shortcut="⌘/"
                   onSelect={() => handleAction('toggle-persona')}
                 />
+                {templatesOn && (
+                  <>
+                    <CommandItem
+                      icon={LayoutTemplate}
+                      label="New layout template"
+                      description="Shape layers to start Context Views from"
+                      onSelect={() => handleAction('navigate:/templates?new=1')}
+                    />
+                    <CommandItem
+                      icon={Upload}
+                      label="Import a layout template"
+                      description="From a .layout-template.json file"
+                      onSelect={() => handleAction('navigate:/templates?import=1')}
+                    />
+                  </>
+                )}
               </Command.Group>
 
               {/* Navigation — always shown */}
@@ -419,6 +432,14 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   description="Discover and explore all views"
                   onSelect={() => handleAction('navigate:/explorer')}
                 />
+                {templatesOn && (
+                  <CommandItem
+                    icon={LayoutTemplate}
+                    label="Browse templates"
+                    description="Every layer layout you can start a view from"
+                    onSelect={() => handleAction('navigate:/templates')}
+                  />
+                )}
               </Command.Group>
 
               {/* Help & Docs — the User Guide, searchable from anywhere */}

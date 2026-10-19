@@ -66,7 +66,7 @@ const SUMMARY = {
     bucket: 'day' as const,
     totals: Object.fromEntries(
         ['users', 'activeUsers', 'workspaces', 'views', 'viewOpens', 'dataSources',
-         'activity', 'ontologies', 'contextModels', 'catalogItems', 'groups']
+         'activity', 'ontologies', 'layoutTemplates', 'catalogItems', 'groups']
             .map((k) => [k, { total: 12, current: 4, previous: 2, changePct: 100 }]),
     ) as never,
     series: {
@@ -165,7 +165,7 @@ const DETAIL = {
     windowDays: 30, generatedAt: SUMMARY.generatedAt,
     range: SUMMARY.range, bucket: 'day' as const,
     totals: Object.fromEntries(
-        ['views', 'viewOpens', 'activeUsers', 'activity', 'members', 'dataSources', 'contextModels']
+        ['views', 'viewOpens', 'activeUsers', 'activity', 'members', 'dataSources', 'layoutTemplates']
             .map((k) => [k, { total: 4, current: 2, previous: 1, changePct: 100 }]),
     ) as never,
     series: {

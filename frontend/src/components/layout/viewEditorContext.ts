@@ -11,6 +11,8 @@ export interface ViewEditorOpenOptions {
   importIntoViewId?: string
   /** Import journey: a view package already uploaded ("Finish importing views"). */
   importUploadId?: string
+  /** Build journey: start a Context View from this layout template. */
+  templateId?: string
 }
 
 export interface ViewEditorContextType {

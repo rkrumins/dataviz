@@ -78,6 +78,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
+    "layoutTemplatesEnabled":
+        "Layout templates are turned off for this deployment. "
+        "An administrator can enable them under Admin → Features.",
     "graphExportEnabled":
         "Exporting graph data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -246,6 +249,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         # operator should turn that on knowing their deployment, not inherit it.
         "default_value": json.dumps(False),
         "options": None,
+        "deprecated": False,
     },
     {
         "key": "analyticsPublicEnabled",
@@ -333,6 +337,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "entirely would leave nobody able to build anything, so at least one layout must stay on."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "layoutTemplatesEnabled",
+        "name": "Layout templates",
+        "description": (
+            "A library of reusable layer layouts to start Context Views from — the built-ins, the "
+            "organization's, each workspace's and people's own — shared with teams, versioned, "
+            "and offered to the views built from them when they change."
+        ),
+        "impact_when_off": (
+            "Templates leaves the sidebar, the Dashboard, search and the command palette; the View "
+            "wizard offers only the layouts suggested by the data; Save as template and template "
+            "updates disappear from views; and the server refuses every template request. Nothing "
+            "is deleted: views built from a template keep their layers, and turning this back on "
+            "brings every template, share, version and favorite back as it was."
+        ),
+        "category_id": "views",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn it off where every view's layers should be built by hand — or while your "
+            "organization's templates are still being prepared."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     # ── Authentication ─────────────────────────────────────────────────────────

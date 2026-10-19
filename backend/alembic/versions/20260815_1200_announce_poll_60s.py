@@ -1,7 +1,7 @@
 """Announcement banner polls every 60s, not every 15s.
 
 Revision ID: 20260815_1200_announce_poll_60s
-Revises: 20261014_1200_aal_api_key
+Revises: 20261018_1300_tpl_lifecycle
 Create Date: 2026-08-15 12:00
 
 ``announcement_config.poll_interval_seconds`` shipped with a default of
@@ -18,7 +18,7 @@ deliberately choosing 15 — keeps it; this is a default correction, not a
 policy override. The admin config endpoint still accepts anything >= 5,
 so dialling it down for a live incident is unaffected.
 
-Re-parented on each merge of main (2026-08-23, 2026-10-12, 2026-10-17). This originally hung
+Re-parented on each merge of main (2026-08-23, 2026-10-12, 2026-10-17, 2026-10-19). This originally hung
 off ``20260802_1000_open_publish``, which by then was also the parent of
 main's own ``20260817_1200_node_ident_scopes`` — so the merge left the
 tree with TWO heads and ``alembic upgrade head`` refusing to run. Git
@@ -39,7 +39,7 @@ from alembic import op
 
 
 revision: str = "20260815_1200_announce_poll_60s"
-down_revision: Union[str, None] = "20261014_1200_aal_api_key"
+down_revision: Union[str, None] = "20261018_1300_tpl_lifecycle"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

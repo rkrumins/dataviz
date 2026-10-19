@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 28 switches on **Administration → Features**.
+safely, then describes all 34 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -29,7 +29,7 @@ flowchart LR
 1. In the sidebar, select **Administration**, then **Features** (under
    **System**). The **Features** page opens. At the top, **This deployment**
    says how many features are available to your users — for example
-   **17 of 28 features available to your users** on a deployment where nothing
+   **21 of 33 features available to your users** on a deployment where nothing
    has been changed.
 2. Find the switch in the list on the left. Switches are grouped by category;
    to filter them, type in **Search features…**.
@@ -171,6 +171,7 @@ will ask for.
 | Switch (key) | Default | What it does | When it's off, who notices | Read more |
 | --- | --- | --- | --- | --- |
 | **View modes** (`allowedViewModes`) | All four: **Graph**, **Hierarchy**, **Context View**, **Layered Lineage** | Chooses which layouts a new view may use. | People building views. A withdrawn layout disappears from the View wizard and the server refuses new views in it. Views already built in it keep working and stay editable. | [Creating Views](/guide/creating-views) |
+| **Layout templates** (`layoutTemplatesEnabled`) | On | The **Templates** library of reusable layer layouts to start Context Views from — built-ins, your organization's, each workspace's and people's own — with sharing, versions and updates offered to the views built from a template. | Everyone building views. **Templates** leaves the sidebar, the Dashboard, search and the command palette; the View wizard offers only the layouts the data suggests; **Save layers as a template** and template updates disappear from views; and the server refuses every template request. Nothing is deleted: views built from a template keep their layers, and turning it back on brings every template, share, version and favorite back. | [Creating Views](/guide/creating-views) |
 
 > **Note:** The View wizard builds **Graph**, **Hierarchy** and **Context
 > View** views. **Layered Lineage** only governs older views of that type. If
@@ -278,6 +279,7 @@ Match a reported message to its switch:
 | "Self-registration is turned off. Ask an administrator for an invitation." | **Self-registration** |
 | "Invite links are turned off for this deployment." | **Invite links** |
 | "That view type is not available in this deployment." | **View modes** |
+| "Layout templates are turned off for this deployment." | **Layout templates** |
 | "Exporting graph data is turned off for this deployment." | **Export graph data** |
 | "View versions, import and export are a preview that is turned off for this deployment." | **View versions, import and export** |
 | "Exporting views to a file is turned off for this deployment." | **Export views** |

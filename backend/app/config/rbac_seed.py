@@ -80,6 +80,13 @@ PERMISSIONS: tuple[dict[str, str | None], ...] = (
         "examples": "[\"Open any workspace and see its data sources, ontology, and views.\", \"Drill into a provider's status without being able to edit it.\"]",
     },
     {
+        "id": "system:templates:manage",
+        "category": "system",
+        "description": "Curate the organization's layout templates and the built-in ones.",
+        "long_description": "Lets you publish, edit and delete layout templates offered to everyone in the organization, feature them, hide or show the built-in starter templates for everyone, and answer requests to offer a team's template to everyone. Deliberately SEPARATE from system:admin so curating the template library can be delegated to the people who own the house style, without handing them the platform. Workspace and personal templates follow their own rules: this reaches someone's personal or workspace template only while its owner has asked for it to be offered to everyone, so it can be reviewed.",
+        "examples": "[\"Publish a team's medallion layout as an organization template.\", \"Hide a built-in template your organization does not use.\"]",
+    },
+    {
         "id": "system:users:manage",
         "category": "system",
         "description": "Create, approve, suspend, and change roles for users.",
@@ -244,6 +251,7 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     ("org_admin", "workspace:view:publish"),
     ("org_admin", "workspace:view:read"),
     ("org_admin", "system:analytics:read"),
+    ("org_admin", "system:templates:manage"),
     ("org_auditor", "system:analytics:read"),
     ("org_auditor", "system:audit:read"),
     ("org_auditor", "system:bindings:read"),
@@ -259,6 +267,7 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     # one decides where the platform may send requests, which is a
     # network decision rather than an administrative one.
     ("super_admin", "system:sso:hosts:manage"),
+    ("super_admin", "system:templates:manage"),
     ("super_admin", "system:users:manage"),
     ("super_admin", "system:workspaces:create"),
     ("super_admin", "workspace:admin"),
