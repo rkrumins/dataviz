@@ -3,9 +3,11 @@
  *
  * Mounted inside ``WorkspaceDetailPage`` as the "Members" tab. Provides:
  *   - KPI strip: total members + per-role breakdown
- *   - Member table: subject (user/group) + role badge + grant audit
+ *   - Member table: subject (user/group) + role badge + grant audit, and
+ *     for admins a time-limited grant's end date to move
  *   - Add Member modal: subject-type toggle + search picker + role grid
  *   - Revoke confirm modal
+ *   - Access reviews (admins): keep or remove each grant made here
  *
  * Authorization: the parent page mounts this tab for callers who may let
  * people in (``workspace:members:add`` — admins and stewards). A steward
@@ -16,10 +18,11 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import * as Popover from '@radix-ui/react-popover'
 import {
     Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
-    ChevronDown, ChevronUp, ChevronRight, Clock,
+    ChevronDown, ChevronUp, ChevronRight, Clock, CalendarClock,
     UserCheck,
 } from 'lucide-react'
 import {
@@ -37,6 +40,7 @@ import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { searchDirectory } from '@/services/userDirectoryService'
 import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
 import { WorkspaceAccessSettings } from './WorkspaceAccessSettings'
+import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import { useAuthStore } from '@/store/auth'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
@@ -157,6 +161,57 @@ function ExpiryBadge({ expiresAt }: { expiresAt: string }) {
             <Clock className="w-2.5 h-2.5" />
             {label}
         </span>
+    )
+}
+
+
+/** Move a time-limited grant's end: from today, or none. The person hears
+ *  about it, and a request they made to keep it reads as answered. */
+const END_CHOICES = [
+    { value: '7d', label: 'End in 7 days' },
+    { value: '30d', label: 'End in 30 days' },
+    { value: '90d', label: 'End in 90 days' },
+    { value: null, label: 'No end date' },
+] as const
+
+function ChangeEndMenu({ name, busy, onChange }: {
+    name: string
+    busy: boolean
+    onChange: (expiresIn: string | null) => void
+}) {
+    const [open, setOpen] = useState(false)
+    return (
+        <Popover.Root open={open} onOpenChange={setOpen}>
+            <Popover.Trigger asChild>
+                <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`Change when ${name}’s access ends`}
+                    className="ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold mt-1 border border-indigo-500/20 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/15 disabled:opacity-50"
+                >
+                    {busy ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <CalendarClock className="w-2.5 h-2.5" />}
+                    Change
+                </button>
+            </Popover.Trigger>
+            <Popover.Portal>
+                <Popover.Content
+                    sideOffset={6}
+                    align="start"
+                    className="z-50 w-44 rounded-xl border border-glass-border bg-canvas-elevated p-1 shadow-lg animate-in fade-in zoom-in-95"
+                >
+                    {END_CHOICES.map(c => (
+                        <button
+                            key={c.label}
+                            type="button"
+                            onClick={() => { setOpen(false); onChange(c.value) }}
+                            className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                            {c.label}
+                        </button>
+                    ))}
+                </Popover.Content>
+            </Popover.Portal>
+        </Popover.Root>
     )
 }
 
@@ -430,6 +485,22 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
             notify('error', msg)
             setError(msg)
+        } finally {
+            setActionLoading(null)
+        }
+    }
+
+    const handleChangeEnd = async (member: WorkspaceMemberResponse, expiresIn: string | null) => {
+        setActionLoading(`end-${member.bindingId}`)
+        try {
+            await workspaceMembersService.updateExpiry(workspaceId, member.bindingId, expiresIn ? { expiresIn } : {})
+            await fetchMembers()
+            const name = member.subject.displayName ?? member.subject.id
+            notify('success', expiresIn
+                ? `${name}’s access now ends in ${expiresIn.replace('d', ' days')}`
+                : `${name}’s access no longer ends`)
+        } catch (err) {
+            notify('error', err instanceof Error ? err.message : 'Failed to change the end date')
         } finally {
             setActionLoading(null)
         }
@@ -740,6 +811,13 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                                             {m.expiresAt && (
                                                 <ExpiryBadge expiresAt={m.expiresAt} />
                                             )}
+                                            {m.expiresAt && canManage && (
+                                                <ChangeEndMenu
+                                                    name={name}
+                                                    busy={actionLoading === `end-${m.bindingId}`}
+                                                    onChange={expiresIn => void handleChangeEnd(m, expiresIn)}
+                                                />
+                                            )}
                                         </td>
 
                                         {/* Actions — removing people is the admins' */}
@@ -820,6 +898,9 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
 
             {/* How people get in — listed, who decides, the note for people asking */}
             {canManage && <WorkspaceAccessSettings workspaceId={workspaceId} />}
+
+            {/* Who still needs to be in — keep or remove each grant made here */}
+            {canManage && <AccessReviewPanel workspaceId={workspaceId} onChanged={() => void fetchMembers()} />}
 
             {/* Modals */}
             {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the

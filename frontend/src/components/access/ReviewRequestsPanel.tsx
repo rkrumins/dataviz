@@ -5,10 +5,12 @@
  * caller lets people into; on a workspace's Members tab it is that
  * workspace's, above the members. Open requests come first with Review
  * (the decisions in ``ApproveRequestDialog``) and Deny with a reason;
- * All shows how each was answered.
+ * All shows how each was answered. A request waiting says for how long —
+ * the platform reminds its approvers after three days and tells the Org
+ * Admins after a week — and one to keep access says when that access ends.
  */
 import { useState } from 'react'
-import { Inbox, KeyRound, Loader2, ShieldCheck, XCircle } from 'lucide-react'
+import { Clock, Inbox, KeyRound, Loader2, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
 
 import { Segmented } from '@/components/ui/Segmented'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -16,6 +18,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useAnswerActions, useRequestsToAnswer } from '@/hooks/useWorkspaceAccess'
 import { OPEN_STATUSES, type AccessRequestResponse } from '@/services/accessRequestsService'
 import { timeAgo } from '@/lib/timeAgo'
+import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { ApproveRequestDialog } from './ApproveRequestDialog'
 import { STATUS_META, roleLabel } from './accessRequestCopy'
@@ -93,6 +96,8 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
     const open = OPEN_STATUSES.includes(r.status)
     const meta = STATUS_META[r.status]
     const StatusIcon = meta.icon
+    const now = useNow()
+    const waited = r.status === 'pending' ? Math.floor((now - new Date(r.createdAt).getTime()) / 86_400_000) : 0
 
     const confirmDeny = () => deny.mutate({ id: r.id, note: reason.trim() || null }, {
         onSuccess: () => {
@@ -112,9 +117,27 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
                         <p className="text-xs text-ink-muted truncate">{r.requester.email}</p>
                     )}
                     <span className="text-xs text-ink-muted">
-                        asks for <span className="font-semibold text-ink">{roleLabel(r.requestedRole)}</span>
+                        {r.bindingId ? 'asks to keep' : 'asks for'} <span className="font-semibold text-ink">{roleLabel(r.requestedRole)}</span>
                         {showWorkspace && <> in <span className="font-semibold text-ink">{r.target.label ?? r.target.id}</span></>}
+                        {r.bindingId && r.currentExpiresAt && open && <> — ends {new Date(r.currentExpiresAt).toLocaleDateString()}</>}
                     </span>
+                    {waited >= 1 && (
+                        <span className={cn(
+                            'inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold',
+                            waited >= 7
+                                ? 'border-rose-500/20 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                                : waited >= 3
+                                    ? 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                    : 'border-slate-500/20 bg-slate-500/10 text-ink-muted',
+                        )}>
+                            <Clock className="w-2.5 h-2.5" /> Waiting {waited} {waited === 1 ? 'day' : 'days'}
+                        </span>
+                    )}
+                    {open && r.escalatedAt && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                            <ShieldAlert className="w-2.5 h-2.5" /> Sent to the Org Admins
+                        </span>
+                    )}
                     {r.target.accessMode === 'idp' && (
                         <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400">
                             <KeyRound className="w-2.5 h-2.5" /> Identity provider
@@ -128,7 +151,10 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
                     </span>
                     Asked {timeAgo(r.createdAt)}
                     {r.status === 'awaiting_idp' && r.idpGroup && <> · pointed to “{r.idpGroup}”</>}
-                    {r.status === 'approved' && (
+                    {r.status === 'approved' && r.bindingId && (
+                        <> · kept, {r.accessExpiresAt ? `until ${new Date(r.accessExpiresAt).toLocaleDateString()}` : 'with no end date'}</>
+                    )}
+                    {r.status === 'approved' && !r.bindingId && (
                         <> · {r.grantedGroup ? `added to ${r.grantedGroup.name ?? 'a team'}` : r.idpGroup && r.fulfilledAt ? `arrived through “${r.idpGroup}”` : `granted ${roleLabel(r.grantedRole ?? r.requestedRole)}`}
                             {r.idpException && ' as an exception'}</>
                     )}

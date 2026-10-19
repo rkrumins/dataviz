@@ -14,11 +14,14 @@
  *   - **Grant an exception** — access here that doesn't follow their groups,
  *     said out loud, for 30 days unless the approver chooses otherwise.
  *
+ * A request to keep access that is about to end is answered with how much
+ * longer — 30 days unless the approver chooses otherwise.
+ *
  * Every choice comes from the server's grant options, so nothing offered
  * here is refused for being more than the approver could grant.
  */
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Check, KeyRound, Loader2, ShieldCheck, UserPlus, Users2, X } from 'lucide-react'
+import { AlertTriangle, CalendarClock, Check, KeyRound, Loader2, ShieldCheck, UserPlus, Users2, X } from 'lucide-react'
 
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Segmented } from '@/components/ui/Segmented'
@@ -49,6 +52,8 @@ export function ApproveRequestDialog({ request, onClose }: {
     const idp = (options?.accessMode ?? request.target.accessMode) === 'idp'
     const who = request.requester.displayName ?? request.requester.email ?? request.requester.id
     const where = request.target.label ?? 'this workspace'
+    // Asking to keep a grant: the only decision is how much longer.
+    const extension = !!request.bindingId
 
     const [decision, setDecision] = useState<Decision | null>(null)
     const chosen: Decision = decision ?? (idp ? 'route' : 'role')
@@ -57,7 +62,7 @@ export function ApproveRequestDialog({ request, onClose }: {
     const pickedRole = role
         ?? (roles.some(r => r.name === request.requestedRole) ? request.requestedRole : roles[0]?.name ?? null)
     const [duration, setDuration] = useState<string | null>(null)
-    const pickedDuration = duration ?? (chosen === 'exception' ? '30d' : '')
+    const pickedDuration = duration ?? (chosen === 'exception' || extension ? '30d' : '')
     const [groupId, setGroupId] = useState<string | null>(null)
     const routes = useMemo(() => {
         const seen = new Map<string, NonNullable<typeof options>['idpRoutes']>()
@@ -69,12 +74,16 @@ export function ApproveRequestDialog({ request, onClose }: {
     const [note, setNote] = useState('')
 
     const pending = approve.isPending || route.isPending
-    const ready = chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole
+    const ready = extension || (chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole)
 
     const submit = async () => {
         const trimmed = note.trim() || null
         try {
-            if (chosen === 'route' && pickedGroup) {
+            if (extension) {
+                await approve.mutateAsync({ id: request.id, body: { expiresIn: pickedDuration || null, note: trimmed } })
+                const label = DURATIONS.find(d => d.value === pickedDuration)?.label.toLowerCase()
+                notify('success', `${who} keeps their access to ${where}${pickedDuration ? ` for ${label}` : ' with no end date'}.`)
+            } else if (chosen === 'route' && pickedGroup) {
                 await route.mutateAsync({ id: request.id, body: { idpGroup: pickedGroup, note: trimmed } })
                 notify('success', `Pointed ${who} to “${pickedGroup}”. The request closes itself when the access arrives.`)
             } else if (chosen === 'team' && groupId) {
@@ -126,9 +135,14 @@ export function ApproveRequestDialog({ request, onClose }: {
                             <UserPlus className="w-5 h-5" aria-hidden />
                         </div>
                         <div className="flex-1 min-w-0">
-                            <h2 className="text-lg font-bold text-ink">Let {who} into {where}?</h2>
+                            <h2 className="text-lg font-bold text-ink">
+                                {extension ? `Let ${who} keep their access to ${where}?` : `Let ${who} into ${where}?`}
+                            </h2>
                             <p className="text-xs text-ink-muted mt-0.5">
-                                Asked for <span className="font-semibold text-ink">{roleLabel(request.requestedRole)}</span>
+                                {extension ? 'Their' : 'Asked for'} <span className="font-semibold text-ink">{roleLabel(request.requestedRole)}</span>
+                                {extension && (request.currentExpiresAt
+                                    ? ` access ends on ${new Date(request.currentExpiresAt).toLocaleDateString()}`
+                                    : ' access')}
                                 {idp && ' · its identity provider decides who is in'}
                             </p>
                         </div>
@@ -144,7 +158,32 @@ export function ApproveRequestDialog({ request, onClose }: {
                             </blockquote>
                         )}
 
-                        {isLoading ? (
+                        {extension ? (
+                            <>
+                                <div>
+                                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-muted mb-2">
+                                        <CalendarClock className="w-3.5 h-3.5" aria-hidden /> For how much longer
+                                    </p>
+                                    <Segmented
+                                        label="For how much longer"
+                                        value={pickedDuration as (typeof DURATIONS)[number]['value']}
+                                        onChange={setDuration}
+                                        options={DURATIONS}
+                                    />
+                                    <p className="text-xs text-ink-muted mt-2">From today. They hear before it ends again.</p>
+                                </div>
+                                <label className="block">
+                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">A note for {who} (optional)</span>
+                                    <textarea
+                                        value={note}
+                                        maxLength={1000}
+                                        rows={2}
+                                        onChange={e => setNote(e.target.value)}
+                                        className="input border-slate-200 dark:border-slate-700 mt-1.5 w-full py-2 bg-glass-base/40 resize-none text-sm"
+                                    />
+                                </label>
+                            </>
+                        ) : isLoading ? (
                             <div className="h-40 rounded-xl bg-black/5 dark:bg-white/5 animate-pulse" />
                         ) : error ? (
                             <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error.message}</p>
@@ -257,7 +296,7 @@ export function ApproveRequestDialog({ request, onClose }: {
                         </button>
                         <button
                             type="button"
-                            disabled={!ready || pending || isLoading || !!error}
+                            disabled={!ready || pending || (!extension && (isLoading || !!error))}
                             onClick={() => void submit()}
                             className={cn(
                                 'inline-flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-semibold text-white shadow-md disabled:opacity-50',
@@ -267,7 +306,9 @@ export function ApproveRequestDialog({ request, onClose }: {
                             )}
                         >
                             {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                            {{ role: 'Approve', team: 'Add to team', route: 'Point to group', exception: 'Grant exception' }[chosen]}
+                            {extension
+                                ? 'Let them keep it'
+                                : { role: 'Approve', team: 'Add to team', route: 'Point to group', exception: 'Grant exception' }[chosen]}
                         </button>
                     </footer>
                 </div>

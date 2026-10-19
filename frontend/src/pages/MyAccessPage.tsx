@@ -38,6 +38,7 @@ import {
     type AccessRequestResponse,
 } from '@/services/accessRequestsService'
 import { AccessSummary } from '@/components/access/AccessSummary'
+import { KeepAccessButton } from '@/components/access/KeepAccessButton'
 import { STATUS_META, idpInstruction, roleLabel } from '@/components/access/accessRequestCopy'
 import { AccountShell } from '@/components/account/AccountShell'
 import { PersonChip } from '@/components/ui/PersonChip'
@@ -148,7 +149,12 @@ export function MyAccessPage() {
                             <MyRequestsPanel requests={requests} />
                         )}
                         <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-                            <AccessSummary access={access} mode="self" hideHeader />
+                            <AccessSummary
+                                access={access}
+                                mode="self"
+                                hideHeader
+                                bindingAction={b => <KeepAccessButton binding={b} requests={requests ?? []} />}
+                            />
                         </div>
                     </>
                 ) : null}
@@ -407,6 +413,7 @@ function MyRequestRow({ request: r }: { request: AccessRequestResponse }) {
             </span>
             <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-ink truncate">
+                    {r.bindingId && <span className="font-normal text-ink-muted mr-1.5">Keep your access to</span>}
                     {r.target.label ?? <span>A workspace you asked to join <code className="font-mono text-[11px] text-ink-muted">{r.target.id}</code></span>}
                     <span className="font-normal text-ink-muted ml-1.5">as {roleLabel(r.requestedRole)}</span>
                 </p>
@@ -456,7 +463,12 @@ function MyRequestRow({ request: r }: { request: AccessRequestResponse }) {
 function RequestOutcome({ request: r }: { request: AccessRequestResponse }) {
     const by = r.resolvedBy ? <PersonChip id={r.resolvedBy} size="xs" link={false} /> : null
     if (r.status === 'pending') {
-        return <p className="text-xs text-ink-muted mt-1">Waiting for the workspace’s admins and stewards to answer.</p>
+        return (
+            <p className="text-xs text-ink-muted mt-1">
+                Waiting for the workspace’s admins and stewards to answer.
+                {r.currentExpiresAt && ` Your access ends on ${new Date(r.currentExpiresAt).toLocaleDateString()}.`}
+            </p>
+        )
     }
     if (r.status === 'awaiting_idp' && r.idpGroup) {
         return (
@@ -468,7 +480,9 @@ function RequestOutcome({ request: r }: { request: AccessRequestResponse }) {
         )
     }
     if (r.status === 'approved') {
-        const what = r.fulfilledAt && r.idpGroup
+        const what = r.bindingId
+            ? <>You can keep it: {r.accessExpiresAt ? `it now ends on ${new Date(r.accessExpiresAt).toLocaleDateString()}` : 'it no longer ends'}.</>
+            : r.fulfilledAt && r.idpGroup
             ? <>Granted through your identity provider’s group “{r.idpGroup}”.</>
             : r.grantedGroup
                 ? <>Added to the team “{r.grantedGroup.name ?? r.grantedGroup.id}”.</>

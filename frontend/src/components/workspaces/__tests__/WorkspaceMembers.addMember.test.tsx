@@ -32,6 +32,9 @@ vi.mock('@/services/accessRequestsService', async (orig) => ({
     ...(await orig<typeof import('@/services/accessRequestsService')>()),
     accessRequestsService: { listToAnswer: vi.fn(), approve: vi.fn(), deny: vi.fn(), route: vi.fn() },
 }))
+vi.mock('@/services/accessReviewsService', () => ({
+    accessReviewsService: { list: vi.fn().mockResolvedValue([]) },
+}))
 
 import { WorkspaceMembers } from '../WorkspaceMembers'
 import { workspaceMembersService } from '@/services/workspaceMembersService'

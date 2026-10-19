@@ -1,6 +1,7 @@
 /**
  * The "How people get in" card shows the workspace's saved settings, keeps
- * Save off until something changes, and saves all three together.
+ * Save off until something changes, and saves them together. A workspace
+ * its identity provider decides can't be open to everyone.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -44,7 +45,27 @@ describe('WorkspaceAccessSettings', () => {
         await user.click(save)
 
         await waitFor(() => expect(update).toHaveBeenCalledWith('ws_fin', {
-            directoryListed: true, accessMode: 'app', accessNote: 'Say which team',
+            directoryListed: true, accessMode: 'app', requestPolicy: 'approval', accessNote: 'Say which team',
+        }))
+    })
+
+    it('opens a workspace to everyone only while access is decided here', async () => {
+        const user = userEvent.setup()
+        get.mockResolvedValue({ id: 'ws_fin', directoryListed: true, accessMode: 'app', requestPolicy: 'open', accessNote: null })
+        renderCard()
+
+        const open = await screen.findByRole('radio', { name: /Open to everyone/ })
+        await waitFor(() => expect(open).toHaveAttribute('aria-checked', 'true'))
+        // Handing membership to the identity provider takes it back to approval.
+        await user.click(screen.getByRole('radio', { name: /Through your identity provider/ }))
+        expect(open).toBeDisabled()
+        expect(open).toHaveTextContent('Not while your identity provider decides who is in.')
+        expect(screen.getByRole('radio', { name: /Approvers decide/ })).toHaveAttribute('aria-checked', 'true')
+
+        await user.click(screen.getByRole('radio', { name: /Closed to requests/ }))
+        await user.click(screen.getByRole('button', { name: 'Save' }))
+        await waitFor(() => expect(update).toHaveBeenCalledWith('ws_fin', {
+            directoryListed: true, accessMode: 'idp', requestPolicy: 'closed', accessNote: '',
         }))
     })
 })

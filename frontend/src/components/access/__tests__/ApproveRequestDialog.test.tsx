@@ -2,7 +2,8 @@
  * Answering a request offers the decisions the workspace's way of letting
  * people in allows: a role (within what the approver may grant, with an end
  * date) or a team where it is decided here; a group to join, or an exception
- * said out loud, where the identity provider decides.
+ * said out loud, where the identity provider decides. A request to keep
+ * access is answered with how much longer.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -59,6 +60,24 @@ beforeEach(() => {
     vi.clearAllMocks()
     requests.approve.mockResolvedValue({ ...REQUEST, status: 'approved' })
     requests.route.mockResolvedValue({ ...REQUEST, status: 'awaiting_idp' })
+})
+
+describe('ApproveRequestDialog — keeping access', () => {
+    it('lets them keep it for 30 days unless told otherwise', async () => {
+        const user = userEvent.setup()
+        members.grantOptions.mockResolvedValue(options())
+        renderDialog({ ...REQUEST, bindingId: 'bnd_1', currentExpiresAt: '2026-10-22T00:00:00Z' })
+
+        expect(screen.getByRole('heading', { name: 'Let Ana keep their access to Finance?' })).toBeInTheDocument()
+        expect(screen.getByText(/access ends on/)).toBeInTheDocument()
+        expect(screen.getByRole('radio', { name: '30 days' })).toHaveAttribute('aria-checked', 'true')
+        // No role or team to choose: the grant stays what it is.
+        expect(screen.queryByRole('radio', { name: /Member/ })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Let them keep it' }))
+
+        await waitFor(() => expect(requests.approve).toHaveBeenCalledWith('ar_1', { expiresIn: '30d', note: null }))
+        expect(notify).toHaveBeenCalledWith('success', 'Ana keeps their access to Finance for 30 days.')
+    })
 })
 
 describe('ApproveRequestDialog — decided here', () => {

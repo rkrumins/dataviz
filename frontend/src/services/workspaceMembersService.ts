@@ -33,8 +33,9 @@ export interface WorkspaceMemberResponse {
 
 /** One route by which a user holds a role in the workspace — a direct
  *  binding, or one inherited through a group. */
-/** How a grant came about. */
-export type AccessOrigin = 'direct' | 'request' | 'exception' | 'idp' | 'team' | 'org_role'
+/** How a grant came about. ``joined``: the person joined a workspace open
+ *  to everyone. */
+export type AccessOrigin = 'direct' | 'request' | 'exception' | 'joined' | 'idp' | 'team' | 'org_role'
 
 export interface AccessProvenance {
     origin: AccessOrigin

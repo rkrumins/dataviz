@@ -2,7 +2,8 @@
  * Request access: the levels a workspace lets people ask for, in plain
  * language (one you hold isn't offered), the workspace's note above your
  * reason, what happens next — said differently where the identity provider
- * decides — and the request sent with what you chose.
+ * decides — and the request sent with what you chose. A workspace open to
+ * everyone is joined at once; one closed to requests says who to ask.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -11,7 +12,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { service } = vi.hoisted(() => ({
-    service: { requestableRoles: vi.fn(), submit: vi.fn() },
+    service: { requestableRoles: vi.fn(), submit: vi.fn(), join: vi.fn() },
 }))
 vi.mock('@/services/accessRequestsService', () => ({ accessRequestsService: service }))
 
@@ -46,7 +47,7 @@ const REQUEST = {
 
 beforeEach(() => {
     vi.clearAllMocks()
-    service.requestableRoles.mockResolvedValue(ROLES)
+    service.requestableRoles.mockResolvedValue({ roles: ROLES, requestPolicy: 'approval', joinRole: null })
     service.submit.mockResolvedValue(REQUEST)
 })
 
@@ -97,6 +98,33 @@ describe('RequestAccessDialog', () => {
         renderDialog()
         await user.click(await screen.findByRole('button', { name: 'Send request' }))
         expect(await screen.findByRole('alert')).toHaveTextContent('You already have this access')
+    })
+
+    it('joins a workspace open to everyone at once, and still asks for more', async () => {
+        const user = userEvent.setup()
+        service.requestableRoles.mockResolvedValue({ roles: ROLES, requestPolicy: 'open', joinRole: 'workspace_viewer' })
+        service.join.mockResolvedValue({ ...REQUEST, status: 'approved', requestedRole: 'workspace_viewer', grantedRole: 'workspace_viewer' })
+        const { onSent } = renderDialog({ workspaceName: 'Finance' })
+
+        expect(await screen.findByText('Open to everyone')).toBeInTheDocument()
+        // Viewer is joined, not asked for.
+        expect(screen.queryByRole('radio', { name: /View/ })).not.toBeInTheDocument()
+        expect(screen.getByRole('radio', { name: /Contribute/ })).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Join now' }))
+
+        await waitFor(() => expect(service.join).toHaveBeenCalledWith('ws_fin'))
+        expect(await screen.findByRole('heading', { name: 'You’re in' })).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /Open it/ })).toHaveAttribute('href', '/workspaces/ws_fin')
+        expect(onSent).toHaveBeenCalled()
+        expect(service.submit).not.toHaveBeenCalled()
+    })
+
+    it('says who to ask when a workspace takes no requests', async () => {
+        service.requestableRoles.mockResolvedValue({ roles: ROLES, requestPolicy: 'closed', joinRole: null })
+        renderDialog({ workspaceName: 'Finance' })
+        expect(await screen.findByText('“Finance” isn’t taking requests')).toBeInTheDocument()
+        expect(screen.getByText(/Ask its admins to add you/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Send request' })).not.toBeInTheDocument()
     })
 
     it('explains a workspace that can’t take requests', async () => {

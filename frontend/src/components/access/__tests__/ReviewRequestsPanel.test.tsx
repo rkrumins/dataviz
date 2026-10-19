@@ -1,7 +1,8 @@
 /**
  * The requests someone answers, in one list: open ones with Review and Deny
  * (with a reason the requester sees), All for how each was answered, and —
- * on a workspace's Members tab — nothing at all while nothing waits.
+ * on a workspace's Members tab — nothing at all while nothing waits. A
+ * request says how long it has waited, and one to keep access says so.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -70,6 +71,25 @@ describe('ReviewRequestsPanel', () => {
 
         await userEvent.click(within(ana).getByRole('button', { name: /Review/ }))
         expect(await screen.findByRole('dialog', { name: 'Answer Ana’s request' })).toBeInTheDocument()
+    })
+
+    it('says how long a request has waited, and when the Org Admins were told', async () => {
+        const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString()
+        requests.listToAnswer.mockResolvedValue([
+            request({ id: 'ar_1', createdAt: daysAgo(8.5), remindedAt: daysAgo(5), escalatedAt: daysAgo(1) }),
+            request({
+                id: 'ar_2', requester: { id: 'usr_bo', email: null, displayName: 'Bo' }, createdAt: daysAgo(0),
+                bindingId: 'bnd_1', requestedRole: 'workspace_viewer', currentExpiresAt: '2026-10-25T00:00:00Z',
+            }),
+        ])
+        renderPanel()
+
+        const ana = (await screen.findByText('Ana')).closest('li') as HTMLElement
+        expect(within(ana).getByText('Waiting 8 days')).toBeInTheDocument()
+        expect(within(ana).getByText('Sent to the Org Admins')).toBeInTheDocument()
+        const bo = screen.getByText('Bo').closest('li') as HTMLElement
+        expect(within(bo).getByText(/asks to keep/)).toHaveTextContent(/ends/)
+        expect(within(bo).queryByText(/Waiting \d+ day/)).not.toBeInTheDocument()
     })
 
     it('declines with a reason the requester sees', async () => {
