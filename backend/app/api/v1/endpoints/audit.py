@@ -57,7 +57,7 @@ _AUDIT_PREFIXES = (
     "rbac.role.",        # created / updated / deleted / cascade_revoked
     "rbac.permission.",  # updated
     "rbac.group.",       # created / updated / deleted / member_added / member_removed
-    "rbac.access_request.",  # created / approved / denied
+    "rbac.access_request.",  # created / approved / denied / withdrawn / routed / fulfilled
     "rbac.sso_mapping.",     # created / deleted
     "user.",             # role_changed / approved / etc.
     "auth.",             # config.updated
@@ -99,9 +99,10 @@ _SECURITY_HIDE = frozenset({
     "user.password_reset_completed",
     "user.reset_token_generated",
     "user.invite_created",
-    # Access request lifecycle — only the approve / deny step is
+    # Access request lifecycle — only the approver's answers are
     # interesting at security volume.
     "rbac.access_request.created",
+    "rbac.access_request.withdrawn",
     # A key refused for being out of date — expired, its owner paused or
     # suspended. Routine; the suspicious refusals are ``misuse``.
     "identity.api_key.rejected",

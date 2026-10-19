@@ -239,6 +239,9 @@ class WorkspaceMemberCreateRequest(BaseModel):
     role: str
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+    # Acknowledges adding a person in the app to a workspace whose access
+    # its identity provider decides; the grant is marked as an exception.
+    exception: bool = False
 
     @model_validator(mode="after")
     def _normalise_expiry(self) -> "WorkspaceMemberCreateRequest":
@@ -494,20 +497,32 @@ class AccessRequestRequester(BaseModel):
     Best-effort: every field except ``id`` may be ``None`` if the user
     row was deleted between request creation and resolution. The
     inbox should still render the row so the admin can act on it.
+    ``ssoLinked`` says whether they have ever signed in through an
+    identity provider — pointing someone who hasn't to an IdP group
+    would leave their request waiting forever.
     """
     model_config = ConfigDict(populate_by_name=True)
     id: str
     email: Optional[str] = None
     display_name: Optional[str] = Field(default=None, alias="displayName")
+    sso_linked: bool = Field(default=False, alias="ssoLinked")
 
 
 class AccessRequestTarget(BaseModel):
     """Inline target description so the FE doesn't need a second
-    round-trip to label the request."""
+    round-trip to label the request. ``label`` and ``accessMode`` are
+    withheld from a requester who could not otherwise see the workspace."""
     model_config = ConfigDict(populate_by_name=True)
     type: str  # 'workspace'
     id: str
     label: Optional[str] = None  # workspace name when resolvable
+    access_mode: Optional[str] = Field(default=None, alias="accessMode")  # 'app' | 'idp'
+
+
+class AccessRequestGroupRef(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: Optional[str] = None
 
 
 class AccessRequestResponse(BaseModel):
@@ -524,11 +539,23 @@ class AccessRequestResponse(BaseModel):
     target: AccessRequestTarget
     requested_role: str = Field(alias="requestedRole")
     justification: Optional[str] = None
-    status: str  # 'pending' | 'approved' | 'denied'
+    # 'pending' | 'awaiting_idp' | 'approved' | 'denied' | 'withdrawn'
+    status: str
     created_at: str = Field(alias="createdAt")
     resolved_at: Optional[str] = Field(default=None, alias="resolvedAt")
     resolved_by: Optional[str] = Field(default=None, alias="resolvedBy")
     resolution_note: Optional[str] = Field(default=None, alias="resolutionNote")
+    # What the approver decided: the role granted, or the team they were
+    # added to, or the identity-provider group they were pointed to (and
+    # the provider, when one mapping names it); when the access ends; and
+    # whether it was granted in the app for an IdP-run workspace.
+    granted_role: Optional[str] = Field(default=None, alias="grantedRole")
+    granted_group: Optional[AccessRequestGroupRef] = Field(default=None, alias="grantedGroup")
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup")
+    idp_provider: Optional[str] = Field(default=None, alias="idpProvider")
+    idp_exception: bool = Field(default=False, alias="idpException")
+    access_expires_at: Optional[str] = Field(default=None, alias="accessExpiresAt")
+    fulfilled_at: Optional[str] = Field(default=None, alias="fulfilledAt")
 
 
 class AccessRequestCreate(BaseModel):
@@ -537,14 +564,124 @@ class AccessRequestCreate(BaseModel):
     target_type: str = Field(alias="targetType")  # only 'workspace' for now
     target_id: str = Field(alias="targetId")
     requested_role: str = Field(alias="requestedRole")
-    justification: Optional[str] = None
+    justification: Optional[str] = Field(default=None, max_length=1000)
 
 
 class AccessRequestResolve(BaseModel):
-    """Body for the approve / deny endpoints. ``note`` is optional but
-    typically populated on denial."""
+    """Body for the deny endpoint: an optional reason the requester sees."""
     model_config = ConfigDict(populate_by_name=True)
-    note: Optional[str] = None
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AccessRequestApprove(BaseModel):
+    """Body for approving: grant a role (the one asked for when none is
+    named), optionally until a date, or add the person to a team bound in
+    the workspace. ``exception`` acknowledges granting in the app for a
+    workspace whose access its identity provider decides."""
+    model_config = ConfigDict(populate_by_name=True)
+    note: Optional[str] = Field(default=None, max_length=1000)
+    role: Optional[str] = None
+    group_id: Optional[str] = Field(default=None, alias="groupId")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+    exception: bool = False
+
+    @model_validator(mode="after")
+    def _one_decision(self) -> "AccessRequestApprove":
+        if self.role and self.group_id:
+            raise ValueError("Pass either role OR groupId, not both")
+        if self.expires_at and self.expires_in:
+            raise ValueError("Pass either expiresAt OR expiresIn, not both")
+        if self.expires_in:
+            self.expires_at = _parse_duration_to_expires_at(self.expires_in)
+            self.expires_in = None
+        if self.group_id and self.expires_at:
+            raise ValueError("An end date applies to a role, not to joining a team")
+        return self
+
+
+class AccessRequestRoute(BaseModel):
+    """Body for pointing a request to the identity-provider group that
+    grants the access."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup", min_length=1, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class RequestableRole(BaseModel):
+    """A role someone may ask for, or an approver may grant, in a workspace."""
+    model_config = ConfigDict(populate_by_name=True)
+    name: str
+    description: Optional[str] = None
+    is_system: bool = Field(default=False, alias="isSystem")
+
+
+class WorkspaceGrantGroup(BaseModel):
+    """An app-managed team bound in the workspace that an approver may add
+    someone to — every role it carries is one they could grant."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: str
+    member_count: int = Field(default=0, alias="memberCount")
+    roles: list[str] = Field(default_factory=list)
+
+
+class WorkspaceIdpRoute(BaseModel):
+    """An identity-provider group whose members get access to the
+    workspace — directly at ``role``, or through the team ``viaGroup``."""
+    model_config = ConfigDict(populate_by_name=True)
+    idp_group: str = Field(alias="idpGroup")
+    provider: Optional[str] = None
+    role: Optional[str] = None
+    via_group_id: Optional[str] = Field(default=None, alias="viaGroupId")
+    via_group_name: Optional[str] = Field(default=None, alias="viaGroupName")
+
+
+class WorkspaceGrantOptions(BaseModel):
+    """What the caller may hand out in this workspace: ``tier`` is
+    ``'admin'`` or ``'steward'``; roles, teams and IdP routes are already
+    narrowed to what they could grant themselves."""
+    model_config = ConfigDict(populate_by_name=True)
+    tier: str
+    access_mode: str = Field(alias="accessMode")
+    roles: list[RequestableRole] = Field(default_factory=list)
+    groups: list[WorkspaceGrantGroup] = Field(default_factory=list)
+    idp_routes: list[WorkspaceIdpRoute] = Field(default_factory=list, alias="idpRoutes")
+
+
+class WorkspaceDirectoryRequest(BaseModel):
+    """The caller's open request for a directory entry."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    status: str
+    requested_role: str = Field(alias="requestedRole")
+    created_at: str = Field(alias="createdAt")
+    idp_group: Optional[str] = Field(default=None, alias="idpGroup")
+
+
+class WorkspaceDirectoryEntry(BaseModel):
+    """A workspace in Find a workspace: what it is, who is in it and who
+    answers requests (ids — the client names them), how access works, and
+    where the caller stands."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: str
+    description: Optional[str] = None
+    data_source_count: int = Field(default=0, alias="dataSourceCount")
+    people_count: int = Field(default=0, alias="peopleCount")
+    approver_ids: list[str] = Field(default_factory=list, alias="approverIds")
+    approver_count: int = Field(default=0, alias="approverCount")
+    access_mode: str = Field(default="app", alias="accessMode")
+    access_note: Optional[str] = Field(default=None, alias="accessNote")
+    directory_listed: bool = Field(default=True, alias="directoryListed")
+    can_open: bool = Field(default=False, alias="canOpen")
+    your_roles: list[str] = Field(default_factory=list, alias="yourRoles")
+    open_request: Optional[WorkspaceDirectoryRequest] = Field(default=None, alias="openRequest")
+
+
+class WorkspaceDirectoryResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    entries: list[WorkspaceDirectoryEntry] = Field(default_factory=list)
 
 
 # ── Impact preview (Phase 4.4) ──────────────────────────────────────

@@ -2,12 +2,16 @@
 
 Mounted at ``/api/v1/admin/workspaces/{ws_id}/members`` for the admin
 flow. Workspace admins use the same path; the ``workspace:admin``
-permission gates write operations, so a user bound as Admin in the
-workspace can manage members without holding global ``system:admin``.
+permission gates removing people and changing their access, so a user
+bound as Admin in the workspace can manage members without holding
+global ``system:admin``. Seeing who is in and adding people needs only
+``workspace:members:add`` — the Workspace steward, who adds people one at
+a time as Viewer or Member (``workspace_access`` holds the ceilings).
 
-  GET    /admin/workspaces/{ws_id}/members              list bindings + roles
-  POST   /admin/workspaces/{ws_id}/members              create binding
-  DELETE /admin/workspaces/{ws_id}/members/{binding}    revoke binding
+  GET    /admin/workspaces/{ws_id}/members                list bindings + roles
+  GET    /admin/workspaces/{ws_id}/members/grant-options  what the caller may grant
+  POST   /admin/workspaces/{ws_id}/members                create binding
+  DELETE /admin/workspaces/{ws_id}/members/{binding}      revoke binding
 """
 from __future__ import annotations
 
@@ -17,20 +21,25 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import requires
+from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
 from backend.app.db.models import GroupORM, WorkspaceORM
 from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
-from backend.app.services.permission_service import simulate_for_user
+from backend.app.services import workspace_access
+from backend.app.services.permission_service import PermissionClaims, simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ImpactPreviewResponse,
     ImpactPreviewUser,
+    RequestableRole,
     WorkspaceAccessGrant,
     WorkspaceAccessResponse,
     WorkspaceAccessUser,
+    WorkspaceGrantGroup,
+    WorkspaceGrantOptions,
+    WorkspaceIdpRoute,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
@@ -119,15 +128,17 @@ async def _hydrate_subject(
     )
 
 
-async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> None:
+async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> WorkspaceORM:
     row = await session.execute(
         select(WorkspaceORM).where(
             WorkspaceORM.id == ws_id,
             WorkspaceORM.deleted_at.is_(None),
         )
     )
-    if row.scalar_one_or_none() is None:
+    ws = row.scalar_one_or_none()
+    if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    return ws
 
 
 # ── Routes ───────────────────────────────────────────────────────────
@@ -139,7 +150,7 @@ async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> None:
 )
 async def list_members(
     ws_id: str,
-    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    _admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _ensure_workspace_exists(session, ws_id)
@@ -174,7 +185,7 @@ async def list_members(
 )
 async def list_effective_access(
     ws_id: str,
-    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    _admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAccessResponse:
     """The flattened, inheritance-aware access list for the workspace.
@@ -270,6 +281,45 @@ async def list_effective_access(
     )
 
 
+@router.get(
+    "/grant-options",
+    response_model=WorkspaceGrantOptions,
+    response_model_by_alias=True,
+)
+async def get_grant_options(
+    ws_id: str,
+    _user: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceGrantOptions:
+    """What the caller may hand out here: the roles, teams and
+    identity-provider groups already narrowed to what they could grant
+    themselves. Backs Add member and answering an access request."""
+    ws = await _ensure_workspace_exists(session, ws_id)
+    roles = [
+        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        for r, perms in await workspace_access.workspace_roles(session, ws_id)
+        if workspace_access.can_grant(claims, ws_id, r.name, perms)
+    ]
+    routes = await workspace_access.idp_routes(session, ws_id)
+    route_perms = await role_repo.role_names_with_permissions(
+        session, sorted({r["role"] for r in routes}),
+    )
+    return WorkspaceGrantOptions(
+        tier=workspace_access.tier(claims, ws_id),
+        access_mode=ws.access_mode or "app",
+        roles=roles,
+        groups=[
+            WorkspaceGrantGroup(**g)
+            for g in await workspace_access.addable_groups(session, claims, ws_id)
+        ],
+        idp_routes=[
+            WorkspaceIdpRoute(**r) for r in routes
+            if workspace_access.can_grant(claims, ws_id, r["role"], route_perms.get(r["role"], []))
+        ],
+    )
+
+
 @router.post(
     "",
     response_model=WorkspaceMemberResponse,
@@ -279,10 +329,23 @@ async def list_effective_access(
 async def create_member_binding(
     ws_id: str,
     body: WorkspaceMemberCreateRequest,
-    admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    await _ensure_workspace_exists(session, ws_id)
+    """Grant a person or a group a role here. A steward adds people, not
+    groups, as Viewer or Member; an admin grants any role whose permissions
+    they hold. A lapsed grant of the same role is made current again.
+
+    For a workspace whose access its identity provider decides, adding a
+    person needs ``exception: true``, and the grant is marked as one.
+    """
+    ws = await _ensure_workspace_exists(session, ws_id)
+    if body.subject_type == "group" and workspace_access.tier(claims, ws_id) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Stewards add people one at a time; binding a group is for workspace admins",
+        )
 
     # Subject must exist before we bind it.
     if body.subject_type == "user":
@@ -320,33 +383,43 @@ async def create_member_binding(
             ),
         )
 
-    existing = await binding_repo.find_binding(
-        session,
-        subject_type=body.subject_type,
-        subject_id=body.subject_id,
-        role_name=body.role,
-        scope_type="workspace",
-        scope_id=ws_id,
-    )
-    if existing is not None:
+    perms = (await role_repo.role_names_with_permissions(session, [body.role])).get(body.role, [])
+    if not workspace_access.can_grant(claims, ws_id, body.role, perms):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=workspace_access.ceiling_refusal(claims, ws_id, body.role),
+        )
+    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user"
+    if exception and not body.exception:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "type": "idp_managed",
+                "message": (
+                    "Its identity provider decides who is in this workspace. Add the person to "
+                    "the provider's group, or confirm adding them here as an exception."
+                ),
+            },
+        )
+
+    try:
+        binding, outcome = await workspace_access.grant_role(
+            session,
+            subject_type=body.subject_type,
+            subject_id=body.subject_id,
+            role=body.role,
+            ws_id=ws_id,
+            granted_by=admin.id,
+            expires_at=body.expires_at,
+            idp_exception=exception,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if outcome == "existing":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Member already has this role in the workspace",
         )
-
-    try:
-        binding = await binding_repo.create_binding(
-            session,
-            subject_type=body.subject_type,
-            subject_id=body.subject_id,
-            role_name=body.role,
-            scope_type="workspace",
-            scope_id=ws_id,
-            granted_by=admin.id,
-            expires_at=body.expires_at,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # The subject's existing JWT pre-dates this binding, so its
     # ``ws_perms`` doesn't include the workspace yet — ``GET /workspaces``
@@ -371,6 +444,8 @@ async def create_member_binding(
             "actor_id": admin.id,
             "expires_at": body.expires_at,
             "sessions_revoked": revoked,
+            "idp_exception": exception,
+            "reactivated": outcome == "reactivated",
         },
     )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)

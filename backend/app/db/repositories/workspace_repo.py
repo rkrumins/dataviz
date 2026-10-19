@@ -128,6 +128,9 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
         identityProperty=getattr(row, "identity_property", None),
         nameProperty=getattr(row, "name_property", None),
         defaultLayoutTemplateId=getattr(row, "default_layout_template_id", None),
+        directoryListed=row.directory_listed is not False,
+        accessMode=row.access_mode or "app",
+        accessNote=row.access_note,
     )
 
 
@@ -362,6 +365,12 @@ async def update_workspace(
     # Checked by the endpoint (``template_access.can_be_workspace_default``).
     if req.default_layout_template_id is not None:
         row.default_layout_template_id = req.default_layout_template_id or None
+    if req.directory_listed is not None:
+        row.directory_listed = req.directory_listed
+    if req.access_mode is not None:
+        row.access_mode = req.access_mode
+    if req.access_note is not None:
+        row.access_note = req.access_note.strip() or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

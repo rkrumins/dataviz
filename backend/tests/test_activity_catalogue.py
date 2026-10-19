@@ -127,6 +127,17 @@ def test_an_access_request_is_a_workspace_event_only_for_a_workspace(target_type
     assert (out["actor_id"], out["subject_id"]) == ("usr_a", "usr_r")
 
 
+@pytest.mark.parametrize("event_type, verb", [
+    ("rbac.access_request.approved", "approved"),
+    ("rbac.access_request.withdrawn", "withdrawn"),
+    ("rbac.access_request.routed", "pointed to the identity provider"),
+    ("rbac.access_request.fulfilled", "fulfilled through the identity provider"),
+])
+def test_an_access_request_names_the_workspace_it_targets(event_type, verb):
+    severity, summary = catalogue.summarize(event_type, {"target_type": "workspace", "target_id": "ws_1"})
+    assert (severity, summary) == ("info", f"Access request {verb} for ws_1")
+
+
 def test_a_moved_source_is_filed_under_where_it_went():
     out = catalogue.project(event_type="workspace.datasource.moved", payload={
         "data_source_id": "ds_1", "from_workspace_id": "ws_a",

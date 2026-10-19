@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 33 switches on **Administration → Features**.
+safely, then describes all 34 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -29,7 +29,7 @@ flowchart LR
 1. In the sidebar, select **Administration**, then **Features** (under
    **System**). The **Features** page opens. At the top, **This deployment**
    says how many features are available to your users — for example
-   **21 of 33 features available to your users** on a deployment where nothing
+   **21 of 34 features available to your users** on a deployment where nothing
    has been changed.
 2. Find the switch in the list on the left. Switches are grouped by category;
    to filter them, type in **Search features…**.
@@ -188,6 +188,7 @@ will ask for.
 | **Longest an API key may live** (`apiKeyMaxLifetime`) | No maximum | The longest any key may stay valid, counted from when it was made: 30, 90, 180 or 365 days, or no maximum. | Not a switch but a ceiling. Lowering it applies to keys that already exist: one older than the new maximum stops working at once, and its owner has to make a new one. | [API Keys](/guide/api-keys) |
 | **Pause keys of people who stop signing in** (`apiKeySsoSignInWindow`) | After 30 days | For people who sign in through your identity provider: their keys pause after this long without a sign-in there, and resume when they next sign in. | With **Never pause**, someone removed from your identity provider keeps working keys until you suspend them or revoke their keys. People who sign in with a password are not affected. | [API Keys](/guide/api-keys#paused-keys) |
 | **Accept a fresh sign-in round trip for API keys** (`apiKeySsoRoundTripStepUp`) | Off | Creating or rotating a key asks the person to confirm it's them. Through an identity provider that means a sign-in the provider proves happened in the last 15 minutes, which OIDC and SAML connections report; through an Enterprise gateway, the gateway confirming the company session. Portal connections can do neither; with this on, a sign-in through one in the last 15 minutes is accepted instead. | Off, people who sign in through a portal connection can't create or rotate keys (they can still use and revoke the ones they have). On, anyone at an unlocked machine whose portal signs them back in silently can make a key. People on OIDC, SAML or Enterprise gateway connections, and people who sign in with a password, are not affected either way. | [API Keys](/guide/api-keys#confirming-its-you) |
+| **Find a workspace** (`workspaceDirectoryEnabled`) | Off | Lets everyone who can sign in browse the organization's workspaces (what each is for, who answers its requests and how access works) and ask to join one. | People without a workspace, and anyone looking for another. Off, the **Find a workspace** tab disappears from **Workspaces** and the server refuses the directory; people can still ask to join from a link someone shares with them, and approvers still answer every request. On, every workspace's name and description is visible to everyone who can sign in, except the workspaces whose admins hide them. | [Requesting Access](/guide/requesting-access) |
 
 ### Lineage
 

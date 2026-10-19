@@ -16,6 +16,7 @@ from .endpoints import (
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
+    workspace_directory,
     versioning,
     admin_idp_groups,
     admin_idp_providers,
@@ -202,8 +203,8 @@ api_router.include_router(
 )
 
 # RBAC Phase 4.3 — self-service access requests.
-# Mounted on three different prefixes so the auth gate is naturally
-# scoped: any-user submit, any-user "my requests", and admin inbox.
+# Mounted on four prefixes so the auth gate is naturally scoped: any-user
+# submit, any-user "my requests", one workspace's list, and answering.
 api_router.include_router(
     access_requests.public_router,
     prefix="/access-requests",
@@ -223,6 +224,13 @@ api_router.include_router(
     access_requests.admin_router,
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
+)
+# Find a workspace — any signed-in user, while the deployment's switch is
+# on (the router carries the gate). Lists workspaces to ask to join.
+api_router.include_router(
+    workspace_directory.router,
+    prefix="/workspace-directory",
+    tags=["workspace-directory"],
 )
 
 # RBAC Phase 4.5 — unified RBAC search across users, groups,

@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -238,3 +238,25 @@ async def resolve(
             row.idp_group = idp_group
     await session.flush()
     return row
+
+
+async def deny_open_for_target(
+    session: AsyncSession,
+    *,
+    target_type: str,
+    target_id: str,
+    resolver_id: str,
+    note: str,
+) -> int:
+    """Close every open request against a target that is going away — a
+    deleted workspace — so the people waiting see why. Returns how many."""
+    result = await session.execute(
+        update(AccessRequestORM)
+        .where(
+            AccessRequestORM.target_type == target_type,
+            AccessRequestORM.target_id == target_id,
+            AccessRequestORM.status.in_(OPEN_STATUSES),
+        )
+        .values(status="denied", resolved_at=_now(), resolved_by=resolver_id, resolution_note=note)
+    )
+    return result.rowcount or 0

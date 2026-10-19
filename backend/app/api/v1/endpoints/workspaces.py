@@ -33,7 +33,7 @@ from backend.app.common.single_flight import read_stats_sf
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (
     workspace_repo, provider_repo, ontology_definition_repo, data_source_repo,
-    binding_repo, role_repo, user_repo, view_repo, profiling_repo,
+    binding_repo, role_repo, user_repo, view_repo, profiling_repo, access_request_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services import profiling_series, template_access, workspace_visibility
@@ -502,6 +502,7 @@ async def delete_workspace(
          and are unaffected.
       3. Emit ``rbac.workspace.roles_cascaded`` listing the role names
          so the audit log shows the cascade explicitly.
+      4. Close its open access requests, so the people waiting see why.
     """
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
@@ -520,6 +521,10 @@ async def delete_workspace(
     )
     cascaded_roles = await role_repo.delete_workspace_scoped_roles(
         session, workspace_id,
+    )
+    await access_request_repo.deny_open_for_target(
+        session, target_type="workspace", target_id=workspace_id,
+        resolver_id=user.id, note="The workspace was deleted",
     )
 
     await provider_registry.evict_workspace(workspace_id, session)
