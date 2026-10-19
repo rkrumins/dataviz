@@ -719,6 +719,64 @@ beside `rbac.access_request.approved`:
 * Granting in the app needs `exception: true` and is stored with
   `role_bindings.idp_exception`. Teams are not offered. The Members tab
   applies the same rule to people (groups can still be bound).
+* An exception ends once the provider covers it
+  (`workspace_access.retire_covered_exceptions`, in the same savepoint at
+  the end of `reconcile_sso_targets`). The reconciler can't add a binding
+  for a key a local row already holds (`uq_role_binding`), so an exception
+  — live or lapsed — for a `(scope, role)` the sign-in asserts **becomes**
+  the provider's binding in place (`source='sso'`, no end, no
+  `idp_exception`): no gap, and the reconciler governs it from then on. A
+  live exception whose `workspace:*` permissions the person's other SSO
+  grants in the workspace already carry is ended (`expires_at = now`).
+  Either way `rbac.workspace.exception_retired` is written, the person and
+  the granter are notified, and an open request to keep it closes as
+  approved.
+
+**How a workspace takes requests** (`workspaces.request_policy`):
+
+| Policy | Asking | Joining |
+|---|---|---|
+| `approval` (default) | Requests go to its approvers | — |
+| `open` | Anything above Viewer is asked for as usual | `POST /access-requests/join` grants `workspace_viewer` at once — recorded as an approved request whose answerer is the asker, so the grant's provenance reads `joined` and `rbac.workspace.member_joined` is written |
+| `closed` | `POST /access-requests` is refused (403, `detail.type = "closed"`) | Refused (403, `not_open`) |
+
+`open` needs `access_mode = 'app'` (422 otherwise). Requests to keep access
+are taken under every policy, and Add member is unaffected.
+`requestable-roles` returns `{roles, requestPolicy, joinRole}`.
+
+**Keeping access that is about to end.** `POST /access-requests/extend`
+with `bindingId` opens a request tied to the caller's own `source='local'`
+workspace binding whose end is still ahead (404 for anyone else's, 409
+otherwise). Approving it sets the binding's new end (`expiresAt` /
+`expiresIn`, neither meaning none) within the answerer's ceiling for the
+binding's role, and writes `rbac.workspace.member_expiry_updated` beside
+`rbac.access_request.approved`. `PUT …/members/{binding}/expiry` answers it
+too, as approved by the admin.
+
+**Reminders** (`backend/app/services/access_housekeeping.py`, an hourly
+control-plane sweeper under an advisory lock):
+
+* Access ending: people's own local workspace bindings hear a week ahead
+  (granted for more than 14 days, or unknown) or two days ahead (longer than
+  two days), once per end date — `role_bindings.expiry_reminded_at` is
+  cleared whenever the end moves. Writes `rbac.workspace.access_expiring`.
+* Waiting requests: `pending` requests remind the workspace's approvers
+  after 3 days (`reminded_at`) and the Org Admins after 7
+  (`escalated_at`, `rbac.access_request.escalated`). `awaiting_idp`
+  requests are left to IT.
+* Access reviews past their due date: one notice to the workspace's admins
+  and whoever started it (`overdue_notified_at`).
+
+**Access reviews** (`/admin/workspaces/{ws}/access-reviews`, every route
+`workspace:admin`): a snapshot of the workspace's live `source='local'`
+bindings — people's and groups' — into `access_review_items`, with each
+person's provenance origin; SSO and organization-wide access is counted
+(`notReviewed`), not reviewed. One open review per workspace
+(`uq_access_reviews_one_open`). `POST …/items/{id}` with `keep` or `remove`
+— removal deletes the same binding (not one re-made since), ends sessions,
+writes `rbac.workspace.member_revoked` with `via: "access_review"` and tells
+the person. `complete` needs every item decided; `cancel` keeps what was
+removed. Nothing is removed automatically.
 
 **Find a workspace** (`GET /workspace-directory`, behind the
 `workspaceDirectoryEnabled` switch, off by default) lists every workspace
@@ -728,14 +786,20 @@ it, or it is listed while the switch is on.
 
 **Provenance.** People with access (`GET …/members/effective`) and My
 Access (`GET /me/access`) give every grant a `provenance`: `direct`,
-`request`, `exception`, `idp` (the asserted groups and provider), `team` or
-`org_role`. People with access also lists people who reach every workspace
+`request`, `exception`, `joined`, `idp` (the asserted groups and provider),
+`team` or `org_role`. People with access also lists people who reach every workspace
 through an organization-wide role (`via: "org"`).
 
 **Notifications** (kind): approvers get `access_request.submitted` (Org
-Admins when the workspace has none); the requester gets
+Admins when the workspace has none) and `access_request.reminder`, Org
+Admins `access_request.escalated`; the requester gets
 `access_request.approved`, `.denied`, `.routed` and `.fulfilled`, and the
-approver who routed a request gets `.fulfilled` too.
+approver who routed a request gets `.fulfilled` too. People hear
+`workspace.member_added`, `workspace.member_removed` and
+`workspace.access_end_changed` when an admin changes their own access (a
+group's members aren't told), `access.expiring` before it ends and
+`access.exception_retired` when the identity provider takes an exception
+over; admins get `access_review.overdue`.
 
 ## Invites
 
@@ -889,6 +953,8 @@ last 7 days. Through the API:
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
 | Who may let whom in (ceilings, requestable roles, provenance) | `backend/app/services/workspace_access.py` |
 | Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
+| Access reviews                         | `backend/app/api/v1/endpoints/access_reviews.py`              |
+| Access reminders (ending, waiting, overdue reviews) | `backend/app/services/access_housekeeping.py` |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
 | Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |

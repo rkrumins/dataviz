@@ -269,10 +269,17 @@ one, there is no group to point people to, and every answer is an exception.
 > decided](#how-access-is-decided)). Someone who has never signed in through
 > single sign-on can't receive it at all — the approver is warned.
 
-> **Note:** Exceptions don't end when the person later joins the group, and
-> memberships of app-managed groups bound to the workspace aren't policed.
-> Review **People with access** now and then and remove exceptions the group
-> has caught up with.
+- An exception ends on its own once the loop grants the same access. At the
+  person's next sign-in, an exception for the very role a rule grants becomes
+  that rule's grant — the loop then adds and removes it like any other, with no
+  gap in between — and one whose workspace permissions the person's other
+  identity-provider grants already cover is ended. The person and whoever
+  granted it hear about it, and a request to keep the exception closes.
+
+> **Note:** Memberships of app-managed groups bound to the workspace aren't
+> policed. An access review ([Workspace
+> Admin](/guide/workspace-admin#reviewing-who-has-access)) is the way to go
+> through them.
 
 ---
 
