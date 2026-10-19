@@ -95,7 +95,19 @@ The lifecycle backfill (CONVERSION) also runs in this migration.
 - `access_events.action`: the ACCESS list MINUS graph.*, projection.* and ingest.*. Those facts belong to lifecycle_events, ingest_source_revisions and commits.
 - `access_events.decision` ∈ {allowed, bypassed, denied, would_deny}.
 
-### 5. Migration chain (linear; down_revision = the previous entry; the first entry follows 20260930_1000_outbox_type_time)
+### 5. Migration chain
+**Shipped so far** (linear; each `down_revision` is the previous entry; the first follows `20261014_1200_aal_api_key`; head `20261018_1200_gv_lifecycle`). Every revision runs through alembic against the management database. The `gv_*` ones change `graphver` tables there, each waiting at most 5 s for its table's lock, and do nothing when those tables are not in that database. With a separate `GRAPHVER_DB_URL`, the versioning worker repeats each `gv_*` change at start (`models._ensure_schema_upgrades`); a required step that fails stops the worker, and its restart tries again. So with a separate `GRAPHVER_DB_URL`, start the versioning workers on this release before rolling the API pods: they select the new graphver columns (`graphs.lifecycle_*`, `merge_requests.approvals`, `projection_state.epoch`/`retired_keys`) on nearly every versioning request, reads included, and fail until those columns exist.
+1. `20261017_1000_datasource_publish`: management DB. Seeds `workspace:datasource:publish`, the system role `workspace_publisher`, and the grants to `org_admin`, `super_admin` and `workspace_data_engineer` (not `workspace_member`). Replaces planned 1.
+2. `20261017_1500_gv_ps_keys`: graphver. `uq_ps_key`, a partial unique index on `projection_state (coalesce(falkor_provider, 'default'), falkor_graph_name)`. A trashed graph that does not own a key another graph pins lets go of it first; pins still shared abort the upgrade and are named. The `uq_ps_key` part of planned 6 (no candidate key). Worker start: optional; shared pins are logged and leave the index unbuilt.
+3. `20261017_1550_gv_ps_fencing`: graphver. `projection_state.epoch`, `failed_attempts`, `next_retry_at`. Not in the plan. Worker start: required.
+4. `20261017_1900_gv_commits_idem`: graphver. `uq_commits_idem`, a partial unique index on `commits (graph_id, branch_id, idempotency_key)`; a later commit sharing a key on the same branch has its key cleared first. Anticipates planned 10, but as a plain build that keeps `ix_commits_idem` and adds no `ix_commits_actor`. Worker start: optional.
+5. `20261017_1950_gv_ingest_active`: graphver. `uq_jobs_ingest_active`, a partial unique index on `jobs.branch_id` for a pending or running import; imports nothing will run are failed first, and imports running together on one draft stop the upgrade. Not in the plan. Worker start: optional; imports running together leave the index for a later start.
+6. `20261017_2000_gv_ps_reseeding`: graphver. `ck_proj_status` allows `reseeding`; the downgrade turns those rows back to `idle`. Not in the plan. Worker start: required.
+7. `20261018_1000_gv_mr_approvals`: graphver. `merge_requests.approvals` JSONB, `{actor: {headCommitId, headSeq, at}}`; an approval given before it has no head and counts as stale. Anticipates the approval-to-head binding of planned 5, without `pr_reviews`, `ck_mr_approval_status` or the backfills. Worker start: required.
+8. `20261018_1100_gv_ps_retired`: graphver. `projection_state.retired_keys` JSONB, `[{name, provider, retireAfter, afterSeq, movedBy}]`; the downgrade drops it and logs how many graphs still had keys waiting; those keys are then never dropped for you. The retired-keys part of planned 6. Worker start: required.
+9. `20261018_1200_gv_lifecycle`: graphver. `graphs.lifecycle_state` (`live` or `frozen`, `ck_graphs_lifecycle_state`), `lifecycle_rev`, `lifecycle_changed_at`; every existing graph reads `live` at rev 0 from the defaults. The freeze subset of planned 4: `trashed` and `purging` stay derived from `deleted_at` and the purge job, and no other §3 column is added. The downgrade drops the columns, so every frozen graph is editable again. Worker start: required, 10 tries of 500 ms.
+
+**Planned (later stages)** (linear; down_revision = the previous entry; the first entry follows 20260930_1000_outbox_type_time)
 1. `20261010_1000_datasource_publish`: management DB: permission, role, grants.
 2. `20261010_1100_gv_commits_kind_actor`: ck_commits_kind adds 'ingest'; commits.actor_kind, source_id and source_ref; batched backfill (genesis, import and sync become system).
 3. `20261010_1200_gv_jobs_types`: full-union ck_jobs_type; jobs.op and not_before.
@@ -111,6 +123,59 @@ The lifecycle backfill (CONVERSION) also runs in this migration.
 The ORM CHECKs and tables are updated in the same PR as each migration. `test_migrations_*` asserts that the live CHECK domains equal the ORM domains after upgrade head.
 
 ### 6. Exceptions → HTTP (versioning/errors.py; one `_domain_errors` table reused by every router)
+**Live now.** Each class in `errors.HTTP_MAPPED` carries its status, `detail` and headers. The versioning router's `_domain_errors` maps them before its other clauses, and `main.py` registers a handler for each, so routes on other routers (graph, workspaces, admin) answer the same. Every body below is the response's `detail`; a class from `errors.py` always adds `message`. Codes in the target lists further down that are not in this table are not live yet.
+
+| Status | Code | `detail` as the code returns it | Raised by |
+|---|---|---|---|
+| 403 | `not_draft_owner` | `{type:"access_denied", code, branchId, owner, message}` | a write, rename, abandon or member change on someone else's private draft; a change of `isShared` by anyone but the owner |
+| 403 | `not_owner_or_member` | `{type:"access_denied", code, required:"editor"\|"maintainer", branchId, message}` | a shared draft refused the caller: editor to write, maintainer to publish, abandon, rename or manage members |
+| 403 | `self_review` | `{type:"access_denied", code, prId, message}` | an approve by the PR's author or its source draft's owner |
+| 403 | `publish_required` | `{type:"access_denied", code, required:"workspace:datasource:publish", message}` | a person without publish writing a versioned graph's main directly (graph-router writes with no draft, bulk ingest), or an API key whose owner lacks it |
+| 403 | `needs_admin` | `{type:"access_denied", code, required:"workspace:admin", error:"missing_permission", permission:"workspace:admin", scope:{type:"workspace", id}, message}` | `?force` or `?allowMassDelete` on a sync or re-sync by anyone but a workspace admin |
+| 403 | `missing_permission` | `{error:"missing_permission", permission, scope:{type, id}, message:"Missing permission: <perm>"}` — no `type` key | the route gate `requires(...)`; this is what a person without publish gets on publish, merge, revert, restore, sync, `/graph/resync` and freeze/unfreeze. Replaces the design's `needs_publish_permission` |
+| 403 | `api_key_not_allowed` | `{error:"api_key_not_allowed", message}`, `WWW-Authenticate` challenge | an API key on a route that is not on the key surface (graph creation, forks, members add/remove, publish, merge, revert, restore, sync, reviewers, freeze/unfreeze, `/admin/versioning/*`) |
+| 403 | `access_denied` | `{type:"access_denied", message}` | any other draft-access refusal (the backstop in `_domain_errors` and `main.py`) |
+| 403 | `feature_disabled` | `{type:"feature_disabled", feature:"versioningEnabled", message}` | a mutating versioning route while the switch is off, except `…/projection/rebuild`, `…/projection/reconcile`, `…/exports` and `…/lifecycle/freeze` |
+| 404 | — | a plain string: `"unknown branch"` (a draft the caller can't read, or none), `"graph not found in workspace"`, `"pull request not found in workspace"` (also a PR the caller takes no part in); on the graph router an unreadable `?branchId=` answers `"'branch_not_found: <bid>'"` | `DraftNotReadable`, `graph_in_workspace`, `pr_in_workspace`, `get_context_engine`; any other `ValueError` answers 404 with its text |
+| 409 | `branch_closed` | `{type, status, branchId, message}` | a write, checkpoint, pull or publish on a merged, abandoned or publishing draft |
+| 409 | `main_write_forbidden` | `{type, message}` | `main` (literal or by id) on a route that writes drafts, or an import into it |
+| 409 | `graph_not_writable` | `{type, state, reason, retryable:false, message}`; `reason` equals `state`: `frozen`, `trashed`, `purging`, or any stored state this code does not know. Never a `Retry-After` | a content write to a graph that is not live (§7, §9) |
+| 409 | `version_conflict` | `{type, resource:"lifecycle", currentVersion, message}` | a freeze or unfreeze whose `expectedRev` is stale |
+| 409 | `integrity` | `{type, message}` | a `ConcurrencyError`: a write, draft open or freeze while version control is still being enabled; a bulk ingest into a graph that already has entities; `POST /graphs` naming a FalkorDB key another versioned graph projects into |
+| 409 | `bootstrapping` | `{type, message}` | a projection rebuild, or an admin projection move, while version control is still being enabled |
+| 409 | `pull_request_exists` | `{type, prId, branchId, title, message}` | opening a second live request from a draft; deleting a fork whose PR into its parent is live |
+| 409 | `approval_required` | `{type, pending, stale}` — no `message` | a merge (in the request, or before it is queued) whose requested reviewers have not all approved the current head. The design's `missing` is `pending` |
+| 409 | `head_moved` | `{type, prId, headCommitId, message}` | an approve whose `expectedHeadCommitId` is no longer the source branch's head |
+| 409 | `not_up_to_date` | `{type, branchId, behindBy, message}` | a publish or merge of a draft behind `main`. The design's `{overlapIds, reason}` is not live |
+| 409 | `merge_conflict` | `{type, conflicts}`; `/graph/changes` adds `current` | a same-field clash in a merge or save |
+| 409 | `too_large_for_tree` | `{type, changed, limit, message}` | the Changes tree's `/children` past `GRAPHVER_DIFF_TREE_MAX_CHANGES` |
+| 409 | `job_active` | `{type, jobId, message}` | a second import on a draft; a publish, merge or publish job while an import runs on the draft; a data-source move while any job runs on the graph or its forks; an admin projection move while a rollup rebuild runs |
+| 409 | `curation_at_risk` | `{type, lastHumanCommit:{id, seq, kind, actor, createdAt}, message}` | a sync or re-sync while `main` holds a person's commit from before its last import or sync |
+| 409 | `mass_delete_blocked` | `{type, deletes, live, limit, message}` | a sync or re-sync that deletes more than `max(GRAPHVER_SYNC_DELETE_MAX_ABS, GRAPHVER_SYNC_DELETE_MAX_FRACTION × live)` |
+| 409 | `fork_limit` | `{type, limit, message}` | a fork, or a fork restore, past `GRAPHVER_MAX_FORKS_PER_GRAPH` live forks |
+| 409 | `not_a_fork` | `{type, graphId, message}` | a fork delete or restore on a graph `fork_graph` did not mint |
+| 409 | `live_forks` | `{type, graphId, forks, message}` | deleting a fork that has live forks. A data source's permanent delete refused because forks read its graph answers `{type:"live_forks", message}`, without `graphId` or `forks` |
+| 409 | `fork_not_restorable` | `{type, graphId, reason:"purging"\|"parent_deleted", message}` | restoring a fork whose purge exists, or whose parent is missing or trashed |
+| 409 | `graph_moved` | `{type, graphId, message}` | a data-source move whose graph another move already took to a third workspace |
+| 409 | `projection_not_adopted` | `{type, reason:"unpinned"\|"customer_key"\|"shared", sharedWith (shared only), message}` | an admin projection move of a graph that is unpinned, still on the customer's own key, or on a key other data sources read |
+| 409 | `graph_key_in_use` | `{type, providerId, key, message}` (class `ProjectionKeyInUse`) | an admin projection move onto a key another graph holds. Enabling version control onto a taken key answers the same `type` as `{type, message}` |
+| 422 | `ineligible_member` | `{type, subjectId, reason:"owner"\|"unknown_user"\|"unknown_group"\|"no_read"\|"no_manage", message}` | adding a draft member who cannot hold the role |
+| 422 | `invalid_target_key` | `{type, key, message}` (class `ProjectionKeyInvalid`) | an admin projection move naming a key that is not this graph's platform key, one of its retired keys or its current key |
+| 422 | `projection_mode_unsupported` | `{type, message}` | an admin projection move of a data source with a dedicated rollup graph |
+| 422 | `provider_unsupported`, `provider_unreachable` | `{type, message}` | a provider that is missing, inactive, not FalkorDB, or offline, for a new versioned graph, a blank model or a projection move |
+| 422 | `ontology_violation` | `{type, violations}` | the ontology gate |
+| 422 | `invalid_patch` | `{type, message}` | an `unsetProperties` that contradicts its op |
+| 422 | `graph_too_large_to_sync` | `{type, entities, limit, estimatedBytes, message}` | a sync or re-sync of a `main` above `GRAPHVER_RESYNC_MAX_ENTITIES` (`main.py` handler) |
+| 422 | `ontology_required` | `{type, message}` | a write to an ontology-governed graph whose data source has no assigned ontology |
+| 422 | `invalid_cursor` | `{type, message}` | an entity-history `before` cursor the server did not issue |
+| 503 | `lock_busy` | `{type, retryable:true, message}`, `Retry-After` | a graph, lifecycle, move, draft, PR or graph-row lock not granted within `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (`Retry-After` = that bound in seconds, at least 1; 5 by default), or every retry of a write lost (`ContentionExhausted`, `Retry-After: 2`) |
+| 503 | `groups_unavailable` | `{type, retryable:true, message}`, `Retry-After: 2` | a role that turns on a group, when the caller's groups can't be read |
+| 503 | `provider_unreachable` | `{type, retryable:true, message}` | an admin projection move that cannot list the provider's keys |
+| 503 | `ontology_unavailable` | `{type, message}` | a write to an ontology-governed graph whose ontology cannot be resolved |
+| 503 | — | `"Authorization temporarily unavailable"` | a permission gate (`requires`, `publish_required`, `needs_admin`) that would refuse but could not read the workspace grants |
+
+**Target (design).**
+
 **403**
 - 403 `{type:'access_denied', code}` with code ∈ {not_owner_or_member, not_draft_owner, needs_publish_permission, needs_admin, self_review, contributor_cannot_approve, not_eligible_reviewer, bypass_not_allowed, service_principal_forbidden, self_approval_forbidden}, plus `required`.
 - 403 `feature_disabled`.
@@ -183,6 +248,16 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 5. CAS on `lifecycle_rev`.
 6. Same-transaction side effects: ingest_sources pause/resume/retire, PR/draft closure on detach, lifecycle_events.
 
+**Shipped so far.** There is no `_authorize`, READ_DRAFT step, policy, bypass or access_events in the shipped writes: the route checks its permission (`requires(...)`) first, then the service runs these steps. Every lock wait is bounded by `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (503 `lock_busy`).
+- *Draft write* (stage, checkpoint, rebase): `gvlifecycle:<gid>` shared → `_assert_writable` (`graphs` FOR KEY SHARE; graph_not_writable) → branch `FOR NO KEY UPDATE`, scoped to the graph (404 "unknown branch") → `_require_open` (branch_closed) → `_require_edit` (not_draft_owner / not_owner_or_member; groups_unavailable). A checkpoint then withdraws the staged edits of anyone who may no longer write the draft. A draft write route needs `_MANAGE`, which reads every draft, so there is no read step; on the graph router, `get_context_engine` answers 404 for a `branchId` the caller cannot read before any write.
+- *apply_ops* (`/graph/changes`, graph-router writes): enablement unfinished (409 integrity) → `main` or main's id on a draft route (main_write_forbidden) → for a draft, `gvlifecycle` shared, for main, `_lock_graph` → `_assert_writable` → the branch lock (a draft) → a retry with a known `Idempotency-Key` answers with its first commit here, before the refusals that follow → graph_not_writable → `_require_open` → `_require_edit` → OCC / ontology.
+- *Import job creation*: the literal `main` (main_write_forbidden) → `gvlifecycle` shared → `gvmove` shared and the graph still in the workspace (404) → `_assert_writable` → with no `branchId`, the draft is opened in this transaction → branch lock → main by id (main_write_forbidden) → `_require_open` → `_require_edit` → another import pending or running on the draft (job_active).
+- *Publish job creation*: `gvlifecycle` shared → `gvmove` shared and workspace → `_assert_writable` → branch lock → main (main_write_forbidden) → `_require_open` → `_require_publish`, except for a review's merge → no import on the draft (job_active) → for a merge, the request still live (404) and `_require_approvals` (approval_required) → the draft becomes `publishing`. *Export job creation* takes only `gvmove` shared and the workspace check.
+- *Publish*: staged edits folded by a checkpoint (its own draft-write gate) → `_lock_graph` → `_assert_writable` → branch lock → `_require_open` → no import (job_active) → edits staged since the fold re-run the attempt (no pending_changes refusal) → `_require_publish` (a private draft's owner; a shared draft's owner or maintainer) → not_up_to_date `{branchId, behindBy}` → merge_conflict → ontology → squash.
+- *Merge of a review* (`merge_mr`): fold → `_lock_graph` → the request merged or closed (404); its row is read without a lock → `_assert_writable` → branch lock → `_require_open` → no import (job_active) → staged re-run → `_require_approvals` (approval_required `{pending, stale}`) → not_up_to_date → merge_conflict → squash. The merger's right to the draft is not checked: `_MANAGE` and `_PUBLISH` on the route, and taking part in the request, are enough.
+- *Freeze / unfreeze* (`set_frozen`): `gvlifecycle` exclusive → `_lock_graph` → `graphs` FOR UPDATE → unknown or trashed (404) → a state this code does not know (graph_not_writable) → freeze only: enablement unfinished (409 integrity) → already in that state (200, unchanged) → CAS on `lifecycle_rev` (version_conflict).
+- *Trash and restore of a data source's graphs*: `gvlifecycle` exclusive per graph, in id order → `graphs` FOR UPDATE. *Queueing a purge*: its job row FOR UPDATE → `gvlifecycle` exclusive → `graphs` FOR UPDATE → direct forks FOR KEY SHARE. Neither takes `_lock_graph`. *Fork delete and restore* take no lifecycle key: delete locks the fork's row FOR UPDATE; restore takes the parent's `_lock_graph`, the parent row FOR KEY SHARE, then the fork's row FOR UPDATE.
+
 ### 8. Lock order (global)
 1. jobs row (claim)
 2. `gvproj:<gid>` session lock (projector, swap, evict)
@@ -197,6 +272,12 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 11. `ingest_offsets`
 
 Writers never take gvproj, and the projector never takes `_lock_graph`. Main writers never take gvlifecycle: they hold `_lock_graph`, which a transition takes after it. Draft writers take it because row locks alone do not queue fairly: a new FOR KEY SHARE goes past a waiting FOR UPDATE, so overlapping draft saves could hold a transition off for ever. The advisory lock's queue is fair, so a save that asks after a transition waits for it.
+
+**Shipped so far.** Items 3, 10 and 11 do not exist yet, and item 2 is taken by the projector, evict and the retire loop only. Where the code differs from the list above:
+- Item 5, `_lock_graph`: main writers (`apply_ops` on main, revert, restore, sync, bulk ingest), publish, merge of a review or fork PR, freeze and unfreeze, forking (on the parent), fork restore (on the parent), projection rebuild and the admin projection move, and a data-source move. Of the transitions only freeze and unfreeze take it: trash, restore and queueing a purge take `gvlifecycle` and then the `graphs` row FOR UPDATE, which waits for the FOR KEY SHARE that a main writer's `_assert_writable` holds. A data-source move takes `_lock_graph` then `gvmove` exclusive for its graph and then each fork, parent before child.
+- Item 6, `graphs` row: FOR UPDATE for freeze, unfreeze, trash, restore and queueing a purge, and for a fork's own row on its delete and restore; FOR KEY SHARE for every content writer, draft or main (`_assert_writable`), and for a parent being forked or having a fork restored. Reviews take no `graphs` lock.
+- Item 7, `branches`: FOR NO KEY UPDATE (`_lock_branch`) for every draft writer and for job creation, so inserting a member row does not wait on it. Reviews take no branch lock.
+- Item 8, `merge_requests`: approve and the reviewer or title edit (`update_pr`) take the request's row FOR UPDATE; a merge reads it without a lock.
 
 ### 9. Lifecycle × drafts/PRs × ingest
 
