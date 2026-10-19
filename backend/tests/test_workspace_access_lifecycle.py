@@ -173,6 +173,24 @@ async def test_only_your_own_time_limited_grant_made_here_can_be_kept(world, db_
             assert (await world.post(f"{URL}/extend", json={"bindingId": b.id})).status_code == 409
 
 
+async def test_one_open_request_per_workspace_never_answers_for_another(world, db_session):
+    binding = await _grant(db_session, role="workspace_viewer")
+    async with acting_as(db_session, "ana"):
+        more = await world.post(URL, json={
+            "targetType": "workspace", "targetId": WS, "requestedRole": "workspace_member",
+        })
+        keep = await world.post(f"{URL}/extend", json={"bindingId": binding.id})
+        assert (more.status_code, keep.status_code) == (201, 409)
+        assert "Withdraw it" in keep.json()["detail"]
+        await world.post(f"/api/v1/me/access-requests/{more.json()['id']}/withdraw")
+        assert (await world.post(f"{URL}/extend", json={"bindingId": binding.id})).status_code == 201
+        again = await world.post(URL, json={
+            "targetType": "workspace", "targetId": WS, "requestedRole": "workspace_member",
+        })
+    assert again.status_code == 409
+    assert "keep your access" in again.json()["detail"]
+
+
 async def test_keeping_access_stays_within_the_approvers_ceiling(world, db_session):
     binding = await _grant(db_session, role="workspace_data_engineer")
     async with acting_as(db_session, "ana"):

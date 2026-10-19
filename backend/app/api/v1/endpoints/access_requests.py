@@ -416,6 +416,11 @@ async def submit_access_request(
         justification=body.justification,
     )
     if not created:
+        if row.binding_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You've asked to keep your access to this workspace. Ask for more once that's answered.",
+            )
         response.status_code = status.HTTP_200_OK
         return (await _to_responses(session, [row], reader=claims))[0]
 
@@ -495,6 +500,13 @@ async def ask_to_keep_access(
         binding_id=binding.id,
     )
     if not created:
+        # The one open request per workspace may be another one.
+        if row.binding_id != binding.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You already have an open request for this workspace. Withdraw it, or wait for "
+                       "its answer, to ask to keep this access.",
+            )
         response.status_code = status.HTTP_200_OK
         return (await _to_responses(session, [row], reader=claims))[0]
 

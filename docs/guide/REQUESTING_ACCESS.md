@@ -256,7 +256,9 @@ when your access now ends. A workspace admin may also change the end date
 directly — you hear about that too.
 
 > **Note:** Access you have through your identity provider's groups doesn't end
-> this way, so it never offers **Ask to keep it**.
+> this way, so it never offers **Ask to keep it**. And you can have one open
+> request per workspace: if you've already asked that workspace for more,
+> withdraw that request or wait for its answer first.
 
 ---
 

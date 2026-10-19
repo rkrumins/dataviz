@@ -896,7 +896,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
             </>
             )}
 
-            {/* How people get in — listed, who decides, the note for people asking */}
+            {/* How people get in — listed, who decides, how people ask, the note for people asking */}
             {canManage && <WorkspaceAccessSettings workspaceId={workspaceId} />}
 
             {/* Who still needs to be in — keep or remove each grant made here */}

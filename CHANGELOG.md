@@ -71,6 +71,8 @@ they're in one.
 - The reminders run in the control plane (or the all-in-one process), hourly. Time-limited access
   already ending within a week is announced on the first pass, and requests already waiting more
   than three days — or a week — are brought up on it too.
+- Downgrading drops the access reviews and every workspace's request policy; requests to keep
+  access become ordinary requests for the same role.
 
 ### Known limitations
 

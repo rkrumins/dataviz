@@ -747,7 +747,9 @@ are taken under every policy, and Add member is unaffected.
 **Keeping access that is about to end.** `POST /access-requests/extend`
 with `bindingId` opens a request tied to the caller's own `source='local'`
 workspace binding whose end is still ahead (404 for anyone else's, 409
-otherwise). Approving it sets the binding's new end (`expiresAt` /
+otherwise). It counts as the person's one open request for the workspace:
+while another is open it is refused (409), and so is asking for more while
+it is open. Approving it sets the binding's new end (`expiresAt` /
 `expiresIn`, neither meaning none) within the answerer's ceiling for the
 binding's role, and writes `rbac.workspace.member_expiry_updated` beside
 `rbac.access_request.approved`. `PUT …/members/{binding}/expiry` answers it
