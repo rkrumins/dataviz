@@ -61,7 +61,7 @@ export const PRIVILEGED: AnalyticsSummary = {
         dataSources: metric(112, 6, 4),
         activity: metric(51200, 1840, 1610),
         ontologies: metric(24, 2, 1),
-        contextModels: metric(310, 12, 15),
+        layoutTemplates: metric(310, 12, 15),
         catalogItems: metric(486, 21, 18),
         groups: metric(19, 1, 0),
     },

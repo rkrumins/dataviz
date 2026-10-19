@@ -36,6 +36,7 @@ class RoleName(str, Enum):
     WORKSPACE_DATA_ENGINEER = "workspace_data_engineer"
     WORKSPACE_MEMBER = "workspace_member"
     WORKSPACE_PUBLISHER = "workspace_publisher"
+    WORKSPACE_STEWARD = "workspace_steward"
     WORKSPACE_VIEWER = "workspace_viewer"
 
 
@@ -71,6 +72,8 @@ WORKSPACE_TEMPLATE_ROLES: frozenset[str] = frozenset({
     RoleName.WORKSPACE_ADMIN.value,
     RoleName.WORKSPACE_DATA_ENGINEER.value,
     RoleName.WORKSPACE_MEMBER.value,
+    RoleName.WORKSPACE_PUBLISHER.value,
+    RoleName.WORKSPACE_STEWARD.value,
     RoleName.WORKSPACE_VIEWER.value,
 })
 """Workspace role templates — assignable on the workspace-member

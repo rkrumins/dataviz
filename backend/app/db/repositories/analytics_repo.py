@@ -67,6 +67,7 @@ from backend.app.db.models import (
     view_is_live,
 )
 from backend.app.db.repositories import stats_repo
+from backend.app.db.repositories.access_request_repo import OPEN_STATUSES
 from backend.app.db.repositories.view_repo import resolve_user_ids
 
 if TYPE_CHECKING:  # pragma: no cover — annotation only
@@ -892,7 +893,15 @@ async def platform_summary(
         session, select(func.count()).select_from(WorkspaceDataSourceORM).where(*live_ds))
     ontologies_total = await _scalar(
         session, select(func.count()).select_from(OntologyORM).where(OntologyORM.deleted_at.is_(None)))
-    models_total = await _scalar(session, select(func.count()).select_from(ContextModelORM))
+    # Layout templates people made: built-ins ship with the product and a
+    # deleted template is kept only for Undo, so neither is adoption.
+    live_templates = (
+        ContextModelORM.is_template.is_(True),
+        ContextModelORM.system_key.is_(None),
+        ContextModelORM.deleted_at.is_(None),
+    )
+    templates_total = await _scalar(
+        session, select(func.count()).select_from(ContextModelORM).where(*live_templates))
     catalog_total = await _scalar(session, select(func.count()).select_from(CatalogItemORM))
     groups_total = await _scalar(
         session, select(func.count()).select_from(GroupORM).where(GroupORM.deleted_at.is_(None)))
@@ -944,9 +953,9 @@ async def platform_summary(
         OntologyORM.created_at >= w.start, OntologyORM.deleted_at.is_(None)))
     ontologies_prev = await _previous(
         OntologyORM.created_at, [OntologyORM.deleted_at.is_(None)])
-    models_new = await _scalar(session, select(func.count()).where(
-        ContextModelORM.created_at >= w.start))
-    models_prev = await _previous(ContextModelORM.created_at)
+    templates_new = await _scalar(session, select(func.count()).where(
+        ContextModelORM.created_at >= w.start, *live_templates))
+    templates_prev = await _previous(ContextModelORM.created_at, live_templates)
     catalog_new = await _scalar(session, select(func.count()).where(
         CatalogItemORM.created_at >= w.start))
     catalog_prev = await _previous(CatalogItemORM.created_at)
@@ -1015,7 +1024,7 @@ async def platform_summary(
             "activity": _metric(
                 activity_total, sum(activity_by_day.values()), activity_prev),
             "ontologies": _metric(ontologies_total, ontologies_new, ontologies_prev),
-            "contextModels": _metric(models_total, models_new, models_prev),
+            "layoutTemplates": _metric(templates_total, templates_new, templates_prev),
             "catalogItems": _metric(catalog_total, catalog_new, catalog_prev),
             "groups": _metric(groups_total, groups_new, groups_prev),
         },
@@ -1801,8 +1810,9 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
         .where(AccessRequestORM.created_at >= w.start)
     )).all()
     waits: list[float] = []
-    for created, resolved, _status in requests:
-        if not resolved:
+    for created, resolved, status in requests:
+        # Withdrawn: the person stopped waiting before anyone answered.
+        if not resolved or status == "withdrawn":
             continue
         started, finished = _parse(created), _parse(resolved)
         if started and finished and finished >= started:
@@ -1811,10 +1821,12 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
     # Count and oldest in one aggregate. The backlog is unbounded by the window
     # by definition — a request pending since last year is exactly the one worth
     # reporting — so it is the one query here that must not read its rows back.
+    # Open includes a request waiting on the identity provider: that person
+    # still can't get in.
     pending_count, oldest_created = (await session.execute(
         select(func.count(), func.min(AccessRequestORM.created_at))
         .select_from(AccessRequestORM)
-        .where(AccessRequestORM.status == "pending")
+        .where(AccessRequestORM.status.in_(OPEN_STATUSES))
     )).one()
     oldest_started = _parse(oldest_created)
     oldest_pending = (
@@ -2727,10 +2739,13 @@ async def workspace_detail(
             continue
 
     members = await _member_counts(session, now=now)
-    models_total = await _scalar(
+    templates_total = await _scalar(
         session,
-        select(func.count()).select_from(ContextModelORM)
-        .where(ContextModelORM.workspace_id == workspace_id),
+        select(func.count()).select_from(ContextModelORM).where(
+            ContextModelORM.workspace_id == workspace_id,
+            ContextModelORM.is_template.is_(True),
+            ContextModelORM.deleted_at.is_(None),
+        ),
     )
 
     # Per-view opens inside this workspace, ranked; falls back to visit counts
@@ -2813,7 +2828,7 @@ async def workspace_detail(
             # so they carry a total and no delta rather than a fabricated 0%.
             "members": {"total": int(members.get(workspace_id, 0))},
             "dataSources": {"total": len(ds_ids)},
-            "contextModels": {"total": models_total},
+            "layoutTemplates": {"total": templates_total},
         },
         "series": {
             "buckets": w.buckets,

@@ -1,26 +1,23 @@
 /**
  * AdminOverview — The global health dashboard.
  * Merges the navigational landing page with system-wide Insights.
+ *
+ * Its numbers are the workspace summary's — the one server-side definition the
+ * Dashboard and the Workspaces page read too. It used to add up the bulk stats
+ * response itself while the Dashboard did the same from a stale workspace list,
+ * and the two pages quoted different totals for the same estate.
  */
-import { useCallback, useEffect, useState } from 'react'
-import { fetchEnveloped } from '@/services/cacheEnvelope'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
     CircleDot, ArrowRightLeft, Database, Layers, Server,
-    Activity, Plus, Shield
+    Activity, Plus, Shield, Loader2, Share2, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { compact } from '@/lib/formatMetric'
 import { providerService } from '@/services/providerService'
-import { withTimeout } from '@/lib/concurrency'
-import { TIMEOUTS } from '@/config/timeouts'
+import { useWorkspaceSummary } from '@/hooks/useWorkspaceSummary'
 import { PageContainer } from '@/components/layout/PageContainer'
-
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
-    return String(n)
-}
 
 const KPI_CONFIG = [
     { key: 'nodes', label: 'Total Nodes', icon: CircleDot, gradient: 'from-indigo-500/20 to-indigo-500/0', accent: 'text-indigo-600 dark:text-indigo-400', iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20' },
@@ -29,109 +26,27 @@ const KPI_CONFIG = [
     { key: 'types', label: 'Entity Types', icon: Layers, gradient: 'from-amber-500/20 to-amber-500/0', accent: 'text-amber-600 dark:text-amber-400', iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20' },
 ]
 
-interface WsInsight {
-    ws: WorkspaceResponse
-    nodes: number
-    edges: number
-    sources: number
-    types: Set<string>
-}
-
 export function AdminOverview() {
     const navigate = useNavigate()
-    const [insights, setInsights] = useState<WsInsight[]>([])
-    const [providerCount, setProviderCount] = useState(0)
-    const [isLoading, setIsLoading] = useState(true)
+    // React Query keeps the last answer when a refresh fails, so a slow or
+    // failing request shows the previous counts — never a fleet of zeros.
+    const { summary, isLoading, error } = useWorkspaceSummary()
+    const { data: providers } = useQuery({
+        queryKey: ['providers', 'list'],
+        queryFn: () => providerService.list(),
+        staleTime: 30_000,
+    })
 
-    const loadInsights = useCallback(async () => {
-        setIsLoading(true)
-        try {
-            // Render even when one of these stalls. The dashboard's value
-            // is mostly the per-workspace KPIs; a slow provider-list
-            // shouldn't gate the whole page.
-            const [wsRes, provRes] = await Promise.allSettled([
-                withTimeout(workspaceService.list(), TIMEOUTS.ADMIN_LIST_MS, 'workspaces.list'),
-                withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
-            ])
-            const workspaces = wsRes.status === 'fulfilled' ? wsRes.value : []
-            const providers = provRes.status === 'fulfilled' ? provRes.value : []
-            setProviderCount(providers.length)
-
-            // One bulk request replaces the former (workspace, datasource)
-            // fan-out — historically the worst offender behind the "lots
-            // of cached-stats requests" symptom. Entries are keyed
-            // "<wsId>/<dsId>"; status==='computing' rows are cold-cache
-            // placeholders (refresh already enqueued server-side).
-            const bulk = await withTimeout(
-                fetchEnveloped<Record<string, {
-                    status?: string
-                    nodeCount?: number
-                    edgeCount?: number
-                    entityTypeCounts?: Record<string, number>
-                }>>('/api/v1/admin/workspaces/datasources/cached-stats'),
-                TIMEOUTS.ADMIN_LIST_MS,
-                'admin-overview.cached-stats.bulk',
-            ).catch(() => null)
-
-            // Reduce entries into per-workspace aggregates.
-            const byWs = new Map<string, { nodes: number; edges: number; types: Set<string> }>()
-            for (const [key, entry] of Object.entries(bulk ?? {})) {
-                if (entry.status === 'computing') continue
-                const wsId = key.slice(0, key.indexOf('/'))
-                const agg = byWs.get(wsId) ?? { nodes: 0, edges: 0, types: new Set<string>() }
-                agg.nodes += entry.nodeCount ?? 0
-                agg.edges += entry.edgeCount ?? 0
-                for (const t of Object.keys(entry.entityTypeCounts ?? {})) agg.types.add(t)
-                byWs.set(wsId, agg)
-            }
-
-            // A failed bulk read is "we don't know", not "there are none". One
-            // unhealthy data source can fail this single request for every
-            // workspace; overwriting good counts with zeros then told the
-            // operator the fleet was empty. Keep what we had.
-            if (bulk === null) {
-                console.warn('[admin-overview] cached-stats refresh failed; keeping the last known counts')
-                setInsights(prev => prev.length > 0 ? prev : workspaces.map(ws => ({
-                    ws, nodes: 0, edges: 0, sources: ws.dataSources?.length || 0, types: new Set<string>(),
-                })))
-                return
-            }
-            const results: WsInsight[] = workspaces.map(ws => {
-                const agg = byWs.get(ws.id) ?? { nodes: 0, edges: 0, types: new Set<string>() }
-                return {
-                    ws,
-                    nodes: agg.nodes,
-                    edges: agg.edges,
-                    sources: ws.dataSources?.length || 0,
-                    types: agg.types,
-                }
-            })
-            setInsights(results)
-        } catch (err) {
-            console.error('Failed to load insights', err)
-        } finally {
-            setIsLoading(false)
-        }
-    }, [])
-
-    useEffect(() => { loadInsights() }, [loadInsights])
-
-    // Aggregate totals
-    const totals = insights.reduce((acc, i) => ({
-        nodes: acc.nodes + i.nodes,
-        edges: acc.edges + i.edges,
-        sources: acc.sources + i.sources,
-        types: new Set([...acc.types, ...i.types]),
-    }), { nodes: 0, edges: 0, sources: 0, types: new Set<string>() })
-
+    const totals = summary?.totals
+    const rows = [...(summary?.workspaces ?? [])].sort((a, b) => b.nodes - a.nodes)
     const kpiValues: Record<string, number> = {
-        nodes: totals.nodes,
-        edges: totals.edges,
-        sources: totals.sources,
-        types: totals.types.size,
+        nodes: totals?.nodes ?? 0,
+        edges: totals?.edges ?? 0,
+        sources: totals?.dataSources ?? 0,
+        types: totals?.entityTypes.length ?? 0,
     }
 
-    if (isLoading) {
+    if (isLoading && !summary) {
         return (
             <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
                 {/* Header */}
@@ -178,6 +93,14 @@ export function AdminOverview() {
 
     return (
         <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
+            {error && !summary && (
+                <div role="alert" className="mb-6 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3">
+                    <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                    <p className="text-sm text-ink">
+                        The overview couldn't be loaded. These counts are unknown, not zero — try again in a moment.
+                    </p>
+                </div>
+            )}
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">
@@ -222,8 +145,8 @@ export function AdminOverview() {
                                 <div className={cn("w-9 h-9 rounded-lg border flex items-center justify-center mb-3", kpi.iconBg)}>
                                     <Icon className="w-4.5 h-4.5" />
                                 </div>
-                                <p className={cn("text-2xl font-bold", kpi.accent)}>
-                                    {compactNum(kpiValues[kpi.key] || 0)}
+                                <p className={cn("text-2xl font-bold tabular-nums", kpi.accent)}>
+                                    {totals ? compact(kpiValues[kpi.key]) : '—'}
                                 </p>
                                 <p className="text-xs text-ink-muted mt-1">{kpi.label}</p>
                             </div>
@@ -233,19 +156,35 @@ export function AdminOverview() {
             </div>
 
             {/* System Breakdown */}
-            <div className="flex items-center gap-4 mb-6">
+            <div className="flex items-center gap-4 mb-6 flex-wrap">
                 <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">
                     <Server className="w-4 h-4 text-ink-muted" />
-                    <span className="text-sm text-ink"><span className="font-bold">{providerCount}</span> Physical Connections</span>
+                    <span className="text-sm text-ink"><span className="font-bold">{providers?.length ?? '—'}</span> Physical Connections</span>
                 </div>
                 <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">
                     <Activity className="w-4 h-4 text-ink-muted" />
-                    <span className="text-sm text-ink"><span className="font-bold">{insights.length}</span> Isolated Workspaces</span>
+                    <span className="text-sm text-ink"><span className="font-bold">{totals?.workspaces ?? '—'}</span> Isolated Workspaces</span>
                 </div>
+                {(totals?.pendingDataSources ?? 0) > 0 && (
+                    <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500/5 border border-amber-500/20">
+                        <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />
+                        <span className="text-sm text-ink">
+                            Counting <span className="font-bold">{totals?.pendingDataSources}</span> source{totals?.pendingDataSources === 1 ? '' : 's'} — totals fill in on their own
+                        </span>
+                    </div>
+                )}
+                {(totals?.sharedGraphs ?? 0) > 0 && (
+                    <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border">
+                        <Share2 className="w-4 h-4 text-ink-muted" />
+                        <span className="text-sm text-ink">
+                            A graph used by several workspaces is counted once in the totals
+                        </span>
+                    </div>
+                )}
             </div>
 
             {/* Per-workspace breakdown table */}
-            {insights.length > 0 && (
+            {rows.length > 0 && (
                 <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
                     <table className="w-full">
                         <thead className="bg-black/5 dark:bg-white/5">
@@ -258,24 +197,24 @@ export function AdminOverview() {
                             </tr>
                         </thead>
                         <tbody>
-                            {insights.sort((a, b) => b.nodes - a.nodes).map((insight, i) => (
-                                <tr key={insight.ws.id} onClick={() => navigate(`/workspaces/${insight.ws.id}`)} className={cn("border-b last:border-b-0 border-glass-border hover:bg-black/[0.05] dark:hover:bg-white/[0.05] cursor-pointer transition-colors", i % 2 === 0 && "bg-black/[0.01] dark:bg-white/[0.01]")}>
+                            {rows.map((row, i) => (
+                                <tr key={row.id} onClick={() => navigate(`/workspaces/${row.id}`)} className={cn("border-b last:border-b-0 border-glass-border hover:bg-black/[0.05] dark:hover:bg-white/[0.05] cursor-pointer transition-colors", i % 2 === 0 && "bg-black/[0.01] dark:bg-white/[0.01]")}>
                                     <td className="px-5 py-3">
                                         <div className="flex items-center gap-2">
-                                            <span className="text-sm font-semibold text-ink">{insight.ws.name}</span>
-                                            {insight.ws.isDefault && (
+                                            <span className="text-sm font-semibold text-ink">{row.name}</span>
+                                            {row.isDefault && (
                                                 <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-indigo-500/10 text-indigo-500">DEFAULT</span>
                                             )}
                                         </div>
                                     </td>
-                                    <td className="px-5 py-3 text-right text-sm text-ink-secondary font-medium">{insight.sources}</td>
+                                    <td className="px-5 py-3 text-right text-sm text-ink-secondary font-medium">{row.dataSources}</td>
                                     <td className="px-5 py-3 text-right">
-                                        <span className="text-sm font-bold text-indigo-500">{compactNum(insight.nodes)}</span>
+                                        <span className="text-sm font-bold text-indigo-500 tabular-nums">{compact(row.nodes)}</span>
                                     </td>
                                     <td className="px-5 py-3 text-right">
-                                        <span className="text-sm font-bold text-violet-500">{compactNum(insight.edges)}</span>
+                                        <span className="text-sm font-bold text-violet-500 tabular-nums">{compact(row.edges)}</span>
                                     </td>
-                                    <td className="px-5 py-3 text-right text-sm text-ink-secondary font-medium">{insight.types.size}</td>
+                                    <td className="px-5 py-3 text-right text-sm text-ink-secondary font-medium">{row.entityTypes.length}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -285,12 +224,12 @@ export function AdminOverview() {
                     <div className="px-5 py-4 border-t border-glass-border bg-canvas-elevated">
                         <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-3 flex items-center gap-2"><Layers className="w-3.5 h-3.5 text-amber-500" /> Enterprise Data Model</h4>
                         <div className="flex flex-wrap gap-1.5">
-                            {[...totals.types].sort().map(type => (
+                            {(totals?.entityTypes ?? []).map(type => (
                                 <span key={type} className="px-2.5 py-1 text-[11px] font-medium rounded-full bg-amber-500/5 text-amber-600 dark:text-amber-400 border border-amber-500/20">
                                     {type}
                                 </span>
                             ))}
-                            {totals.types.size === 0 && <span className="text-xs text-ink-muted">No entity types discovered</span>}
+                            {(totals?.entityTypes.length ?? 0) === 0 && <span className="text-xs text-ink-muted">No entity types discovered</span>}
                         </div>
                     </div>
                 </div>

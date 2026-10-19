@@ -19,7 +19,7 @@ export const _ROLE_VISUAL_NONE = {
 export const _BUILTIN_ORDER: readonly string[] = [
     ROLE_NAMES.SUPER_ADMIN, ROLE_NAMES.ORG_ADMIN, ROLE_NAMES.ORG_AUDITOR,
     ROLE_NAMES.WORKSPACE_ADMIN, ROLE_NAMES.WORKSPACE_DATA_ENGINEER,
-    ROLE_NAMES.WORKSPACE_MEMBER, ROLE_NAMES.WORKSPACE_VIEWER,
+    ROLE_NAMES.WORKSPACE_STEWARD, ROLE_NAMES.WORKSPACE_MEMBER, ROLE_NAMES.WORKSPACE_VIEWER,
 ]
 
 export const _ROLE_FALLBACK_DESC: Record<string, string> = {
@@ -28,6 +28,7 @@ export const _ROLE_FALLBACK_DESC: Record<string, string> = {
     [ROLE_NAMES.ORG_AUDITOR]: 'Read-only access to every workspace and the activity log.',
     [ROLE_NAMES.WORKSPACE_ADMIN]: 'Full control inside the workspace — members, settings, and content.',
     [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Owns data sources, semantic layers, and views inside the workspace.',
+    [ROLE_NAMES.WORKSPACE_STEWARD]: 'A member who also answers access requests and adds people as viewers or members.',
     [ROLE_NAMES.WORKSPACE_MEMBER]: 'Day-to-day contributor. Creates and edits views and data sources.',
     [ROLE_NAMES.WORKSPACE_VIEWER]: 'Read-only access to the workspace.',
 }

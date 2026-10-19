@@ -75,9 +75,15 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "inviteLinksEnabled":
         "Invite links are turned off for this deployment. "
         "An administrator can enable them under Admin → Features, or create your account directly.",
+    "workspaceDirectoryEnabled":
+        "Find a workspace is turned off for this deployment. Ask a colleague for a link to the "
+        "workspace, or an administrator can enable it under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
+    "layoutTemplatesEnabled":
+        "Layout templates are turned off for this deployment. "
+        "An administrator can enable them under Admin → Features.",
     "graphExportEnabled":
         "Exporting graph data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -246,6 +252,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         # operator should turn that on knowing their deployment, not inherit it.
         "default_value": json.dumps(False),
         "options": None,
+        "deprecated": False,
     },
     {
         "key": "analyticsPublicEnabled",
@@ -333,6 +340,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "entirely would leave nobody able to build anything, so at least one layout must stay on."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "layoutTemplatesEnabled",
+        "name": "Layout templates",
+        "description": (
+            "A library of reusable layer layouts to start Context Views from — the built-ins, the "
+            "organization's, each workspace's and people's own — shared with teams, versioned, "
+            "and offered to the views built from them when they change."
+        ),
+        "impact_when_off": (
+            "Templates leaves the sidebar, the Dashboard, search and the command palette; the View "
+            "wizard offers only the layouts suggested by the data; Save as template and template "
+            "updates disappear from views; and the server refuses every template request. Nothing "
+            "is deleted: views built from a template keep their layers, and turning this back on "
+            "brings every template, share, version and favorite back as it was."
+        ),
+        "category_id": "views",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn it off where every view's layers should be built by hand — or while your "
+            "organization's templates are still being prepared."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     # ── Authentication ─────────────────────────────────────────────────────────
@@ -502,6 +536,31 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "portal users need keys and you accept that."
         ),
         "sort_order": 5,
+        "deprecated": False,
+    },
+    {
+        "key": "workspaceDirectoryEnabled",
+        "name": "Find a workspace",
+        "description": (
+            "Let everyone who can sign in browse the organization's workspaces — what each is "
+            "for, who answers requests and how access works — and ask to join one."
+        ),
+        "impact_when_off": (
+            "The Find a workspace tab disappears and the server refuses the directory. People "
+            "can still ask to join a workspace from a link someone shares with them, and "
+            "approvers still answer every request. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "On, every workspace's name and description is visible to everyone who can sign in, "
+            "except the workspaces whose admins hide them in their access settings. Leave it off "
+            "if the names of workspaces are themselves sensitive."
+        ),
+        "sort_order": 6,
         "deprecated": False,
     },
     # ── Lineage ────────────────────────────────────────────────────────────────

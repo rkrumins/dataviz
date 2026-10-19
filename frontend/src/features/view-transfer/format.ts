@@ -60,6 +60,7 @@ export const VERSION_SOURCE_LABEL: Record<ViewVersionSource, string> = {
   export: 'Saved for export',
   manual: 'Saved',
   snapshot: 'Saved automatically',
+  template: 'Template update applied',
 }
 
 export function pluralize(count: number, one: string, many = `${one}s`): string {

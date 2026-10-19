@@ -26,6 +26,7 @@ export const ROLE_NAMES = {
     WORKSPACE_DATA_ENGINEER: 'workspace_data_engineer',
     WORKSPACE_MEMBER: 'workspace_member',
     WORKSPACE_PUBLISHER: 'workspace_publisher',
+    WORKSPACE_STEWARD: 'workspace_steward',
     WORKSPACE_VIEWER: 'workspace_viewer',
 } as const
 
@@ -62,6 +63,7 @@ export const WORKSPACE_TEMPLATE_ROLES: readonly RoleName[] = [
     ROLE_NAMES.WORKSPACE_DATA_ENGINEER,
     ROLE_NAMES.WORKSPACE_MEMBER,
     ROLE_NAMES.WORKSPACE_PUBLISHER,
+    ROLE_NAMES.WORKSPACE_STEWARD,
     ROLE_NAMES.WORKSPACE_VIEWER,
 ]
 

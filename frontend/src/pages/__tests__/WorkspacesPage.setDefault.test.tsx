@@ -21,7 +21,7 @@ const { listWorkspaces, setDefault } = vi.hoisted(() => ({
 }))
 
 vi.mock('@/services/workspaceService', () => ({
-    workspaceService: { list: listWorkspaces, setDefault, getImpact: vi.fn(), delete: vi.fn() },
+    workspaceService: { list: listWorkspaces, summary: vi.fn().mockResolvedValue({ coverage: 'all', totals: { workspaces: 0, dataSources: 0, activeDataSources: 0, pendingDataSources: 0, nodes: 0, edges: 0, entityTypes: [], views: 0, sharedGraphs: 0 }, workspaces: [] }), setDefault, getImpact: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('@/services/catalogService', () => ({
     catalogService: { list: vi.fn().mockResolvedValue([]), listWithBindings: vi.fn().mockResolvedValue([]) },

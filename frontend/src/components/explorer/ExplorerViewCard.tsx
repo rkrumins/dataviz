@@ -32,6 +32,7 @@ import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { ContributorTrail } from '@/features/view-filters/components/ContributorTrail'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
+import { layersOfViewConfig } from '@/components/templates/fromView'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -446,6 +447,7 @@ export function ExplorerViewCard({
             editDisabled={editDisabled}
             onDelete={() => onDelete?.()}
             onShare={onManageSharing ?? onShare}
+            templateLayers={view.viewType === 'reference' ? layersOfViewConfig(view.config) : undefined}
           />
             </>
           )}
@@ -491,7 +493,7 @@ export function ExplorerViewCard({
             <ViewScopeBadge
               workspaceId={view.workspaceId}
               workspaceName={view.workspaceName}
-              ontologyName={providerInfo?.ontologyName ?? view.contextModelName}
+              ontologyName={providerInfo?.ontologyName}
               ontologyVersion={providerInfo?.ontologyVersion}
               hideWorkspace={hideWorkspaceInScope}
               parts={['workspace', 'ontology']}

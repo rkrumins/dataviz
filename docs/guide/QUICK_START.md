@@ -66,7 +66,7 @@ sidebar are **Getting started** (your checklist), **User Guide** and
 | The theme button | Cycles between light, dark and your system's theme |
 | The question mark (**Help**, or press `?`) | Searches this guide and the documentation without leaving the page |
 | The cog (**Administration**) | The admin console — Super Admins and Org Admins only |
-| Your avatar | **Account settings**, **My access**, **Identities**, **Reduce motion** and **Sign Out** |
+| Your avatar | **Account settings**, **My access**, **Identities**, **API keys**, **Preferences**, **Reduce motion** and **Sign Out** |
 
 If you can invite people, there's one more bell, **Invite activity**, showing who
 has joined through your invite links.
@@ -103,6 +103,12 @@ you reach it. Two other routes to the same place:
 
 **You should now see** the Explorer, with a **Workspace:** chip above the
 results naming the workspace you picked.
+
+> **Not in a workspace yet?** The Dashboard says **You're not in a workspace
+> yet** instead of showing business areas. Click **Find a workspace**, find your
+> team's, and click **Request access** — or, if there's no **Find a workspace**
+> button, ask a colleague for a link to their workspace and request access from
+> there. See [Requesting Access](/guide/requesting-access#find-a-workspace).
 
 ---
 

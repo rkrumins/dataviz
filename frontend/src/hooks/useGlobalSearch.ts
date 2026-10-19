@@ -3,7 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import { listViews, type View } from '@/services/viewApiService'
 import { useDebouncedValue } from './useDebouncedValue'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
-import { useDashboardData, type TemplateBrief, type OntologyBrief } from './useDashboardData'
+import { useDashboardData, type OntologyBrief } from './useDashboardData'
+import { useLayoutTemplates } from './useLayoutTemplates'
+import type { LayoutTemplate } from '@/services/layoutTemplateService'
 import { useAnalyticsAccess } from './useAnalyticsAccess'
 import { scoreCandidates, type FieldSpec } from '@/utils/searchScoring'
 import { getIndex, runSearch, type DocsSearchArea } from '@/components/docs/search/useDocsSearchIndex'
@@ -11,6 +13,7 @@ import { interpolateBrand } from '@/lib/brandText'
 import { PAGE_INDEX, pageAllowed, type PageEntry } from '@/lib/pageIndex'
 import { usePermissionClaims } from '@/store/auth'
 import { useBrand } from '@/store/branding'
+import { isFeatureOn, useFeaturesStore } from '@/store/features'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
 
 export type SearchCategory =
@@ -67,7 +70,7 @@ export interface ViewHit extends BaseHit {
 
 export interface TemplateHit extends BaseHit {
     category: 'Template'
-    template: TemplateBrief
+    template: LayoutTemplate
 }
 
 export interface OntologyHit extends BaseHit {
@@ -130,7 +133,7 @@ const VIEW_FIELDS: FieldSpec<View>[] = [
     { get: v => v.workspaceName, weight: 0.3 },
 ]
 
-const TEMPLATE_FIELDS: FieldSpec<TemplateBrief>[] = [
+const TEMPLATE_FIELDS: FieldSpec<LayoutTemplate>[] = [
     { get: t => t.name, weight: 1.0 },
     { get: t => t.description, weight: 0.4 },
     { get: t => t.category, weight: 0.3 },
@@ -170,8 +173,9 @@ const DATA_SOURCE_FIELDS: FieldSpec<DataSourceWithContext>[] = [
  *   per query string). This is the critical fix — both Dashboard and Palette
  *   used to filter only their in-memory subsets, missing any view not in
  *   the active schema/recent list.
+ * - Templates: the layout template library, loaded once there is a query.
  * - Everything else: ranked client-side from `useDashboardData()`, which
- *   already loads workspaces / templates / ontologies into the dashboard.
+ *   already loads workspaces / ontologies into the dashboard.
  *
  * `appWide` adds the product itself — pages and settings this reader may
  * open, and the docs/guide full text. The Dashboard hero searches content
@@ -186,7 +190,8 @@ export function useGlobalSearch(
     const trimmed = rawQuery.trim()
     const debouncedQuery = useDebouncedValue(trimmed, 150)
 
-    const { workspaces, templates, ontologies } = useDashboardData()
+    const { workspaces, ontologies } = useDashboardData()
+    const { templates } = useLayoutTemplates({ enabled: debouncedQuery.length > 0 })
 
     // Read unconditionally — rules of hooks, and each is one store slice.
     // Only the filtering below is skipped for a content-only caller.
@@ -194,6 +199,8 @@ export function useGlobalSearch(
     const sidebar = useNavCatalogueStore(s => s.sidebar)
     const adminSections = useNavCatalogueStore(s => s.adminSections)
     const analyticsAllowed = useAnalyticsAccess().allowed
+    // A page behind a switch leaves search the moment an admin turns it off.
+    const featureValues = useFeaturesStore(s => s.values)
     const brand = useBrand()
 
     // The palette must offer no door that then slams: same catalogue
@@ -202,10 +209,13 @@ export function useGlobalSearch(
         () =>
             appWide
                 ? PAGE_INDEX.filter(entry =>
-                    pageAllowed(entry, { claims, sidebar, adminSections, analyticsAllowed })
+                    pageAllowed(entry, {
+                        claims, sidebar, adminSections, analyticsAllowed,
+                        featureOn: key => isFeatureOn(featureValues, key),
+                    })
                 )
                 : [],
-        [appWide, claims, sidebar, adminSections, analyticsAllowed]
+        [appWide, claims, sidebar, adminSections, analyticsAllowed, featureValues]
     )
 
     const viewsQuery = useQuery({
@@ -289,7 +299,7 @@ export function useGlobalSearch(
             id: `tpl-${item.id}`,
             category: 'Template',
             name: item.name,
-            description: item.description,
+            description: item.description ?? undefined,
             score,
             template: item,
         }))

@@ -44,8 +44,6 @@ GET /api/v1/views/{view_id}/versions/status resource
 GET /api/v1/views/{view_id}/versions/{version} resource
 GET /api/v1/{ws_id}/assets/rule-sets resource
 GET /api/v1/{ws_id}/assets/rule-sets/{rule_set_id} resource
-GET /api/v1/{ws_id}/context-models/templates resource
-GET /api/v1/{ws_id}/context-models/templates/{template_id} resource
 GET /api/v1/{ws_id}/graph/alignment-analysis resource
 GET /api/v1/{ws_id}/graph/bootstrap/duplicates resource
 GET /api/v1/{ws_id}/graph/bootstrap/status resource

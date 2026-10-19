@@ -200,6 +200,7 @@ export function AppLayout() {
           importFile={initialScope.importFile}
           importIntoViewId={initialScope.importIntoViewId}
           importUploadId={initialScope.importUploadId}
+          initialTemplateId={initialScope.templateId}
         />
 
         <HelpPanel />

@@ -1,9 +1,139 @@
 {
   "schema": [
     {
+      "key": "analyticsWorkspaceVisibility",
+      "name": "Show every workspace in Analytics",
+      "description": "Let everyone see each workspace's name and figures in Analytics, including workspaces they are not a member of. Reporting only \u2014 it does not grant access to the workspace itself, and links into a workspace still appear only for people who can actually open it.",
+      "category": "analytics",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this on for a single-company deployment where workspace names are team names rather than secrets. It widens what Analytics REPORTS beyond what workspace permissions allow, so the change is recorded in the feature-change log. The alternative, if you want people to see everything everywhere, is to grant them the 'system:org-viewer' permission \u2014 that widens the whole product consistently instead of just this page.",
+      "impactWhenOff": "Workspaces someone is not a member of appear as locked rows: counted in the platform totals, with their name and figures hidden. This matches how the rest of the product already scopes workspaces.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /admin/analytics/* \u2014 when on, workspace names and figures are reported for every workspace rather than only the reader's own. Does NOT grant access to the workspace itself."
+      ],
+      "uiSurfaces": [
+        "Locked rows in the Workspaces table",
+        "Redacted names in the workspace and view leaderboards"
+      ],
+      "stillAllowed": [
+        "Platform-wide totals always count every workspace",
+        "Opening a workspace still requires the usual permissions"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "analyticsPrivacyMode",
+      "name": "What everyone can see",
+      "description": "How much detail Analytics shows to people who are not administrators or auditors. Workspace access is never affected by this setting \u2014 that always follows the same permissions as the rest of the product.",
+      "category": "analytics",
+      "type": "string",
+      "default": "internal",
+      "options": [
+        {
+          "id": "strict",
+          "label": "Aggregate only"
+        },
+        {
+          "id": "internal",
+          "label": "Show colleagues"
+        },
+        {
+          "id": "full",
+          "label": "Show colleagues and operations"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": "Aggregate only \u2014 counts and trends, nobody is ever named. Show colleagues \u2014 adds leaderboards and who built what; right for an internal deployment, though publishing per-person activity to all staff is a works-council question in parts of the EU. Show colleagues and operations \u2014 also adds access-request backlogs, invite acceptance and refresh failures. None of these reveal a workspace someone cannot already open.",
+      "impactWhenOff": "Not applicable \u2014 this is a choice between levels rather than a switch. If the value cannot be read, Analytics falls back to aggregate-only.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /admin/analytics/* \u2014 decides whether a non-privileged reader is shown individual activity (internal, full) and operational health (full). Never affects workspace or view access, which follow the app's own permissions."
+      ],
+      "uiSurfaces": [
+        "Leaderboards and per-person panels on Overview, Engagement and Content",
+        "The freshness and access-friction sections of the Health tab"
+      ],
+      "stillAllowed": [
+        "Platform-wide counts and trends at every level",
+        "Full detail for workspaces the reader can already open",
+        "Their own activity, at every level"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "analyticsShowEmailAddresses",
+      "name": "Let people contact each other from Analytics",
+      "description": "Show a colleague's email address beside their name in Analytics, so someone who finds the person behind a view or a busy workspace can reach out without hunting for them. Only where the person is attached to something the reader can already open \u2014 never on the platform-wide activity ranking.",
+      "category": "analytics",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": null,
+      "impactWhenOff": "Names still appear (subject to the privacy level); addresses do not. The reader can still reach a view's author the way they always could \u2014 by opening the view, where the address has always been shown.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /admin/analytics/* \u2014 adds a contact address to a view's creator and to a workspace's contributors, only where the reader could already see that person's name. Never reaches the platform-wide activity ranking, whatever this is set to."
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Reaching a view's author from the view itself, which never needed this",
+        "Everything the privacy level already governs \u2014 this can only narrow it"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "analyticsPublicEnabled",
+      "name": "Analytics for everyone",
+      "description": "Open the Analytics section to every signed-in person, not just administrators and auditors. Everyone sees platform-wide growth and usage; workspaces they are not a member of stay locked, and no individual's activity is ever shown.",
+      "category": "analytics",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turning this on is a disclosure decision. Non-privileged people see aggregate growth and usage for the whole platform, plus full detail for workspaces they belong to. Names of other workspaces, their data sources, and every per-person leaderboard stay hidden no matter who is looking.",
+      "impactWhenOff": "Analytics disappears from the sidebar for everyone except administrators, auditors and organisation admins, and the server refuses their requests. Privileged users keep the full section either way \u2014 this switch only decides whether everyone else gets the redacted view.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /admin/analytics/* \u2014 a caller without system:audit:read, system:org-admin or system:admin is refused outright when this is off, and served a redacted document when it is on"
+      ],
+      "uiSurfaces": [
+        "The Analytics item in the sidebar, for non-privileged people",
+        "The /analytics route guard"
+      ],
+      "stillAllowed": [
+        "Administrators, auditors and organisation admins keep the full Analytics section regardless of this switch"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "editModeEnabled",
       "name": "Edit mode",
-      "description": "Let people change the data itself \u2014 editing node properties from a view and saving those changes back to the source.",
+      "description": "Let people change the data itself \u2014 editing entities and their properties in a draft of a view, then publishing the draft. A data source without version control stays read-only.",
       "category": "editing",
       "type": "boolean",
       "default": true,
@@ -81,6 +211,41 @@
       "dependsOn": []
     },
     {
+      "key": "layoutTemplatesEnabled",
+      "name": "Layout templates",
+      "description": "A library of reusable layer layouts to start Context Views from \u2014 the built-ins, the organization's, each workspace's and people's own \u2014 shared with teams, versioned, and offered to the views built from them when they change.",
+      "category": "views",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn it off where every view's layers should be built by hand \u2014 or while your organization's templates are still being prepared.",
+      "impactWhenOff": "Templates leaves the sidebar, the Dashboard, search and the command palette; the View wizard offers only the layouts suggested by the data; Save as template and template updates disappear from views; and the server refuses every template request. Nothing is deleted: views built from a template keep their layers, and turning this back on brings every template, share, version and favorite back as it was.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /layout-templates route \u2014 the library, saves, shares, versions, favorites, featuring and requests to offer a template to everyone",
+        "PUT /views/{id}/template-version \u2014 marking a view up to date with its template"
+      ],
+      "uiSurfaces": [
+        "Templates in the sidebar, its page, and the Dashboard's Layout templates",
+        "The template library, Save as template and a workspace's default template on the View wizard's Layout step",
+        "Save layers as a template in the view card menu and the canvas Import / Export menu",
+        "Template update offers on a view's header and details",
+        "Templates in search and the command palette"
+      ],
+      "stillAllowed": [
+        "Views built from a template keep their layers and keep working",
+        "Templates, shares, versions and favorites are kept \u2014 turning this on brings them back",
+        "The layouts the View wizard suggests from the data itself"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "signupEnabled",
       "name": "Self-registration",
       "description": "Let anyone who reaches the login page create their own account.",
@@ -138,6 +303,185 @@
         "Outstanding links stay listed so they can be reviewed and revoked",
         "Turning it back on revives every link that has not expired",
         "Existing users sign in as normal"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "apiKeysEnabled",
+      "name": "API keys",
+      "description": "Let people create API keys from their account, so scripts and services can read and change the views and data they can reach, acting as them. Each key can be limited to particular workspaces, views and data sources, and to reading only.",
+      "category": "auth",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "This is the kill switch for every key at once \u2014 use it if keys are being misused and you need them all stopped while you look. To stop one person's keys, revoke them from Administration \u2192 API keys instead.",
+      "impactWhenOff": "Every API key stops working within half a minute, and nobody can create a new one. Keys are not deleted: people can still see and revoke theirs, and turning this back on brings back every key that has not expired or been revoked. Signing in with a browser is unaffected.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every request made with an API key \u2014 refused while off",
+        "POST /me/api-keys and /me/api-keys/{id}/rotate \u2014 refuse to mint a key"
+      ],
+      "uiSurfaces": [
+        "Create key and Rotate on Account \u2192 API keys"
+      ],
+      "stillAllowed": [
+        "Keys are kept, not deleted \u2014 turning this back on restores every key still in date",
+        "Signing in with a browser, and everything done that way"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "apiKeyMaxLifetime",
+      "name": "Longest an API key may live",
+      "description": "The most time any API key may stay valid, counted from when it was created. People choose their key's expiry within this.",
+      "category": "auth",
+      "type": "string",
+      "default": "none",
+      "options": [
+        {
+          "id": "none",
+          "label": "No maximum"
+        },
+        {
+          "id": "365",
+          "label": "1 year"
+        },
+        {
+          "id": "180",
+          "label": "180 days"
+        },
+        {
+          "id": "90",
+          "label": "90 days"
+        },
+        {
+          "id": "30",
+          "label": "30 days"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": "Keys that never expire are the ones still working long after the person who made them has forgotten them. If your organisation rotates credentials on a schedule, set this to match it.",
+      "impactWhenOff": "This is a ceiling, not a switch. Lowering it also shortens keys that already exist: a key older than the new maximum stops working at once, and its owner has to create a new one. 'No maximum' lets people create keys that never expire.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every request made with an API key \u2014 a key older than the maximum is refused as expired"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Keys younger than the maximum keep working until their own expiry"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "apiKeySsoSignInWindow",
+      "name": "Pause keys of people who stop signing in",
+      "description": "For people who sign in through your identity provider: their API keys pause when they have not signed in through it for this long, and resume the next time they do. This is how someone who has left \u2014 and so can no longer sign in \u2014 stops having working keys.",
+      "category": "auth",
+      "type": "string",
+      "default": "30",
+      "options": [
+        {
+          "id": "14",
+          "label": "After 14 days"
+        },
+        {
+          "id": "30",
+          "label": "After 30 days"
+        },
+        {
+          "id": "90",
+          "label": "After 90 days"
+        },
+        {
+          "id": "off",
+          "label": "Never pause"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": "Keep this on unless your identity provider also deprovisions people here directly. People who sign in with a password are not affected: suspending their account stops their keys at once.",
+      "impactWhenOff": "With 'Never pause', a person removed from your identity provider keeps working API keys until an administrator suspends their account or revokes the keys: the platform only learns they have gone when they next try to sign in. A shorter window stops a leaver's keys sooner, and asks everyone else to sign in a little more often.",
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every request made with an API key \u2014 paused while its owner's last identity-provider sign-in is older than the window"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "A paused key resumes when its owner signs in again; nothing is revoked",
+        "Owners who sign in with a password are not affected"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "apiKeySsoRoundTripStepUp",
+      "name": "Accept a fresh sign-in round trip for API keys",
+      "description": "Creating or rotating an API key asks the person to confirm it's them. Through an identity provider, that means a sign-in the provider proves happened in the last 15 minutes \u2014 which OIDC and SAML connections report \u2014 or, through an Enterprise gateway, the gateway confirming the company session. Portal connections can do neither; with this on, a sign-in through one in the last 15 minutes is accepted instead.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Off is the safer choice: a provider that signs someone back in silently from a session it still holds proves nothing about who is at the keyboard, so on an unlocked machine anyone could mint a key. Turn it on only if your gateway or portal users need keys and you accept that.",
+      "impactWhenOff": "People whose sign-in goes through a portal connection can't create or rotate API keys; they can still use and revoke the keys they have. People on OIDC, SAML or Enterprise gateway connections, and people who sign in with a password, are not affected.",
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "POST /me/api-keys and /me/api-keys/{id}/rotate \u2014 a session from a portal connection, which can neither prove a fresh sign-in nor be asked, is refused (step_up_unavailable) while off"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Using, describing and revoking existing keys",
+        "Creating keys after a proven identity-provider sign-in, a gateway's confirmation, or with a password"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "workspaceDirectoryEnabled",
+      "name": "Find a workspace",
+      "description": "Let everyone who can sign in browse the organization's workspaces \u2014 what each is for, who answers requests and how access works \u2014 and ask to join one.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "On, every workspace's name and description is visible to everyone who can sign in, except the workspaces whose admins hide them in their access settings. Leave it off if the names of workspaces are themselves sensitive.",
+      "impactWhenOff": "The Find a workspace tab disappears and the server refuses the directory. People can still ask to join a workspace from a link someone shares with them, and approvers still answer every request. Nothing is deleted.",
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /workspace-directory \u2014 refused while off",
+        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed"
+      ],
+      "uiSurfaces": [
+        "The Find a workspace tab on Workspaces, and its entry in search",
+        "The way in offered to someone with no workspace \u2014 on the Dashboard, Workspaces and My Access"
+      ],
+      "stillAllowed": [
+        "Asking to join from a link someone shared, and answering every request",
+        "Workspaces, their access settings and every request are kept"
       ],
       "dependsOn": []
     },
@@ -224,14 +568,62 @@
         "GET /graphs/{id}/exports/plan and /stream \u2014 check, then download, a streamed export",
         "GET /graph/export/plan and /stream \u2014 the same for a data source without version control",
         "POST /graphs/{id}/exports \u2014 start an export job",
-        "GET /graphs/{id}/exports/{job}/download \u2014 take the file"
+        "GET /graphs/{id}/exports/{job}/download \u2014 take the file",
+        "POST /graph/search/exports and GET /graph/search/exports/{id}/download \u2014 write, then take, every match of a search"
       ],
       "uiSurfaces": [
-        "Export controls on the canvas and the context-view menu"
+        "Export controls on the canvas and the context-view menu",
+        "Export on a search's matches"
       ],
       "stillAllowed": [
         "Reading, filtering and tracing every graph in the product",
         "Exports already downloaded are not recalled \u2014 this stops NEW ones"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "enterpriseViewPolicy",
+      "name": "Publishing views to everyone",
+      "description": "How far a workspace may open publishing on its own. Publishing a view makes it readable by anyone signed in, and gives them read-only access to the data source behind it.",
+      "category": "governance",
+      "type": "string",
+      "default": "workspaces",
+      "options": [
+        {
+          "id": "workspaces",
+          "label": "Workspaces decide"
+        },
+        {
+          "id": "request",
+          "label": "Always require approval"
+        },
+        {
+          "id": "off",
+          "label": "Not available"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": "Leave this on 'Workspaces decide' unless your organisation needs a rule that a workspace admin cannot opt out of. What these views expose is metadata \u2014 names, types and the lineage between them \u2014 so the default is deliberately open; tightening it everywhere is a real cost to how people share their work. If only a few sources are sensitive, mark THOSE restricted in the workspace's Views tab instead of closing the whole platform.",
+      "impactWhenOff": "This is a ceiling, not a switch \u2014 it caps how open any workspace can be, and no workspace admin can go past it. 'Always require approval' overrides workspaces that have opened publishing to their members: they can still ASK, and a publisher still answers. 'Not available' withdraws the tier from new work \u2014 views already published keep working and can still be unpublished, which is never blocked.",
+      "sortOrder": 0,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "PUT /views/{id}/visibility \u2014 refuses a move TO enterprise the ceiling forbids",
+        "POST /views \u2014 refuses creating one directly as enterprise",
+        "POST /views/{id}/publish-request/approve \u2014 refuses to complete the publish"
+      ],
+      "uiSurfaces": [
+        "Enterprise tile in the View wizard, Share dialog and Details panel",
+        "Bulk 'Publish to everyone' in the Explorer"
+      ],
+      "stillAllowed": [
+        "Views already published keep working and stay readable",
+        "UNPUBLISHING is never blocked \u2014 closing something down must always be possible",
+        "Private and workspace sharing, and sharing with named people or groups"
       ],
       "dependsOn": []
     },
@@ -640,6 +1032,91 @@
         "The Help panel and every guide stay available whether tours are on or off"
       ],
       "dependsOn": []
+    },
+    {
+      "key": "canvasLayerFoldEnabled",
+      "name": "Fold distant layers",
+      "description": "Offer a Fold button on the Context View: layers outside the part of the canvas being read fold into slim spines, so a wide view fits on screen and a line into a folded layer lands on its spine instead of scrolling away.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Worth turning on for views with many layers. Each person still chooses whether to fold \u2014 this only offers the button. Client-side only and safe to toggle at any time.",
+      "impactWhenOff": "The Fold button disappears and every layer stays at full width; a wide view scrolls sideways, and lines to layers out of sight show as ghosts at the canvas edge. Folding one layer by hand from its header keeps working. This is a preview; it ships off until you switch it on.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": false,
+      "posture": "capability",
+      "serverGates": [],
+      "uiSurfaces": [
+        "Fold button in the Context View layer strip",
+        "Layers folded into spines to fit the canvas"
+      ],
+      "stillAllowed": [
+        "Every layer stays on the canvas at full width, and the canvas scrolls sideways",
+        "A line to a layer scrolled out of sight still shows, as a ghost at the canvas edge",
+        "Folding a single layer by hand from its header"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "canvasLineageRollupEnabled",
+      "name": "Roll up lineage to unloaded entities",
+      "description": "Retired: this switch no longer does anything. A line whose far end is an entity the canvas has not loaded \u2014 inside a collapsed container, say \u2014 always rolls up to the nearest container on screen, because where that entity sits is how the canvas tells lineage inside the view from lineage that leaves it.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Nothing to decide: the switch is retired and will be removed in a later release.",
+      "impactWhenOff": "None. The switch is retired and nothing reads it; roll-ups are always on.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "deprecated",
+      "implemented": false,
+      "enforcedServerSide": false,
+      "posture": "capability",
+      "serverGates": [],
+      "uiSurfaces": [],
+      "stillAllowed": [],
+      "dependsOn": []
+    },
+    {
+      "key": "placementContractEnabled",
+      "name": "One placement rule for every view surface",
+      "description": "Decide which layer each entity sits in with one shared rule everywhere: the canvas, Layer Studio, the trace overlay, search badges, Build Mode and view imports, so they can no longer disagree.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Run the placement dry run first (python -m backend.scripts.placement_dry_run) and review the views it lists. While this is on, creating a view or saving its layers refuses a new or changed layer rule that can never match. Safe to switch back off at any time.",
+      "impactWhenOff": "Every surface keeps today's placement, including its known disagreements: an entity type two layers claim can land in either column depending on load order, and Layer Studio can show a different column from the canvas. Saved views are not changed either way. While it is on, an entity created in an open view is pinned to a layer only where the rule would put it elsewhere, so after turning it off such entities follow today's rules. This is a preview; it ships off until you switch it on.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/assignments/compute \u2014 places with the shared placement contract",
+        "View-scoped import \u2014 a new top-level entity is pinned to a layer only where the contract would place it elsewhere",
+        "POST /views and PUT /views/{id}/layout \u2014 a new or changed layer rule that can never match is refused"
+      ],
+      "uiSurfaces": [
+        "Context View columns, trace overlay lanes and search-hit layer badges",
+        "The View wizard's preview and assignment tree, and Layer Studio",
+        "Build Mode and rail create pin a layer only where the contract would place the entity elsewhere"
+      ],
+      "stillAllowed": [
+        "Saved views are not rewritten \u2014 turning this off restores today's placement",
+        "Layer rules already saved keep loading, even ones that can never match",
+        "Search's Layer filter, view-scoped export and scoped replace keep today's rules"
+      ],
+      "dependsOn": []
     }
   ],
   "categories": [
@@ -749,9 +1226,9 @@
       "icon": "BarChart3",
       "color": "teal",
       "sortOrder": 9,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved. Full behaviour for this section will be enabled in a future update."
+      "preview": false,
+      "previewLabel": null,
+      "previewFooter": null
     },
     {
       "id": "experimental",
@@ -785,6 +1262,10 @@
     }
   ],
   "defaults": {
+    "analyticsWorkspaceVisibility": false,
+    "analyticsPrivacyMode": "internal",
+    "analyticsShowEmailAddresses": false,
+    "analyticsPublicEnabled": false,
     "editModeEnabled": true,
     "allowedViewModes": [
       "graph",
@@ -792,11 +1273,18 @@
       "reference",
       "layered-lineage"
     ],
+    "layoutTemplatesEnabled": true,
     "signupEnabled": false,
     "inviteLinksEnabled": true,
+    "apiKeysEnabled": true,
+    "apiKeyMaxLifetime": "none",
+    "apiKeySsoSignInWindow": "30",
+    "apiKeySsoRoundTripStepUp": false,
+    "workspaceDirectoryEnabled": false,
     "versioningEnabled": true,
     "traceEnabled": true,
     "graphExportEnabled": true,
+    "enterpriseViewPolicy": "workspaces",
     "blankModelsEnabled": true,
     "viewPortabilityEnabled": false,
     "viewExportEnabled": true,
@@ -809,7 +1297,10 @@
     "semanticLayerAutoSuggest": true,
     "semanticLayerVersionHistory": true,
     "announcementsEnabled": true,
-    "toursEnabled": false
+    "toursEnabled": false,
+    "canvasLayerFoldEnabled": false,
+    "canvasLineageRollupEnabled": false,
+    "placementContractEnabled": false
   },
   "experimentalNotice": {
     "title": "Early access",

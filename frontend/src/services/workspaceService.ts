@@ -6,6 +6,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import type { AccessRequestStatus, WorkspaceAccessMode } from './accessRequestsService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -120,6 +121,42 @@ export interface WorkspaceUpdateRequest {
      *  Omit to leave untouched; "" clears it back to unset. */
     identityProperty?: string
     nameProperty?: string
+    /** The layout template new views here start from (workspace:admin); "" clears it. */
+    defaultLayoutTemplateId?: string
+    /** Listed in Find a workspace (while the deployment's switch is on). */
+    directoryListed?: boolean
+    /** Who decides membership: approvers here, or the identity provider's groups. */
+    accessMode?: WorkspaceAccessMode
+    /** Shown to people asking to join; "" clears it. */
+    accessNote?: string
+}
+
+/** Your open request on a Find a workspace entry. */
+export interface WorkspaceDirectoryRequest {
+    id: string
+    status: AccessRequestStatus
+    requestedRole: string
+    createdAt: string
+    idpGroup: string | null
+}
+
+/** A workspace in Find a workspace: what it is, who is in it and who answers
+ *  requests (ids — name them with the people lookup), how access works, and
+ *  where you stand. */
+export interface WorkspaceDirectoryEntry {
+    id: string
+    name: string
+    description: string | null
+    dataSourceCount: number
+    peopleCount: number
+    approverIds: string[]
+    approverCount: number
+    accessMode: WorkspaceAccessMode
+    accessNote: string | null
+    directoryListed: boolean
+    canOpen: boolean
+    yourRoles: string[]
+    openRequest: WorkspaceDirectoryRequest | null
 }
 
 export interface WorkspaceResponse {
@@ -134,8 +171,9 @@ export interface WorkspaceResponse {
     /** People/groups with access. Rides along with the list — asking per card
      *  would be one request per workspace. */
     memberCount?: number
-    /** Live (non-deleted) views built on this workspace. */
-    viewCount?: number
+    /** Live views built on this workspace that the caller can open — the full
+     *  list only; null where it was not counted. */
+    viewCount?: number | null
     /** Publication gate for this workspace's views. Absent on servers that
      *  predate the setting — treat a missing value as 'request'. */
     publishPolicy?: WorkspacePublishPolicy
@@ -143,6 +181,13 @@ export interface WorkspaceResponse {
      *  so its sources fall through to the platform default. */
     identityProperty?: string | null
     nameProperty?: string | null
+    /** The layout template a new view here starts from, if any. */
+    defaultLayoutTemplateId?: string | null
+    /** Joining: listed in Find a workspace, who decides membership, and the
+     *  note shown to people asking. Absent on servers that predate them. */
+    directoryListed?: boolean
+    accessMode?: WorkspaceAccessMode
+    accessNote?: string | null
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string
@@ -219,6 +264,71 @@ export interface WorkspaceImpactResponse {
     customRoleCount: number
 }
 
+/** One data source's share of a workspace's numbers in {@link WorkspaceSummary}. */
+export interface WorkspaceSourceSummary {
+    nodes: number
+    edges: number
+    /** Its statistics are still being computed: a source, but not in the sums yet. */
+    pending: boolean
+    /** Live views the caller can read that name this source. */
+    views: number
+}
+
+export interface WorkspaceSummaryRow {
+    id: string
+    name: string
+    isDefault: boolean
+    dataSources: number
+    activeDataSources: number
+    pendingDataSources: number
+    nodes: number
+    edges: number
+    entityTypes: string[]
+    views: number
+    sources: Record<string, WorkspaceSourceSummary>
+}
+
+/**
+ * The estate's numbers as the caller can see them — the ONE definition the
+ * dashboard, the workspaces page and the admin overview all read. They used to
+ * add these up separately in the browser, from different snapshots, and quoted
+ * different totals.
+ */
+export interface WorkspaceSummary {
+    /** 'all' when the caller sees every workspace, 'granted' when only their own. */
+    coverage: 'all' | 'granted'
+    totals: {
+        workspaces: number
+        dataSources: number
+        activeDataSources: number
+        pendingDataSources: number
+        /** Each physical graph counted once, however many workspaces mount it. */
+        nodes: number
+        edges: number
+        entityTypes: string[]
+        /** Live views the caller can read — the Explorer's total. */
+        views: number
+        /** Graphs mounted in more than one of the caller's workspaces. */
+        sharedGraphs: number
+    }
+    workspaces: WorkspaceSummaryRow[]
+}
+
+/**
+ * {@link WorkspaceSummary}'s totals day by day, oldest first: each list holds one
+ * value per entry of `days` (UTC dates, today last). Counted the same way — a
+ * graph used by several workspaces once — among what exists now.
+ */
+export interface WorkspaceSummaryTrend {
+    days: string[]
+    workspaces: number[]
+    dataSources: number[]
+    views: number[]
+    /** null for a day before anything was measured — not zero. */
+    nodes: (number | null)[]
+    edges: (number | null)[]
+}
+
 /**
  * Resolve a data source's provenance when `sourceMode` is null/absent
  * (legacy rows). Mirrors the backend ORM comment: a source with no
@@ -262,6 +372,22 @@ export const workspaceService = {
 
     list(): Promise<WorkspaceResponse[]> {
         return request<WorkspaceResponse[]>(ADMIN_API)
+    },
+
+    /** Counts for every workspace the caller can see — see {@link WorkspaceSummary}. */
+    summary(): Promise<WorkspaceSummary> {
+        return request<WorkspaceSummary>(`${ADMIN_API}/summary`)
+    },
+
+    /** The same totals day by day over the last 30 days — see {@link WorkspaceSummaryTrend}. */
+    summaryTrend(): Promise<WorkspaceSummaryTrend> {
+        return request<WorkspaceSummaryTrend>(`${ADMIN_API}/summary/trend`)
+    },
+
+    /** Find a workspace — refused while the deployment's switch is off. */
+    async directory(): Promise<WorkspaceDirectoryEntry[]> {
+        const body = await request<{ entries: WorkspaceDirectoryEntry[] }>('/api/v1/workspace-directory')
+        return body.entries
     },
 
     /**

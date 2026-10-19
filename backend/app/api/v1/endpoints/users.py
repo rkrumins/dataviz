@@ -1194,7 +1194,8 @@ async def generate_reset_token(
 # they are NOT globally meaningful — an invite for one of these
 # MUST carry a workspace_id.
 _WORKSPACE_TEMPLATE_ROLES = frozenset({
-    "workspace_admin", "workspace_member", "workspace_viewer",
+    "workspace_admin", "workspace_member", "workspace_publisher", "workspace_steward",
+    "workspace_viewer",
 })
 _GLOBAL_TIER_ROLES = frozenset({"super_admin", "org_admin"})
 

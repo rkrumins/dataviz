@@ -36,6 +36,12 @@ _ANALYTICS_PERM_MIGRATION_PATH = _VERSIONS_DIR / "20260823_1200_analytics_perm.p
 _DATASOURCE_PUBLISH_MIGRATION_PATH = (
     _VERSIONS_DIR / "20261017_1000_datasource_publish.py"
 )
+# Layout templates added system:templates:manage — curating organization
+# templates and hiding built-ins. Seeded by the layout-templates revision.
+_TEMPLATES_MIGRATION_PATH = _VERSIONS_DIR / "20261018_1200_layout_templates.py"
+# Workspace access added workspace:members:add and the Workspace steward role
+# — answering access requests and adding people as viewers or members.
+_WS_ACCESS_MIGRATION_PATH = _VERSIONS_DIR / "20261019_1000_ws_access.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -219,7 +225,7 @@ def test_datasource_publish_seed_convergence():
         _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
     )
     assert (mod.revision, mod.down_revision) == (
-        "20261017_1000_datasource_publish", "20261014_1200_aal_api_key",
+        "20261017_1000_datasource_publish", "20261019_1000_ws_access",
     )
 
     # Permission row: the same text in both paths.
@@ -393,6 +399,65 @@ def test_analytics_permission_reaches_an_existing_database():
         f"rbac_seed grants {sorted(seed_grants)} but the migration grants "
         f"{sorted(migration_grants)}"
     )
+
+
+def test_templates_permission_reaches_an_existing_database():
+    """``system:templates:manage`` is seeded by the migration AND ``rbac_seed``,
+    with the same grants — fresh installs and migrated databases must agree on
+    who curates the organization's templates. ``org_admin`` needs its row:
+    ``system:org-admin`` passes workspace checks only, never a system one."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "system:templates:manage"
+    assert _TEMPLATES_MIGRATION_PATH.exists(), f"missing migration: {_TEMPLATES_MIGRATION_PATH}"
+    mod = _load_migration(_TEMPLATES_MIGRATION_PATH, "_layout_templates_migration")
+
+    assert mod._PERMISSION == perm
+    migration_grants = set(mod._ROLE_PERMISSIONS)
+    assert migration_grants == {("org_admin", perm), ("super_admin", perm)}
+
+    assert perm in {p["id"] for p in rbac_seed.PERMISSIONS}
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    assert seed_grants == migration_grants
+    # "Reset to default" re-applies these bundles; without the entry a reset
+    # would quietly take curation away from both roles.
+    for role, _ in migration_grants:
+        assert perm in SYSTEM_ROLE_DEFAULTS[role].permissions, role
+
+
+def test_members_add_permission_and_steward_reach_an_existing_database():
+    """``workspace:members:add`` and ``workspace_steward`` arrive by migration
+    AND ``rbac_seed``, with the same rows, and "Reset to default" restores the
+    same bundles: fresh installs and migrated databases must agree on who may
+    let people into a workspace. ``workspace:admin`` implies it in code, which
+    is why ``workspace_admin`` carries no row of its own."""
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import _WORKSPACE_CATEGORY_LEAVES
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm, role = "workspace:members:add", "workspace_steward"
+    assert _WS_ACCESS_MIGRATION_PATH.exists(), f"missing migration: {_WS_ACCESS_MIGRATION_PATH}"
+    mod = _load_migration(_WS_ACCESS_MIGRATION_PATH, "_ws_access_migration")
+    assert (mod._PERMISSION, mod._ROLE) == (perm, role)
+
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert (seed_perm["description"], seed_perm["long_description"]) == (
+        mod._DESCRIPTION, mod._LONG_DESCRIPTION,
+    )
+    seed_role = next(r for r in rbac_seed.SYSTEM_ROLES if r["name"] == role)
+    assert seed_role["description"] == mod._ROLE_DESCRIPTION
+
+    migration_grants = set(mod._ROLE_PERMISSIONS)
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm or r == role}
+    assert seed_grants == migration_grants
+    for granted_role, granted in migration_grants:
+        assert granted in SYSTEM_ROLE_DEFAULTS[granted_role].permissions, granted_role
+
+    # A steward is a member who can also let people in.
+    member = SYSTEM_ROLE_DEFAULTS["workspace_member"].permissions
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == member | {perm}
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
 
 
 def test_the_analytics_permission_is_offered_to_the_client():

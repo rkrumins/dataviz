@@ -7,9 +7,9 @@ router-level ``requires(...)`` dependencies in
 ``backend/app/api/v1/api.py``:
 
   * Global-admin routers (providers, catalog, ontologies, features,
-    context-model-templates, aggregation, insights) → ``system:admin``.
-  * Workspace-scoped data routers (graph, assignments, assets,
-    context-models) → ``workspace:datasource:read`` baseline, with the
+    aggregation, insights) → ``system:admin``.
+  * Workspace-scoped data routers (graph, assignments, assets)
+    → ``workspace:datasource:read`` baseline, with the
     mutating routes additionally requiring
     ``workspace:datasource:manage``.
 
@@ -103,7 +103,6 @@ _GLOBAL_ADMIN_GET = [
     "/api/v1/admin/providers",
     "/api/v1/admin/catalog",
     "/api/v1/admin/features",
-    "/api/v1/admin/context-model-templates",
 ]
 
 # Routers whose handlers need extra services — assert deny paths only.

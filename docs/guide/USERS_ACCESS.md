@@ -222,6 +222,7 @@ do their job; you can always raise it later.
 | --- | --- | --- |
 | **Workspace admin** | `workspace_admin` | Everything inside that workspace — settings, members, deletion, data and views. Nothing outside it. |
 | **Data engineer** | `workspace_data_engineer` | Owns the workspace's data — data sources, semantic layers, catalog items and views — without managing members or workspace settings. |
+| **Workspace steward** | `workspace_steward` | A **Workspace member** who also lets people in: adds them as viewers or members and answers their access requests (`workspace:members:add`). Can't remove people or change how people get in. |
 | **Workspace member** | `workspace_member` | The everyday contributor: creates, edits and deletes views, and manages data sources. |
 | **Publisher** | `workspace_publisher` | A workspace member trusted to publish a versioned data source's drafts to its Published version. Publishing isn't restricted to this role yet, so members can still publish too. |
 | **Workspace viewer** | `workspace_viewer` | Read-only: opens the workspace's views and sees its data sources, semantic layers and providers. |
@@ -500,17 +501,32 @@ To correct a locked field, fix it in your directory, or set a display name. When
 two providers are linked, the one you **most recently signed in with** owns the
 fields — the same rule group memberships already follow.
 
+### Preferences
+
+**Preferences**, in the same profile menu, changes how the app works for you.
+It's saved in the browser you're using, so set it again on another device.
+
+| Preference | Notes |
+|---|---|
+| **Needs attention** | Off by default. On, your Dashboard lists the worst open profiling findings — a source far outside its usual movement, an entity type that vanished, a source gone quiet — each with **Open** and **Mark seen**. It's for people who look after data sources: it needs the permission to see profiling results, and the switch says so when you don't have it. |
+
 ---
 
 ## The "My Access" page
 
 Every signed-in person has a **My access** page (profile menu → **My access**)
 that plainly answers *"what am I allowed to do, and how did I get it?"* — their
-roles, scopes and effective permissions. It also lists their **My access
-requests**, each marked **Pending**, **Approved** or **Denied**. Point confused
-users there before they file a ticket; it resolves most "why can't I…?"
-questions on its own. What people see when they ask for access is covered in
-[Requesting Access](/guide/requesting-access).
+roles, scopes and effective permissions. Each role says how it came about —
+**Added directly**, **Approved request**, **Exception**, **Identity provider**,
+**Team** or **Organization-wide** — and when it ends, if it does. The page also
+lists their **My access requests**, each with where it stands: **Waiting for
+approval**, **Waiting on your identity provider**, **Approved**, **Declined** or
+**Withdrawn**. Point confused users there before they file a ticket; it
+resolves most "why can't I…?" questions on its own. What people see when they
+ask for access is covered in [Requesting Access](/guide/requesting-access).
+
+The same chips appear on **Administration → Permissions → By user** and on a
+workspace's **People with access** list.
 
 ---
 

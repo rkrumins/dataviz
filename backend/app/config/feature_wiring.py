@@ -254,6 +254,28 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=("Reading every view", "Exporting data"),
     ),
     # ── View modes ─────────────────────────────────────────────────────────────
+    "layoutTemplatesEnabled": FeatureWiring(
+        key="layoutTemplatesEnabled",
+        posture="capability",
+        server_gates=(
+            "Every /layout-templates route — the library, saves, shares, versions, favorites, "
+            "featuring and requests to offer a template to everyone",
+            "PUT /views/{id}/template-version — marking a view up to date with its template",
+        ),
+        ui_surfaces=(
+            "Templates in the sidebar, its page, and the Dashboard's Layout templates",
+            "The template library, Save as template and a workspace's default template on the "
+            "View wizard's Layout step",
+            "Save layers as a template in the view card menu and the canvas Import / Export menu",
+            "Template update offers on a view's header and details",
+            "Templates in search and the command palette",
+        ),
+        still_allowed=(
+            "Views built from a template keep their layers and keep working",
+            "Templates, shares, versions and favorites are kept — turning this on brings them back",
+            "The layouts the View wizard suggests from the data itself",
+        ),
+    ),
     "allowedViewModes": FeatureWiring(
         key="allowedViewModes",
         posture="capability",
@@ -371,6 +393,26 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Using, describing and revoking existing keys",
             "Creating keys after a proven identity-provider sign-in, a gateway's confirmation, "
             "or with a password",
+        ),
+    ),
+    # Widens who learns which workspaces exist: when it cannot be read, assume it
+    # is off, and a workspace's name stays with the people who can open it.
+    "workspaceDirectoryEnabled": FeatureWiring(
+        key="workspaceDirectoryEnabled",
+        posture="security",
+        server_gates=(
+            "GET /workspace-directory — refused while off",
+            "POST /access-requests and GET /me/access-requests — name a workspace the person "
+            "cannot open only while this is on and the workspace is listed",
+        ),
+        ui_surfaces=(
+            "The Find a workspace tab on Workspaces, and its entry in search",
+            "The way in offered to someone with no workspace — on the Dashboard, Workspaces "
+            "and My Access",
+        ),
+        still_allowed=(
+            "Asking to join from a link someone shared, and answering every request",
+            "Workspaces, their access settings and every request are kept",
         ),
     ),
     # ── Notifications ──────────────────────────────────────────────────────────

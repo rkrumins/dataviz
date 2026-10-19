@@ -52,6 +52,9 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     "dashboard":  ("Dashboard",     NavSpecAlways()),
     "explore":    ("Explore",       NavSpecAlways()),
     "workspaces": ("Workspaces",    NavSpecAlways()),
+    # Layout templates: everyone has some (the built-ins); what each person
+    # may change is decided per template, not by the page.
+    "templates":  ("Templates",     NavSpecAlways()),
     # Phase 18: Ingestion and Semantic Layers open to any workspace-bound
     # user holding the matching workspace:*:read perm. Their pages render
     # filtered results (workspace-scoped); edit affordances are gated

@@ -50,6 +50,7 @@ const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelem
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
 const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
+const TemplatesPage = lazyWithRetry(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
@@ -57,6 +58,7 @@ const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m =
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m => ({ default: m.MyApiKeysPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
+const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
@@ -202,6 +204,11 @@ export const router = createBrowserRouter([
       // to the workspace) when the admin turns version control off.
       { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
 
+      // The layout template library — everyone has some (the built-ins); what
+      // each person may change is decided per template, not by the page.
+      { path: 'templates', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren’t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration → Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
+      { path: 'templates/:templateId', element: <RequireFeature feature="layoutTemplatesEnabled" explain title="Layout templates are turned off" message="Reusable layer layouts aren’t enabled for this deployment. Views keep the layers they were built with, and an administrator can turn templates on under Administration → Features." guideSlug="creating-views"><Lazy><TemplatesPage /></Lazy></RequireFeature> },
+
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
       // Own profile, password, sessions. Ungated for the same reason as
@@ -213,6 +220,8 @@ export const router = createBrowserRouter([
       // the apiKeysEnabled switch: with keys off you can still see and revoke
       // yours — the page says so and offers nothing new.
       { path: 'me/api-keys', element: <Lazy><MyApiKeysPage /></Lazy> },
+      // How the app works for you — kept in this browser, ungated like its siblings.
+      { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context

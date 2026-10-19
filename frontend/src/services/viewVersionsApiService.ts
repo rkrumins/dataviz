@@ -12,6 +12,7 @@ import type { View } from './viewApiService'
 
 export type ViewVersionSource =
   | 'baseline' | 'create' | 'wizard' | 'import' | 'restore' | 'promote' | 'export' | 'manual' | 'snapshot'
+  | 'template'
 
 /** Where an imported version came from, as its file said. */
 export interface ViewVersionOrigin {

@@ -5,8 +5,9 @@
  * import targets the working draft and there is no branch to write to in a published View.
  *
  * Below the graph's own items, "This view" moves the VIEW between environments: its design as a
- * view file, or its design with its data as a package, and updating it from a file. Each item
- * shows only where its switch is on and the host passed its callback.
+ * view file, or its design with its data as a package, and updating it from a file — and keeps
+ * its layers as a reusable layout template. Each item shows only where its switch (if any) is on
+ * and the host passed its callback.
  *
  * Mirrors the header's portal-menu pattern (ViewTitleMenu / DisplayMenu): trigger + fixed-positioned
  * portal to document.body (escapes the header's backdrop-blur stacking context), outside-click/Escape
@@ -21,12 +22,14 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 
-/** Moving this view between environments (see the "This view" section). */
+/** Moving this view between environments, or reusing its layers (see the "This view" section). */
 export interface ViewFileActions {
   onExport?: () => void
   onExportWithData?: () => void
   /** Only for someone who may edit the view. */
   onUpdateFromFile?: () => void
+  /** Keep its layer layout as a template — anyone who can read the view. */
+  onSaveAsTemplate?: () => void
 }
 
 export interface ImportExportMenuProps {
@@ -67,6 +70,12 @@ export function ImportExportMenu({ onImport, onExport, isDraft, thisView }: Impo
     viewItems.push({
       key: 'update', icon: LucideIcons.FileUp, label: 'Update this view from a file…', run: thisView.onUpdateFromFile,
       detail: 'Bring in a newer design of it from another environment.',
+    })
+  }
+  if (thisView?.onSaveAsTemplate) {
+    viewItems.push({
+      key: 'template', icon: LucideIcons.LayoutTemplate, label: 'Save layers as a template…', run: thisView.onSaveAsTemplate,
+      detail: 'Reuse its layer layout for new views — never the entities it placed.',
     })
   }
   const [open, setOpen] = useState(false)

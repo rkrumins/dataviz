@@ -117,21 +117,6 @@ async def list_data_sources(
     return [_to_response(r, await load_node_identity(session, r)) for r in rows]
 
 
-async def list_data_sources_for_workspaces(
-    session: AsyncSession, workspace_ids: List[str]
-) -> List[WorkspaceDataSourceORM]:
-    """All data-source rows across a set of workspaces in one query —
-    backs the bulk /datasources/cached-stats endpoint."""
-    if not workspace_ids:
-        return []
-    result = await session.execute(
-        select(WorkspaceDataSourceORM)
-        .where(WorkspaceDataSourceORM.workspace_id.in_(workspace_ids), _live())
-        .order_by(WorkspaceDataSourceORM.created_at)
-    )
-    return list(result.scalars().all())
-
-
 async def get_data_source(
     session: AsyncSession, ds_id: str
 ) -> Optional[DataSourceResponse]:

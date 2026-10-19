@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
-from sqlalchemy import and_, case, literal_column, select, delete, func, or_, update
+from sqlalchemy import and_, case, false, literal_column, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -82,13 +82,25 @@ async def _get_workspace_name(
     return result.scalar_one_or_none()
 
 
+def _nameable_template(user_id: Optional[str]):
+    """The layout templates a view may name as the one it was built from: not
+    deleted, and not someone else's personal one — whose name is theirs."""
+    mine = ContextModelORM.created_by == user_id if user_id else false()
+    return and_(
+        ContextModelORM.deleted_at.is_(None),
+        or_(ContextModelORM.visibility != "private", mine),
+    )
+
+
 async def _get_context_model_name(
-    session: AsyncSession, context_model_id: Optional[str]
+    session: AsyncSession, context_model_id: Optional[str], user_id: Optional[str] = None,
 ) -> Optional[str]:
     if not context_model_id:
         return None
     result = await session.execute(
-        select(ContextModelORM.name).where(ContextModelORM.id == context_model_id)
+        select(ContextModelORM.name).where(
+            ContextModelORM.id == context_model_id, _nameable_template(user_id),
+        )
     )
     return result.scalar_one_or_none()
 
@@ -323,6 +335,7 @@ def _to_response(
         description=label.get("description") if label_override else row.description,
         contextModelId=row.context_model_id,
         contextModelName=context_model_name,
+        contextModelVersion=row.context_model_version,
         workspaceId=row.workspace_id,
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
@@ -377,7 +390,7 @@ async def _to_enriched_response(
     """
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
-    cm_name = await _get_context_model_name(session, row.context_model_id)
+    cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal) — avatars included.
     user_map = await _resolve_user_identities(session, {
@@ -503,7 +516,7 @@ async def _batch_enrich_rows(
     if cm_ids:
         res = await session.execute(
             select(ContextModelORM.id, ContextModelORM.name)
-            .where(ContextModelORM.id.in_(cm_ids))
+            .where(ContextModelORM.id.in_(cm_ids), _nameable_template(user_id))
         )
         cm_map = {cid: name for cid, name in res.all()}
 
@@ -618,6 +631,7 @@ async def create_view(
         name=req.name,
         description=req.description,
         context_model_id=req.context_model_id,
+        context_model_version=req.context_model_version,
         workspace_id=req.workspace_id,
         data_source_id=req.data_source_id,
         view_type=req.view_type or "graph",
@@ -710,6 +724,8 @@ async def update_view(
         row.description = req.description
     if req.context_model_id is not None:
         row.context_model_id = req.context_model_id
+    if req.context_model_version is not None:
+        row.context_model_version = req.context_model_version
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
@@ -2304,6 +2320,79 @@ async def get_view_stats(
     )
 
 
+async def count_views_grouped(
+    session: AsyncSession,
+    column,
+    *,
+    readable=None,
+    ids: Optional[Sequence[str]] = None,
+) -> Dict[str, int]:
+    """Live views the caller can read, counted per value of ``column``
+    (``ViewORM.workspace_id``, ``.data_source_id`` or ``.context_model_id``).
+
+    Counted through ``_apply_view_filters`` like the Explorer's list, stats and
+    facets, so a count shown on the dashboard or a template card is the total
+    the Explorer would show for the same filter. ``ids`` limits the groups to
+    those values; a view whose ``column`` is NULL is in no group.
+    """
+    query = select(column, func.count(func.distinct(ViewORM.id))).where(column.isnot(None))
+    if ids is not None:
+        if not ids:
+            return {}
+        query = query.where(column.in_(list(ids)))
+    rows = await session.execute(
+        _apply_view_filters(query.group_by(column), readable=readable)
+    )
+    return {value: int(n) for value, n in rows.all()}
+
+
+
+async def set_context_model_version(
+    session: AsyncSession, view_id: str, version: int, *, user_id: Optional[str] = None,
+) -> Optional[ViewResponse]:
+    """Record the layout-template version a view's layers now match — after an
+    update was applied, or declined. Not an edit of the view, so ``updated_at``
+    stays as it was."""
+    await session.execute(
+        update(ViewORM).where(ViewORM.id == view_id)
+        .values(context_model_version=version, updated_at=ViewORM.updated_at)
+    )
+    row = await session.get(ViewORM, view_id)
+    if row is None:
+        return None
+    await session.refresh(row)
+    return await _to_enriched_response(session, row, user_id)
+
+
+async def last_built_from(session: AsyncSession, user_id: str, template_ids: Sequence[str]) -> Dict[str, str]:
+    """When ``user_id`` last made a live view from each of ``template_ids`` —
+    "recently used", as far as anyone can tell: views are what templates are
+    used for."""
+    if not template_ids:
+        return {}
+    rows = await session.execute(
+        select(ViewORM.context_model_id, func.max(ViewORM.created_at)).where(
+            ViewORM.created_by == user_id,
+            ViewORM.context_model_id.in_(list(template_ids)),
+            view_is_live(),
+        ).group_by(ViewORM.context_model_id)
+    )
+    return {tid: at for tid, at in rows.all()}
+
+
+async def template_owners_behind(session: AsyncSession, template_id: str, version: int) -> set:
+    """Who made a live view from ``template_id`` that matches a version older
+    than ``version`` — the people a new version is news to."""
+    rows = await session.execute(
+        select(ViewORM.created_by).distinct().where(
+            ViewORM.context_model_id == template_id,
+            ViewORM.context_model_version < version,
+            ViewORM.created_by.isnot(None),
+            view_is_live(),
+        )
+    )
+    return {owner for (owner,) in rows.all()}
+
 async def list_popular_views(
     session: AsyncSession,
     *,
@@ -2377,7 +2466,7 @@ async def list_popular_views(
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
         ds_name = await _get_data_source_name(session, row.data_source_id)
-        cm_name = await _get_context_model_name(session, row.context_model_id)
+        cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
         # The data publisher too, in the same lookup: without it this path showed
         # every trail without its last publisher, unlike the batched one.
         publisher_id = getattr(row, 'data_updated_by', None)

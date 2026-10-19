@@ -9,13 +9,14 @@ from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
     graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
-    assets, context_models, catalog, views, features,
+    assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
+    workspace_directory,
     versioning,
     versioning_admin,
     admin_idp_groups,
@@ -103,11 +104,6 @@ api_router.include_router(
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],
-)
-api_router.include_router(
-    context_models.template_router, prefix="/admin/context-model-templates",
-    tags=["admin:context-model-templates"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
@@ -213,8 +209,8 @@ api_router.include_router(
 )
 
 # RBAC Phase 4.3 — self-service access requests.
-# Mounted on three different prefixes so the auth gate is naturally
-# scoped: any-user submit, any-user "my requests", and admin inbox.
+# Mounted on four prefixes so the auth gate is naturally scoped: any-user
+# submit, any-user "my requests", one workspace's list, and answering.
 api_router.include_router(
     access_requests.public_router,
     prefix="/access-requests",
@@ -234,6 +230,13 @@ api_router.include_router(
     access_requests.admin_router,
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
+)
+# Find a workspace — any signed-in user, while the deployment's switch is
+# on (the router carries the gate). Lists workspaces to ask to join.
+api_router.include_router(
+    workspace_directory.router,
+    prefix="/workspace-directory",
+    tags=["workspace-directory"],
 )
 
 # RBAC Phase 4.5 — unified RBAC search across users, groups,
@@ -405,6 +408,11 @@ api_router.include_router(
 api_router.include_router(
     views.router, prefix="/views", tags=["views"],
 )
+# Layout templates — any signed-in user; what each may see and do is decided
+# per template (services/template_access.py).
+api_router.include_router(
+    layout_templates.router, prefix="/layout-templates", tags=["layout-templates"],
+)
 
 # ── Versioned graph editing (workspace-scoped) ───────────────────────
 # The ONLY path between the frontend and the graphver Postgres store; the
@@ -451,10 +459,5 @@ api_router.include_router(
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(
     assets.router, prefix="/{ws_id}/assets", tags=["assets:workspace"],
-    dependencies=[Depends(require_ws_read_or_view)],
-)
-# Context models: /api/v1/{ws_id}/context-models
-api_router.include_router(
-    context_models.router, prefix="/{ws_id}/context-models", tags=["context-models"],
     dependencies=[Depends(require_ws_read_or_view)],
 )

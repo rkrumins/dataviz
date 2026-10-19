@@ -112,11 +112,13 @@ async def add_member(
     group_id: str,
     user_id: str,
     added_by: Optional[str] = None,
+    access_request_id: Optional[str] = None,
 ) -> GroupMemberORM:
     member = GroupMemberORM(
         group_id=group_id,
         user_id=user_id,
         added_by=added_by,
+        access_request_id=access_request_id,
     )
     session.add(member)
     await session.flush()

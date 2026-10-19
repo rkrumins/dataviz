@@ -100,6 +100,8 @@ export interface View {
     description?: string
     contextModelId?: string
     contextModelName?: string
+    /** The version of that layout template the view's layers last matched. */
+    contextModelVersion?: number | null
     workspaceId: string
     workspaceName?: string
     dataSourceId?: string
@@ -175,6 +177,8 @@ export interface ViewCreateRequest {
     name: string
     description?: string
     contextModelId?: string
+    /** The version of that template whose layers were applied. */
+    contextModelVersion?: number
     workspaceId: string
     dataSourceId?: string
     viewType?: string
@@ -188,6 +192,7 @@ export interface ViewUpdateRequest {
     name?: string
     description?: string
     contextModelId?: string
+    contextModelVersion?: number
     viewType?: string
     config?: Record<string, any>
     // NB: no `visibility` — the generic PUT rejects it (422). Visibility
@@ -647,9 +652,10 @@ export async function updateViewLayout(
         referenceLayout: { layers: ViewLayerConfig[]; assignments: Record<string, LayerAssignmentEntry> }
         entityScope?: 'all' | 'curated'
         displayRules?: unknown[]
-        /** Record the saved design as a version of the view (a wizard save). Ignored for a
-         *  draft's write: a draft isn't the view yet, and becomes a version when promoted. */
-        checkpoint?: { source: 'create' | 'wizard'; message?: string }
+        /** Record the saved design as a version of the view (a wizard save, or a layout
+         *  template's update applied). Ignored for a draft's write: a draft isn't the view
+         *  yet, and becomes a version when promoted. */
+        checkpoint?: { source: 'create' | 'wizard' | 'template'; message?: string }
     },
     branchId?: string,
 ): Promise<View> {
@@ -664,6 +670,20 @@ export async function updateViewLayout(
         void queryClient.invalidateQueries({ queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, viewId] })
         void queryClient.invalidateQueries({ queryKey: [VIEW_VERSIONS_QUERY_KEY, viewId] })
     }
+    return view
+}
+
+/**
+ * Record the version of its layout template a view's layers now match — after
+ * applying that version's changes, or keeping the view's own. Not an edit: the
+ * view's "last updated" stays as it was.
+ */
+export async function setViewTemplateVersion(viewId: string, version: number): Promise<View> {
+    const view = await apiFetch<View>(`/api/v1/views/${viewId}/template-version`, {
+        method: 'PUT',
+        body: JSON.stringify({ version }),
+    })
+    void queryClient.invalidateQueries({ queryKey: ['view', viewId] })
     return view
 }
 
@@ -823,7 +843,7 @@ export async function unfavouriteView(viewId: string): Promise<void> {
 
 /**
  * Convert a View API response to the ViewConfiguration type
- * consumed by CanvasRouter, ViewSelector, and SidebarNav.
+ * consumed by CanvasRouter and SidebarNav.
  *
  * View.config stores the FULL ViewConfiguration shape — we just
  * overlay the top-level identity fields.

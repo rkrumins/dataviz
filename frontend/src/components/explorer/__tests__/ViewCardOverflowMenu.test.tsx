@@ -139,6 +139,34 @@ describe('when the deployment has withdrawn the tier', () => {
     })
 })
 
+describe('saving layers as a template follows the layout templates switch', () => {
+    const set = (values: Record<string, unknown>) =>
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, ...values } })
+    afterEach(() => set({}))
+    const open = () => {
+        render(
+            <ViewCardOverflowMenu
+                viewId="view_1" viewName="Quarterly lineage" visibility="private" workspaceId="ws_1"
+                onDelete={vi.fn()} onShare={vi.fn()}
+                templateLayers={[{ id: 'l1', name: 'Sources', entityTypes: [], order: 0 }]}
+            />,
+        )
+        fireEvent.click(screen.getByRole('button'))
+    }
+
+    it('offers it while templates are on', () => {
+        open()
+        expect(screen.getByText('Save layers as template…')).toBeTruthy()
+    })
+
+    it('offers nothing while an admin has them off', () => {
+        set({ layoutTemplatesEnabled: false })
+        open()
+        expect(screen.getByText('Activity')).toBeTruthy()
+        expect(screen.queryByText('Save layers as template…')).toBeNull()
+    })
+})
+
 describe('versions, export and import: a preview behind one admin switch', () => {
     function openMenu() {
         const openViewEditor = vi.fn()

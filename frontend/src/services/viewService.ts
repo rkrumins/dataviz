@@ -26,6 +26,7 @@ export interface CreateViewRequest {
     workspaceId: string
     dataSourceId?: string
     contextModelId?: string
+    contextModelVersion?: number
     visibility?: ViewVisibility
     tags?: string[]
 }
@@ -40,6 +41,7 @@ export interface UpdateViewRequest {
     visibleRelationshipTypes?: string[]
     fieldFilters?: FieldFilter[]
     contextModelId?: string
+    contextModelVersion?: number
     visibility?: ViewVisibility
     tags?: string[]
 }
@@ -140,6 +142,7 @@ class ViewServiceImpl {
                 name: request.name,
                 description: request.description,
                 contextModelId: request.contextModelId,
+                contextModelVersion: request.contextModelVersion,
                 workspaceId: request.workspaceId,
                 dataSourceId: request.dataSourceId,
                 viewType: request.layoutType,
@@ -179,6 +182,7 @@ class ViewServiceImpl {
                 name: request.name,
                 description: request.description,
                 contextModelId: request.contextModelId,
+                contextModelVersion: request.contextModelVersion,
                 ...(request.layoutType && { viewType: request.layoutType }),
                 config: buildViewConfig(request, base),
                 tags: request.tags,

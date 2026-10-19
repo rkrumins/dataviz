@@ -19,13 +19,18 @@
 import { useState } from 'react'
 import {
     Bell,
+    Building2,
     CheckCheck,
     CheckCircle2,
     Clock,
+    KeyRound,
     KeySquare,
+    LayoutTemplate,
     Megaphone,
     Share2,
     ShieldAlert,
+    Sparkles,
+    UserPlus,
     XCircle,
     type LucideIcon,
 } from 'lucide-react'
@@ -51,6 +56,31 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-sky-500',
         tile: 'bg-sky-500/10',
     },
+    'layout_template.shared': {
+        Icon: LayoutTemplate,
+        icon: 'text-fuchsia-500',
+        tile: 'bg-fuchsia-500/10',
+    },
+    'layout_template.updated': {
+        Icon: Sparkles,
+        icon: 'text-fuchsia-500',
+        tile: 'bg-fuchsia-500/10',
+    },
+    'layout_template.promotion_requested': {
+        Icon: Building2,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'layout_template.promotion_approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'layout_template.promotion_declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
     'view.publish_requested': {
         Icon: Megaphone,
         icon: 'text-amber-500',
@@ -65,6 +95,34 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
+    },
+    // Asking to join a workspace: the ask reaches its approvers; the answer,
+    // a group to join at the identity provider, or the access arriving
+    // reaches the person who asked.
+    'access_request.submitted': {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.denied': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'access_request.routed': {
+        Icon: KeyRound,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access_request.fulfilled': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

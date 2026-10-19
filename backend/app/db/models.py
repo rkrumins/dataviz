@@ -653,6 +653,19 @@ class WorkspaceORM(Base):
     # ``backend.app.services.node_identity``.
     identity_property = Column(Text, nullable=True)
     name_property = Column(Text, nullable=True)
+    # The layout template a new view in this workspace starts from (a built-in,
+    # an Organization template, or this workspace's own). A plain id: templates
+    # belong to the visualization domain. NULL = start from the suggestions.
+    default_layout_template_id = Column(Text, nullable=True)
+    # Joining. Listed in the Find a workspace directory (when the deployment's
+    # switch is on), so people who aren't members can see it and ask to join.
+    directory_listed = Column(Boolean, nullable=False, default=True, server_default="true")
+    # Who decides membership: 'app' — approvers grant access here; 'idp' —
+    # the identity provider's groups do, and an in-app grant is a labelled
+    # exception (``role_bindings.idp_exception``).
+    access_mode = Column(Text, nullable=False, default="app", server_default="app")
+    # Shown to people asking to join: how access works here, who to ask.
+    access_note = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -675,6 +688,7 @@ class WorkspaceORM(Base):
     __table_args__ = (
         Index("idx_workspaces_is_default", "is_default"),
         Index("idx_workspaces_deleted_at", "deleted_at"),
+        CheckConstraint("access_mode IN ('app', 'idp')", name="ck_workspaces_access_mode"),
     )
 
     def __repr__(self) -> str:
@@ -838,6 +852,23 @@ class ContextModelORM(Base):
     )
     is_template = Column(Boolean, nullable=False, default=False)
     category = Column(Text, nullable=True)                           # e.g. "data-engineering"
+    # Layout templates (is_template rows) — see services/template_access.py.
+    # A built-in is a row with a system_key: product-owned, refreshed from
+    # seed_templates.py on every start, read-only (is_active=False hides it).
+    system_key = Column(Text, nullable=True)
+    # Soft delete: keeps the id, its shares and the views that name it, so
+    # "Undo" puts back exactly what was there.
+    deleted_at = Column(Text, nullable=True, default=None)
+    deleted_by = Column(Text, nullable=True, default=None)
+    # The layers' version: bumped only when ``layers_config`` changes, every one
+    # kept in ``layout_template_versions``, so a view built from an older one
+    # (``views.context_model_version``) can be offered the difference.
+    version = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    # A pending request to offer this template to the whole organization. A
+    # template manager answers it, and may read the template meanwhile.
+    promotion_requested_by = Column(Text, nullable=True)
+    promotion_requested_at = Column(Text, nullable=True)
+    promotion_request_note = Column(Text, nullable=True)
     layers_config = Column(Text, nullable=False, default="[]")       # JSON: ViewLayerConfig[]
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
@@ -850,6 +881,8 @@ class ContextModelORM(Base):
     visibility = Column(Text, nullable=False, default="private")        # private | workspace | enterprise
     created_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                                 # JSON array
+    # Layout templates: featured at the top of the library (Organization and
+    # built-in templates, set by a template manager).
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
@@ -863,10 +896,56 @@ class ContextModelORM(Base):
     __table_args__ = (
         Index("idx_cm_workspace", "workspace_id"),
         Index("idx_cm_template", "is_template"),
+        # One row per built-in. Both dialect kwargs: a bare postgresql_where is
+        # silently dropped on SQLite, which would make NULL keys collide there.
+        Index("uq_cm_system_key", "system_key",
+              unique=True,
+              postgresql_where=text("system_key IS NOT NULL"),
+              sqlite_where=text("system_key IS NOT NULL")),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_context_models_visibility",
         ),
+    )
+
+
+class LayoutTemplateVersionORM(Base):
+    """One version of a layout template's layers — written when the template is
+    made and whenever its layers change, never edited afterwards."""
+
+    __tablename__ = "layout_template_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ltv_{uuid.uuid4().hex[:12]}")
+    template_id = Column(
+        Text, ForeignKey("context_models.id", ondelete="CASCADE"), nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    name = Column(Text, nullable=False)                    # the template's name then
+    layers = Column(Text, nullable=False, default="[]")    # JSON: ViewLayerConfig[]
+    change_note = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="uq_ltv_template_version"),
+    )
+
+
+class LayoutTemplateFavouriteORM(Base):
+    """A person's favourite layout template — theirs alone, like a view's."""
+
+    __tablename__ = "layout_template_favourites"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ltf_{uuid.uuid4().hex[:12]}")
+    template_id = Column(
+        Text, ForeignKey("context_models.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "user_id", name="uq_ltf_template_user"),
+        Index("idx_ltf_user", "user_id"),
     )
 
 
@@ -885,6 +964,9 @@ class ViewORM(Base):
         ForeignKey("context_models.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The version of that layout template the view's layers last matched: what
+    # an update is measured against (``layout_template_versions``).
+    context_model_version = Column(Integer, nullable=True)
     workspace_id = Column(
         Text,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
@@ -1175,7 +1257,7 @@ class ViewVersionORM(Base):
               sqlite_where=text("request_id IS NOT NULL")),
         CheckConstraint(
             "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
-            "'promote', 'export', 'manual', 'snapshot')",
+            "'promote', 'export', 'manual', 'snapshot', 'template')",
             name="ck_view_versions_source",
         ),
     )
@@ -2623,6 +2705,8 @@ class GroupMemberORM(Base):
     # source='sso'; manually-added members stay untouched even when
     # the IdP later stops asserting the group.
     source = Column(Text, nullable=False, default="local")
+    # The access request whose approval added them, if one did.
+    access_request_id = Column(Text, nullable=True)
 
     group = relationship("GroupORM", back_populates="members")
 
@@ -2775,6 +2859,11 @@ class RoleBindingORM(Base):
     # reconciler only ever touches ``source='sso'`` rows; admin-granted
     # bindings remain authoritative and untouched.
     source = Column(Text, nullable=False, default="local")
+    # The access request whose approval made this grant, if one did.
+    access_request_id = Column(Text, nullable=True)
+    # Granted in the app for a workspace whose access its identity provider
+    # decides — an exception people should be able to see as one.
+    idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (
         UniqueConstraint(
@@ -2863,7 +2952,7 @@ class NotificationORM(Base):
 
 
 class ResourceGrantORM(Base):
-    """Explicit grant of access to a single resource (Phase 1: views only).
+    """Explicit grant of access to a single resource: a view or a layout template.
 
     Additive only — a grant extends access to a subject regardless of
     workspace membership. The role_name enum here is intentionally
@@ -2873,7 +2962,7 @@ class ResourceGrantORM(Base):
     __tablename__ = "resource_grants"
 
     id = Column(Text, primary_key=True, default=lambda: f"grt_{uuid.uuid4().hex[:12]}")
-    resource_type = Column(Text, nullable=False)  # 'view' for now
+    resource_type = Column(Text, nullable=False)  # 'view' | 'layout_template'
     resource_id = Column(Text, nullable=False)
     subject_type = Column(Text, nullable=False)   # user | group
     subject_id = Column(Text, nullable=False)
@@ -2891,7 +2980,7 @@ class ResourceGrantORM(Base):
         # Reverse: "what views does Bob have explicit access to?"
         Index("idx_resource_grants_subject", "subject_type", "subject_id"),
         CheckConstraint(
-            "resource_type IN ('view')",
+            "resource_type IN ('view', 'layout_template')",
             name="ck_resource_grants_resource_type",
         ),
         CheckConstraint(
@@ -2918,12 +3007,15 @@ class ResourceGrantORM(Base):
 # ------------------------------------------------------------------ #
 
 class AccessRequestORM(Base):
-    """A user asking a workspace admin for access at a specific role.
+    """A user asking to join a workspace at a specific role.
 
-    State machine: ``pending`` → ``approved`` | ``denied``. Approval
-    atomically creates the corresponding role binding (handled in the
-    endpoint). The row stays around in either resolved state so the
-    requester can see the resolution + reason on their My Access page.
+    State machine: ``pending`` → ``approved`` | ``denied`` | ``withdrawn``,
+    or ``pending`` → ``awaiting_idp`` (an approver pointed them to the
+    identity-provider group that grants it) → ``approved`` when that access
+    arrives, or ``denied`` / ``withdrawn``. Approval grants the access in the
+    same transaction (handled in the endpoint). The row stays around once
+    answered so the requester can see the outcome on their My Access page.
+    One open request per person per workspace (``uq_access_requests_one_open``).
 
     No FKs on ``requester_id`` / ``target_id`` — they reference users
     and workspaces respectively but rely on application-level guards
@@ -2944,6 +3036,17 @@ class AccessRequestORM(Base):
     resolved_at = Column(Text, nullable=True)
     resolved_by = Column(Text, nullable=True)
     resolution_note = Column(Text, nullable=True)
+    # What the approver decided, which may differ from what was asked: the
+    # role granted, or the team (group) they were added to, or the identity-
+    # provider group they were pointed to; when granted access ends; and
+    # whether it was granted in the app for an IdP-run workspace.
+    granted_role = Column(Text, nullable=True)
+    granted_group_id = Column(Text, nullable=True)
+    idp_group = Column(Text, nullable=True)
+    access_expires_at = Column(Text, nullable=True)
+    idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When access routed to the identity provider actually arrived.
+    fulfilled_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -2959,15 +3062,24 @@ class AccessRequestORM(Base):
             name="ck_access_requests_target_type",
         ),
         CheckConstraint(
-            "status IN ('pending', 'approved', 'denied')",
+            "status IN ('pending', 'awaiting_idp', 'approved', 'denied', 'withdrawn')",
             name="ck_access_requests_status",
         ),
         CheckConstraint(
-            # Pending rows have no resolution; resolved rows have both
-            # a timestamp and (usually) a resolver id.
+            # Pending rows have no decision yet; every other row has one, and
+            # a request waiting on the identity provider names the group.
             "(status = 'pending' AND resolved_at IS NULL AND resolved_by IS NULL) "
-            "OR (status IN ('approved', 'denied') AND resolved_at IS NOT NULL)",
+            "OR (status = 'awaiting_idp' AND resolved_at IS NOT NULL AND idp_group IS NOT NULL) "
+            "OR (status IN ('approved', 'denied', 'withdrawn') AND resolved_at IS NOT NULL)",
             name="ck_access_requests_state_consistency",
+        ),
+        # One open request per person per workspace: a second ask returns
+        # the first. Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_access_requests_one_open", "requester_id", "target_type", "target_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'awaiting_idp')"),
+            sqlite_where=text("status IN ('pending', 'awaiting_idp')"),
         ),
     )
 

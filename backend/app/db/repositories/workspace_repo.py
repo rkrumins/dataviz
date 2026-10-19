@@ -5,7 +5,7 @@ Workspaces are operational contexts that contain one or more data sources
 """
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,6 @@ from ..models import (
     ViewORM,
     RoleBindingORM,
     RoleORM,
-    view_is_live,
 )
 from backend.common.models.management import (
     WorkspaceCreateRequest,
@@ -128,6 +127,10 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
         publishPolicy=row.publish_policy or "open",
         identityProperty=getattr(row, "identity_property", None),
         nameProperty=getattr(row, "name_property", None),
+        defaultLayoutTemplateId=getattr(row, "default_layout_template_id", None),
+        directoryListed=row.directory_listed is not False,
+        accessMode=row.access_mode or "app",
+        accessNote=row.access_note,
     )
 
 
@@ -151,25 +154,18 @@ def _ws_query():
     )
 
 
-async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
-    """Members and live views per workspace, in TWO grouped queries.
+async def _member_counts(session: AsyncSession) -> dict:
+    """Members per workspace, in ONE grouped query.
 
     Not N+1: the workspaces page renders 25 cards, and asking each one for its
-    own member count would be 25 round-trips for two numbers.
+    own member count would be 25 round-trips. (Each card's view count depends on
+    who is asking, so the list endpoint adds it — ``_with_view_counts``.)
     """
-    members = dict((await session.execute(
+    return dict((await session.execute(
         select(RoleBindingORM.scope_id, func.count())
         .where(RoleBindingORM.scope_type == "workspace")
         .group_by(RoleBindingORM.scope_id)
     )).all())
-
-    views = dict((await session.execute(
-        select(ViewORM.workspace_id, func.count())
-        .where(view_is_live())
-        .group_by(ViewORM.workspace_id)
-    )).all())
-
-    return members, views
 
 
 async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
@@ -178,14 +174,13 @@ async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
     )
     rows = result.scalars().unique().all()
 
-    members, views = await _counts_by_workspace(session)
+    members = await _member_counts(session)
     identities = await _resolve_ds_identities(session, rows)
 
     out: List[WorkspaceResponse] = []
     for r in rows:
         resp = _to_response(r, identities)
         resp.member_count = int(members.get(r.id, 0) or 0)
-        resp.view_count = int(views.get(r.id, 0) or 0)
         out.append(resp)
     return out
 
@@ -246,6 +241,17 @@ async def get_workspace(
     if not row:
         return None
     return _to_response(row, await _resolve_ds_identities(session, [row]))
+
+
+async def names_by_id(session: AsyncSession, ids: Iterable[str]) -> Dict[str, str]:
+    """Workspace id → name, for the ids that still exist."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ids))
+    )
+    return {ws_id: name for ws_id, name in rows.all()}
 
 
 async def get_workspace_orm(
@@ -356,6 +362,15 @@ async def update_workspace(
         row.identity_property = req.identity_property.strip() or None
     if req.name_property is not None:
         row.name_property = req.name_property.strip() or None
+    # Checked by the endpoint (``template_access.can_be_workspace_default``).
+    if req.default_layout_template_id is not None:
+        row.default_layout_template_id = req.default_layout_template_id or None
+    if req.directory_listed is not None:
+        row.directory_listed = req.directory_listed
+    if req.access_mode is not None:
+        row.access_mode = req.access_mode
+    if req.access_note is not None:
+        row.access_note = req.access_note.strip() or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -444,3 +459,17 @@ async def get_workspace_impact(
         memberCount=int(member_count or 0),
         customRoleCount=int(role_count or 0),
     )
+
+
+async def defaults_for_templates(session: AsyncSession, template_ids: List[str]) -> List[tuple]:
+    """``(workspace_id, workspace_name, template_id)`` for every live workspace
+    that starts new views from one of ``template_ids``."""
+    if not template_ids:
+        return []
+    rows = await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name, WorkspaceORM.default_layout_template_id).where(
+            WorkspaceORM.default_layout_template_id.in_(template_ids),
+            WorkspaceORM.deleted_at.is_(None),
+        )
+    )
+    return [tuple(r) for r in rows.all()]

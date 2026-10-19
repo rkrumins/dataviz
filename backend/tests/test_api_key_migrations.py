@@ -4,9 +4,15 @@ The upgrade job applies its revisions in one transaction, so every lock is
 held until the whole upgrade commits — and a failed upgrade changes nothing.
 Within that:
 
-* the ledger's ``api_key_id`` column and its index are the upgrade's last
+* the ledger's ``api_key_id`` column and its index were the upgrade's last
   step, so the ledger's exclusive lock — reads included — lasts only for its
-  own build, not for every revision after it;
+  own build. Only cheap revisions may follow it (``20261018_1200_layout_templates``
+  adds three nullable columns and swaps a CHECK; ``20261018_1300_tpl_lifecycle``
+  adds nullable columns, two empty tables and a v1 row per template, and swaps
+  a CHECK; ``20261019_1000_ws_access`` adds columns with constant defaults,
+  swaps CHECKs, builds a partial index on the small ``access_requests`` and
+  seeds a permission and a role), since on a database upgrading through them
+  the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -28,6 +34,10 @@ from alembic.script import ScriptDirectory
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _EARLIER = "20261013_1200_activity_api_key.py"
 _LAST = "20261014_1200_aal_api_key.py"
+#: The cheap revisions right after the ledger's, in order.
+_NEXT = "20261018_1200_layout_templates"
+_THEN = "20261018_1300_tpl_lifecycle"
+_THIRD = "20261019_1000_ws_access"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -36,6 +46,9 @@ _ON_LIVE_TABLES = {
     _EARLIER: ("downgrade",),
     "20261013_1300_api_key_scale.py": ("upgrade", "downgrade"),
     _LAST: ("upgrade", "downgrade"),
+    f"{_NEXT}.py": ("upgrade", "downgrade"),
+    f"{_THEN}.py": ("upgrade", "downgrade"),
+    f"{_THIRD}.py": ("upgrade", "downgrade"),
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
@@ -145,6 +158,11 @@ def test_the_chain_ends_at_the_ledger_revision():
     assert [
         s.revision for s in later if "auth_audit_log" in Path(s.path).read_text()
     ] == []
+    # The cheap revisions right after the ledger's stay in order, so the ledger's lock still
+    # covers only them before the ones that follow.
+    assert scripts.get_revision(_THEN).down_revision == _NEXT
+    assert scripts.get_revision(_NEXT).down_revision == _LAST[:-3]
+    assert scripts.get_revision(_THIRD).down_revision == _THEN
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

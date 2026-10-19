@@ -13,9 +13,11 @@ defaults back:
     its default so the UI can flag customised built-ins and enable reset.
 
 Because the values are seeded by migrations but consumed here, the two
-must not drift. ``tests/test_system_role_editing.py`` pins this with a
-parity check (Postgres-gated) that runs the real migration chain against a
-scratch DB and asserts the seeded ``role_permissions`` equal these bundles.
+must not drift. ``tests/test_system_role_editing.py`` pins this twice: on
+every run against ``rbac_seed.ROLE_GRANTS`` (what the migrations seed —
+``tests/test_rbac_migration.py`` holds those two together), and with a
+Postgres-gated check that runs the real migration chain against a scratch
+DB and asserts the seeded ``role_permissions`` equal these bundles.
 
 The bundles below were captured from a fully-migrated database (head:
 ``role_expansion``). ``super_admin``'s ``system:admin`` short-circuits
@@ -51,11 +53,14 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         scope_type="global",
         permissions=frozenset({
             "system:admin",
+            "system:analytics:read",
             "system:audit:read",
             "system:bindings:read",
             "system:groups:manage",
             "system:org-admin",
             "system:org-viewer",
+            "system:sso:hosts:manage",
+            "system:templates:manage",
             "system:users:manage",
             "system:workspaces:create",
             "workspace:admin",
@@ -64,12 +69,14 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",
             "workspace:view:delete",
             "workspace:view:edit",
+            "workspace:view:publish",
             "workspace:view:read",
         }),
     ),
@@ -80,8 +87,10 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "system:analytics:read",
             "system:groups:manage",
             "system:org-admin",
+            "system:templates:manage",
             "system:workspaces:create",
             "workspace:admin",
             "workspace:catalog:manage",
@@ -89,12 +98,14 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",
             "workspace:view:delete",
             "workspace:view:edit",
+            "workspace:view:publish",
             "workspace:view:read",
         }),
     ),
@@ -105,6 +116,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         ),
         scope_type="global",
         permissions=frozenset({
+            "system:analytics:read",
             "system:audit:read",
             "system:bindings:read",
             "system:org-viewer",
@@ -167,6 +179,25 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:ontology:read",
+            "workspace:provider:read",
+            "workspace:view:create",
+            "workspace:view:delete",
+            "workspace:view:edit",
+            "workspace:view:read",
+        }),
+    ),
+    RoleName.WORKSPACE_STEWARD.value: SystemRoleDefault(
+        description=(
+            "Everything a workspace member can do, plus answering access "
+            "requests and adding people as viewers or members."
+        ),
+        scope_type="global",
+        permissions=frozenset({
+            "workspace:catalog:read",
+            "workspace:datasource:manage",
+            "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",

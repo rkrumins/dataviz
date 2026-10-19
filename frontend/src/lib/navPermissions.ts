@@ -47,6 +47,7 @@ export type NavPermissionSpec =
 export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpec> = {
     dashboard:  { kind: 'always' },
     explore:    { kind: 'always' },
+    templates:  { kind: 'always' },
     workspaces: { kind: 'always' },
     // Phase 18: Ingestion + Semantic Layers open to workspace-bound
     // readers via the new workspace:provider:read /

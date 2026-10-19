@@ -89,6 +89,21 @@ def test_defaults_are_well_formed():
         assert spec.description.strip()
 
 
+def test_defaults_match_the_reference_seed():
+    """The defaults are what the migrations seed. A permission granted to a
+    built-in role by a migration but missing here is stripped by "Reset to
+    default", and the untouched role reads as customized."""
+    from backend.app.config.rbac_seed import ROLE_GRANTS, SYSTEM_ROLES
+
+    seeded: dict[str, set[str]] = {}
+    for role_name, permission in ROLE_GRANTS:
+        seeded.setdefault(role_name, set()).add(permission)
+    assert {name: set(spec.permissions) for name, spec in SYSTEM_ROLE_DEFAULTS.items()} == seeded
+    assert {
+        name: spec.description for name, spec in SYSTEM_ROLE_DEFAULTS.items()
+    } == {role["name"]: role["description"] for role in SYSTEM_ROLES}
+
+
 # ── Repo behaviour ───────────────────────────────────────────────────
 
 @pytest.mark.asyncio

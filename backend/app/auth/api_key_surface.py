@@ -157,10 +157,6 @@ SURFACE: dict[tuple[str, str], Rule] = {
     # workspace-wide.
     **_entries("assets", RESOURCE, "list_rule_sets", "get_rule_set"),
     **_entries("assets", WORKSPACE, "create_rule_set", "delete_rule_set"),
-    **_entries(
-        "context_models", RESOURCE,
-        "list_workspace_templates", "get_workspace_template",
-    ),
 
     # ── Versioning: drafts, proposals, history ──────────────────────
     # Not here: creating graphs (blank or forked) and opening a draft by

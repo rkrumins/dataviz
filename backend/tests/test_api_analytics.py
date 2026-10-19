@@ -589,6 +589,34 @@ async def test_access_friction_measures_the_wait(db_session):
     assert access["acceptanceRate"] == 0.5
 
 
+async def test_access_friction_counts_waiting_on_the_identity_provider_and_not_withdrawals(db_session):
+    from backend.app.db.models import AccessRequestORM
+
+    await _seed(db_session)
+    db_session.add_all([
+        AccessRequestORM(id="req_1", requester_id="usr_new1", target_type="workspace",
+                         target_id="ws_live", requested_role="workspace_viewer",
+                         status="approved", created_at=_iso(3), resolved_at=_iso(1)),
+        # Answered by pointing to the identity provider a day in; still can't get in.
+        AccessRequestORM(id="req_2", requester_id="usr_new2", target_type="workspace",
+                         target_id="ws_live", requested_role="workspace_viewer",
+                         status="awaiting_idp", created_at=_iso(6), resolved_at=_iso(5),
+                         idp_group="analysts"),
+        # Withdrawn before anyone answered: no wait to measure.
+        AccessRequestORM(id="req_3", requester_id="usr_new3", target_type="workspace",
+                         target_id="ws_live", requested_role="workspace_viewer",
+                         status="withdrawn", created_at=_iso(5), resolved_at=_iso(0)),
+    ])
+    await db_session.commit()
+
+    access = (await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW))["health"]["access"]
+    assert access["requests"] == 3
+    assert access["pending"] == 1
+    assert access["oldestPendingDays"] == 6.0
+    assert access["medianHoursToApprove"] == 36.0     # 48h and 24h; the withdrawal isn't a wait
+
+
 async def test_semantic_coverage_counts_assigned_sources(db_session):
     from backend.app.db.models import OntologyORM, ProviderORM, WorkspaceDataSourceORM
 

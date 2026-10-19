@@ -85,6 +85,7 @@ const EMPTY_CLAIMS: PermissionClaims = { sid: '', global: [], ws: {} }
  *   * ``super_admin``     — global, full platform access
  *   * ``org_admin``       — global, every workspace power w/o user/SSO admin
  *   * ``workspace_admin`` — workspace, auto-implies every workspace:*
+ *   * ``workspace_steward``— workspace, a member who also lets people in
  *   * ``workspace_member``— workspace, manage views + data sources
  *   * ``workspace_publisher``— workspace, member + publish data sources
  *   * ``workspace_viewer``— workspace, read-only
@@ -100,6 +101,7 @@ export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
     [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Data Engineer',
     [ROLE_NAMES.WORKSPACE_MEMBER]: 'Member',
     [ROLE_NAMES.WORKSPACE_PUBLISHER]: 'Publisher',
+    [ROLE_NAMES.WORKSPACE_STEWARD]: 'Steward',
     [ROLE_NAMES.WORKSPACE_VIEWER]: 'Viewer',
 }
 
@@ -157,9 +159,10 @@ export function checkPermission(
  *   1. super_admin   → ``system:admin`` in global_perms
  *   2. org_admin     → ``system:org-admin`` in global_perms
  *   3. workspace_admin   → ``workspace:admin`` in the named ws bucket
- *   4. workspace_member  → any workspace:view:edit in the named ws bucket
- *   5. workspace_viewer  → any workspace:view:read in the named ws bucket
- *   6. null          → no role in this scope
+ *   4. workspace_steward → ``workspace:members:add`` in the named ws bucket
+ *   5. workspace_member  → any workspace:view:edit in the named ws bucket
+ *   6. workspace_viewer  → any workspace:view:read in the named ws bucket
+ *   7. null          → no role in this scope
  *
  * The TopBar uses this with the active workspace id to render a
  * workspace-aware role badge (a user can be admin in finance and viewer
@@ -175,6 +178,9 @@ export function effectiveRoleFor(
     const bucket = claims.ws[workspaceId]
     if (!bucket) return null
     if (bucket.includes('workspace:admin')) return ROLE_NAMES.WORKSPACE_ADMIN
+    if (checkPermission(claims, 'workspace:members:add', workspaceId)) {
+        return ROLE_NAMES.WORKSPACE_STEWARD
+    }
     // Use wildcard-aware checks so a 'workspace:view:*' / 'workspace:view:edit'
     // claim correctly resolves to "member".
     if (checkPermission(claims, 'workspace:view:edit', workspaceId)) {

@@ -2,7 +2,7 @@
 
 *For administrators granting access, and engineers writing permission checks.*
 
-The authorization reference for {brand}: the eight built-in roles and the default `user`
+The authorization reference for {brand}: the nine built-in roles and the default `user`
 tier, every permission the platform seeds, how a permission check is decided, the typed 403
 body, and the machinery around them — custom roles, invitations, time-bound bindings, session
 revocation and the activity log.
@@ -41,7 +41,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
 | Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
 | Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
-| Publisher | `workspace_publisher` | A workspace | A member trusted to advance a versioned data source's Published version. Nothing checks that yet (ACCESS R3). |
+| Publisher | `workspace_publisher` | A workspace | A member who can also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync. |
+| Steward | `workspace_steward` | A workspace | A member who also answers requests to join and adds people as viewers or members — for the person who knows a team, without administering the workspace. |
 | Viewer | `workspace_viewer` | A workspace | Read-only, for someone who shouldn't be able to edit. |
 
 **User** (`user`) is not a stored role. It's the default tier of any account without a
@@ -60,13 +61,14 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 24 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 18 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 26 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 20 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
 | `workspace_data_engineer` | 12 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_publisher` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_steward` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_viewer` | 5 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
@@ -98,27 +100,31 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
 | `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
+| `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
 | `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
 | `workspace:catalog:manage` | workspace | Promote / edit / delete catalog items the workspace owns. | `super_admin`, `org_admin`, `workspace_data_engineer` |
-| `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_viewer` |
-| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher` |
+| `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
 | `workspace:datasource:publish` | workspace | Advance a versioned data source's Published version: publish a draft, merge a review, revert, restore and sync. Checked on top of `workspace:datasource:manage`. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_publisher` |
-| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_viewer` |
+| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
-| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_viewer` |
-| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_viewer` |
-| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher` |
-| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher` |
-| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher` |
+| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
 | `workspace:view:publish` | workspace | Publish views to everyone in the organization (enterprise visibility). | `super_admin`, `org_admin` |
-| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_viewer` |
+| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 
-Two of these are deliberately separate from `system:admin`'s everyday reach:
-`system:analytics:read` (business metrics are not the audit log), and
+Three of these are deliberately separate from `system:admin`'s everyday reach:
+`system:analytics:read` (business metrics are not the audit log),
 `system:sso:hosts:manage` (an entry lets the service make requests to an internal address,
-which is a network decision, so only `super_admin` holds it by default).
+which is a network decision, so only `super_admin` holds it by default), and
+`system:templates:manage` (curating the template library can be delegated to whoever owns the
+house style, without handing them the platform).
 
 ### Which permissions open which screens
 
@@ -127,7 +133,7 @@ enforce, and the app shows or hides it to match:
 
 | Screen | Shown to holders of |
 |---|---|
-| **Dashboard**, **Explore**, **Workspaces** | Everyone signed in |
+| **Dashboard**, **Explore**, **Templates**, **Workspaces** | Everyone signed in |
 | **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
 | **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
 | **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
@@ -161,10 +167,9 @@ graph/canvas routers accept a `?viewId=` capability context
 (`backend/app/api/v1/capability_gate.py`) pinned to the view's
 resolved data source. Mutations always require
 `workspace:datasource:manage`. Workspace-metadata surfaces (assets
-rule-sets, context-model templates) use an unpinned variant of the
-gate — they have no data-source dimension, so a capability holder on
-ANY readable view in the workspace can read them; both routers are
-GET-only or manage-gated.
+rule-sets) use an unpinned variant of the gate — they have no
+data-source dimension, so a capability holder on ANY readable view in
+the workspace can read them; the router is GET-only or manage-gated.
 
 `workspace:view:publish` gates every transition **to or from**
 `enterprise` (including creating a view directly as enterprise) — the
@@ -256,6 +261,36 @@ simply publish.
 over a private view someone else created writes an `admin_viewed`
 entry to that view's activity log (deduped hourly per admin). The
 reach is unchanged; it is simply no longer invisible to the owner.
+
+### Layout templates
+
+A layout template (`/api/v1/layout-templates`) is decided per template by
+`backend/app/services/template_access.py`, which also renders the read rule as SQL for the list
+(`tests/test_layout_templates.py` holds the two together). Shares use `resource_grants` with
+`resource_type = 'layout_template'`, to people or groups, as `viewer` (use it) or `editor` (also
+edit it):
+
+| Audience (stored) | Who can use it | Edit | Delete, restore | Share, change audience |
+|---|---|---|---|---|
+| Built-in (`system_key` set) | everyone; a hidden one only `system:templates:manage` holders | nobody — duplicate it | nobody | nobody; managers hide or show it |
+| Organization (`enterprise`) | everyone signed in | `system:templates:manage` | `system:templates:manage` | audience: `system:templates:manage` |
+| Workspace (`workspace`) | its owner, `workspace:view:read` there, grantees | owner, `workspace:view:edit` there, editors | owner, `workspace:view:delete` there | owner, `workspace:admin` there |
+| Personal (`private`) | its owner and grantees | owner, editors | owner | owner |
+
+Creating a workspace template needs `workspace:view:create` there; an organization one needs
+`system:templates:manage`. Changing a template's audience needs rights over the one it has and the
+right to create in the new one.
+
+Whoever may share a personal or workspace template can ask for it to be offered to everyone.
+Until a template manager answers, every `system:templates:manage` holder can **read** it (they
+can't approve what they can't see; its access reads `via: "request"`); approving moves it to the
+organization — no rights over its old audience needed — and declining or withdrawing ends that
+read. Featuring a template takes `system:templates:manage`, and only for a built-in or an
+organization template. A workspace's default template is set with `workspace:admin` there, and
+must be one every member can use: a shown built-in, an organization template, or that
+workspace's own. Unlike a private view, a personal template is **not** readable by
+administrators: a template is a layout, not data, so there is nothing behind it to audit. API keys
+cannot call these routes.
 
 ## Resolver behaviour
 
@@ -628,7 +663,92 @@ Deleting a workspace cascades both the `RoleBindingORM` rows pointing
 at it (`delete_scope_bindings`) and the custom `RoleORM` rows scoped
 to it (`role_repo.delete_workspace_scoped_roles`), which couldn't be
 bound anywhere else. A `rbac.workspace.roles_cascaded` outbox event
-lists the removed bindings + roles.
+lists the removed bindings + roles. Open access requests for it are
+closed as denied, with the note "The workspace was deleted".
+
+## Access requests
+
+Anyone signed in can ask to join a workspace; its admins and stewards
+answer. The rules live in `backend/app/services/workspace_access.py`, shared
+by the request endpoints, the Members tab and the SSO reconciler.
+
+**What may be asked for.** Workspace roles that carry neither
+`workspace:admin` nor `workspace:members:add` — Viewer, Member, Data
+engineer and custom workspace roles. Asking is for access, not authority.
+`GET /access-requests/requestable-roles?workspaceId=` lists them without
+naming the workspace. A role the person already holds there, or whose
+permissions they already have, is refused (409).
+
+**One open request per person per workspace.** A partial unique index
+(`uq_access_requests_one_open`) holds it; asking again returns the open
+request (200 instead of 201).
+
+**States.** `pending` → `approved` | `denied` | `withdrawn`, or `pending` →
+`awaiting_idp` → `approved` | `denied` | `withdrawn`. `awaiting_idp` means
+an approver pointed the person to the identity-provider group that grants
+it. The requester withdraws with `POST /me/access-requests/{id}/withdraw`.
+
+**Who answers, and what they may grant.** Answering needs
+`workspace:members:add` in the request's workspace (`workspace:admin`
+implies it; Org Admins and Super Admins answer everywhere), and nobody
+answers their own request. `GET /admin/access-requests?status=open|all`
+is one list across every workspace the caller answers.
+
+| Approver | May grant |
+|---|---|
+| Workspace admin, Org Admin, Super Admin | Any workspace role whose `workspace:*` permissions they hold |
+| Steward (`workspace:members:add` without `workspace:admin`) | `workspace_viewer` or `workspace_member`, to people (never groups) |
+
+The same ceilings hold on the Members tab (`POST /admin/workspaces/{ws}/members`),
+which `workspace:members:add` opens; `GET …/members/grant-options` returns
+what the caller may grant — roles, teams and identity-provider groups.
+Removing people and changing their access stay with `workspace:admin`.
+
+**Approving** (`POST /admin/access-requests/{id}/approve`) grants in the same
+transaction, ends the requester's sessions so the access applies at once,
+and writes `rbac.workspace.member_bound` (or `rbac.group.member_added`)
+beside `rbac.access_request.approved`:
+
+* `role` (default: the requested role, which must be requestable),
+  optionally until `expiresAt` / `expiresIn`. A lapsed binding of the same
+  role is made current again (`source` becomes `local`) rather than
+  skipped.
+* `groupId` — add the person to an app-managed group bound in the
+  workspace: not protected, not filled by SCIM, no global binding, and
+  every binding it carries one the approver could make. Adding someone to
+  a group grants everything it carries everywhere it is bound, hence the
+  rule.
+
+**Workspaces whose identity provider decides** (`workspaces.access_mode =
+'idp'`):
+
+* `POST /admin/access-requests/{id}/route` with `idpGroup` points the
+  person to a group whose mappings reach the workspace (a `role_binding`
+  mapping into it, or a `group_membership` mapping to a group bound in
+  it), within the approver's ceiling. The request waits as
+  `awaiting_idp`; `reconcile_sso_targets` closes it as approved
+  (`fulfilled_at`) when the person's SSO grants reach the workspace, in a
+  savepoint that can never fail a sign-in.
+* Granting in the app needs `exception: true` and is stored with
+  `role_bindings.idp_exception`. Teams are not offered. The Members tab
+  applies the same rule to people (groups can still be bound).
+
+**Find a workspace** (`GET /workspace-directory`, behind the
+`workspaceDirectoryEnabled` switch, off by default) lists every workspace
+with `directory_listed` true, plus the ones the caller can open. A
+requester sees a workspace's name on their requests only if they can open
+it, or it is listed while the switch is on.
+
+**Provenance.** People with access (`GET …/members/effective`) and My
+Access (`GET /me/access`) give every grant a `provenance`: `direct`,
+`request`, `exception`, `idp` (the asserted groups and provider), `team` or
+`org_role`. People with access also lists people who reach every workspace
+through an organization-wide role (`via: "org"`).
+
+**Notifications** (kind): approvers get `access_request.submitted` (Org
+Admins when the workspace has none); the requester gets
+`access_request.approved`, `.denied`, `.routed` and `.fulfilled`, and the
+approver who routed a request gets `.fulfilled` too.
 
 ## Invites
 
@@ -780,6 +900,8 @@ last 7 days. Through the API:
 | Which permission opens which screen    | `backend/app/services/nav_catalogue.py`                       |
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
+| Who may let whom in (ceilings, requestable roles, provenance) | `backend/app/services/workspace_access.py` |
+| Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
 | Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |
@@ -824,6 +946,12 @@ current catalogue, most recently `20261017_1000_datasource_publish`
 (`workspace:datasource:publish` and `workspace_publisher`, ACCESS R0). A
 fresh install is seeded from `rbac_seed.py` instead of replaying the chain,
 and CI holds the two paths to the same result.
+
+`20261019_1000_ws_access` added `workspace:members:add` and the
+`workspace_steward` role, the `awaiting_idp` and `withdrawn` request states
+with one open request per person per workspace, the workspace access
+settings (`directory_listed`, `access_mode`, `access_note`), and the records
+of how a grant came about (`access_request_id`, `idp_exception`).
 
 ## See also
 

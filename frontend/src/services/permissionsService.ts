@@ -3,6 +3,7 @@
  * access endpoints. Backs the Permissions admin page.
  */
 import { authFetch } from './apiClient'
+import type { AccessProvenance } from './workspaceMembersService'
 
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -101,6 +102,10 @@ export interface AccessBinding {
     grantedBy: string | null
     /** When non-null, this binding was inherited via the named group. */
     viaGroup: AccessViaGroup | null
+    /** When it ends, if it does. */
+    expiresAt?: string | null
+    /** How it came about — added directly, a request, the identity provider… */
+    provenance?: AccessProvenance | null
 }
 
 export interface AccessGroup {
@@ -136,8 +141,8 @@ export interface UserAccessResponse {
 // ── Service ──────────────────────────────────────────────────────────
 
 export const permissionsService = {
-    listPermissions(): Promise<PermissionResponse[]> {
-        return authFetch<PermissionResponse[]>('/api/v1/admin/permissions')
+    listPermissions(init?: { silent403?: boolean }): Promise<PermissionResponse[]> {
+        return authFetch<PermissionResponse[]>('/api/v1/admin/permissions', init)
     },
 
     /**

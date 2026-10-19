@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 28 switches
+every route with its request and answer, how a change is saved safely, and all 34 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -188,7 +188,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 28 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 34 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -215,6 +215,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | View modes | `allowedViewModes` | All four: Graph (`graph`), Hierarchy (`hierarchy`), Context View (`reference`), Layered Lineage (`layered-lineage`) | A list, not a switch: `POST /views` and `PUT /views/{view_id}` refuse a view type that isn't in it | Views already built in a removed type keep working. At least one must stay |
+| Layout templates | `layoutTemplatesEnabled` | On | Every `/layout-templates` route, and `PUT /views/{view_id}/template-version` | Views built from a template keep their layers and stay readable and editable. Nothing is deleted while it is off |
 
 ### Authentication
 
@@ -226,6 +227,7 @@ feature open to anyone who knows the URL.
 | Longest an API key may live | `apiKeyMaxLifetime` | `none` | A ladder (`none`, `365`, `180`, `90`, `30` days): a key older than the maximum is refused as expired, and new keys must expire within it | Applies to keys that already exist |
 | Pause keys of people who stop signing in | `apiKeySsoSignInWindow` | `30` | A ladder (`14`, `30`, `90` days, `off`): a key whose owner has an SSO identity and has not signed in through it within the window is refused `401 owner_reauth_required` until they do | Owners without an SSO identity are not affected |
 | Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from a portal session are refused `403 step_up_unavailable`. OIDC and SAML sessions need a sign-in the provider dated within 15 minutes (`auth_time_proven`); Enterprise gateway sessions need the gateway's confirmation — asked on the request when this server can reach it (`503 gateway_unreachable` if it does not answer), else a sign-in through it within 15 minutes. On: a portal sign-in within 15 minutes is accepted too | Security: unreadable means off. Password sessions are not affected |
+| Find a workspace | `workspaceDirectoryEnabled` | `false` | `GET /workspace-directory` is refused. Access requests still work from a shared link; while it is off, a requester sees a workspace's name in `POST /access-requests` and `GET /me/access-requests` only if they can open it (on: also if it is listed) | Security: unreadable means off |
 
 ### Lineage
 

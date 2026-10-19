@@ -123,7 +123,9 @@ def _summary_identity(verb: str):
 
 def _summary_access_request(verb: str):
     def _build(p: dict) -> str:
-        ws = p.get("workspace_id") or "?"
+        # Requests name their workspace as the target; later events also
+        # carry it as ``workspace_id``.
+        ws = p.get("workspace_id") or p.get("target_id") or "?"
         return f"Access request {verb} for {ws}"
     return _build
 
@@ -486,6 +488,13 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.approved": ("info", _summary_user_status("approved")),
     "user.reactivated": ("info", _summary_user_status("reactivated")),
     "rbac.access_request.approved": ("info", _summary_access_request("approved")),
+    "rbac.access_request.withdrawn": ("info", _summary_access_request("withdrawn")),
+    "rbac.access_request.routed": (
+        "info", _summary_access_request("pointed to the identity provider"),
+    ),
+    "rbac.access_request.fulfilled": (
+        "info", _summary_access_request("fulfilled through the identity provider"),
+    ),
     # Phase 9 — login / lifecycle events promoted to first-class.
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
@@ -753,6 +762,9 @@ LABELS: dict[str, str] = {
     "rbac.access_request.created": "Requested access",
     "rbac.access_request.approved": "Approved access",
     "rbac.access_request.denied": "Denied access",
+    "rbac.access_request.withdrawn": "Withdrew an access request",
+    "rbac.access_request.routed": "Pointed a request to the identity provider",
+    "rbac.access_request.fulfilled": "Access arrived through the identity provider",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -784,6 +796,22 @@ LABELS: dict[str, str] = {
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",
+    "visualization.layout_template.created": "Created a layout template",
+    "visualization.layout_template.updated": "Edited a layout template",
+    "visualization.layout_template.deleted": "Deleted a layout template",
+    "visualization.layout_template.restored": "Restored a layout template",
+    "visualization.layout_template.version_restored": "Restored an earlier version of a layout template",
+    "visualization.layout_template.featured": "Featured a layout template",
+    "visualization.layout_template.unfeatured": "Stopped featuring a layout template",
+    "visualization.layout_template.promotion_requested": "Asked for a layout template to be offered to everyone",
+    "visualization.layout_template.promotion_withdrawn": "Withdrew a request to offer a layout template to everyone",
+    "visualization.layout_template.promotion_approved": "Offered a layout template to everyone",
+    "visualization.layout_template.promotion_declined": "Declined to offer a layout template to everyone",
+    "visualization.layout_template.hidden": "Hid a built-in layout template",
+    "visualization.layout_template.shown": "Showed a built-in layout template",
+    "visualization.layout_template.grant_added": "Shared a layout template",
+    "visualization.layout_template.grant_updated": "Changed a layout template share",
+    "visualization.layout_template.grant_removed": "Unshared a layout template",
     "branding.updated": "Changed branding",
 }
 

@@ -61,7 +61,7 @@ def read_ttl_seconds() -> float:
 
 #: Redis key prefix. Versioned so a payload-shape change cannot serve a
 #: document the current frontend cannot read — bump it when the shape changes.
-_PREFIX = "analytics:v1:"
+_PREFIX = "analytics:v2:"
 
 #: Concurrency dedup. Its TTL is the ceiling on how long a follower waits for a
 #: leader, not a cache lifetime, so it tracks the slowest plausible summary.

@@ -163,9 +163,11 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
 
   // Loading = no workspace loaded for THIS wsId yet (the query is keyed by wsId,
   // so its data is always for the current wsId; the second clause preserves the
-  // old exact condition). isRefreshing = a background refetch is in flight after
-  // the page already rendered — callers show a subtle indicator, not a spinner.
-  const isLoading = !workspace || workspace.id !== wsId
+  // old exact condition). A load that failed is not loading: the page then says
+  // it can't open the workspace instead of showing the skeleton for good.
+  // isRefreshing = a background refetch is in flight after the page already
+  // rendered — callers show a subtle indicator, not a spinner.
+  const isLoading = !workspaceQuery.isError && (!workspace || workspace.id !== wsId)
   const isRefreshing = workspaceQuery.isFetching || phase2Query.isFetching
   // Matches the old behavior: only a workspace.get failure surfaced an error;
   // the list + phase-2 failures were swallowed (empty fallbacks).
