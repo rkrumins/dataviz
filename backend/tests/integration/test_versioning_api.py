@@ -277,6 +277,36 @@ def test_versioning_api_e2e(data_sources):
     asyncio.run(_run(data_sources))
 
 
+async def _run_main_draft_routes() -> None:
+    """Stage, checkpoint and pull are draft writes: main's id answers 409 main_write_forbidden,
+    even to a member with manage only, and main does not move."""
+    from httpx import ASGITransport, AsyncClient
+
+    await models.create_schema_and_partitions()
+    ws1 = "/api/v1/ws1/versioning"
+    h = _hdr(f"{R},{M}")
+    try:
+        async with AsyncClient(transport=ASGITransport(app=_build_app()), base_url="http://test") as c:
+            r = await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(4).hex(),
+                                                   "workspaceId": "ws1"}, headers=h)
+            gid, main = r.json()["graphId"], r.json()["mainBranchId"]
+            head = (await c.get(f"{ws1}/graphs/{gid}", headers=h)).json()["mainHeadCommitSeq"]
+            for path, body in (("changes", {"ops": [{"op": "create", "entityKind": "node", "entityId": "A",
+                                                     "payload": {"entityType": "Dataset", "displayName": "A"}}]}),
+                               ("commit", {}), ("rebase", {})):
+                r = await c.post(f"{ws1}/graphs/{gid}/branches/{main}/{path}", json=body, headers=h)
+                assert r.status_code == 409, (path, r.text)
+                assert r.json()["detail"]["type"] == "main_write_forbidden", (path, r.text)
+            assert (await c.get(f"{ws1}/graphs/{gid}", headers=h)).json()["mainHeadCommitSeq"] == head
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_draft_write_routes_refuse_main(data_sources):
+    asyncio.run(_run_main_draft_routes())
+
+
 if __name__ == "__main__":
     asyncio.run(_run({}))
     print("versioning API (auth + RBAC + tenant + governance) e2e: OK")

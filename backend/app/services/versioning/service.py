@@ -832,6 +832,8 @@ class GraphVersioningService:
             await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             branch = await self._lock_branch(s, graph_id, branch_id)   # serializes the seq allocation
+            if branch.kind == "main":
+                raise MainWriteForbidden()
             self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
             graph = await s.get(GraphORM, graph_id)
@@ -954,6 +956,8 @@ class GraphVersioningService:
             await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             branch = await self._lock_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
             self._require_open(branch, publishing_ok=publishing_ok)
             await self._require_edit(s, branch, actor, actor_groups)
 
@@ -970,17 +974,16 @@ class GraphVersioningService:
             ).scalars().all()
             # Staged by someone who may no longer write the draft (removed, un-shared, out of the
             # group): withdrawn, never folded into this commit, and so never published.
-            if branch.kind != "main":
-                barred = set()
-                for who in {c.actor for c in changes} - {actor}:
-                    try:
-                        await self._require_edit(s, branch, who, ())
-                    except AccessDenied:
-                        barred.add(who)
-                for c in changes:
-                    if c.actor in barred:
-                        await s.delete(c)
-                changes = [c for c in changes if c.actor not in barred]
+            barred = set()
+            for who in {c.actor for c in changes} - {actor}:
+                try:
+                    await self._require_edit(s, branch, who, ())
+                except AccessDenied:
+                    barred.add(who)
+            for c in changes:
+                if c.actor in barred:
+                    await s.delete(c)
+            changes = [c for c in changes if c.actor not in barred]
             if not changes:
                 return None
 
@@ -1080,10 +1083,7 @@ class GraphVersioningService:
                 s, graph_id, branch_id, commit, deltas, kind_by_entity, actor
             )
 
-            # Merkle root over the branch's full effective live state — for main only: nothing
-            # reads a draft's fingerprint, and building it composes the whole graph again.
-            commit.merkle_root = (await self._merkle_root(s, graph_id, branch_id)
-                                  if branch.kind == "main" else None)
+            commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             commit.stats = _delta_stats(deltas)
 
             for c in changes:
@@ -1538,9 +1538,9 @@ class GraphVersioningService:
             # The draft's lock first, so main's head is read after any save, checkpoint or pull of
             # this draft that held it has committed.
             draft = await self._lock_branch(s, graph_id, branch_id)
-            self._require_open(draft)
             if draft.kind == "main":
-                raise ValueError("main has no base to rebase")
+                raise MainWriteForbidden()
+            self._require_open(draft)
             await self._require_edit(s, draft, actor, ())
             graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)

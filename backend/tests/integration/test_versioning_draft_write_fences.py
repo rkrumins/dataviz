@@ -90,6 +90,34 @@ def test_a_write_naming_main_is_refused():
     _e2e(_named_main)
 
 
+async def _stage_on_main(svc):
+    gid = await _graph(svc, _node("N"))
+    main = await svc.main_branch_id(gid)
+    seq = (await svc.get_graph(gid))["main_head_commit_seq"]
+    commits = await _commits(gid, main)
+    with pytest.raises(MainWriteForbidden):
+        await svc.stage_changes(graph_id=gid, branch_id=main, actor="member",
+                                ops=[_upd("N", description="x")])
+    # A row staged on main before the refusal existed is never folded into a main commit.
+    async with db.graphver_session() as s, s.begin():
+        s.add(WorkingChangeORM(graph_id=gid, branch_id=main, seq=1, op="update", entity_kind="node",
+                               entity_id="N", payload={"description": "x"}, actor="member"))
+    with pytest.raises(MainWriteForbidden):
+        await svc.checkpoint(graph_id=gid, branch_id=main, actor="member")
+    with pytest.raises(MainWriteForbidden):
+        await svc.rebase_draft(graph_id=gid, branch_id=main, actor="member")
+    assert (await svc.get_graph(gid))["main_head_commit_seq"] == seq
+    assert await _commits(gid, main) == commits
+    async with db.graphver_session() as s:
+        rows = (await s.execute(select(WorkingChangeORM.committed_into_commit_id).where(
+            WorkingChangeORM.graph_id == gid, WorkingChangeORM.branch_id == main))).scalars().all()
+    assert rows == [None]
+
+
+def test_stage_checkpoint_and_pull_on_main_are_refused():
+    _e2e(_stage_on_main)
+
+
 async def _foreign_draft(svc):
     ga, gb = await _graph(svc, _node("N")), await _graph(svc, _node("N"))
     db_ = await svc.open_draft(graph_id=gb, owner="u")

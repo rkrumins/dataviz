@@ -334,6 +334,11 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
   characters) with `POST /graph/changes` and reuse it only to retry the same save: a reused key
   answers with the first save's result whatever the body, even after the draft has closed or editing
   was paused. CORS allows the header.
+- `POST …/branches/{bid}/changes`, `…/commit` and `…/rebase` given `main`'s id answer **409
+  `main_write_forbidden`**. Before, anyone with manage could stage and checkpoint on `main`: the
+  commit skipped the publish permission and the graph lock, and `main`'s head did not count it; a
+  pull of `main` answered 404. Scripts that staged on `main` write a draft and publish it, or, with
+  publish, write `main` through the graph routes with no `branchId`.
 - A write that waits longer than `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (default `5000`) for its graph,
   draft, lifecycle or move lock, or that loses every retry to concurrent writers, answers **503
   `lock_busy`** `{retryable: true}` with `Retry-After`; out of retries it answered 409 `integrity`
