@@ -96,6 +96,7 @@ export const filenameMap: Record<string, string> = {
   'versioning/13-access-and-review.md': 'versioning-access-and-review',
   'versioning/14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
   'versioning/15-shared-contracts.md': 'versioning-shared-contracts',
+  'versioning/16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
   'README.md': 'versioning-guide',
   '02-data-model.md': 'versioning-data-model',
   '03-branching-commits-merge.md': 'versioning-branching-and-merge',
@@ -110,6 +111,7 @@ export const filenameMap: Record<string, string> = {
   '13-access-and-review.md': 'versioning-access-and-review',
   '14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
   '15-shared-contracts.md': 'versioning-shared-contracts',
+  '16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
   'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 

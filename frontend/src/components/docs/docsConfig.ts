@@ -570,6 +570,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/15-shared-contracts.md?raw'),
   },
   {
+    slug: 'versioning-go-live-stages-1-2',
+    section: 'versioning',
+    title: 'Versioning: Go-Live Stages 1–2',
+    description: 'What the go-live work shipped, why, how it works, and its performance and resiliency',
+    importFn: () => import('@docs/versioning/16-go-live-stages-1-2.md?raw'),
+  },
+  {
     slug: 'versioning-e2e',
     section: 'versioning',
     title: 'Versioning: End-to-End Walkthrough',

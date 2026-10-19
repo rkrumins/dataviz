@@ -76,6 +76,7 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 | 13 | [Access & Review](13-access-and-review.md) | *Design spec.* Draft visibility and membership, `datasource:publish`, protected main, head-bound approvals, bypass audit | work on authorization or reviews |
 | 14 | [Graph Lifecycle v2](14-graph-lifecycle-v2.md) | *Design spec.* External FalkorDB → versioned: preflight, lossless convert, platform-owned keys, cutover, drift, release, detach, purge | convert or manage a graph's lifecycle |
 | 15 | [Shared Contracts](15-shared-contracts.md) | Principals, permissions, migration chain, error codes, gate and lock order binding 12–14 | implement any of 12–14 |
+| 16 | [Go-Live Stages 1–2](16-go-live-stages-1-2.md) | What Stages 1–2 shipped and why: data-safety fences, draft access and review, lifecycle operations, lock order, performance and failure handling | review or operate the go-live work |
 | — | Go-Live Review (2026-10), repository only: `docs/audits/versioning-go-live-review-2026-10.md` | Verified review findings, requirement scorecard, end-to-end flow walkthrough | assess go-live readiness |
 
 **Suggested paths.** *Architect / evaluator:* 01 → 03 → 09 → 10. *Backend engineer:* 02 → 03 → 04
