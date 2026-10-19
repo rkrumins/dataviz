@@ -70,6 +70,8 @@ _FAIL_CLOSED_PERMISSIONS = frozenset({
     "system:groups:manage",
     "system:workspaces:create",
     "workspace:admin",
+    # Lets people into a workspace: an unconfirmable session must not.
+    "workspace:members:add",
     # Editing the back-channel host allowlist decides where this service
     # may send requests on the internal network. "I cannot confirm this
     # session is still alive" must not read as "carry on" for that.

@@ -19,8 +19,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 
 ## TL;DR
 
-* Seven built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
-  and four workspace roles. Any account without a platform role is in the default `user`
+* Eight built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
+  and five workspace roles. Any account without a platform role is in the default `user`
   tier, which stores nothing and grants nothing.
 * Permissions are namespaced by category — `system:*` or `workspace:*`. The resolver only
   emits permissions whose category matches the binding's scope; cross-category ones are
@@ -41,14 +41,15 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
 | Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
 | Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
+| Steward | `workspace_steward` | A workspace | A member who also answers requests to join and adds people as viewers or members — for the person who knows a team, without administering the workspace. |
 | Viewer | `workspace_viewer` | A workspace | Read-only, for someone who shouldn't be able to edit. |
 
 **User** (`user`) is not a stored role. It's the default tier of any account without a
 platform role: no platform permissions, and no workspace access until a workspace binding
 grants it.
 
-All seven roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
-platform roles are bound at global scope. The four workspace roles are templates you bind to a
+All eight roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
+platform roles are bound at global scope. The five workspace roles are templates you bind to a
 specific workspace (`scope_type='workspace'`, `scope_id=<workspace id>`); bound at global
 scope they grant nothing, because the resolver's category filter drops every `workspace:*`
 permission from a global binding.
@@ -59,12 +60,13 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 24 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 18 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 25 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 19 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
 | `workspace_data_engineer` | 11 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_steward` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_viewer` | 5 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
@@ -101,17 +103,18 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
 | `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
 | `workspace:catalog:manage` | workspace | Promote / edit / delete catalog items the workspace owns. | `super_admin`, `org_admin`, `workspace_data_engineer` |
-| `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
-| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
-| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
+| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward` |
+| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
+| `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
-| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
-| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
-| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
-| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
-| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
+| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
+| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
+| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward` |
+| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward` |
+| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward` |
 | `workspace:view:publish` | workspace | Publish views to everyone in the organization (enterprise visibility). | `super_admin`, `org_admin` |
-| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
 
 Three of these are deliberately separate from `system:admin`'s everyday reach:
 `system:analytics:read` (business metrics are not the audit log),

@@ -475,6 +475,9 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
     "workspace:datasource:read",
+    # Answering access requests and adding people: a workspace admin can do
+    # whatever a Workspace steward can.
+    "workspace:members:add",
     "workspace:view:create",
     "workspace:view:edit",
     "workspace:view:delete",

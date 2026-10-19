@@ -141,10 +141,9 @@ async def submit_access_request(
 ):
     """Any authenticated user can ask for access.
 
-    Validates the target exists, the role is bindable in the target
-    scope, and there isn't already a pending request from this user
-    for the same target+role pair (we surface the existing one
-    instead of creating a duplicate).
+    Validates the target exists and the role is bindable in the target
+    scope. A person has one open request per workspace: asking again
+    returns the existing one instead of creating a duplicate.
     """
     if body.target_type != "workspace":
         raise HTTPException(
@@ -182,19 +181,9 @@ async def submit_access_request(
             ),
         )
 
-    # Short-circuit duplicates so the user gets a stable single row
-    # rather than a stack of identical asks the admin has to triage.
-    existing = await access_request_repo.find_pending_for(
-        session,
-        requester_id=user.id,
-        target_type=body.target_type,
-        target_id=body.target_id,
-        requested_role=body.requested_role,
-    )
-    if existing is not None:
-        return await _to_response(session, existing)
-
-    row = await access_request_repo.create(
+    # One open request per person per workspace: a second ask returns the
+    # first, so approvers triage one row rather than a stack of repeats.
+    row, created = await access_request_repo.create(
         session,
         requester_id=user.id,
         target_type=body.target_type,
@@ -202,6 +191,8 @@ async def submit_access_request(
         requested_role=body.requested_role,
         justification=body.justification,
     )
+    if not created:
+        return await _to_response(session, row)
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.access_request.created",

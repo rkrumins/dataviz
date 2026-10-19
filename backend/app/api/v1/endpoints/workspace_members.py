@@ -43,7 +43,8 @@ from backend.common.models.rbac import (
 # still carried in ``roles`` and every ``grant`` — the badge is a
 # convenience, never the whole picture.
 _WS_ROLE_RANK = {
-    "workspace_admin": 3,
+    "workspace_admin": 4,
+    "workspace_steward": 3,
     "workspace_member": 2,
     "workspace_viewer": 1,
 }
