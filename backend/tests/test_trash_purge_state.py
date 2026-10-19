@@ -69,3 +69,24 @@ async def test_a_refused_restore_says_why_the_purge_stopped(test_client, trash, 
     assert resp.status_code == 409, resp.text
     assert "connection reset by peer" in resp.json()["detail"]
     assert "can no longer be restored" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_trash_the_graph_is_too_busy_for_is_503_lock_busy(test_client, trash, db_session,
+                                                                  monkeypatch):
+    """The tombstone waits a bounded time for saves in flight; past it the person is told the graph
+    is busy, and nothing went to the trash."""
+    from backend.app.services.versioning.errors import LockBusy
+
+    db_session.add(WorkspaceDataSourceORM(id="ds_other", workspace_id="ws_1", provider_id="prov_1",
+                                          graph_name="g_other", label="Other"))
+    await db_session.commit()
+
+    async def _busy(**_k):
+        raise LockBusy("graph g_live is busy with another change; try again shortly", retry_after=5)
+
+    monkeypatch.setattr(purge_worker, "tombstone_graphs_for_data_source", _busy)
+    resp = await test_client.delete(f"{DS}/ds_live")
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"]["type"] == "lock_busy" and resp.headers["Retry-After"] == "5"
+    assert "ds_live" not in {r["id"] for r in (await test_client.get(f"{DS}/deleted")).json()}

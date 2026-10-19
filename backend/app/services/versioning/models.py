@@ -756,26 +756,35 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1100_gv_ps_retired.
     _bounded_step(conn, "the retired_keys column was not added",
                   lambda: ensure_ps_retired_keys_column(conn), required=True)
-    # 20261018_1200_gv_lifecycle.
+    # 20261018_1200_gv_lifecycle. Every graph read queues behind its lock request: short tries.
     _bounded_step(conn, "the graph lifecycle columns were not added",
-                  lambda: ensure_graph_lifecycle_columns(conn), required=True)
+                  lambda: ensure_graph_lifecycle_columns(conn), required=True, tries=10)
 
 
-def _bounded_step(conn, failure: str, step, *, required: bool = False) -> None:
+def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
     """Run one schema step in a savepoint that waits at most five seconds for a lock, as the
     migrations do (``_bound_lock_wait``): a table a save or a job's heartbeat holds makes the step
     give up rather than queue every later write on the table behind it. Then, or on any other
     failure, the step is rolled back and logged, and the worker starts without it; the next start
     tries again. A ``required`` step's failure is raised instead: the worker exits and its restart
-    tries again, rather than run against a schema its code cannot use."""
-    try:
-        with conn.begin_nested():
-            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
-            step()
-    except Exception:
-        logger.exception("%s; the next start tries again", failure)
-        if required:
-            raise
+    tries again, rather than run against a schema its code cannot use.
+
+    ``tries`` splits the five seconds into tries of half a second each, for a table every request
+    reads: what queues behind the step's lock request then waits at most that long, and goes
+    through between tries."""
+    for attempt in range(tries):
+        try:
+            with conn.begin_nested():
+                conn.execute(text(f"SET LOCAL lock_timeout = '{'5s' if tries == 1 else '500ms'}'"))
+                step()
+            return
+        except Exception as exc:
+            if attempt + 1 < tries and getattr(getattr(exc, "orig", None), "sqlstate", None) == "55P03":
+                continue                                 # the lock wait ran out: try again
+            logger.exception("%s; the next start tries again", failure)
+            if required:
+                raise
+            return
 
 
 def ensure_ps_fencing_columns(conn) -> None:

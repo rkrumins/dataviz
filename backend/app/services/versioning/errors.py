@@ -270,8 +270,9 @@ class ProjectionKeyInvalid(_HttpMapped, RuntimeError):
 
 class GraphNotWritable(_HttpMapped, RuntimeError):
     """A content write reached a graph that is not live: editing is paused (``frozen``), or it is
-    in the trash (``trashed``) or being permanently deleted (``purging``). Not a
-    ``ConcurrencyError``, which answers 'integrity', nor a ``ValueError``, which answers 404."""
+    in the trash (``trashed``) or being permanently deleted (``purging``). A state a later schema
+    stores that this code has no words for is refused the same way. Not a ``ConcurrencyError``,
+    which answers 'integrity', nor a ``ValueError``, which answers 404."""
 
     _MESSAGES = {
         "frozen": "Editing is paused on this graph. A publisher can resume it from the data "
@@ -282,8 +283,9 @@ class GraphNotWritable(_HttpMapped, RuntimeError):
 
     def __init__(self, state: str):
         self.state = state
-        super().__init__(self._MESSAGES[state], {"type": "graph_not_writable", "state": state,
-                                                 "reason": state, "retryable": False})
+        super().__init__(self._MESSAGES.get(state, "This graph can't be changed right now."),
+                         {"type": "graph_not_writable", "state": state, "reason": state,
+                          "retryable": False})
 
 
 class VersionConflict(_HttpMapped, RuntimeError):

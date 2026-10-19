@@ -756,7 +756,7 @@ The route chip reads "Serving from: platform copy · shard 2", "original graph",
 | Aggregation during converting/ready | 409 `conversion_in_progress`; sweep skips | n/a |
 | Wrong data after cutover | Undo while `main_head == cutover_seq`; afterwards rollback to postgres + Rebuild | One CAS + broadcast |
 | Swap blocked by writers | `lock_busy` (503) or `catchup_required` | Retry |
-| Freeze vs 50 in-flight draft saves | `FOR UPDATE` waits on `FOR KEY SHARE`; later saves see `frozen` | None needed |
+| Freeze vs 50 in-flight draft saves | The freeze takes `gvlifecycle:<gid>` exclusive and waits for the saves holding it shared; later saves queue behind it and see `frozen` (row locks alone would let them overtake it) | None needed |
 | Freeze / trash / rollback with an active binding | Same transaction: source paused `lifecycle:<state>`; unfreeze/restore resumes via replay; a retention gap leaves it paused with an issue | Ingest panel |
 | Held ingest rejects during non-writable states | Redrive enqueued on re-entering writable | Automatic |
 | Adopt repair on a protected graph | Job completes `repair_pr_opened`; slot freed | Review → Continue adoption |

@@ -177,24 +177,26 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 
 **Lifecycle transition:**
 1. gvproj session lock, if a swap.
-2. `_lock_graph`.
-3. `graphs FOR UPDATE`.
-4. CAS on `lifecycle_rev`.
-5. Same-transaction side effects: ingest_sources pause/resume/retire, PR/draft closure on detach, lifecycle_events.
+2. `gvlifecycle:<gid>` exclusive.
+3. `_lock_graph`.
+4. `graphs FOR UPDATE`.
+5. CAS on `lifecycle_rev`.
+6. Same-transaction side effects: ingest_sources pause/resume/retire, PR/draft closure on detach, lifecycle_events.
 
 ### 8. Lock order (global)
 1. jobs row (claim)
 2. `gvproj:<gid>` session lock (projector, swap, evict)
 3. `gvcompact:<gid>`: exclusive for compaction; shared for seq pinners (restore, revert, export, fork, history_export, purge)
-4. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions
-5. `graphs` row: FOR UPDATE for transitions and policy; FOR KEY SHARE for draft writers and reviews; plain UPDATE for main commits
-6. `branches`: FOR UPDATE for writers; FOR SHARE for reviews
-7. `merge_requests`
-8. `projection_state`
-9. `ingest_sources`
-10. `ingest_offsets`
+4. `gvlifecycle:<gid>` (`_lock_lifecycle`): exclusive for transitions (freeze, trash, restore, purge queued); shared for draft writers
+5. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions
+6. `graphs` row: FOR UPDATE for transitions and policy; FOR KEY SHARE for draft writers and reviews; plain UPDATE for main commits
+7. `branches`: FOR UPDATE for writers; FOR SHARE for reviews
+8. `merge_requests`
+9. `projection_state`
+10. `ingest_sources`
+11. `ingest_offsets`
 
-Writers never take gvproj, and the projector never takes `_lock_graph`.
+Writers never take gvproj, and the projector never takes `_lock_graph`. Main writers never take gvlifecycle: they hold `_lock_graph`, which a transition takes after it. Draft writers take it because row locks alone do not queue fairly: a new FOR KEY SHARE goes past a waiting FOR UPDATE, so overlapping draft saves could hold a transition off for ever. The advisory lock's queue is fair, so a save that asks after a transition waits for it.
 
 ### 9. Lifecycle × drafts/PRs × ingest
 

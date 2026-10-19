@@ -231,6 +231,15 @@ def test_graph_not_writable_is_409_with_state_reason_retryable():
     assert "paused" in err.detail["message"]
 
 
+def test_a_lifecycle_state_this_code_does_not_know_is_still_409():
+    """A later schema stores more states (doc 14 §3); one this code has no words for is refused
+    the same way, not a KeyError and a 500."""
+    err = _raised(GraphNotWritable("live_legacy"))
+    assert err.status_code == 409
+    assert (err.detail["type"], err.detail["state"]) == ("graph_not_writable", "live_legacy")
+    assert err.detail["message"]
+
+
 def test_version_conflict_names_the_resource_and_current_version():
     exc = VersionConflict("lifecycle", 3)
     assert type(exc) in HTTP_MAPPED

@@ -9,8 +9,8 @@ spuriously trip ``NotUpToDate`` and flap the projection target. These tests pin 
 * a draft-branch write takes the draft's row lock (``_lock_branch``), not the graph lock, and
   is refused when the draft is not open;
 * a write that names main (its id or ``'main'``) is refused unless the caller allows it;
-* every write checks the graph is writable: a draft write before the draft's lock, a main write
-  after the graph lock; a paused graph's refusal comes after the idempotent replay (a save that
+* every write checks the graph is writable: a draft write before the draft's lock, after the
+  graph's lifecycle key shared, a main write after the graph lock; a paused graph's refusal comes after the idempotent replay (a save that
   landed still answers with its commit) and before the draft's open check;
 * ``_compute_fork_merge`` fails loud on a fork row with no ``fork_base_commit_seq`` instead
   of silently merging against an empty (genesis) base.
@@ -74,6 +74,10 @@ def _svc_with_spy(rows, monkeypatch, refuse=None):
         lock_calls.append(gid)
         svc.calls.append(("graph lock", gid))
     monkeypatch.setattr(svc, "_lock_graph", spy_lock)
+
+    async def spy_lifecycle(s, gid, *, shared=False):
+        svc.calls.append(("lifecycle shared" if shared else "lifecycle", gid))
+    monkeypatch.setattr(svc, "_lock_lifecycle", spy_lifecycle)
 
     async def spy_writable(s, gid):
         svc.calls.append(("writable", gid))
@@ -158,7 +162,7 @@ def test_a_draft_write_checks_the_lifecycle_before_the_draft_lock(monkeypatch):
 
     with pytest.raises(_StopAfterLock):
         asyncio.run(svc.apply_ops(graph_id="g1", actor="u", branch_id="draft1", ops=_DEL_OP))
-    assert svc.calls == [("writable", "g1"), ("branch lock", "draft1")]
+    assert svc.calls == [("lifecycle shared", "g1"), ("writable", "g1"), ("branch lock", "draft1")]
 
 
 def test_a_main_write_checks_the_lifecycle_after_the_graph_lock(monkeypatch):

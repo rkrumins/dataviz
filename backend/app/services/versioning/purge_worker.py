@@ -474,18 +474,23 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
     anyone else is refused (:class:`PurgeRefused` ``live_forks``). A trashed minted fork that no
     fork reads through is no reader: it is purged with its parent (:func:`_queue_trashed_forks`).
     """
+    from .service import GraphVersioningService
+
     sf = session_factory or db.graphver_session
     async with (contextlib.nullcontext(session) if session is not None else sf()) as s:
-        # Jobs before graphs (15 §8). The graph row is the one restore locks, so whichever of
-        # the two commits second sees what the other did.
+        # Jobs, the lifecycle key, then graphs (15 §8). The graph row is the one restore locks, so
+        # whichever of the two commits second sees what the other did. The key makes the draft
+        # saves that start after us wait for us; its wait, and the row's, are bounded (LockBusy).
         existing = (await s.execute(
             select(JobORM).where(
                 JobORM.job_type == PURGE_JOB_TYPE,
                 JobORM.graph_id == graph_id,
                 JobORM.status.in_(("pending", "running", "failed")),
             ).order_by(JobORM.created_at.desc()).limit(1).with_for_update())).scalars().first()
-        graph = (await s.execute(select(GraphORM).where(GraphORM.id == graph_id)
-                                 .with_for_update())).scalars().first()
+        await GraphVersioningService._lock_lifecycle(s, graph_id)
+        graph = (await GraphVersioningService._bounded_lock(
+            s, select(GraphORM).where(GraphORM.id == graph_id).with_for_update(),
+            f"graph {graph_id}")).scalars().first()
         if graph is None:
             return None
         if require_tombstoned and graph.deleted_at is None:
@@ -626,16 +631,24 @@ async def tombstone_graphs_for_data_source(*, data_source_id: str, workspace_id:
 
     No purge job is created. The tombstone's age is the only schedule there is, and the reaper
     (below) is what eventually acts on it — which is precisely what leaves room for an undo.
+
+    A graph busy past ``GRAPH_LOCK_TIMEOUT_MS`` (a long import or save) is :class:`LockBusy`, and
+    nothing is trashed.
     """
+    from .service import GraphVersioningService
+
+    of_source = (GraphORM.data_source_id == data_source_id, GraphORM.workspace_id == workspace_id,
+                 GraphORM.deleted_at.is_(None))
     async with db.graphver_session() as s:
-        # FOR UPDATE, not the UPDATE's own FOR NO KEY UPDATE: a fork or fork restore reads the
-        # parent FOR KEY SHARE, so it waits for this and sees the graph trashed, or we wait for it.
-        graphs = (await s.execute(
-            select(GraphORM).where(
-                GraphORM.data_source_id == data_source_id,
-                GraphORM.workspace_id == workspace_id,
-                GraphORM.deleted_at.is_(None),
-            ).with_for_update())).scalars().all()
+        # Each graph's lifecycle key first (15 §8), so the draft saves that start after us wait for
+        # us; then FOR UPDATE, not the UPDATE's own FOR NO KEY UPDATE: a fork or fork restore reads
+        # the parent FOR KEY SHARE, so it waits for this and sees the graph trashed, or we wait for
+        # it. Both waits are bounded.
+        for gid in sorted((await s.execute(select(GraphORM.id).where(*of_source))).scalars().all()):
+            await GraphVersioningService._lock_lifecycle(s, gid)
+        graphs = (await GraphVersioningService._bounded_lock(
+            s, select(GraphORM).where(*of_source).with_for_update(),
+            f"data source {data_source_id}")).scalars().all()
         for g in graphs:
             g.deleted_at = _now()
             g.deleted_by = actor
@@ -689,14 +702,18 @@ async def restore_graphs_for_data_source(*, data_source_id: str, workspace_id: s
     mid-flight and stitch a half-deleted graph back together, restore simply REFUSES once a purge
     has been queued. A purge and a restore can therefore never overlap, and there is no
     partial-restore state to reason about. The row lock below serialises us against the reaper
-    deciding to queue one at this exact moment.
+    deciding to queue one at this exact moment. It is taken after each graph's lifecycle key (15
+    §8), and both waits are bounded (:class:`LockBusy`).
     """
+    from .service import GraphVersioningService
+
+    of_source = (GraphORM.data_source_id == data_source_id, GraphORM.workspace_id == workspace_id)
     async with db.graphver_session() as s:
-        graphs = (await s.execute(
-            select(GraphORM).where(
-                GraphORM.data_source_id == data_source_id,
-                GraphORM.workspace_id == workspace_id,
-            ).with_for_update())).scalars().all()
+        for gid in sorted((await s.execute(select(GraphORM.id).where(*of_source))).scalars().all()):
+            await GraphVersioningService._lock_lifecycle(s, gid)
+        graphs = (await GraphVersioningService._bounded_lock(
+            s, select(GraphORM).where(*of_source).with_for_update(),
+            f"data source {data_source_id}")).scalars().all()
 
         state = await _purge_state(s, data_source_id, deleted_at)
         if state.final:

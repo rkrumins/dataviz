@@ -207,9 +207,11 @@ class _PurgeSession:
         self.fork_rows = list(fork_rows)
         self.statements, self.added = [], []
 
-    async def execute(self, stmt):
+    async def execute(self, stmt, params=None):
+        if params is not None:                   # the bounded lock wait's set_config
+            return _Rows([])
         self.statements.append(stmt)
-        if stmt.column_descriptions[0]["entity"] is JobORM:
+        if stmt.column_descriptions[0].get("entity") is JobORM:
             return _Rows([self.existing] if self.existing is not None else [])
         if "graphs.fork_parent_graph_id = " in str(stmt):
             return _Rows(self.fork_rows)
@@ -245,10 +247,12 @@ async def test_the_purge_job_is_locked_before_the_graph():
     await purge_worker.create_purge_job(graph_id="g1", workspace_id=None, actor="u", session=s)
 
     selects = [st for st in s.statements if hasattr(st, "column_descriptions")
-               and st.column_descriptions[0]["entity"] in (JobORM, GraphORM)]
+               and st.column_descriptions[0].get("entity") in (JobORM, GraphORM)]
     assert [st.column_descriptions[0]["entity"] for st in selects[:2]] == [JobORM, GraphORM]
     assert all(st._for_update_arg is not None for st in selects[:2]), \
         "jobs then graphs, both FOR UPDATE (15 §8)"
+    assert "pg_advisory_xact_lock(hashtext" in _sql(s.statements[1]), \
+        "the graph's lifecycle key, exclusive, between the two"
 
 
 async def test_a_trashed_fork_holds_its_parent_only_while_a_live_or_bound_fork_reads_through_it():
@@ -274,14 +278,14 @@ async def test_a_purge_locks_the_graphs_forks_before_counting_them():
     s = _PurgeSession(_graph(head=5, deleted_at="t"))
     await purge_worker.create_purge_job(graph_id="g1", workspace_id=None, actor="u", session=s)
 
-    lock = s.statements[2]
+    lock = s.statements[3]
     assert getattr(lock, "column_descriptions", None), f"no fork-row select: {s.statements}"
     assert lock.column_descriptions[0]["entity"] is GraphORM
     assert "graphs.fork_parent_graph_id = " in str(lock)
     assert lock._for_update_arg is not None
     assert (lock._for_update_arg.read, lock._for_update_arg.key_share) == (True, True), \
         "FOR KEY SHARE: a restore's FOR UPDATE waits for it, a fork's commit does not"
-    assert "count" in str(s.statements[3]), "the lock comes before the count"
+    assert "count" in str(s.statements[4]), "the lock comes before the count"
 
 
 async def test_a_parent_purge_queues_its_trashed_forks():

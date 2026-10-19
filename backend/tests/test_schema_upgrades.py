@@ -870,8 +870,9 @@ async def test_a_store_alembic_never_reached_gets_the_lifecycle_columns(store):
 
 
 @e2e
-async def test_the_lifecycle_migration_round_trips(store):
-    """Down drops the columns, and with them every freeze; the graphs stay."""
+async def test_the_lifecycle_migration_round_trips(store, caplog):
+    """Down drops the columns, and with them every freeze, saying how many graphs it resumed; the
+    graphs stay."""
     migration = _migration(_GV_LIFECYCLE)
 
     def run(step):
@@ -885,7 +886,11 @@ async def test_the_lifecycle_migration_round_trips(store):
         trans = await conn.begin()
         try:
             await _insert_graph(conn, "g_schema_frozen", "frozen")
+            frozen = (await conn.execute(text(
+                f"SELECT count(*) FROM {_GRAPHS} WHERE lifecycle_state = 'frozen'"))).scalar()
+            caplog.set_level("WARNING", logger="alembic.runtime.migration")
             await conn.run_sync(run("downgrade"))
+            assert f"{frozen} graph(s) had editing paused" in caplog.text
             assert not _LIFECYCLE_COLUMNS & await _graphs_columns(conn)
             assert (await conn.execute(text(
                 f"SELECT count(*) FROM {_GRAPHS} WHERE id = 'g_schema_frozen'"))).scalar() == 1
@@ -894,3 +899,36 @@ async def test_the_lifecycle_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+@e2e
+async def test_the_lifecycle_step_never_stalls_graph_reads_for_long(store):
+    """While the step waits for ``graphs``, every read of a graph queues behind its request. Each
+    try waits half a second, so a read waits about that long rather than the step's whole bound,
+    and the step tries again until the long holder lets go."""
+    async with store.begin() as conn:
+        await conn.execute(text(f"ALTER TABLE {_GRAPHS} DROP COLUMN lifecycle_rev"))
+    async with store.connect() as holder, store.connect() as conn, store.connect() as reader:
+        held = await holder.begin()
+        await holder.execute(text(f"LOCK TABLE {_GRAPHS} IN ACCESS SHARE MODE"))
+
+        async def upgrade():
+            async with conn.begin():
+                await conn.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await conn.run_sync(models._ensure_schema_upgrades)
+                assert _LIFECYCLE_COLUMNS <= await _graphs_columns(conn)
+
+        async def read():
+            await asyncio.sleep(1)
+            started = time.monotonic()
+            async with reader.begin():
+                await reader.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await reader.execute(text(f"SELECT count(*) FROM {_GRAPHS}"))
+            return time.monotonic() - started
+
+        async def release():
+            await asyncio.sleep(2.5)
+            await held.rollback()
+
+        _, waited, _ = await asyncio.gather(upgrade(), read(), release())
+    assert waited < 1, f"a graph read waited {waited:.1f}s behind the schema step"

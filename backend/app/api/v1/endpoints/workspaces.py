@@ -67,6 +67,7 @@ from backend.common.models.management import (
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 from backend.app.services.versioning import config as gv_config
+from backend.app.services.versioning.errors import LockBusy
 
 logger = logging.getLogger(__name__)
 
@@ -765,6 +766,8 @@ async def remove_data_source(
     try:
         await purge_worker.tombstone_graphs_for_data_source(
             data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
+    except LockBusy:
+        raise                    # 503 lock_busy: a save or import holds the graph; nothing changed
     except Exception:
         logger.exception("could not tombstone graphs for %s", ds_id)
         raise HTTPException(

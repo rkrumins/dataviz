@@ -12,7 +12,10 @@
   (no new rev), a stale rev is :class:`VersionConflict`, a trashed graph is unknown. Unfreezing
   restores every write.
 * A freeze waits for a draft save in flight, and every later save sees it; past
-  ``GRAPH_LOCK_TIMEOUT_MS`` it is :class:`LockBusy`.
+  ``GRAPH_LOCK_TIMEOUT_MS`` it is :class:`LockBusy`. A stream of overlapping draft saves does not
+  hold it off: the saves that start after it queue behind it. A trash behind a save in flight is
+  :class:`LockBusy` too, not a wait without end.
+* A graph whose enablement has not finished is not frozen: its import still lands on main.
 * A queued publish that meets a freeze fails with the 409 and hands its draft back; an import
   fails after the windows it committed and, once unfrozen and retried, lands every row once.
 * A trashed graph reports ``trashed``, one with a purge job ``purging``; a frozen graph trashed and
@@ -37,7 +40,7 @@ from backend.app.services.versioning.import_export.service import ImportExportSe
 from backend.app.services.versioning.models import BranchORM, CommitORM, GraphORM, JobORM, WorkingChangeORM
 from backend.app.services.versioning.purge_worker import (PURGE_JOB_TYPE, restore_graphs_for_data_source,
                                                           tombstone_graphs_for_data_source)
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres to run")
@@ -312,6 +315,91 @@ async def _in_flight(svc, monkeypatch):
 
 def test_freeze_waits_for_an_in_flight_draft_save_and_later_saves_see_it(monkeypatch):
     _e2e(_in_flight, monkeypatch)
+
+
+async def _stream(svc, monkeypatch):
+    monkeypatch.setattr(config, "GRAPH_LOCK_TIMEOUT_MS", 3000)
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="u"))["graph_id"]
+    drafts = [await svc.open_draft(graph_id=gid, owner=f"u{i}") for i in range(4)]
+
+    async def held(_s):
+        await asyncio.sleep(0.4)
+
+    async def saves(i, draft):
+        await asyncio.sleep(0.1 * i)               # staggered: one is always in flight
+        for n in range(100):
+            try:
+                await svc.apply_ops(graph_id=gid, branch_id=draft, actor=f"u{i}",
+                                    ops=[_node(f"S{i}_{n}")], on_commit=held)
+            except GraphNotWritable:
+                return n
+        raise AssertionError("the saves never saw the freeze")
+
+    savers = [asyncio.create_task(saves(i, d)) for i, d in enumerate(drafts)]
+    try:
+        await asyncio.sleep(1)
+        started = asyncio.get_running_loop().time()
+        assert (await svc.set_frozen(graph_id=gid, frozen=True, expected_rev=0))["state"] == "frozen"
+        assert asyncio.get_running_loop().time() - started < 2, "the freeze waited out the stream"
+        assert all(await asyncio.wait_for(asyncio.gather(*savers), 5)), "every saver saw the freeze"
+    finally:
+        for task in savers:
+            task.cancel()
+        await asyncio.gather(*savers, return_exceptions=True)
+
+
+def test_a_freeze_is_not_held_off_by_a_stream_of_overlapping_draft_saves(monkeypatch):
+    _e2e(_stream, monkeypatch)
+
+
+async def _trash_busy(svc, monkeypatch):
+    ds = "ds_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u"))["graph_id"]
+    draft = await svc.open_draft(graph_id=gid, owner="u")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held(_s):
+        entered.set()
+        await release.wait()
+
+    save = asyncio.create_task(svc.apply_ops(graph_id=gid, branch_id=draft, actor="u",
+                                             ops=[_node("A")], on_commit=held))
+    await entered.wait()
+    monkeypatch.setattr(config, "GRAPH_LOCK_TIMEOUT_MS", 200)
+    try:
+        with pytest.raises(LockBusy):
+            await asyncio.wait_for(tombstone_graphs_for_data_source(
+                data_source_id=ds, workspace_id="ws1", actor="u"), 5)
+    finally:
+        release.set()
+        await save
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, gid)).deleted_at is None, "a busy trash changes nothing"
+
+
+def test_a_trash_behind_a_save_in_flight_is_busy_not_stuck(monkeypatch):
+    _e2e(_trash_busy, monkeypatch)
+
+
+async def _enabling(svc):
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="u"))["graph_id"]
+    async with db.graphver_session() as s:          # pending: no worker picks it up here
+        s.add(JobORM(job_type="bootstrap", graph_id=gid, workspace_id="ws1", status="pending"))
+    try:
+        with pytest.raises(ConcurrencyError, match="still being enabled"):
+            await svc.set_frozen(graph_id=gid, frozen=True, expected_rev=0)
+        async with db.graphver_session() as s:
+            row = await s.get(GraphORM, gid)
+            assert (row.lifecycle_state, row.lifecycle_rev) == ("live", 0)
+    finally:
+        async with db.graphver_session() as s:
+            await s.execute(delete(JobORM).where(JobORM.graph_id == gid))
+
+
+def test_a_graph_whose_enablement_is_unfinished_is_not_frozen():
+    _e2e(_enabling)
 
 
 async def _queued_publish(svc):

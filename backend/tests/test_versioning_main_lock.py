@@ -12,6 +12,9 @@ unbounded.
   enablement has not finished, before they read anything; each is retried. Bulk import into a
   graph created in the same transaction takes no lock. Under the lock they check the graph is
   writable, and a graph that is not is refused, not retried.
+* A draft writer takes the graph's lifecycle key shared before it checks the graph is writable, and
+  a main writer never takes it; a freeze takes it exclusive, then the graph lock, then the row. A
+  freeze never overwrites a lifecycle state other than live or frozen.
 * A busy graph reaches the caller as LockBusy through ContextEngine and ``/commands/batch``,
   instead of a ``success: false``; so does a paused one, as GraphNotWritable. Once a batch command has committed, the busy command is a
   ``lock_busy`` result instead and the batch stops, so a retry does not resend what landed.
@@ -20,6 +23,7 @@ Pure unit tests: fakes stand in for the session. The same runs on Postgres in
 integration/test_versioning_main_lock.py.
 """
 import contextlib
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -58,6 +62,10 @@ _LOCKS = [
                  id="graph"),
     pytest.param(lambda s: GraphVersioningService._lock_branch(s, "g1", "d1"), "FOR NO KEY UPDATE",
                  id="branch"),
+    pytest.param(lambda s: GraphVersioningService._lock_lifecycle(s, "g1"),
+                 "pg_advisory_xact_lock(hashtext", id="lifecycle"),
+    pytest.param(lambda s: GraphVersioningService._lock_lifecycle(s, "g1", shared=True),
+                 "pg_advisory_xact_lock_shared(hashtext", id="lifecycle-shared"),
 ]
 
 
@@ -208,9 +216,13 @@ def _spied_svc(monkeypatch, rows=None, lock_failures=(), refuse=None):
         if refuse is not None:
             raise refuse
 
+    async def lifecycle(s, gid, *, shared=False):
+        events.append("lifecycle shared" if shared else "lifecycle")
+
     async def nothing(*_a, **_k):
         return None
     monkeypatch.setattr(svc, "_lock_graph", lock)
+    monkeypatch.setattr(svc, "_lock_lifecycle", lifecycle, raising=False)
     monkeypatch.setattr(svc, "_assert_not_bootstrapping", not_bootstrapping)
     monkeypatch.setattr(svc, "_assert_writable", writable)
     monkeypatch.setattr(svc, "_assert_syncable", nothing)
@@ -280,6 +292,69 @@ async def test_main_advancers_check_the_lifecycle_under_the_lock(monkeypatch, ad
     assert refused.value.state == "frozen"
     assert events.index("lock") < events.index("writable"), events
     assert events.count("lock") == 1, "a paused graph is not retried"
+    # It holds the graph lock, which a freeze takes after the lifecycle key: waiting for that key
+    # here would deadlock with it.
+    assert "lifecycle shared" not in events, events
+
+
+_DRAFT_WRITERS = [
+    pytest.param(lambda svc: svc.open_draft(graph_id="g1", owner="u"), id="open"),
+    pytest.param(lambda svc: svc.stage_changes(graph_id="g1", branch_id="d1", actor="u", ops=[]),
+                 id="stage"),
+    pytest.param(lambda svc: svc.checkpoint(graph_id="g1", branch_id="d1", actor="u"), id="checkpoint"),
+    pytest.param(lambda svc: svc.rebase_draft(graph_id="g1", branch_id="d1", actor="u"), id="rebase"),
+    pytest.param(lambda svc: svc.apply_ops(graph_id="g1", branch_id="d1", actor="u", ops=[
+        {"op": "delete", "entity_id": "n1", "entity_kind": "node"}]), id="save"),
+]
+
+
+@pytest.mark.parametrize("write", _DRAFT_WRITERS)
+async def test_draft_writers_take_the_lifecycle_key_shared_first(monkeypatch, write):
+    """Row locks let a new FOR KEY SHARE past a waiting FOR UPDATE, so overlapping saves could hold
+    a freeze or a trash off for ever. The lifecycle key's queue is fair: a transition waiting for
+    it exclusive goes ahead of every save that asks after it."""
+    rows = {(GraphORM, "g1"): GraphORM(id="g1", main_head_commit_seq=3)}
+    svc, events = _spied_svc(monkeypatch, rows, refuse=GraphNotWritable("frozen"))
+
+    async def main_bid(s, gid):
+        return "main1"
+
+    async def stop(*_a, **_k):
+        raise _Stop
+    monkeypatch.setattr(svc, "_main_branch_id", main_bid)
+    monkeypatch.setattr(svc, "_lock_branch", stop)
+    with pytest.raises((GraphNotWritable, _Stop)):
+        await write(svc)
+    assert events.index("lifecycle shared") < events.index("writable"), events
+    assert "lock" not in events, "a draft writer never takes the graph lock after the key"
+
+
+def _freezer(monkeypatch, state="live"):
+    graph = GraphORM(id="g1", lifecycle_state=state, lifecycle_rev=0)
+    svc, events = _spied_svc(monkeypatch)
+
+    async def row(s, stmt, what):
+        events.append("row")
+        return SimpleNamespace(scalar_one_or_none=lambda: graph)
+    monkeypatch.setattr(svc, "_bounded_lock", row)
+    return svc, events, graph
+
+
+async def test_a_freeze_takes_the_lifecycle_key_then_the_graph_lock_then_the_row(monkeypatch):
+    svc, events, graph = _freezer(monkeypatch)
+    assert (await svc.set_frozen(graph_id="g1", frozen=True, expected_rev=0))["state"] == "frozen"
+    assert events[:3] == ["lifecycle", "lock", "row"], events
+
+
+@pytest.mark.parametrize("frozen", [True, False], ids=["freeze", "unfreeze"])
+async def test_a_freeze_never_overwrites_a_lifecycle_state_it_does_not_know(monkeypatch, frozen):
+    """A later schema stores more states (doc 14 §3, converting or detaching among them): this code
+    refuses them rather than turn them into live or frozen."""
+    svc, _events, graph = _freezer(monkeypatch, "converting")
+    with pytest.raises(GraphNotWritable) as refused:
+        await svc.set_frozen(graph_id="g1", frozen=frozen, expected_rev=0)
+    assert refused.value.state == "converting"
+    assert (graph.lifecycle_state, graph.lifecycle_rev) == ("converting", 0)
 
 
 async def test_a_seed_inside_the_creating_transaction_takes_no_lock(monkeypatch):

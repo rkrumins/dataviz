@@ -8,13 +8,15 @@ every existing one reads live at rev 0 from the column defaults: no UPDATE, no r
 per graph. The wait for the table's lock is bounded (``_bound_lock_wait``), and the upgrade is safe
 to re-run.
 
-The downgrade drops the columns, and with them every freeze: each graph is editable again.
+The downgrade drops the columns, and with them every freeze: each graph is editable again. It
+logs how many graphs that resumes; a later upgrade does not pause them again.
 
 Mirrored in ``models._ensure_schema_upgrades`` for a separate ``GRAPHVER_DB_URL`` alembic never
 reaches.
 """
 from __future__ import annotations
 
+import logging
 from typing import Union
 
 from alembic import op
@@ -27,6 +29,8 @@ revision: str = "20261018_1200_gv_lifecycle"
 down_revision: Union[str, None] = "20261018_1100_gv_ps_retired"
 branch_labels = None
 depends_on = None
+
+logger = logging.getLogger("alembic.runtime.migration")
 
 
 def _bound_lock_wait() -> None:
@@ -46,9 +50,16 @@ def downgrade() -> None:
     _bound_lock_wait()
     bind = op.get_bind()
     schema = gv_config.graphver_schema()
-    if not sa.inspect(bind).has_table("graphs", schema=schema):
+    inspector = sa.inspect(bind)
+    if not inspector.has_table("graphs", schema=schema):
         return
     graphs = f'"{schema}"."graphs"'
+    if "lifecycle_state" in {c["name"] for c in inspector.get_columns("graphs", schema=schema)}:
+        frozen = bind.execute(sa.text(
+            f"SELECT count(*) FROM {graphs} WHERE lifecycle_state = 'frozen'")).scalar()
+        if frozen:
+            logger.warning("%d graph(s) had editing paused; the downgrade resumes editing on all of "
+                           "them, and a later upgrade does not pause them again", frozen)
     bind.execute(sa.text(f"ALTER TABLE {graphs} DROP CONSTRAINT IF EXISTS ck_graphs_lifecycle_state"))
     for column in ("lifecycle_state", "lifecycle_rev", "lifecycle_changed_at"):
         bind.execute(sa.text(f"ALTER TABLE {graphs} DROP COLUMN IF EXISTS {column}"))

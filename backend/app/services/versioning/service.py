@@ -632,11 +632,12 @@ class GraphVersioningService:
         editing is paused (``frozen``), it is in the trash (``trashed``), or a purge of it exists
         (``purging``, the rule restore uses). An unknown graph passes, for the caller's own 404.
 
-        The row is read FOR KEY SHARE and held to the end of the write (doc 15 §8, position 5:
+        The row is read FOR KEY SHARE and held to the end of the write (doc 15 §8, position 6:
         after ``_lock_graph``, before a draft's row). It waits only for a row lock taken FOR
         UPDATE — :meth:`set_frozen`, a restore, a purge being queued, a trash — so a freeze waits
-        for the writes in flight, and a write after it sees it. A wait that runs out is
-        :class:`LockBusy`, which ``_retry_seq`` retries."""
+        for the writes in flight, and a write after it sees it: a draft writer has taken the
+        lifecycle key shared first (:meth:`_lock_lifecycle`), so it cannot overtake one. A wait
+        that runs out is :class:`LockBusy`, which ``_retry_seq`` retries."""
         row = (await self._bounded_lock(s, select(GraphORM.lifecycle_state, GraphORM.deleted_at)
                .where(GraphORM.id == graph_id).with_for_update(read=True, key_share=True),
                f"graph {graph_id}")).first()
@@ -697,6 +698,7 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             await self._assert_not_bootstrapping(s, graph_id)
+            await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             draft = BranchORM(
                 graph_id=graph_id,
@@ -817,6 +819,7 @@ class GraphVersioningService:
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
+            await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             branch = await self._lock_branch(s, graph_id, branch_id)   # serializes the seq allocation
             self._require_open(branch)
@@ -938,6 +941,7 @@ class GraphVersioningService:
         field-merged; a same-field clash raises :class:`MergeConflict` unless a
         ``resolutions`` payload (``{entity_id: payload|None}``) settles it."""
         async with self._session() as s:
+            await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             branch = await self._lock_branch(s, graph_id, branch_id)
             self._require_open(branch, publishing_ok=publishing_ok)
@@ -1507,6 +1511,7 @@ class GraphVersioningService:
         """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
         collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
+            await self._lock_lifecycle(s, graph_id, shared=True)
             await self._assert_writable(s, graph_id)
             # The draft's lock first, so main's head is read after any save, checkpoint or pull of
             # this draft that held it has committed.
@@ -1792,15 +1797,23 @@ class GraphVersioningService:
         §7), so it waits for the writes in flight. A graph already in the asked state answers
         ``changed: False`` whatever ``expected_rev`` says, so a retried freeze is not a conflict;
         otherwise a stale ``expected_rev`` is :class:`VersionConflict`. A trashed or unknown graph
-        is ``ValueError``. Not retried: a busy graph is :class:`LockBusy`, for the person to retry."""
+        is ``ValueError``. Not retried: a busy graph is :class:`LockBusy`, for the person to retry.
+        A graph in any other state (one a later schema stores) is :class:`GraphNotWritable`, and one
+        whose enablement has not finished is not frozen (:class:`ConcurrencyError`): its import
+        commit still lands on main."""
         to = "frozen" if frozen else "live"
         async with self._session() as s:
+            await self._lock_lifecycle(s, graph_id)
             await self._lock_graph(s, graph_id)
             g = (await self._bounded_lock(s, select(GraphORM).where(GraphORM.id == graph_id)
                  .with_for_update().execution_options(populate_existing=True),
                  f"graph {graph_id}")).scalar_one_or_none()
             if g is None or g.deleted_at is not None:
                 raise ValueError(f"unknown graph {graph_id}")
+            if g.lifecycle_state not in ("live", "frozen"):
+                raise GraphNotWritable(g.lifecycle_state)
+            if frozen:
+                await self._assert_not_bootstrapping(s, graph_id)
             changed = g.lifecycle_state != to
             if changed:
                 if g.lifecycle_rev != expected_rev:
@@ -6593,6 +6606,19 @@ class GraphVersioningService:
             s, select(func.pg_advisory_xact_lock(func.hashtext(graph_id))), f"graph {graph_id}")
 
     @staticmethod
+    async def _lock_lifecycle(s, graph_id: str, *, shared: bool = False) -> None:
+        """Take the graph's lifecycle key for the transaction: ``shared`` for a draft writer,
+        before :meth:`_assert_writable`; exclusive for a transition (freeze, trash, restore, a purge
+        queued), before :meth:`_lock_graph` and the row. Row locks let each new FOR KEY SHARE past a
+        waiting FOR UPDATE, so overlapping draft saves could hold a transition off for ever; this
+        key's queue is fair, so the saves that ask after a transition wait for it. Main writers do
+        not take it: they hold the graph lock, which a transition takes after this key. The wait is
+        bounded (:meth:`_bounded_lock`)."""
+        take = func.pg_advisory_xact_lock_shared if shared else func.pg_advisory_xact_lock
+        await GraphVersioningService._bounded_lock(
+            s, select(take(func.hashtext(f"gvlifecycle:{graph_id}"))), f"graph {graph_id}")
+
+    @staticmethod
     async def _lock_branch(s, graph_id: str, branch_id: str) -> BranchORM:
         """Take a branch's row lock for the transaction and return the row as committed. Every
         writer of one draft (apply_ops, stage, checkpoint, pull, claim, abandon) serializes here,
@@ -6708,6 +6734,8 @@ class GraphVersioningService:
                     raise MainWriteForbidden()
                 await self._lock_graph(s, graph_id)
                 await s.refresh(graph)
+            else:
+                await self._lock_lifecycle(s, graph_id, shared=True)
             refusal = None
             try:
                 await self._assert_writable(s, graph_id)
