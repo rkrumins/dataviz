@@ -308,6 +308,18 @@ async def test_work_in_flight_blocks_a_move_but_not_a_request(test_client, db_se
     assert r.status_code == 409 and r.json()["detail"]["issues"][0]["code"] == "aggregation_running"
 
 
+async def test_a_source_too_big_to_move_in_one_go_says_so(test_client, db_session, world,
+                                                          monkeypatch):
+    monkeypatch.setattr(data_source_transfer, "MAX_VIEWS", 6)
+    async with acting_as(db_session, "cy"):
+        p = await _preview(test_client)
+        r = await _move(test_client)
+    assert [b["code"] for b in p["blockers"]] == ["too_large"]
+    assert p["blockers"][0]["message"].startswith("7 views are built on it, more than the 6")
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "blocked"
+    assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
+
+
 @pytest.mark.parametrize("busy, down, code", [
     ("export", False, "graph_busy"),
     (None, True, "version_store_unavailable"),

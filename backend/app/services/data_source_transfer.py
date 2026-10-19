@@ -116,6 +116,10 @@ logger = logging.getLogger(__name__)
 REQUEST_DAYS = 14
 #: How long a move can be undone for.
 UNDO_DAYS = 7
+#: The most views one move takes. On Postgres a move of 50,000 views, and its undo, finish in
+#: about ten seconds; the cap keeps a much slower deployment well inside the two minutes the
+#: routes are given (``HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS``).
+MAX_VIEWS = 50_000
 #: Preview rows past this are counted, not listed.
 _VIEW_LIST_CAP = 500
 #: Rows per IN (...) when rewriting by id.
@@ -276,7 +280,7 @@ class _Loser:
     type: str
     id: str
     role: str
-    views: list[str]
+    views: int                     # how many moved views they'd lose
     name: str = ""
     email: Optional[str] = None
     member_count: Optional[int] = None
@@ -287,7 +291,7 @@ class _Loser:
     def recorded(self) -> dict:
         """As the move records it: who lost access is audit history, names included."""
         out = {"type": self.type, "id": self.id, "name": self.name, "role": self.role,
-               "views": len(self.views), "via": self.via}
+               "views": self.views, "via": self.via}
         if self.email:
             out["email"] = self.email
         if self.member_count is not None:
@@ -433,6 +437,20 @@ async def _access_plan(
         b_readers |= members.get(gid, set())
     org_wide = await _org_wide_people(session)
 
+    # Who reads which of them some other way: the views each subject is shared with, and the
+    # ones each person made. Kept as sets per subject, so the plan costs people + views to work
+    # out, never their product.
+    shared_ids = {v.id for v in shared_ws}
+    granted: dict[tuple[str, str], set[str]] = {}
+    for vid, subjects in grants.items():
+        if vid in shared_ids:
+            for subject in subjects:
+                granted.setdefault(subject, set()).add(vid)
+    made: dict[str, set[str]] = {}
+    for v in shared_ws:
+        if v.created_by:
+            made.setdefault(v.created_by, set()).add(v.id)
+
     losers: dict[tuple[str, str], _Loser] = {}
     for b in in_a:
         key = (b.subject_type, b.subject_id)
@@ -441,16 +459,15 @@ async def _access_plan(
         if b.subject_type == "group":
             if b.subject_id in b_reader_groups or b.subject_id not in group_names:
                 continue
-            lost = [v.id for v in shared_ws if key not in grants.get(v.id, ())]
+            still = granted.get(key, set())
         else:
             uid = b.subject_id
             if uid in b_readers or uid in org_wide:
                 continue
-            via = {("group", g) for g in user_groups.get(uid, ())}
-            lost = [
-                v.id for v in shared_ws
-                if v.created_by != uid and not ({key} | via) & grants.get(v.id, set())
-            ]
+            still = made.get(uid, set()) | granted.get(key, set())
+            for gid in user_groups.get(uid, ()):
+                still = still | granted.get(("group", gid), set())
+        lost = len(shared_ids) - len(still)
         if lost:
             losers[key] = _Loser(type=b.subject_type, id=b.subject_id,
                                  role=workspace_access.role_label(b.role_name), views=lost)
@@ -603,11 +620,12 @@ async def _destination_blockers(
 
 def _token(target_id: str, views: list[_View], losers: dict, was_default: bool,
            becomes_primary: bool, pin_dest: Optional[str], identity_pin: dict) -> str:
-    """A fingerprint of everything a reviewer must re-read if it changes."""
+    """A fingerprint of everything a reviewer must re-read if it changes. Who loses access is
+    taken by how many views each loses, so it costs people + views to build, never their product."""
     material = json.dumps({
         "to": target_id,
         "views": sorted(v.id for v in views),
-        "losers": sorted([t, i, sorted(loser.views)] for (t, i), loser in losers.items()),
+        "losers": sorted([t, i, loser.views] for (t, i), loser in losers.items()),
         "primary": [was_default, becomes_primary, pin_dest],
         "identity": sorted(identity_pin.items()),
     }, sort_keys=True)
@@ -650,6 +668,12 @@ async def preflight(
     effective = purpose or {"direct": "move", "request": "propose"}.get(mode or "")
 
     blockers, facts = await _destination_blockers(session, ds, target)
+    if len(views) > MAX_VIEWS:
+        blockers.append(_issue(
+            "too_large",
+            f"{len(views):,} views are built on it, more than the {MAX_VIEWS:,} one move can take. "
+            "Empty its trash, or delete views nobody uses, then try again.",
+            "blocker"))
     notes: list[TransferIssue] = []
 
     pending = await transfer_repo.pending_for_source(session, ds.id)
@@ -892,7 +916,7 @@ def _preview(pre: Preflight, *, mode: Optional[str] = None,
             loses=[
                 TransferSubject(type=loser.type, id=loser.id, name=loser.name, email=loser.email,
                                 memberCount=loser.member_count, role=loser.role,
-                                views=len(loser.views), via=loser.via)
+                                views=loser.views, via=loser.via)
                 for loser in sorted(pre.losers.values(), key=lambda l: (l.type != "group",
                                                                         l.name.lower()))
             ],
@@ -979,19 +1003,20 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         .where(ViewORM.data_source_id == ds.id)
         .values(workspace_id=target.id, updated_at=ViewORM.updated_at)
         .execution_options(synchronize_session=False))
+    # Their history goes with them, so the old workspace's feed stops listing them.
+    await session.execute(
+        update(ViewActivityLogORM)
+        .where(ViewActivityLogORM.view_id.in_(
+            select(ViewORM.id).where(ViewORM.data_source_id == ds.id)))
+        .values(workspace_id=target.id)
+        .execution_options(synchronize_session=False))
     moved = list((await session.execute(
         select(ViewORM.id).where(ViewORM.data_source_id == ds.id))).scalars().all())
-    for chunk in _chunks(moved):
-        await session.execute(
-            update(ViewActivityLogORM)
-            .where(ViewActivityLogORM.view_id.in_(chunk))
-            .values(workspace_id=target.id)
-            .execution_options(synchronize_session=False))
     summary = f"Moved from {source.name} to {target.name} with {_label(ds)}"
-    for vid in moved:
-        await view_activity_repo.record_view_activity(
-            session, view_id=vid, workspace_id=target.id, action="moved", actor=actor,
-            summary=summary, changes={"from": source.id, "to": target.id, "transferId": transfer_id})
+    changes = {"from": source.id, "to": target.id, "transferId": transfer_id}
+    await view_activity_repo.record_view_activity_many(
+        session, entries=[(vid, summary, changes) for vid in moved], workspace_id=target.id,
+        action="moved", actor=actor)
 
     await session.execute(
         update(AggregationDataSourceStateORM)
@@ -1534,11 +1559,10 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
             .values(data_source_id=None, updated_at=ViewORM.updated_at)
             .execution_options(synchronize_session=False))
     summary = f"Moved back to {source.name} (the move to {target.name} was undone)"
-    for vid in view_ids:
-        await view_activity_repo.record_view_activity(
-            session, view_id=vid, workspace_id=source.id, action="moved", actor=actor,
-            summary=summary, changes={"from": target.id, "to": source.id, "transferId": row.id,
-                                      "undo": True})
+    changes = {"from": target.id, "to": source.id, "transferId": row.id, "undo": True}
+    await view_activity_repo.record_view_activity_many(
+        session, entries=[(vid, summary, changes) for vid in view_ids], workspace_id=source.id,
+        action="moved", actor=actor)
     await session.execute(
         update(AggregationDataSourceStateORM)
         .where(AggregationDataSourceStateORM.data_source_id == ds.id)

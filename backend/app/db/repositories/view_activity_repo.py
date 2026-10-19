@@ -17,7 +17,7 @@ import logging
 from typing import Any, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewActivityLogORM, ViewORM, view_is_live
@@ -114,6 +114,38 @@ async def record_view_activity(
         await user_repo.note_activity(session, actor)
     except Exception:  # noqa: BLE001 — never fail the mutation on audit error
         logger.exception("record_view_activity failed (view=%s action=%s)", view_id, action)
+
+
+async def record_view_activity_many(
+    session: AsyncSession,
+    *,
+    entries: list[tuple[str, Optional[str], Optional[dict]]],
+    workspace_id: Optional[str],
+    action: str,
+    actor: Optional[str] = None,
+) -> None:
+    """:func:`record_view_activity` for many views at once — the same rows and the same events, as
+    two statements rather than a flush apiece. ``entries`` is ``[(view_id, summary, changes)]``.
+
+    Atomic with the caller's change, unlike the one-view form: it records changes where the
+    history is part of what happened (a data source moving with thousands of views), so a move
+    whose history can't be written doesn't happen either.
+    """
+    if action not in ACTIONS:
+        raise ValueError(f"unknown view activity action {action!r}")
+    if not entries:
+        return
+    await session.execute(insert(ViewActivityLogORM), [
+        {"view_id": view_id, "workspace_id": workspace_id, "action": action, "actor": actor,
+         "summary": summary, "changes": json.dumps(changes) if changes else None}
+        for view_id, summary, changes in entries
+    ])
+    await outbox_event_repo.emit_many(
+        session, event_type=f"visualization.view.{action}", aggregate_type="view",
+        events=[(view_id, {"workspaceId": workspace_id, "actor": actor, "summary": summary,
+                           "changes": changes})
+                for view_id, summary, changes in entries])
+    await user_repo.note_activity(session, actor)
 
 
 async def get_view_activity(
