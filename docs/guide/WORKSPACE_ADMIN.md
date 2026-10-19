@@ -21,6 +21,8 @@ ontology health.
 > - Adding, editing and re-aggregating data sources needs
 >   `workspace:datasource:manage` — **Workspace admin**, **Data engineer** and
 >   **Workspace member** all hold it.
+> - Moving a data source that has views to another workspace needs **Workspace
+>   admin** in both workspaces; an admin of only one can ask the other to take it.
 
 ---
 
@@ -243,21 +245,89 @@ it from the **Aggregation** tab when you're ready (see below).
 
 ## Moving a data source between workspaces
 
-Teams reorganize, and data sources sometimes need to move with them. The same
-Add Data Source wizard handles this: pick a source that already belongs to
-another workspace, and the wizard switches into **move mode** — its title
-becomes **Move Data Source** and the final button **Move it here**.
+Teams reorganize, and data sources sometimes need to move with them. A data source
+moves to another workspace **with everything built on it**: its views (including any
+in the trash), their history, its version history and open drafts, and its
+aggregation state and stats. The new workspace gets a fully working source, not a
+blank slate, and nothing is rebuilt.
 
-> **Warning:** A data source can only move if nothing is built on it. If any
-> Views exist against it in its current workspace, it isn't offered as movable —
-> you'll see it listed but disabled, with a note showing how many Views
-> depend on it. This protects those Views from breaking out from under
-> their owners.
+How you move it depends on what you run:
 
-Sources that *are* eligible show a clear **Move** badge, along with which
-workspace currently holds them. Moving one takes its aggregation state and
-stats with it — the members of its old workspace simply lose access, and the
-new workspace gains a fully working data source, not a blank slate.
+| You administer | What happens |
+| --- | --- |
+| Both workspaces | You move it straight away. |
+| Only the one it's in | You send a **transfer request**, and the other workspace's admins accept or decline it. |
+
+> **Note:** Once views are built on a source, moving it changes who can read other
+> people's work, so it takes **Workspace admin** in both workspaces. A source with
+> nothing built on it can still be moved by anyone who manages data sources in both
+> (**Workspace member** and up).
+
+### Move it
+
+1. On the **Data Sources** tab, select the source to open it, open its **⋯** menu and
+   choose **Move to another workspace…**.
+2. **Destination** — pick where it goes. Each workspace says what you can do there:
+   move it now, or ask its admins. Workspaces it can't go to are listed under **Not
+   available** with the reason, such as **Already has this graph**.
+3. **What moves** — check how many views move (and how many are in the trash or
+   follow the workspace's default source), its version history, and what you should
+   know. Anything under **Resolve before moving** — an aggregation run or a
+   version-history job in progress, say — has to finish before you can continue.
+4. **Access** — see who **keeps access**, who **gains access** and who **would lose
+   access**. Owners and anyone a view is shared with keep it automatically. For each
+   person or team that would lose access, choose whether they keep it: they keep
+   view-only access to exactly the moved views, and nothing else in the new workspace
+   opens to them.
+5. **Confirm** — read the summary, say why you're moving it, and select **Move to
+   *workspace*** (or **Send request**).
+
+**You should now see** "*Source* now lives in *workspace*", with **Open in
+*workspace*** and **Undo**.
+
+[screenshot-pending]: # "workspace-admin-move-access — the Access step of moving a data source, with a team kept"
+
+### Answer a transfer request
+
+When another workspace asks to move a source into yours, its admins hear about it in
+their Inbox, and the request appears on **Workspaces → Requests** and as a banner on
+the workspace's **Data Sources** tab.
+
+1. Select **Review**. You see exactly what would move and who keeps access — as the
+   person who asked decided it — and anything that has changed since they asked.
+2. Select **Accept and move**, or **Decline** with a reason they'll see.
+
+Requests expire after 14 days. The person who asked can cancel theirs from the
+source's panel.
+
+[screenshot-pending]: # "workspace-admin-review-transfer — reviewing a transfer request, with what changed since it was sent"
+
+### Undo a move
+
+For 7 days after a move, the source's panel says where it came from and offers
+**Undo**. Undo puts everything back as it was: the workspace, the primary source, the
+views, and the access the move added. It isn't offered once a view has been built on
+the source in its new workspace, or once the source has moved again — move it back
+instead. A move made by accepting a request can only be undone by the destination's
+admins.
+
+Every move, request and undo appears in both workspaces' **Activity** and in each
+moved view's own activity, and **History** on the source's panel lists where it has
+lived.
+
+[screenshot-pending]: # "workspace-admin-moved-from — a moved source's panel, showing where it came from, with Undo"
+
+### Start from the destination
+
+If you administer both workspaces, you can also start from the destination: on its
+**Data Sources** tab, select **Add Source** and pick a source that belongs to another
+workspace. A source with views is marked **Move with *N* views** and opens the same
+steps, with the destination already chosen.
+
+> **What stays behind:** forks of the version history; layout templates shared only in
+> the old workspace (views that use them keep working); and file uploads that were in
+> progress — choose the file again. API keys limited to the old workspace no longer
+> reach the moved views.
 
 ---
 
@@ -385,8 +455,8 @@ covers the other side.
 
 The **Activity** tab answers "who did this here, when, and why?" for the
 workspace's operations, access and data: rebuilds, retries and purges of its
-data sources, runs stopped, members added or removed, data sources added or
-moved in, and version control turned on.
+data sources, runs stopped, members added or removed, data sources added, moved
+in or out (and requests to move them), and version control turned on.
 
 1. Open the workspace and select the **Activity** tab.
 2. Choose a range, and a lens: **Everything**, **Operations**, **Access** or

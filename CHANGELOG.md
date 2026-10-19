@@ -9,6 +9,74 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Move a data source to another workspace, with its views and access
+
+### Added
+
+**Move a data source, and everything built on it.** **Move to another workspace…** on a data
+source's **⋯** menu opens a guided move. Its views go with it — including those in the trash, and
+those with no source of their own that read it as the workspace's default — together with their
+history, its version history, open drafts and reviews, and its aggregation state and stats. Nothing
+is rebuilt. The steps:
+
+- **Destination** says, for each workspace you can see, whether you can move the source there now,
+  ask its admins, or why not.
+- **What moves** counts the views by visibility and shows the version history, then lists what to
+  resolve first (an aggregation run or a version-history job in progress) and what to know (the
+  workspace's last source leaving, its primary source, views published to everyone, requests to
+  publish, layout templates that stay behind, open drafts whose owners can't reach the new
+  workspace).
+- **Access** shows who keeps access, who gains it and who would lose it. For each person or team
+  losing it, you choose whether they keep view-only access to exactly the moved views — a grant,
+  never a membership.
+- **Confirm** asks why, and the reason is shown in both workspaces' activity.
+
+**Ask the other workspace to take it.** When you administer only the workspace a source is in,
+the same steps end in **Send request**. The destination's admins hear in their Inbox and find it
+on **Workspaces → Requests** and as a banner on the workspace's **Data Sources** tab. Review shows
+a fresh picture of what would move, who keeps access as you decided it, and what has changed since
+you asked. They **Accept and move** — refused if anything changed after they read it — or
+**Decline** with a reason you see. Requests expire after 14 days. You can cancel yours, and one is
+cancelled when its source is deleted or moved some other way.
+
+**Undo, for a week.** A completed move can be undone for 7 days — the workspace, the primary
+source, the views and the access the move added — while it is the source's latest move and
+nothing new has been built on it in its new workspace. The source's panel says where it came from,
+offers **Undo**, and keeps its **History** of where it has lived. Each moved view's activity says
+where it went.
+
+### Changed
+
+- **`POST /api/v1/admin/workspaces/{id}/data-sources/{ds}/move` moves a source that has views**,
+  which it used to refuse with a 409. For such a source it needs `workspace:admin` in both
+  workspaces (a source with nothing on it still needs `workspace:datasource:manage` in both). It
+  takes `keep` and `previewToken`, and returns the move's record rather than the data source.
+- **A move re-files everything that named the old workspace**, including for a source with no
+  views. The versioned graph and its jobs, the aggregation state and each moved view's activity
+  used to stay behind, so a moved versioned source stayed writable through the old workspace's
+  versioning routes and couldn't be deleted cleanly.
+- **Both workspaces' activity records a move**, as `workspace.data_source.moved`; it was filed
+  only under the destination. The old `workspace.datasource.moved` events still show in history.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261019_1400_ds_transfers` adds `data_source_transfers`,
+  the record of every move and request, with one open request per data source, and allows a view
+  activity entry to say `moved`. Downgrading removes the table and those entries.
+
+### Known limitations
+
+- Forks of a source's version history stay in the old workspace.
+- File uploads in progress for the source when it moves have to be started again.
+- API keys limited to the old workspace no longer reach the moved views; keys that name the source
+  or a view follow it.
+- A layout template shared only in the old workspace stays there: views that use it keep working,
+  but people in the new workspace can't open the template.
+- The picker on **Add Source** doesn't count views that read a source as the workspace's default,
+  so it may offer a move the server then refuses, saying why.
+
+---
+
 ## [Unreleased] — Find a workspace, ask to join it, and see how every grant came about
 
 ### Added
