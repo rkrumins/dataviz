@@ -575,7 +575,8 @@ async def test_a_steward_adds_people_on_the_members_tab_within_the_same_ceiling(
             url, json={"subjectType": "group", "subjectId": "grp_x", "role": "workspace_viewer"},
         )).status_code == 403
         # Removing people stays with admins.
-        assert (await world.delete(f"{url}/{added.json()['bindingId']}")).status_code == 403
+        removed = await world.delete(f"{url}/{added.json()['bindingId']}")
+        assert removed.status_code == 403
     async with acting_as(db_session, "max"):
         assert (await world.get(url)).status_code == 403
 
