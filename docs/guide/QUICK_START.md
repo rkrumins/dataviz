@@ -104,6 +104,12 @@ you reach it. Two other routes to the same place:
 **You should now see** the Explorer, with a **Workspace:** chip above the
 results naming the workspace you picked.
 
+> **Not in a workspace yet?** The Dashboard says **You're not in a workspace
+> yet** instead of showing business areas. Click **Find a workspace**, find your
+> team's, and click **Request access** — or, if there's no **Find a workspace**
+> button, ask a colleague for a link to their workspace and request access from
+> there. See [Requesting Access](/guide/requesting-access#find-a-workspace).
+
 ---
 
 ## Step 3 — Open a view

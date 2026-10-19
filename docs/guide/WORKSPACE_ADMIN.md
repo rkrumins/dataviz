@@ -14,9 +14,10 @@ ontology health.
 >
 > - **Create Workspace** needs the `system:workspaces:create` permission —
 >   the **Org Admin** and **Super Admin** roles carry it.
-> - The **Members** tab appears only to admins of that workspace
->   (`workspace:admin`) — **Workspace admins**, **Org Admins** and **Super
->   Admins**.
+> - The **Members** tab appears to the people who let others into that
+>   workspace (`workspace:members:add`) — its **Workspace admins** and
+>   **Workspace stewards**, **Org Admins** and **Super Admins**. Removing
+>   people and choosing how people get in stay with admins (`workspace:admin`).
 > - Adding, editing and re-aggregating data sources needs
 >   `workspace:datasource:manage` — **Workspace admin**, **Data engineer** and
 >   **Workspace member** all hold it.
@@ -37,13 +38,13 @@ Open **Workspaces** in the sidebar and select a workspace. Under its header, the
 | **Aggregation** | Monitor and re-run aggregation for each source | Everyone who can open the workspace (re-running needs data-source permission) |
 | **Ontology** | Follow changes to the semantic layers this workspace's sources use | Everyone who can open the workspace |
 | **Reviews** | Review merge requests across the workspace's versioned sources | Only while **Version control** is on — it is by default |
-| **Members** | Decide who can get in, and with which role | Workspace admins, Org Admins and Super Admins |
+| **Members** | Decide who can get in, with which role, and answer their requests | Workspace admins and stewards, Org Admins and Super Admins |
 | **Activity** | See who ran, changed or granted what in this workspace — when, and why | Workspace admins, Org Admins, Org Auditors and Super Admins |
 
 > **If you don't see Reviews:** **Version control** is switched off in
 > **Administration → Features** — see [Feature
 > Switches](/guide/feature-switches). **If you don't see Members:** you aren't
-> an admin of this workspace.
+> an admin or steward of this workspace.
 
 ---
 
@@ -56,20 +57,34 @@ hold rights in every workspace, but a workspace appears in their
 **Workspaces** list only once they have a binding into it — **Workspace
 viewer** is enough, because their organization-wide role supplies the rest.
 
+Two kinds of people look after who gets in:
+
+| Role | Can | Can't |
+| --- | --- | --- |
+| **Workspace admin** | Add users and groups at any workspace role whose permissions they hold, answer requests, remove people, and choose [how people get in](#how-people-get-in) | — |
+| **Workspace steward** | Add people as **Workspace viewer** or **Workspace member**, and answer requests at those levels — otherwise a **Workspace member** | Bind groups, remove people or change anyone's access, or change how people get in |
+
+A steward suits the team lead who knows who should be in, without handing them
+the workspace.
+
 1. Open the workspace and select the **Members** tab. (Or, on **Workspaces**,
    hover over the workspace's card and select **Members**.)
 2. Select **Add member**. The **Add member** dialog opens.
-3. Choose **User** or **Group**, search, and pick one.
+3. Choose **User** or **Group**, search, and pick one. A steward adds users
+   only, so there's no **Group** choice.
 4. Under **Role**, choose a role (see the table below). **Workspace member** is
-   selected to start with.
+   selected to start with. The list holds only the roles you may grant.
 5. Under **Access duration**, keep **Permanent**, or choose **24h**, **7d**,
    **30d** or **90d** — access then revokes itself, which suits contractors
    and temporary cover.
-6. Select **Add to workspace**.
+6. If the workspace's identity provider decides who is in, tick **Add them
+   here as an exception** to add a person (see [When the identity provider
+   decides](#when-the-identity-provider-decides)).
+7. Select **Add to workspace**.
 
 **You should now see** the user or group in the members list with its role. A
 binding with a duration shows how long it has left, in an **Expires in …**
-badge.
+badge. Adding someone whose earlier access had ended gives it back to them.
 
 ![a workspace's Members tab with the Add member dialog open, showing the User and Group toggle, the Role list and the Access duration choices](/docs-assets/guide/workspace-admin-members.png)
 
@@ -77,51 +92,108 @@ badge.
 | --- | --- | --- |
 | Look, not change | **Workspace viewer** | Read-only: they open the workspace's views and see its data sources. |
 | Build and edit views, and look after data sources day to day | **Workspace member** | The everyday contributor role. |
+| Do what a member does, and let people in | **Workspace steward** | Adds people as viewers or members and answers their requests. |
 | Own the data — sources, semantic layers, catalog items and views — without managing people | **Data engineer** | Full data control, but no members or workspace settings. |
 | Run the workspace — members, settings, deletion and everything inside | **Workspace admin** | Every permission inside this one workspace, none outside it. |
 
 Custom roles your team has created also appear in the list, when they can be
-bound in this workspace.
+bound in this workspace and you hold everything they grant.
 
-> **Note:** Today, **Add member** works fully only for **Super Admins**. Its
-> lists come from elsewhere in the platform: people need the Super Admin role,
-> groups need `system:groups:manage` (Org Admins have it), and roles need
-> `system:bindings:read`. Every workspace admin can still review members,
-> revoke them and approve access requests — so the quickest way to let someone
-> in yourself is to have them request access, then approve it (below).
+> **Note:** Binding a group needs the platform's group list
+> (`system:groups:manage`) — Org Admins and Super Admins have it. A workspace
+> admin without it can still add people one by one, or ask an Org Admin to bind
+> the group.
 
 ### Seeing who can actually get in
 
 The toggle above the list switches between **Bindings** (what was granted, to
 whom) and **People with access** (everyone who can get in, with groups
-expanded into their members). Use **People with access** to answer "can Dana
-see this workspace?".
+expanded into their members, and Org Admins and Super Admins, who reach every
+workspace). Use **People with access** to answer "can Dana see this workspace?",
+and its chips to answer "why?":
+
+| Chip | How they got in |
+| --- | --- |
+| **Added directly** | Someone added them with **Add member**. |
+| **Approved request** | They asked, and an admin or steward approved it. |
+| **Exception** | Added here although the identity provider decides who is in — it won't follow their groups. |
+| **Identity provider** | A group in your organization's identity provider — it adds and removes them. |
+| **Team** | They belong to a team (a group managed in {brand}) bound here. |
+| **Organization-wide** | An Org Admin or Super Admin role, which reaches every workspace. |
+
+Hover a chip for who did it and when, the identity-provider groups and
+provider, or the team. The counts at the top include **Organization-wide**.
 
 ### Removing someone
 
 On their row, select **Revoke binding**. A preview shows what they would
 lose; select **Revoke binding** again to confirm. Access ends at their next
-request.
+request. Only admins remove people.
 
 ### Answering access requests
 
 People who can't open a workspace can ask for access — see [Requesting
-Access](/guide/requesting-access). Their requests come to the admins of that
-workspace, and the **Members** tab is the only place to answer them: a
-**Pending access requests** panel appears at the foot of the tab while anything
-is waiting, showing who asked, the role they asked for and when.
+Access](/guide/requesting-access). Their requests reach the workspace's admins
+and stewards in their **Inbox**; when a workspace has neither, they go to the
+Org Admins.
 
-1. Read the request, including any note the person wrote.
-2. Select **Approve** to grant the requested role — or select **Deny**, add an
-   optional reason (the requester sees it), and select **Confirm deny**.
+1. Select **Workspaces** in the sidebar, then the **Requests** tab — every open
+   request across the workspaces you answer, with the count on the tab. (The
+   **Members** tab shows its own workspace's requests above the members while
+   any are waiting.)
+2. Read the request: who asked, for which level, and their reason.
+3. Select **Review** and choose your answer — see the table below. Add a note
+   if you like; the requester sees it.
+4. Select **Approve**, **Add to team**, **Point to group** or **Grant
+   exception**.
 
-**You should now see** the request leave the panel; an approved person
-appears in the members list straight away. The requester sees the outcome on
-their own **My access** page, under **My access requests**.
+| The workspace | Your choices |
+| --- | --- |
+| **Approved in the app** | **Grant a role** — what they asked for or another level you may grant, with **No end date** or for **7**, **30** or **90 days**. **Add to a team** — appears when a team is bound here whose every role you could grant, so they get what their colleagues have. |
+| **Through your identity provider** | **Point to a group** — the identity-provider group that grants it. The request waits and closes itself when they next sign in with that group. **Grant an exception** — access here that doesn't follow their groups, for **30 days** unless you choose otherwise. |
 
-> **Tip:** New requests don't arrive in your Inbox. If people tell you they've
-> asked for access, look at the **Members** tab of the workspace they asked
-> about.
+To decline, select **Deny**, write a reason (the requester sees it), and select
+**Decline**.
+
+**You should now see** the request leave the open list; an approved person can
+open the workspace straight away, and **People with access** shows **Approved
+request** with your name. **All** lists every request with how it was answered.
+The requester follows it on **My access**.
+
+> **Note:** Stewards answer with **Workspace viewer** or **Workspace member**.
+> Requests for levels that run the workspace or let others in can't be made;
+> grant those with **Add member**. Nobody answers their own request.
+
+### How people get in
+
+The **How people get in** card at the foot of the **Members** tab holds three
+settings. Only admins see it.
+
+| Setting | What it does |
+| --- | --- |
+| **Listed in Find a workspace** | On (the default): everyone who can sign in sees its name, description and who answers requests in **Find a workspace** — once an administrator has switched **Find a workspace** on ([Feature Switches](/guide/feature-switches)). Off: only its members see it there. |
+| **Who decides who is in** | **Approved in the app** (the default): admins and stewards answer requests and add people here. **Through your identity provider**: membership follows your identity provider's groups, approvers point people to the group that grants it, and anything granted here is an exception. |
+| **A note for people asking** | Shown to people as they ask — "Say which team you're on", for example. Up to 500 characters. |
+
+Select **Save** after changing them.
+
+### When the identity provider decides
+
+Choose **Through your identity provider** when your organization already
+manages this workspace's membership with sign-in groups — and someone who runs
+sign-in has mapped those groups to roles here (see [SSO
+Operations](/guide/sso-operations#workspaces-your-identity-provider-controls)).
+Then:
+
+- **Point to a group** answers a request with the group to join. The requester
+  is told to ask IT; their access arrives at their next sign-in with the group,
+  and the request closes itself. It warns you when they have never signed in
+  through the identity provider.
+- **Grant an exception** and **Add them here as an exception** let someone in
+  without the group — for a contractor, or while IT catches up. Exceptions are
+  labelled wherever access is listed, and don't end on their own when the
+  person later joins the group; remove them once they have.
+- Groups can still be bound with **Add member**.
 
 ---
 

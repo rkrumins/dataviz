@@ -12,6 +12,7 @@ working.
 
 - [Find out why someone can't sign in](#when-a-sign-in-fails)
 - [Give people roles from their directory groups](#access-mapping)
+- [Let groups decide who is in a workspace](#workspaces-your-identity-provider-controls)
 - [Offboard somebody who is leaving](#somebody-is-leaving)
 - [End someone's sessions now](#ending-sessions)
 - [Make single sign-on the only way in](#enforcing-single-sign-on)
@@ -240,6 +241,38 @@ then measures from each sign-in instead of from the moment the person
 actually authenticated at the IdP. The same happens when the time is too old
 to use — a gateway reporting the portal's original login — and the login
 event records it as `auth_time_anchored: true`.
+
+---
+
+## Workspaces your identity provider controls
+
+A workspace admin can say that a workspace's members come from your identity
+provider: on its **Members** tab, **How people get in** → **Who decides who is
+in** → **Through your identity provider**. Nothing changes in the loop above —
+the setting changes how *requests* for that workspace are answered:
+
+- An approver answers a request by **pointing it to a group** — any group with
+  an [access mapping](#access-mapping) rule that reaches the workspace, at a
+  level the approver could grant. The requester is told which group, and in
+  which provider, to ask IT for.
+- When their next sign-in carries the group and the loop grants the access, the
+  request closes itself as approved, and the requester and the approver hear
+  about it. A sign-in that grants something else leaves it open.
+- Letting someone in without the group is an **exception**: a role granted in
+  the app and labelled **Exception** wherever access is listed.
+
+Before you switch a workspace over, write at least one rule for it — without
+one, there is no group to point people to, and every answer is an exception.
+
+> **Note:** The request only closes after a full sign-in with the group,
+> because the group list is read at sign-in (see [How access is
+> decided](#how-access-is-decided)). Someone who has never signed in through
+> single sign-on can't receive it at all — the approver is warned.
+
+> **Note:** Exceptions don't end when the person later joins the group, and
+> memberships of app-managed groups bound to the workspace aren't policed.
+> Review **People with access** now and then and remove exceptions the group
+> has caught up with.
 
 ---
 

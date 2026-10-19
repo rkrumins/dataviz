@@ -9,6 +9,133 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Find a workspace, ask to join it, and see how every grant came about
+
+### Added
+
+**Find a workspace.** A new tab on **Workspaces** lists your organization's workspaces: what each
+is for, how many people and data sources it has, who answers its requests, how people get in, and
+its admins' note for people asking — with search, a filter (**All**, **Not yours yet**, **Yours**,
+**Requested**) and a summary banner. Each card says where you stand: **Open**, **Waiting for
+approval**, **Waiting on your identity provider** or **Request access**. It sits behind a new
+switch, **Find a workspace** (`workspaceDirectoryEnabled`, **Administration → Features**), which is
+off until an administrator turns it on, and a workspace's admins can keep theirs out of it. Someone
+in no workspace who can't create one lands on it from **Workspaces**, and the Dashboard welcomes
+them with how to join one instead of onboarding written for administrators.
+
+**Ask to join, in one dialog.** **Request access** — on a directory card, on the page a link to a
+workspace you can't open shows, on the **Access denied** card and after your access is removed —
+opens a guided dialog: the level you need in plain words (**View**, **Contribute**, **Engineer the
+data** or a level your organization defined; ones you hold are marked), why (under the workspace's
+note), and what happens next. You hold one open request per workspace; asking again shows it.
+Follow it on **My access** — **Waiting for approval**, **Waiting on your identity provider** (with
+the group to ask IT for), **Approved** (what you were granted, by whom, and their note),
+**Declined** (with the reason) or **Withdrawn** — and withdraw it while it's open. Answers arrive in
+your Inbox, and an approval applies at once: your sessions are signed back in with the new access.
+
+**Workspace stewards.** A new built-in workspace role, **Workspace steward** (`workspace_steward`),
+is a member who also lets people in: they answer requests and add people as **Workspace viewer** or
+**Workspace member** from the **Members** tab. Its permission, `workspace:members:add`, can go on
+custom roles too, and `workspace:admin` implies it. Removing people, binding groups and changing
+how people get in stay with admins.
+
+**Answer requests in one place.** Approvers get a **Requests** tab on **Workspaces**, with a count,
+listing the open requests across every workspace they answer (**All** keeps the history); a
+workspace's **Members** tab shows its own above the members. New requests reach the workspace's
+admins and stewards in their Inbox, or the Org Admins when it has neither. **Review** offers what
+the workspace allows: **Grant a role** — what was asked for, or another level within what the
+approver may grant, with no end date or for 7, 30 or 90 days — or **Add to a team** whose every
+role the approver could grant. **Deny** takes a reason the requester sees. Nobody answers their own
+request.
+
+**Workspaces your identity provider controls.** On the new **How people get in** card (**Members**
+tab, admins only), a workspace can say its membership follows identity-provider groups. Its
+requests are then answered by **pointing to a group** that an access-mapping rule maps into the
+workspace: the requester is told which group to ask IT for, and the request closes itself —
+telling them and the approver — when a sign-in brings the access. Letting someone in without the
+group is an **exception**: granted for 30 days unless the approver chooses otherwise, and labelled
+wherever access is listed; **Add member** asks for it to be ticked too. The same card lists the
+workspace in Find a workspace or hides it, and holds the note for people asking.
+
+**How every grant came about.** **People with access**, **My access** and **Administration →
+Permissions → By user** mark each grant **Added directly**, **Approved request**, **Exception**,
+**Identity provider** (with the groups and provider), **Team** or **Organization-wide**, with who
+and when on hover. **People with access** also lists, and counts, the Org Admins and Super Admins
+who reach every workspace.
+
+**For integrators.** New: `GET /api/v1/workspace-directory` (behind the switch),
+`GET /api/v1/access-requests/requestable-roles?workspaceId=`,
+`POST /api/v1/me/access-requests/{id}/withdraw`,
+`GET /api/v1/admin/access-requests?status=open|all&workspaceId=`,
+`POST /api/v1/admin/access-requests/{id}/route` and
+`GET /api/v1/admin/workspaces/{id}/members/grant-options`.
+`POST /api/v1/admin/access-requests/{id}/approve` takes `role` or `groupId`, `expiresIn` or
+`expiresAt`, `exception` and `note`. Workspaces carry `directoryListed`, `accessMode` and
+`accessNote`; access requests carry the decision (`grantedRole`, `grantedGroup`, `idpGroup`,
+`idpProvider`, `idpException`, `accessExpiresAt`, `fulfilledAt`); access grants carry
+`provenance`. The activity log adds `rbac.access_request.withdrawn`, `.routed` and `.fulfilled`.
+
+### Changed
+
+- **The Members tab opens to stewards** (`workspace:members:add`), as do
+  `GET`/`POST /api/v1/admin/workspaces/{id}/members` and `/members/effective`. Revoking, changing an
+  end date and the revoke preview still need `workspace:admin`.
+- **Add member** picks people from the directory for anyone who isn't a Super Admin — the list used
+  to stay empty for them — and offers only the roles the caller may grant. Adding someone whose
+  earlier grant had ended gives it back, and in a workspace its identity provider controls, adding
+  a person needs `exception: true`.
+- **Approve** grants only what the approver may grant, refuses requests for roles that run the
+  workspace or let others in, and makes a lapsed grant current — it used to mark the request
+  approved and leave the person without access.
+- **A workspace's request list** (`GET /api/v1/admin/workspaces/{id}/access-requests`) returns open
+  requests by default — waiting for approval or on the identity provider — where it returned
+  pending ones.
+- **The Access denied card's request form** is the new dialog; the old one couldn't list roles for
+  most people.
+- **A requester sees a workspace's name** only if they can open it or it is listed in Find a
+  workspace while that is on — on the request, in the Inbox and on My access.
+
+### Fixed
+
+- The activity log names the workspace of an access request; it read a key the events never
+  carried.
+- Analytics' access-friction backlog counts requests waiting on the identity provider as open, and
+  leaves withdrawn ones out of the wait.
+- Deleting a workspace declines its open access requests ("The workspace was deleted") instead of
+  leaving them waiting.
+- My access no longer lists grants that have ended.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261019_1000_ws_access` adds `workspaces.directory_listed`,
+  `access_mode` and `access_note`; the decision columns and the `awaiting_idp` and `withdrawn`
+  statuses on `access_requests`; `access_request_id` on `role_bindings` and `group_members`, and
+  `role_bindings.idp_exception`; and the `workspace:members:add` permission (granted to Org Admin
+  and Super Admin too) with the **Workspace steward** role. Where one person has several pending
+  requests for the same workspace, the newest stays and the rest become **Withdrawn**, before an
+  index allows one open request each. It waits at most 5 seconds for a lock and can simply be run
+  again.
+- **Find a workspace is off.** Turn it on when you're ready for everyone who can sign in to see
+  every workspace's name, description and approvers — except those their admins hide. Hide
+  workspaces whose names are sensitive first.
+- Before switching a workspace to **Through your identity provider**, write an access-mapping rule
+  that reaches it; without one, every answer is an exception.
+- Downgrading turns requests waiting on the identity provider back into pending ones and withdrawn
+  ones into denied; the steward role is removed only when nothing is bound to it.
+
+### Known limitations
+
+- Exceptions don't end when the person later joins the group: remove them from **People with
+  access** once the group has caught up.
+- In a workspace its identity provider controls, memberships of teams (groups managed in {brand})
+  bound there aren't policed.
+- Pointing to a group needs an access-mapping rule for the workspace and a single sign-on sign-in;
+  the approver is warned about someone who has never signed in that way, not stopped.
+- Find a workspace lists every workspace that isn't hidden, to everyone who can sign in; it can't
+  be narrowed to some groups.
+
+---
+
 ## [Unreleased] — Layout templates: reuse a Context View's layers, for yourself, your team or everyone
 
 ### Added

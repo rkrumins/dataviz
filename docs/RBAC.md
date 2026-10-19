@@ -650,7 +650,92 @@ Deleting a workspace cascades both the `RoleBindingORM` rows pointing
 at it (`delete_scope_bindings`) and the custom `RoleORM` rows scoped
 to it (`role_repo.delete_workspace_scoped_roles`), which couldn't be
 bound anywhere else. A `rbac.workspace.roles_cascaded` outbox event
-lists the removed bindings + roles.
+lists the removed bindings + roles. Open access requests for it are
+closed as denied, with the note "The workspace was deleted".
+
+## Access requests
+
+Anyone signed in can ask to join a workspace; its admins and stewards
+answer. The rules live in `backend/app/services/workspace_access.py`, shared
+by the request endpoints, the Members tab and the SSO reconciler.
+
+**What may be asked for.** Workspace roles that carry neither
+`workspace:admin` nor `workspace:members:add` — Viewer, Member, Data
+engineer and custom workspace roles. Asking is for access, not authority.
+`GET /access-requests/requestable-roles?workspaceId=` lists them without
+naming the workspace. A role the person already holds there, or whose
+permissions they already have, is refused (409).
+
+**One open request per person per workspace.** A partial unique index
+(`uq_access_requests_one_open`) holds it; asking again returns the open
+request (200 instead of 201).
+
+**States.** `pending` → `approved` | `denied` | `withdrawn`, or `pending` →
+`awaiting_idp` → `approved` | `denied` | `withdrawn`. `awaiting_idp` means
+an approver pointed the person to the identity-provider group that grants
+it. The requester withdraws with `POST /me/access-requests/{id}/withdraw`.
+
+**Who answers, and what they may grant.** Answering needs
+`workspace:members:add` in the request's workspace (`workspace:admin`
+implies it; Org Admins and Super Admins answer everywhere), and nobody
+answers their own request. `GET /admin/access-requests?status=open|all`
+is one list across every workspace the caller answers.
+
+| Approver | May grant |
+|---|---|
+| Workspace admin, Org Admin, Super Admin | Any workspace role whose `workspace:*` permissions they hold |
+| Steward (`workspace:members:add` without `workspace:admin`) | `workspace_viewer` or `workspace_member`, to people (never groups) |
+
+The same ceilings hold on the Members tab (`POST /admin/workspaces/{ws}/members`),
+which `workspace:members:add` opens; `GET …/members/grant-options` returns
+what the caller may grant — roles, teams and identity-provider groups.
+Removing people and changing their access stay with `workspace:admin`.
+
+**Approving** (`POST /admin/access-requests/{id}/approve`) grants in the same
+transaction, ends the requester's sessions so the access applies at once,
+and writes `rbac.workspace.member_bound` (or `rbac.group.member_added`)
+beside `rbac.access_request.approved`:
+
+* `role` (default: the requested role, which must be requestable),
+  optionally until `expiresAt` / `expiresIn`. A lapsed binding of the same
+  role is made current again (`source` becomes `local`) rather than
+  skipped.
+* `groupId` — add the person to an app-managed group bound in the
+  workspace: not protected, not filled by SCIM, no global binding, and
+  every binding it carries one the approver could make. Adding someone to
+  a group grants everything it carries everywhere it is bound, hence the
+  rule.
+
+**Workspaces whose identity provider decides** (`workspaces.access_mode =
+'idp'`):
+
+* `POST /admin/access-requests/{id}/route` with `idpGroup` points the
+  person to a group whose mappings reach the workspace (a `role_binding`
+  mapping into it, or a `group_membership` mapping to a group bound in
+  it), within the approver's ceiling. The request waits as
+  `awaiting_idp`; `reconcile_sso_targets` closes it as approved
+  (`fulfilled_at`) when the person's SSO grants reach the workspace, in a
+  savepoint that can never fail a sign-in.
+* Granting in the app needs `exception: true` and is stored with
+  `role_bindings.idp_exception`. Teams are not offered. The Members tab
+  applies the same rule to people (groups can still be bound).
+
+**Find a workspace** (`GET /workspace-directory`, behind the
+`workspaceDirectoryEnabled` switch, off by default) lists every workspace
+with `directory_listed` true, plus the ones the caller can open. A
+requester sees a workspace's name on their requests only if they can open
+it, or it is listed while the switch is on.
+
+**Provenance.** People with access (`GET …/members/effective`) and My
+Access (`GET /me/access`) give every grant a `provenance`: `direct`,
+`request`, `exception`, `idp` (the asserted groups and provider), `team` or
+`org_role`. People with access also lists people who reach every workspace
+through an organization-wide role (`via: "org"`).
+
+**Notifications** (kind): approvers get `access_request.submitted` (Org
+Admins when the workspace has none); the requester gets
+`access_request.approved`, `.denied`, `.routed` and `.fulfilled`, and the
+approver who routed a request gets `.fulfilled` too.
 
 ## Invites
 
@@ -802,6 +887,8 @@ last 7 days. Through the API:
 | Which permission opens which screen    | `backend/app/services/nav_catalogue.py`                       |
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
+| Who may let whom in (ceilings, requestable roles, provenance) | `backend/app/services/workspace_access.py` |
+| Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
 | Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |
@@ -844,6 +931,12 @@ downgrade — in the old taxonomy `user` was the workspace member tier (now
 `system:bindings:read` permissions; later migrations added the rest of the
 current catalogue. A fresh install is seeded from `rbac_seed.py` instead of
 replaying the chain, and CI holds the two paths to the same result.
+
+`20261019_1000_ws_access` added `workspace:members:add` and the
+`workspace_steward` role, the `awaiting_idp` and `withdrawn` request states
+with one open request per person per workspace, the workspace access
+settings (`directory_listed`, `access_mode`, `access_note`), and the records
+of how a grant came about (`access_request_id`, `idp_exception`).
 
 ## See also
 
