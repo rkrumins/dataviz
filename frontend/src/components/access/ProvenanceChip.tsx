@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 
 import { HoverTip } from '@/components/ui/HoverTip'
+import { usePersonLookup } from '@/hooks/usePerson'
 import { cn } from '@/lib/utils'
 import type { AccessProvenance, AccessOrigin } from '@/services/workspaceMembersService'
 import { provenanceSentence } from './accessRequestCopy'
@@ -50,17 +51,22 @@ const ORIGINS: Record<AccessOrigin, { label: string; icon: LucideIcon; pill: str
     },
 }
 
-export function ProvenanceChip({ provenance, nameOf, className }: {
+/** The hover's sentence. It mounts only while the hover is open, so the
+ *  person who granted it is looked up (batched) only when someone asks. */
+function ProvenanceDetail({ provenance }: { provenance: AccessProvenance }) {
+    const { data: person, isLoading } = usePersonLookup(provenance.by)
+    return <>{provenanceSentence(provenance, id => person?.displayName ?? (isLoading ? '…' : id))}</>
+}
+
+export function ProvenanceChip({ provenance, className }: {
     provenance: AccessProvenance | null | undefined
-    /** Names people for the hover; ids otherwise. */
-    nameOf?: (id: string) => string
     className?: string
 }) {
     if (!provenance) return null
     const meta = ORIGINS[provenance.origin] ?? ORIGINS.direct
     const Icon = meta.icon
     return (
-        <HoverTip label={meta.label} detail={provenanceSentence(provenance, nameOf)}>
+        <HoverTip label={meta.label} detail={<ProvenanceDetail provenance={provenance} />}>
             <span
                 className={cn(
                     'inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold leading-none whitespace-nowrap',

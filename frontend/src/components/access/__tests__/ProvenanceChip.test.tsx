@@ -1,10 +1,16 @@
 /**
  * Every grant says how it came about — one label per origin, and the
  * sentence behind it naming who, when, the request, the identity
- * provider's groups, the team or the organization role.
+ * provider's groups, the team or the organization role. The hover names
+ * the person who granted it, not their id.
  */
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { describe, expect, it, vi } from 'vitest'
+
+const { peopleById } = vi.hoisted(() => ({ peopleById: vi.fn() }))
+vi.mock('@/services/userDirectoryService', () => ({ peopleById }))
 
 import { ProvenanceChip } from '../ProvenanceChip'
 import { provenanceSentence } from '../accessRequestCopy'
@@ -32,6 +38,19 @@ describe('ProvenanceChip', () => {
     it('renders nothing without a provenance', () => {
         const { container } = render(<ProvenanceChip provenance={null} />)
         expect(container).toBeEmptyDOMElement()
+    })
+
+    it('names who granted it on hover', async () => {
+        peopleById.mockResolvedValue([{ id: 'usr_bob', displayName: 'Bob Steward', email: 'bob@x.io', deleted: false }])
+        const user = userEvent.setup()
+        render(
+            <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+                <ProvenanceChip provenance={provenance({ origin: 'request', by: 'usr_bob' })} />
+            </QueryClientProvider>,
+        )
+        await user.hover(screen.getByText('Approved request'))
+        expect(await screen.findByText('Approved by Bob Steward, answering their request.')).toBeInTheDocument()
+        expect(peopleById).toHaveBeenCalledWith(['usr_bob'])
     })
 
     it('says how it came about in full', () => {
