@@ -69,11 +69,13 @@ export function MyAccessPage() {
         setError(null)
         try {
             // The permission catalogue is best-effort — used only for the
-            // summary banner. Its failure doesn't block the page. (Requests
-            // come from their own query, shared with Find a workspace.)
+            // summary banner. Its failure doesn't block the page, and most
+            // people can't read it: no reason to show them Access denied.
+            // (Requests come from their own query, shared with Find a
+            // workspace.)
             const [accessRes, permsRes] = await Promise.allSettled([
                 permissionsService.getMyAccess(),
-                permissionsService.listPermissions(),
+                permissionsService.listPermissions({ silent403: true }),
             ])
             if (accessRes.status === 'rejected') {
                 throw accessRes.reason instanceof Error

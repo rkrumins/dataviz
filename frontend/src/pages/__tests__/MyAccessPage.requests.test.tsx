@@ -137,4 +137,11 @@ describe('MyAccessPage — no workspace yet', () => {
         expect(await screen.findByText(/Ask an administrator to add you to a workspace/)).toBeInTheDocument()
         expect(screen.queryByRole('link', { name: 'Find a workspace' })).not.toBeInTheDocument()
     })
+
+    it('reads the permission catalogue quietly — most people may not', async () => {
+        requests.listMine.mockResolvedValue([])
+        renderPage()
+        await screen.findByText(/Ask an administrator to add you to a workspace/)
+        expect(access.listPermissions).toHaveBeenCalledWith({ silent403: true })
+    })
 })

@@ -141,8 +141,8 @@ export interface UserAccessResponse {
 // ── Service ──────────────────────────────────────────────────────────
 
 export const permissionsService = {
-    listPermissions(): Promise<PermissionResponse[]> {
-        return authFetch<PermissionResponse[]>('/api/v1/admin/permissions')
+    listPermissions(init?: { silent403?: boolean }): Promise<PermissionResponse[]> {
+        return authFetch<PermissionResponse[]>('/api/v1/admin/permissions', init)
     },
 
     /**
