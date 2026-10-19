@@ -353,6 +353,24 @@ def test_a_freeze_is_not_held_off_by_a_stream_of_overlapping_draft_saves(monkeyp
     _e2e(_stream, monkeypatch)
 
 
+async def _job_start_behind_transition(svc, monkeypatch):
+    g = await _live(svc)
+    monkeypatch.setattr(config, "GRAPH_LOCK_TIMEOUT_MS", 200)
+    for write in ("import_new_draft", "import_onto_draft", "publish_job"):
+        async with db.graphver_session() as s:      # a transition holding the lifecycle key
+            await GraphVersioningService._lock_lifecycle(s, g["gid"])
+            before = await _footprint(g["gid"])
+            with pytest.raises(LockBusy):
+                await asyncio.wait_for(_WRITES[write](svc, g), 5)
+        assert await _footprint(g["gid"]) == before, write
+
+
+def test_an_import_or_publish_job_does_not_start_past_a_transition(monkeypatch):
+    """A job's start takes no graph lock (it fences a move with ``gvmove`` only), so it queues on
+    the lifecycle key like a draft save, instead of slipping past a freeze or trash waiting there."""
+    _e2e(_job_start_behind_transition, monkeypatch)
+
+
 async def _trash_busy(svc, monkeypatch):
     ds = "ds_" + os.urandom(4).hex()
     gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u"))["graph_id"]
