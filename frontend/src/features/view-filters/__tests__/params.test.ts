@@ -2,7 +2,7 @@
  * Every view request — the list, the stats bar, the counts — is built here, so
  * this is where "the same filters" is decided.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { resolveFilters, toQueryParams } from '../params'
 import { EMPTY_FILTERS, ME } from '../model'
 
@@ -47,11 +47,20 @@ describe('toQueryParams', () => {
   })
 
   it('intersects Recent with a created rule: the later lower bound wins', () => {
-    const narrow = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added', created: 'today' }, CTX))
-    expect(narrow.createdAfter).toBe(new Date(2026, 9, 12).toISOString())
+    // Recent counts back from the real clock and the rules from CTX.today, so
+    // the clock is pinned to that day: unpinned, Recent's cutoff overtook
+    // "today" a week after it and this failed for everyone.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 9, 12, 12))
+    try {
+      const narrow = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added', created: 'today' }, CTX))
+      expect(narrow.createdAfter).toBe(new Date(2026, 9, 12).toISOString())
 
-    const wide = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added', created: 'this-year' }, CTX))
-    // This year starts long before Recent's 7 days, so Recent's cutoff stands.
-    expect(wide.createdAfter! > new Date(2026, 0, 1).toISOString()).toBe(true)
+      const wide = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added', created: 'this-year' }, CTX))
+      // This year starts long before Recent's 7 days, so Recent's cutoff stands.
+      expect(wide.createdAfter! > new Date(2026, 0, 1).toISOString()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
