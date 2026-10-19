@@ -449,6 +449,32 @@ async def test_a_chain_of_trashed_forks_holds_its_parent_only_while_a_live_fork_
     assert await _purges(f1) == [] and await _purges(f2) == []
 
 
+async def test_a_parent_purge_waits_for_the_reaper_queueing_a_deeper_forks_purge():
+    """The reaper queues the purge of a trashed fork two forks down while the parent's purge
+    takes the chain along: the parent's waits for that fork's row, then finds its job — one job,
+    and no unique-key error failing the parent's purge."""
+    svc = GraphVersioningService()
+    ds, gid = await _graph(svc)
+    f1, _ = await _fork(svc, gid)
+    f2, _ = await _fork(svc, f1)
+    for f in (f2, f1):
+        await svc.delete_fork(graph_id=f, workspace_id=WS, actor="bob")
+    await _trash(ds)
+
+    async with db.graphver_session() as s:          # the reaper's purge of f2, committed on exit
+        f2_job = await create_purge_job(graph_id=f2, workspace_id=WS, actor="reaper", session=s,
+                                        require_tombstoned=True)
+        purge = asyncio.create_task(create_purge_job(graph_id=gid, workspace_id=WS,
+                                                     actor="alice"))
+        await asyncio.sleep(0.3)
+        assert not purge.done(), "the parent's purge must wait for the fork row the reaper holds"
+
+    assert await purge
+    assert [j.id for j in await _purges(f2)] == [f2_job]
+    (f1_job,) = await _purges(f1)
+    assert f1_job.summary["parentGraphId"] == gid
+
+
 async def test_a_trashed_fork_bound_to_a_data_source_holds_its_parent_until_that_source_goes():
     svc = GraphVersioningService()
     ds, gid = await _graph(svc)

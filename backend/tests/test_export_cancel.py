@@ -55,12 +55,12 @@ def _sessions(row=None, added=None, opened=None):
     return session
 
 
-async def _unlocked(_s, _graph_id):
+async def _unlocked(_s, _graph_id, **_kw):
     return None
 
 
 def _service() -> ImportExportService:
-    return ImportExportService(versioning=SimpleNamespace(_lock_graph=_unlocked), store=object())
+    return ImportExportService(versioning=SimpleNamespace(_lock_move=_unlocked), store=object())
 
 
 async def test_an_export_records_who_started_it(monkeypatch):

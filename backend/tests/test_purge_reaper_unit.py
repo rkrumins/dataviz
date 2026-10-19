@@ -300,7 +300,10 @@ async def test_a_parent_purge_queues_its_trashed_forks():
     assert (jobs["purge:f1"].graph_id, jobs["purge:f1"].workspace_id,
             jobs["purge:f1"].data_source_id) == ("f1", "ws1", "dsfork_1")
     assert jobs["purge:f1"].summary == {"actor": "u", "parentGraphId": "g1"}
-    (cascade,) = [_sql(st) for st in s.statements if "RECURSIVE tree" in _sql(st)]
+    lock, cascade = [st for st in s.statements if "RECURSIVE tree" in _sql(st)]
+    assert lock._for_update_arg is not None and "NOT (EXISTS" not in _sql(lock), \
+        "the tree's rows are locked before they are checked for a job: a fork's own purge is seen"
+    cascade = _sql(cascade)
     assert "graphs.deleted_at IS NOT NULL" in cascade and "'purge'" in cascade
     assert "NOT (EXISTS" in cascade, cascade
     assert "graphs_1.fork_parent_graph_id = tree.id" in cascade, "at any depth"

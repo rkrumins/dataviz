@@ -698,26 +698,32 @@ class GraphVersioningService:
         :meth:`add_branch_member` can edit it, and checkpoints field-merge
         concurrent edits (raising on same-field clashes) instead of clobbering."""
         async with self._session() as s:
-            graph = await s.get(GraphORM, graph_id)
-            if graph is None:
-                raise ValueError(f"unknown graph {graph_id}")
-            await self._assert_not_bootstrapping(s, graph_id)
-            await self._lock_lifecycle(s, graph_id, shared=True)
-            await self._assert_writable(s, graph_id)
-            draft = BranchORM(
-                graph_id=graph_id,
-                kind="draft",
-                name=name,
-                owner=owner,
-                is_shared=shared,
-                base_commit_seq=graph.main_head_commit_seq,
-                base_ontology_version_id=graph.base_ontology_version_id,
-                originating_view_id=originating_view_id,
-                created_by=owner,
-            )
-            s.add(draft)
-            await s.flush()
-            return draft.id
+            return await self._add_draft(s, graph_id=graph_id, owner=owner, name=name,
+                                         originating_view_id=originating_view_id, shared=shared)
+
+    async def _add_draft(self, s, *, graph_id: str, owner: str, name: Optional[str] = None,
+                         originating_view_id: Optional[str] = None, shared: bool = False) -> str:
+        """:meth:`open_draft` in the caller's transaction ``s``; returns the new draft's id."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None:
+            raise ValueError(f"unknown graph {graph_id}")
+        await self._assert_not_bootstrapping(s, graph_id)
+        await self._lock_lifecycle(s, graph_id, shared=True)
+        await self._assert_writable(s, graph_id)
+        draft = BranchORM(
+            graph_id=graph_id,
+            kind="draft",
+            name=name,
+            owner=owner,
+            is_shared=shared,
+            base_commit_seq=graph.main_head_commit_seq,
+            base_ontology_version_id=graph.base_ontology_version_id,
+            originating_view_id=originating_view_id,
+            created_by=owner,
+        )
+        s.add(draft)
+        await s.flush()
+        return draft.id
 
     # ------------------------------------------------------------------ #
     # Shared-draft membership (plan §8)                                   #
@@ -5032,13 +5038,14 @@ class GraphVersioningService:
         ``from_workspace_id`` into ``new_workspace_id`` — the graphver half of moving the data
         source. Returns the moved graph ids; ``[]`` when the source is not versioned.
 
-        Each graph is locked before its forks are read: a fork, or a job, is created under its
-        graph's lock and in the workspace it reads there, so none appears unseen or in the old
-        workspace. A graph found already in ``new_workspace_id`` moves again (a retry that
-        finishes a move); one in any other workspace was moved by another request
-        (:class:`GraphMoved`). Nothing moves while any of them has a pending or running job
-        (:class:`JobActive`), because a job runs in the workspace it was queued in; the finished
-        ones move with their graph, so lookups scoped by workspace still find them."""
+        Each graph is locked before its forks are read: a fork is created under its graph's
+        lock, and a job under its move lock (:meth:`_lock_move`), in the workspace it reads
+        there, so none appears unseen or in the old workspace. A graph found already in
+        ``new_workspace_id`` moves again (a retry that finishes a move); one in any other
+        workspace was moved by another request (:class:`GraphMoved`). Nothing moves while any of
+        them has a pending or running job (:class:`JobActive`), because a job runs in the
+        workspace it was queued in; the finished ones move with their graph, so lookups scoped by
+        workspace still find them."""
         async with self._session() as s:
             root = await s.scalar(
                 select(GraphORM.id).where(GraphORM.data_source_id == data_source_id))
@@ -5048,6 +5055,7 @@ class GraphVersioningService:
             while todo:
                 gid = todo.pop(0)
                 await self._lock_graph(s, gid)
+                await self._lock_move(s, gid)
                 if gid == root and await s.scalar(select(GraphORM.workspace_id).where(
                         GraphORM.id == root)) not in (from_workspace_id, new_workspace_id):
                     raise GraphMoved(root)
@@ -6647,6 +6655,15 @@ class GraphVersioningService:
         take = func.pg_advisory_xact_lock_shared if shared else func.pg_advisory_xact_lock
         await GraphVersioningService._bounded_lock(
             s, select(take(func.hashtext(f"gvlifecycle:{graph_id}"))), f"graph {graph_id}")
+
+    @staticmethod
+    async def _lock_move(s, graph_id: str, *, shared: bool = False) -> None:
+        """The lock a move of the graph's data source holds (exclusive, after :meth:`_lock_graph`)
+        and a job's creation takes ``shared``: jobs fence against a move without waiting on main
+        writers or on each other. The wait is bounded (:meth:`_bounded_lock`)."""
+        lock = func.pg_advisory_xact_lock_shared if shared else func.pg_advisory_xact_lock
+        await GraphVersioningService._bounded_lock(
+            s, select(lock(func.hashtext(f"gvmove:{graph_id}"))), f"graph {graph_id}")
 
     @staticmethod
     async def _lock_branch(s, graph_id: str, branch_id: str) -> BranchORM:

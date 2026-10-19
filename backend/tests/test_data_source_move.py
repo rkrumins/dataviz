@@ -20,7 +20,8 @@ does. The graphver cases need a live Postgres (``GRAPHVER_E2E=1``); without it t
 move finds no versioned graph.
 
 A move races nothing that stamps a workspace: a fork, an import, an export or a publish
-started in the old workspace waits for the move's graph lock and is then refused, a second
+started in the old workspace waits for the move's lock and is then refused (a job's start
+waits for no main write, and an import refused leaves no draft behind), a second
 move finds the graph already gone from the workspace it moves from, and enabling version
 control waits for the data source's row, which the move holds. A move whose graph could
 not be put back says so, and how to finish it.
@@ -36,10 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import OutboxEventORM, WorkspaceDataSourceORM
 from backend.app.db.repositories import view_repo
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export.service import ImportExportService
-from backend.app.services.versioning.models import GraphORM, JobORM
+from backend.app.services.versioning.models import BranchORM, GraphORM, JobORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.management import ViewCreateRequest
 
@@ -326,6 +327,38 @@ async def test_a_move_cancelled_after_the_graph_moved_puts_it_back(
     assert calls == [(ds, dst), (ds, src)]
 
 
+async def test_a_commit_that_landed_but_raised_keeps_the_graph_with_the_source(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    """The management commit lands and only its answer is lost (a connection reset after the
+    server committed): the source is in B, so its history stays there and the move succeeds."""
+    calls = []
+
+    async def _record(_self, ds_id, ws_id, **_kw):
+        calls.append((ds_id, ws_id))
+        return ["g_moved"]
+    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
+
+    src = await _workspace(test_client, "Answer Lost")
+    dst = await _workspace(test_client, "Answer Lost Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Landed"))
+
+    commit = db_session.commit
+    lost = []
+
+    async def _land_then_fail_once():
+        await commit()
+        if not lost:
+            lost.append(True)
+            raise ConnectionResetError("connection reset after COMMIT")
+    monkeypatch.setattr(db_session, "commit", _land_then_fail_once)
+
+    resp = await _move(test_client, src, ds, dst)
+    assert resp.status_code == 200, resp.text
+    assert calls == [(ds, dst)], "the graph is not moved back from where its source now is"
+    assert resp.json()["workspaceId"] == dst
+
+
 async def test_a_graph_that_cannot_be_moved_back_is_recorded_and_the_answer_says_how_to_finish(
     test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
 ):
@@ -484,6 +517,7 @@ async def _write_during_move(gid: str, ws: str, write):
     move. Returns the write, which must have waited for the move."""
     async with db.graphver_session() as s:
         await GraphVersioningService._lock_graph(s, gid)
+        await GraphVersioningService._lock_move(s, gid)
         await s.execute(update(GraphORM).where(GraphORM.id == gid).values(workspace_id=ws))
         task = asyncio.ensure_future(write())
         await asyncio.sleep(0.5)
@@ -533,6 +567,52 @@ async def test_a_job_started_during_the_move_is_refused_not_left_in_the_old_work
         await job
     async with db.graphver_session() as s:
         assert (await s.scalar(select(JobORM.id).where(JobORM.graph_id == gid))) is None
+
+
+@e2e
+async def test_an_import_into_a_new_draft_refused_by_the_move_leaves_no_draft():
+    """The draft an import opens is opened with its job, after the workspace check: an import
+    the move refuses leaves no empty draft on the graph in the new workspace."""
+    ds = "ds_" + os.urandom(4).hex()
+    svc, gid = await _graph(ds, "ws_old")
+    ie = ImportExportService(svc, store=None)
+    job = await _write_during_move(gid, "ws_new", lambda: ie.create_import_job(
+        workspace_id="ws_old", data_source_id=ds, graph_id=gid, actor="u1",
+        import_format="ndjson"))
+    with pytest.raises(ValueError):
+        await job
+    async with db.graphver_session() as s:
+        assert (await s.scalar(select(BranchORM.id).where(
+            BranchORM.graph_id == gid, BranchORM.kind == "draft"))) is None
+
+
+@e2e
+@pytest.mark.parametrize("kind", ["import", "new-draft import", "export", "publish"])
+async def test_a_job_does_not_wait_for_a_long_main_write(kind, monkeypatch):
+    """A publish, resync or bulk ingest holds the graph's lock for its whole squash: starting a
+    job meanwhile neither waits for it nor fails with lock_busy. Only a move fences jobs."""
+    monkeypatch.setattr(config, "GRAPH_LOCK_TIMEOUT_MS", 300)
+    ds = "ds_" + os.urandom(4).hex()
+    svc, gid = await _graph(ds, "ws_a")
+    draft = await svc.open_draft(graph_id=gid, owner="u1")
+    ie = ImportExportService(svc, store=None)
+    start = {
+        "import": lambda: ie.create_import_job(
+            workspace_id="ws_a", data_source_id=ds, graph_id=gid, actor="u1",
+            import_format="ndjson", branch_id=draft),
+        "new-draft import": lambda: ie.create_import_job(
+            workspace_id="ws_a", data_source_id=ds, graph_id=gid, actor="u1",
+            import_format="ndjson"),
+        "export": lambda: ie.create_export_job(
+            workspace_id="ws_a", data_source_id=ds, graph_id=gid, actor="u1"),
+        "publish": lambda: ie.create_publish_job(
+            workspace_id="ws_a", data_source_id=ds, graph_id=gid, branch_id=draft,
+            actor="u1", message="big"),
+    }[kind]
+    async with db.graphver_session() as s:          # the main write, still running
+        await GraphVersioningService._lock_graph(s, gid)
+        created = await asyncio.wait_for(start(), 3)
+    assert created["job_id"]
 
 
 @e2e

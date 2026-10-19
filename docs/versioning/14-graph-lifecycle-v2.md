@@ -511,8 +511,8 @@ Auth column: R = read, M = manage, P = publish+manage, A = admin.
   - 409 `lifecycle_job_running`.
 - `POST …/restore` (L727): T14.
 - `POST …/move` (L759): updates graphver `workspace_id` first; 409 `job_active` while a mutating lifecycle job runs.
-  - It holds the data source row (FOR UPDATE) and each graph's lock. A fork, job or enable started in the old workspace waits, then gets 404. A second move gets 404, or 409 `graph_moved` once the graph is in neither workspace.
-  - If the commit fails, the graph moves back and the answer is 503. If the graph cannot move back, the 503 says to move the source again, and `workspace.data_source.move_incomplete` is recorded.
+  - It holds the data source row (FOR UPDATE), each graph's lock, and each graph's move lock (`gvmove:<gid>`), which a job's start (import, export, publish) takes shared instead of the graph's lock, so a job's start never waits on a publish or ingest. A fork, job or enable started in the old workspace waits, then gets 404; an import's new draft is opened with its job, so a refused import leaves none. A second move gets 404, or 409 `graph_moved` once the graph is in neither workspace.
+  - If the commit fails, the graph moves back and the answer is 503. A commit that raised but landed (the row, read again, is in the target) keeps the graph there and answers 200. If the graph cannot move back, the 503 says to move the source again, and `workspace.data_source.move_incomplete` is recorded.
 - `GET …/impact?action=delete|detach|release|freeze`: the fixed `versioning_impact`.
 
 **`POST /{ws}/versioning/graphs`** (`versioning.py:1185`)

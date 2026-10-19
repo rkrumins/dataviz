@@ -560,7 +560,9 @@ async def _queue_trashed_forks(s, graph_id: str, actor: str) -> None:
     """Queue a purge, in the caller's transaction, for each trashed minted fork under ``graph_id``,
     at any depth through trashed minted forks, that no fork reads (:func:`_forks_reading`) and
     has no purge job: a fork cannot outlive the history it reads, and once queued it is past its
-    undo. The caller holds the direct fork rows (FOR KEY SHARE); a deeper one's restore is
+    undo. The caller holds the direct fork rows (FOR KEY SHARE); the deeper ones are locked so
+    here first, and only then checked for a job, so a fork's own purge (the reaper's, which holds
+    its row FOR UPDATE) is waited for and seen, not queued twice. A deeper fork's restore is
     refused while its parent is trashed."""
     tree = select(GraphORM.id).where(
         GraphORM.fork_parent_graph_id == graph_id, GraphORM.deleted_at.isnot(None),
@@ -568,6 +570,8 @@ async def _queue_trashed_forks(s, graph_id: str, actor: str) -> None:
     child = aliased(GraphORM)
     tree = tree.union_all(select(child.id).where(
         child.fork_parent_graph_id == tree.c.id, child.deleted_at.isnot(None), _minted(child)))
+    await s.execute(select(GraphORM.id).where(GraphORM.id.in_(select(tree.c.id)))
+                    .order_by(GraphORM.id).with_for_update(read=True, key_share=True))
     forks = [f for f in (await s.execute(select(GraphORM).where(
         GraphORM.id.in_(select(tree.c.id)),
         ~select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,

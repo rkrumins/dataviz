@@ -187,8 +187,8 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 1. jobs row (claim)
 2. `gvproj:<gid>` session lock (projector, swap, evict)
 3. `gvcompact:<gid>`: exclusive for compaction; shared for seq pinners (restore, revert, export, fork, history_export, purge)
-4. `gvlifecycle:<gid>` (`_lock_lifecycle`): exclusive for transitions (freeze, trash, restore, purge queued); shared for draft writers
-5. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions
+4. `gvlifecycle:<gid>` (`_lock_lifecycle`): exclusive for transitions (freeze, trash, restore, purge queued); shared for draft writers and for creating an import or publish job
+5. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions; then `gvmove:<gid>` (`_lock_move`): exclusive for a data-source move, shared for creating an import, export or publish job (which takes no `_lock_graph`)
 6. `graphs` row: FOR UPDATE for transitions and policy; FOR KEY SHARE for draft writers and reviews; plain UPDATE for main commits
 7. `branches`: FOR UPDATE for writers; FOR SHARE for reviews
 8. `merge_requests`

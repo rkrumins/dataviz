@@ -913,6 +913,7 @@ async def move_data_source(
             )
 
     source_ws_name = (await workspace_repo.get_workspace_orm(session, workspace_id)).name
+    target_name = target.name
     target_fields = recorder.data_source_target(ds)   # read now: a failed commit expires the row
 
     # The versioned graph and its forks move FIRST, so a refusal (a job still running: 409
@@ -958,8 +959,15 @@ async def move_data_source(
         # Committed here, not at request end, so a failure can still put the graph back.
         await session.commit()
     except BaseException as exc:
-        # No two-phase commit across the stores: move the graph back. Shielded, and on a
+        # No two-phase commit across the stores: move the graph back — unless the commit landed
+        # and only its answer was lost, which the row, read again, says. Shielded, and on a
         # cancellation too (the request's time ran out, the client went away).
+        if await asyncio.shield(_committed_in(session, ds_id, target_id)):
+            if not isinstance(exc, Exception):
+                raise
+            logger.warning("data source %s moved to %s although its commit raised %r", ds_id,
+                           target_id, exc)
+            return await data_source_repo.get_data_source(session, ds_id)
         detail = ("The data source couldn't be moved right now. Nothing has been changed. "
                   "Try again shortly.")
         try:
@@ -969,8 +977,8 @@ async def move_data_source(
             logger.exception("data source %s stayed in %s but its versioned graph could not be "
                              "moved back from %s", ds_id, workspace_id, target_id)
             detail = (f"The data source is still in '{source_ws_name}', but its version history "
-                      f"could not be moved back from '{target.name}'. Move the data source to "
-                      f"'{target.name}' again to finish the move.")
+                      f"could not be moved back from '{target_name}'. Move the data source to "
+                      f"'{target_name}' again to finish the move.")
             try:
                 await session.rollback()
                 await recorder.record_for_request(
@@ -988,6 +996,18 @@ async def move_data_source(
         raise HTTPException(status_code=503, detail=detail) from exc
 
     return await data_source_repo.get_data_source(session, ds_id)
+
+
+async def _committed_in(session: AsyncSession, ds_id: str, workspace_id: str) -> bool:
+    """Whether the data source's row is committed in ``workspace_id``: a commit that raised may
+    still have landed. False when the row cannot be read, so the move is undone as before."""
+    try:
+        await session.rollback()
+        return await session.scalar(select(WorkspaceDataSourceORM.workspace_id).where(
+            WorkspaceDataSourceORM.id == ds_id)) == workspace_id
+    except Exception:
+        logger.exception("could not read where data source %s is after its move", ds_id)
+        return False
 
 
 @router.get("/{workspace_id}/data-sources/{ds_id}/impact", response_model=WorkspaceDataSourceImpactResponse)

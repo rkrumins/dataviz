@@ -104,13 +104,16 @@ class ImportExportService:
         auto_publish: bool = False,
         idempotency_key: Optional[str] = None,
         name: Optional[str] = None,
+        originating_view_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
         Returns ``{job_id, branch_id, source_uri}``. When ``source_uri`` is omitted it is minted
         from the traceable ``{ws}/{ds}/{graph}/{job}/source.<fmt>`` layout (the caller then streams
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
-        imports per branch, like successive manual edits); omitted -> open a fresh import draft.
+        imports per branch, like successive manual edits); omitted -> open a fresh import draft
+        (for ``originating_view_id``), in the job's transaction once the graph is known to be in
+        ``workspace_id``: an import refused or rolled back leaves no empty draft behind.
         A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
         a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
         any other branch ``ValueError``.
@@ -121,29 +124,31 @@ class ImportExportService:
         count — the transfer lane's reaper rules are applied to it first — but a running one whose
         worker went quiet does: it is taken over and resumed.
         """
-        if branch_id is None:
-            branch_id = await self._svc.open_draft(
-                graph_id=graph_id, owner=actor, name=name or "Import")
-        elif branch_id == "main":
+        if branch_id == "main":
             raise MainWriteForbidden()
 
         async def insert() -> Dict[str, str]:
-            uri = source_uri
+            uri, draft_id = source_uri, branch_id
             async with db.graphver_session() as s:
+                await self._svc._lock_lifecycle(s, graph_id, shared=True)
                 await self._lock_in_workspace(s, graph_id, workspace_id)
                 await self._svc._assert_writable(s, graph_id)
-                branch = await self._svc._lock_branch(s, graph_id, branch_id)
+                if draft_id is None:
+                    draft_id = await self._svc._add_draft(
+                        s, graph_id=graph_id, owner=actor, name=name or "Import",
+                        originating_view_id=originating_view_id)
+                branch = await self._svc._lock_branch(s, graph_id, draft_id)
                 if branch.kind == "main":
                     raise MainWriteForbidden()
                 self._svc._require_open(branch)
                 await self._svc._require_edit(s, branch, actor, ())
-                active = await self._import_on(s, branch_id, idempotency_key)
+                active = await self._import_on(s, draft_id, idempotency_key)
                 if active is not None:
                     raise JobActive(active)
                 job = JobORM(
                     job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
                     data_source_id=data_source_id, provider_id=provider_id,
-                    scope_view_id=scope_view_id, branch_id=branch_id,
+                    scope_view_id=scope_view_id, branch_id=draft_id,
                     reconcile_mode=reconcile_mode, import_format=import_format,
                     field_scope=field_scope, auto_publish=auto_publish,
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
@@ -155,7 +160,7 @@ class ImportExportService:
                     uri = storage_key(
                         workspace_id, data_source_id, graph_id, job_id, f"source.{import_format}")
                     job.source_uri = uri
-            return {"job_id": job_id, "branch_id": branch_id, "source_uri": uri}
+            return {"job_id": job_id, "branch_id": draft_id, "source_uri": uri}
 
         for attempt in (1, 2):
             try:
@@ -166,7 +171,7 @@ class ImportExportService:
                 # A repeated idempotency key: the caller answers with that key's job (find_job).
                 if idempotency_key and await self.find_job(graph_id=graph_id, idempotency_key=idempotency_key):
                     raise
-                active = await self._active_import(branch_id)
+                active = await self._active_import(branch_id) if branch_id else None
                 if active is None:          # the import it met has finished since: the draft is free
                     if attempt == 2:
                         raise
@@ -176,10 +181,11 @@ class ImportExportService:
                                         f"{active}). Wait for it to finish, then import again.") from None
 
     async def _lock_in_workspace(self, s, graph_id: str, workspace_id: str) -> None:
-        """Take the graph's lock, which a move of its data source holds, and refuse a graph that
-        has moved out of ``workspace_id`` (``ValueError``, the 404 of a graph in no workspace of
-        the caller's): a job is never stamped with the workspace its graph has left."""
-        await self._svc._lock_graph(s, graph_id)
+        """Take the graph's move lock shared (:meth:`GraphVersioningService._lock_move`), which a
+        move of its data source holds but no main write does, and refuse a graph that has moved
+        out of ``workspace_id`` (``ValueError``, the 404 of a graph in no workspace of the
+        caller's): a job is never stamped with the workspace its graph has left."""
+        await self._svc._lock_move(s, graph_id, shared=True)
         if await s.scalar(select(GraphORM.id).where(
                 GraphORM.id == graph_id, GraphORM.workspace_id != workspace_id)) is not None:
             raise ValueError(f"unknown graph {graph_id}")
@@ -520,6 +526,7 @@ class ImportExportService:
         if merge_request_id:
             fields["mergeRequestId"] = merge_request_id
         async with db.graphver_session() as s:
+            await self._svc._lock_lifecycle(s, graph_id, shared=True)
             await self._lock_in_workspace(s, graph_id, workspace_id)
             await self._svc._assert_writable(s, graph_id)
             branch = await self._svc._lock_branch(s, graph_id, branch_id)
