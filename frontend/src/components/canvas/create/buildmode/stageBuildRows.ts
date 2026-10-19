@@ -193,7 +193,8 @@ export function useStageBuildRows(): {
 
   const stageBuildRows = useCallback(
     async (rows: BuildRow[], opts: StageBuildRowsOptions): Promise<Map<string, string>> => {
-      await ensureDraftOpen()
+      // No draft (editing paused): stage nothing rather than land the batch on main.
+      if (!(await ensureDraftOpen())) return new Map()
 
       const rootParentType = opts.rootParentUrn
         ? ((useCanvasStore.getState().nodes.find(

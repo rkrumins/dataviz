@@ -18,6 +18,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useBranches, useOpenDraft, VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
+import { GraphNotWritableError } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, canWriteDraft, ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
 
@@ -149,7 +150,10 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
               </button>
             </div>
             {openDraft.isError && (
-              <p className="mt-1.5 text-[11px] text-rose-500">Couldn’t create the branch — try again.</p>
+              <p className="mt-1.5 text-[11px] text-rose-500">
+                {/* Editing is paused: retrying cannot help, so say what can — in the server's words. */}
+                {openDraft.error instanceof GraphNotWritableError ? openDraft.error.message : 'Couldn’t create the branch — try again.'}
+              </p>
             )}
           </div>
         </div>

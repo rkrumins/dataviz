@@ -163,7 +163,8 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
     if (!canApply) return
     setApplying(true)
     try {
-      await stageBuildRows(stageable, { rootParentUrn: parentUrn, onRowStaged })
+      // Nothing staged (no draft could be opened): keep the rows to apply once editing resumes.
+      if ((await stageBuildRows(stageable, { rootParentUrn: parentUrn, onRowStaged })).size === 0) return
       reset()
       onClose()
     } finally {

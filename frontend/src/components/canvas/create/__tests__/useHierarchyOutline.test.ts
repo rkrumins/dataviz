@@ -17,10 +17,13 @@ import type { ParsedOutlineRow } from '../outlineParser'
 import { useHierarchyOutline } from '../useHierarchyOutline'
 
 vi.mock('@/features/versioning/model/ensureDraftOpen', () => ({
-  ensureDraftOpen: vi.fn().mockResolvedValue(null),
+  ensureDraftOpen: vi.fn().mockResolvedValue('branch-1'),
 }))
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { useHierarchyBuilderStore } from '../hierarchyBuilderStore'
+
+// The builder store's open() sets state once ensureDraftOpen has resolved.
+const settle = () => new Promise((r) => setTimeout(r, 0))
 
 // useViewSchema falls back to the global schema store whenever there's no
 // ViewExecutionContext in the render tree (exactly the case outside a
@@ -435,7 +438,7 @@ describe('useHierarchyOutline', () => {
     expect(canvasNode(tempUrn!)?.data.label).toBe('Sales EMEA')
   })
 
-  it('14. tree scopes to the CURRENT batch: a fresh open() clears the ADDING list without un-staging the previous set; the next set staged shows only itself', () => {
+  it('14. tree scopes to the CURRENT batch: a fresh open() clears the ADDING list without un-staging the previous set; the next set staged shows only itself', async () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     const { result } = renderHook(() =>
       useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null }),
@@ -448,7 +451,10 @@ describe('useHierarchyOutline', () => {
     expect(result.current.tree.map((r) => r.tempUrn)).toEqual([aUrn])
 
     // A fresh open() (e.g. "Start another set") bumps the batch — WITHOUT un-staging set A.
-    act(() => { useHierarchyBuilderStore.getState().open({ parentUrn: 'urn:real:domain1' }) })
+    await act(async () => {
+      useHierarchyBuilderStore.getState().open({ parentUrn: 'urn:real:domain1' })
+      await settle()
+    })
 
     expect(result.current.tree).toEqual([])
     expect(findByTempUrn(aUrn!)).toBeTruthy()
@@ -463,9 +469,10 @@ describe('useHierarchyOutline', () => {
     expect(findByTempUrn(aUrn!)).toBeTruthy()
   })
 
-  it('15. a fresh open() to a NEW scope resets active.parentUrn to it — a previously nested-into parent does not leak into the next batch', () => {
+  it('15. a fresh open() to a NEW scope resets active.parentUrn to it — a previously nested-into parent does not leak into the next batch', async () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     useHierarchyBuilderStore.getState().open({ parentUrn: 'urn:real:domain1' })
+    await settle()
 
     const { result } = renderHook(() => {
       const scopeParentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
@@ -482,7 +489,10 @@ describe('useHierarchyOutline', () => {
 
     // A fresh open() to a DIFFERENT scope (per-layer "+", or "Start another set") —
     // the pinned nested parent must NOT survive into the new batch.
-    act(() => { useHierarchyBuilderStore.getState().open() })
+    await act(async () => {
+      useHierarchyBuilderStore.getState().open()
+      await settle()
+    })
 
     expect(result.current.active.parentUrn).toBeNull()
     expect(result.current.active.parentUrn).not.toBe(platformUrn)
@@ -496,12 +506,14 @@ describe('useHierarchyBuilderStore', () => {
       batchId: 0, batchUrns: [], sessionAddedCount: 0,
     })
     vi.mocked(ensureDraftOpen).mockClear()
+    vi.mocked(ensureDraftOpen).mockResolvedValue('branch-1')
   })
 
-  it('open() calls ensureDraftOpen and sets isOpen + the given opts', () => {
+  it('open() calls ensureDraftOpen and sets isOpen + the given opts', async () => {
     useHierarchyBuilderStore.getState().open({
       parentUrn: 'p1', layerId: 'l1', initialTypeId: 't1', mode: 'paste', template: ['a', 'b'],
     })
+    await settle()
 
     expect(ensureDraftOpen).toHaveBeenCalledTimes(1)
     const s = useHierarchyBuilderStore.getState()
@@ -513,8 +525,9 @@ describe('useHierarchyBuilderStore', () => {
     expect(s.initialTemplate).toEqual(['a', 'b'])
   })
 
-  it('open() with no opts resets fields to null / outline', () => {
+  it('open() with no opts resets fields to null / outline', async () => {
     useHierarchyBuilderStore.getState().open()
+    await settle()
     const s = useHierarchyBuilderStore.getState()
     expect(s.isOpen).toBe(true)
     expect(s.parentUrn).toBeNull()
@@ -524,8 +537,9 @@ describe('useHierarchyBuilderStore', () => {
     expect(s.initialTemplate).toBeNull()
   })
 
-  it('close() resets isOpen and all opts fields', () => {
+  it('close() resets isOpen and all opts fields', async () => {
     useHierarchyBuilderStore.getState().open({ parentUrn: 'p1', mode: 'paste' })
+    await settle()
     useHierarchyBuilderStore.getState().close()
     const s = useHierarchyBuilderStore.getState()
     expect(s.isOpen).toBe(false)
@@ -533,24 +547,34 @@ describe('useHierarchyBuilderStore', () => {
     expect(s.initialMode).toBe('outline')
   })
 
-  it('calls ensureDraftOpen before flipping isOpen (order guard)', () => {
+  it('calls ensureDraftOpen before flipping isOpen (order guard)', async () => {
     const order: string[] = []
     vi.mocked(ensureDraftOpen).mockImplementation(() => {
       order.push('ensureDraftOpen')
-      return Promise.resolve(null)
+      return Promise.resolve('branch-1')
     })
     const unsub = useHierarchyBuilderStore.subscribe((s) => {
       if (s.isOpen) order.push('isOpen')
     })
     useHierarchyBuilderStore.getState().open()
+    await settle()
     unsub()
     expect(order).toEqual(['ensureDraftOpen', 'isOpen'])
   })
 
-  it('open() bumps batchId and clears batchUrns; a second open() bumps it again and clears anything registered since', () => {
+  it('stays closed when no draft can be opened, so nothing is staged on main', async () => {
+    vi.mocked(ensureDraftOpen).mockResolvedValue(null)
+    useHierarchyBuilderStore.getState().open({ parentUrn: 'p1' })
+    await settle()
+    expect(ensureDraftOpen).toHaveBeenCalledTimes(1)
+    expect(useHierarchyBuilderStore.getState().isOpen).toBe(false)
+  })
+
+  it('open() bumps batchId and clears batchUrns; a second open() bumps it again and clears anything registered since', async () => {
     expect(useHierarchyBuilderStore.getState().batchId).toBe(0)
 
     useHierarchyBuilderStore.getState().open()
+    await settle()
     const afterFirst = useHierarchyBuilderStore.getState().batchId
     expect(afterFirst).toBeGreaterThan(0)
     expect(useHierarchyBuilderStore.getState().batchUrns).toEqual([])
@@ -559,12 +583,14 @@ describe('useHierarchyBuilderStore', () => {
     expect(useHierarchyBuilderStore.getState().batchUrns).toEqual(['urn:temp:1'])
 
     useHierarchyBuilderStore.getState().open()
+    await settle()
     expect(useHierarchyBuilderStore.getState().batchId).toBeGreaterThan(afterFirst)
     expect(useHierarchyBuilderStore.getState().batchUrns).toEqual([])
   })
 
-  it('registerBatchUrn appends to batchUrns and bumps sessionAddedCount', () => {
+  it('registerBatchUrn appends to batchUrns and bumps sessionAddedCount', async () => {
     useHierarchyBuilderStore.getState().open()
+    await settle()
     useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:1')
     useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:2')
 
@@ -573,10 +599,12 @@ describe('useHierarchyBuilderStore', () => {
     expect(s.sessionAddedCount).toBe(2)
   })
 
-  it('close() resets sessionAddedCount; open() alone (a "start another set" reopen) does not, since it tracks the WHOLE session', () => {
+  it('close() resets sessionAddedCount; open() alone (a "start another set" reopen) does not, since it tracks the WHOLE session', async () => {
     useHierarchyBuilderStore.getState().open()
+    await settle()
     useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:1')
     useHierarchyBuilderStore.getState().open() // a "start another set" reopen
+    await settle()
     expect(useHierarchyBuilderStore.getState().sessionAddedCount).toBe(1)
 
     useHierarchyBuilderStore.getState().close()
