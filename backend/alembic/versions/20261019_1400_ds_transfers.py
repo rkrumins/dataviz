@@ -10,6 +10,9 @@
 * ``view_activity_log``'s action CHECK gains ``moved``: each moved view's
   own timeline says where it went, and that it came back on an undo.
 
+``view_activity_log`` is written on every change to a view, so the revision
+bounds its wait for that table's lock.
+
 Fresh installs get the table from ``0001_baseline``'s create_all and never run
 this file, so the DDL is guarded (docs/MIGRATIONS.md, "Guard the DDL; never
 guard the data"). Revision id is kept <=32 chars (alembic_version.version_num
@@ -52,12 +55,21 @@ _STATE = (
 )
 
 
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for a lock: ``view_activity_log`` is written
+    on every change to a view, and giving up (to be run again) beats queueing
+    those writes behind a long transaction."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
+
 def _swap_check(table: str, name: str, condition: str) -> None:
     op.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
     op.create_check_constraint(name, table, condition)
 
 
 def upgrade() -> None:
+    _bound_lock_wait()
     bind = op.get_bind()
 
     if not sa.inspect(bind).has_table("data_source_transfers"):
@@ -116,6 +128,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     op.execute("ALTER TABLE view_activity_log DROP CONSTRAINT IF EXISTS ck_val_action_enum")
     # Rows carrying the widened verb would violate the narrower constraint.
     op.execute("DELETE FROM view_activity_log WHERE action = 'moved'")

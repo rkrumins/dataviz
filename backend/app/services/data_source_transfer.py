@@ -64,6 +64,7 @@ from backend.app.db.models import (
     ViewORM,
     WorkspaceDataSourceORM,
     WorkspaceORM,
+    view_is_live,
 )
 from backend.app.db.repositories import (
     data_source_repo,
@@ -240,6 +241,13 @@ class _View:
     follows_default: bool
     publish_requested: bool
     context_model_id: Optional[str]
+    #: Waiting in a draft to go live: it moves with the source (its draft does too), but no one
+    #: else sees it until the draft is published.
+    staged: bool = False
+
+    @property
+    def live(self) -> bool:
+        return not self.trashed and not self.staged
 
 
 @dataclass
@@ -289,7 +297,7 @@ async def _views_on(session: AsyncSession, ds: WorkspaceDataSourceORM,
     """Every view that moves: those on the source (trashed ones too) and, when the source is its
     workspace's default, the views with no source of their own — they read it today."""
     cols = (ViewORM.id, ViewORM.name, ViewORM.visibility, ViewORM.created_by, ViewORM.deleted_at,
-            ViewORM.publish_requested_at, ViewORM.context_model_id)
+            ViewORM.publish_requested_at, ViewORM.context_model_id, ViewORM.draft_branch_id)
     rows = [(r, False) for r in (await session.execute(
         select(*cols).where(ViewORM.data_source_id == ds.id).order_by(ViewORM.name)
     )).all()]
@@ -302,7 +310,8 @@ async def _views_on(session: AsyncSession, ds: WorkspaceDataSourceORM,
     return [
         _View(id=r[0], name=r[1], visibility=r[2] or "private", created_by=r[3],
               trashed=r[4] is not None, follows_default=follows,
-              publish_requested=r[5] is not None, context_model_id=r[6])
+              publish_requested=r[5] is not None, context_model_id=r[6],
+              staged=r[7] is not None)
         for r, follows in rows
     ]
 
@@ -607,7 +616,7 @@ async def preflight(
             "not_allowed",
             f"Moving this source, or asking to, takes administering {source.name}.", "blocker"))
 
-    live = [v for v in views if not v.trashed]
+    live = [v for v in views if v.live]
     losers, counts, reach_b = await _access_plan(session, source.id, target.id, live)
 
     # The source's place as a default, on both sides.
@@ -785,7 +794,7 @@ async def _person_names(session: AsyncSession, user_ids: Iterable[str]) -> dict[
 def _preview(pre: Preflight, *, keep: Optional[set] = None, mode: Optional[str] = None,
              owners: Optional[dict] = None) -> TransferPreview:
     """The preflight as the API returns it. ``keep`` marks who keeps access (None: everyone)."""
-    live = [v for v in pre.views if not v.trashed]
+    live = [v for v in pre.views if v.live]
     owners = owners or {}
     facts = pre.facts
     return TransferPreview(
@@ -951,7 +960,7 @@ async def _grant_kept(session: AsyncSession, pre: Preflight, keep: set, actor: s
 async def _ask_new_publishers(session: AsyncSession, pre: Preflight, actor: str) -> None:
     """A request to publish was put to the old workspace's publishers; it is the new one's to
     answer now, so they hear about it."""
-    asked = [v for v in pre.views if v.publish_requested and not v.trashed]
+    asked = [v for v in pre.views if v.publish_requested and v.live]
     if not asked:
         return
     publishers = await notification_repo.users_who_can(
@@ -1514,8 +1523,7 @@ async def _creators(session: AsyncSession, view_ids: list[str]) -> dict[str, int
     for chunk in _chunks(view_ids):
         for creator, n in (await session.execute(
             select(ViewORM.created_by, func.count())
-            .where(ViewORM.id.in_(chunk), ViewORM.deleted_at.is_(None),
-                   ViewORM.created_by.isnot(None))
+            .where(ViewORM.id.in_(chunk), view_is_live(), ViewORM.created_by.isnot(None))
             .group_by(ViewORM.created_by)
         )).all():
             out[creator] = out.get(creator, 0) + n
