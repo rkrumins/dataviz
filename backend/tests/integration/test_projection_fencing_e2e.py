@@ -225,6 +225,14 @@ async def _run_reads_follow_the_pin() -> None:
     assert await physical_key(ds, "prov_ds", old) == ("prov_ds", old)
     await svc.move_projection(graph_id=gid, provider="prov_b", key=new, actor="a", shard_map={})
     assert await physical_key(ds, "prov_ds", old) == ("prov_b", new)
+    # Trashed while a pod refreshes its cached set, then restored: still routed to the pin.
+    async with db.graphver_session() as s:
+        (await s.get(GraphORM, gid)).deleted_at = models._now()
+    versioned_sources.reset_cache()
+    assert ds not in await versioned_sources.versioned_data_source_ids()
+    async with db.graphver_session() as s:
+        (await s.get(GraphORM, gid)).deleted_at = None
+    assert await physical_key(ds, "prov_ds", old) == ("prov_b", new)
     await svc.move_projection(graph_id=gid, provider="default", key=old, actor="a", shard_map={})
     assert await physical_key(ds, "prov_ds", old) == ("prov_ds", old)
     assert await physical_key("ds_unversioned", "prov_ds", "k") == ("prov_ds", "k")

@@ -45,10 +45,12 @@ async def retire_moved_keys(
     the next run), so no pass writes a key as it is dropped. A key is dropped only when no graph
     pins it, no other data source or catalog entry reads it (``key_in_use``, by default
     :func:`purge_worker.graph_key_readers`; the graph's own data source is left out) and it holds
-    the projector's pass marker; otherwise it is kept and its entry goes (PROTECTED). A key already
-    gone counts as dropped. When its readers or its marker cannot be read, or the drop fails, the
-    entry stays for the next run. Returns ``[{graphId, key, provider, verdict}]`` for each entry
-    that went."""
+    the projector's pass marker or is one of the graph's own platform keys (:func:`is_owned_key`),
+    which a reseed cut short leaves without one; a pinned or read key is kept and its entry goes
+    (PROTECTED). A key already gone counts as dropped. Any other key without the marker is kept
+    with its entry, which the inventory shows, and so is one whose readers or marker cannot be
+    read, or whose drop fails, for the next run. Returns ``[{graphId, key, provider, verdict}]``
+    for each entry that went."""
     if key_in_use is None:
         from .purge_worker import graph_key_readers as key_in_use
     now = now or datetime.now(timezone.utc).isoformat()
@@ -76,7 +78,7 @@ async def retire_moved_keys(
             if not acquired:
                 continue
             for entry in due:
-                verdict = await _retire(projector, entry, ds_id, key_in_use)
+                verdict = await _retire(projector, gid, entry, ds_id, key_in_use)
                 if verdict is None:
                     continue
                 await _forget(session, gid, entry)
@@ -93,7 +95,8 @@ async def retire_moved_keys(
     return out
 
 
-async def _retire(projector, entry: dict, ds_id: Optional[str], key_in_use) -> Optional[str]:
+async def _retire(projector, graph_id: str, entry: dict, ds_id: Optional[str],
+                  key_in_use) -> Optional[str]:
     """Drop one retired key if it may go, and say what became of it; None keeps its entry."""
     from backend.app.providers.falkordb_provider import _is_missing_graph_error
 
@@ -125,8 +128,10 @@ async def _retire(projector, entry: dict, ds_id: Optional[str], key_in_use) -> O
         return "gone"
     if exists is None:                                  # a client that cannot tell
         return None
-    if seq is None:
-        return f"PROTECTED: '{name}' holds no projection marker of ours"
+    if seq is None and not is_owned_key(graph_id, name):
+        logger.warning("retire: '%s' of graph %s holds no projection marker of ours; kept",
+                       name, graph_id)
+        return None
     try:
         await projector.drop_graph(name, provider)
     except Exception as exc:                            # noqa: BLE001

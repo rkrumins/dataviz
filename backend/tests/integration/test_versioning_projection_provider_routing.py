@@ -8,9 +8,9 @@ provider rows asynchronously), and eviction drops the graph on its pinned provid
 
 A moved graph's old key (``keymigrate.retire_moved_keys``) is dropped on its own provider only
 once the new key has caught up and the grace period has passed, and only under the graph's
-projection lock. A key another data source or catalog entry reads, another graph's pin, and a key
-without the projector's pass marker are kept (PROTECTED); when its readers cannot be asked, the
-key waits for the next run.
+projection lock. A key another data source or catalog entry reads and another graph's pin are kept
+(PROTECTED); a key without the projector's pass marker is kept with its entry, unless it is one of
+the graph's own platform keys; when its readers cannot be asked, the key waits for the next run.
 
 The ``make_registry_graph_factory``/``list_graph_keys`` unit tests below (no Postgres
 needed — ``session_factory``/``provider_repo`` are stubbed) pin the fail-loud contract: a
@@ -259,12 +259,26 @@ async def _run_retire() -> None:
     assert out["verdict"].startswith("PROTECTED") and ("prov_A", k1) not in keys.drops, out
     assert await _retired(gid) is None
 
-    # A key without our pass marker is not one the projector wrote: kept, and its entry goes.
+    # A key without our pass marker may not be one the projector wrote: kept, and so is its
+    # entry, which the inventory shows, so it is not lost track of.
     gid, ds, k1 = await moved()
     keys.keys[("prov_A", k1)].proj_meta = {}
-    (out,) = await retire(gid, key_in_use=nobody)
-    assert out["verdict"].startswith("PROTECTED") and ("prov_A", k1) not in keys.drops, out
-    assert ("prov_A", k1) in keys.keys and await _retired(gid) is None
+    assert await retire(gid, key_in_use=nobody) == []
+    assert ("prov_A", k1) in keys.keys and ("prov_A", k1) not in keys.drops
+    assert [e["name"] for e in await _retired(gid)] == [k1]
+
+    # One of the graph's own platform keys is ours by its name: a reseed cut short leaves it with
+    # data and no marker, and once the graph has moved off it, it is dropped all the same.
+    gid, ds, k1 = await moved()
+    t1, t2 = keymigrate.owned_key(gid, 1), keymigrate.owned_key(gid, 2)
+    await svc.move_projection(graph_id=gid, provider="prov_B", key=t2, actor="admin", shard_map={})
+    await proj.project_graph(gid)
+    keys.keys[("prov_B", t2)].proj_meta = {}                       # the reseed never finished
+    await svc.move_projection(graph_id=gid, provider="prov_B", key=t1, actor="admin", shard_map={})
+    await proj.project_graph(gid)
+    assert {r["key"]: r["verdict"] for r in await retire(gid, key_in_use=nobody)} == {
+        k1: "dropped", t2: "dropped"}
+    assert ("prov_B", t2) in keys.drops and await _retired(gid) is None
 
     # A key that is already gone counts as dropped, and nothing is sent to it.
     gid, ds, k1 = await moved()

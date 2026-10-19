@@ -324,7 +324,8 @@ class PurgeRunner:
     async def _phase_falkor(self, lease: Lease, graph_id: str) -> bool:
         """Drop the projected FalkorDB graph — if, and only if, it is ours to drop and nothing else
         reads it — and, by the same rule, each old key a move left waiting to be dropped
-        (``retired_keys``) that holds the projector's pass marker."""
+        (``retired_keys``) that holds the projector's pass marker or is one of the graph's own
+        platform keys."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             name = ps.falkor_graph_name if ps else None
@@ -379,12 +380,14 @@ class PurgeRunner:
                     client = await client
                 if marked:
                     # A key the projector wrote carries its pass marker; one without it is not
-                    # a key we can vouch for.
+                    # a key we can vouch for, unless it is one of the graph's own platform keys,
+                    # which a reseed cut short leaves without one.
+                    from . import keymigrate
                     from .projection import read_projection_marker
                     exists, seq = await read_projection_marker(client)
                     if exists is False:
                         return f"'{name}' was already gone"
-                    if seq is None:
+                    if seq is None and not keymigrate.is_owned_key(graph_id, name):
                         return (f"PROTECTED: '{name}' holds no projection marker of ours — "
                                 "left untouched")
                 await client.delete()

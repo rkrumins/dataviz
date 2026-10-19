@@ -60,9 +60,10 @@ CACHE_TTL_SECS = 600
 # the store stayed down each one waited out a fresh connection attempt.
 FAILURE_BACKOFF_SECS = 30
 
-_cache: Optional[FrozenSet[str]] = None
-_cache_at: float = 0.0
-_refresh_failed_at: Optional[float] = None
+# Keyed by ``include_trashed``: the two sets are cached apart.
+_cache: Dict[bool, FrozenSet[str]] = {}
+_cache_at: Dict[bool, float] = {}
+_refresh_failed_at: Dict[bool, float] = {}
 
 
 class VersionedLookupUnavailable(RuntimeError):
@@ -76,25 +77,26 @@ class VersionedLookupUnavailable(RuntimeError):
 
 
 async def versioned_data_source_ids(
-    *, ttl_secs: int = CACHE_TTL_SECS,
+    *, ttl_secs: int = CACHE_TTL_SECS, include_trashed: bool = False,
 ) -> FrozenSet[str]:
-    """Every data source with a live versioned graph.
+    """Every data source with a live versioned graph, or, with
+    ``include_trashed``, with any versioned graph, trashed ones included.
 
     Serves the cache while it is fresh, and keeps serving it if a refresh
     fails — a blip must not flip the fleet's classification. Raises
     :class:`VersionedLookupUnavailable` only on a cold failure, i.e. when there
     is no previous answer to stand on.
     """
-    global _cache, _cache_at, _refresh_failed_at
-
     now = time.monotonic()
-    if _cache is not None and (now - _cache_at) < ttl_secs:
-        return _cache
+    cached = _cache.get(include_trashed)
+    if cached is not None and (now - _cache_at[include_trashed]) < ttl_secs:
+        return cached
+    failed_at = _refresh_failed_at.get(include_trashed)
     if (
-        _cache is not None and _refresh_failed_at is not None
-        and (now - _refresh_failed_at) < FAILURE_BACKOFF_SECS
+        cached is not None and failed_at is not None
+        and (now - failed_at) < FAILURE_BACKOFF_SECS
     ):
-        return _cache
+        return cached
 
     try:
         from sqlalchemy import select
@@ -102,37 +104,38 @@ async def versioned_data_source_ids(
         from backend.app.services.versioning.db import get_session_factory
         from backend.app.services.versioning.models import GraphORM
 
+        stmt = select(GraphORM.data_source_id)
+        if not include_trashed:
+            stmt = stmt.where(GraphORM.deleted_at.is_(None))
         async with get_session_factory()() as session:
-            rows = await session.execute(
-                select(GraphORM.data_source_id).where(
-                    GraphORM.deleted_at.is_(None)
-                )
-            )
+            rows = await session.execute(stmt)
         found = frozenset(r[0] for r in rows.all() if r[0])
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if _cache is not None:
+        if cached is not None:
             # Serve the previous answer. The set changes only when a source is
             # versioned or unversioned, so a stale read is very nearly always
             # still correct.
-            _refresh_failed_at = now
+            _refresh_failed_at[include_trashed] = now
             logger.warning(
                 "versioned data-source lookup failed, reusing the cached set "
-                "(%d entries): %s", len(_cache), exc,
+                "(%d entries): %s", len(cached), exc,
             )
-            return _cache
+            return cached
         raise VersionedLookupUnavailable(str(exc)) from exc
 
-    _cache, _cache_at, _refresh_failed_at = found, now, None
+    _cache[include_trashed], _cache_at[include_trashed] = found, now
+    _refresh_failed_at.pop(include_trashed, None)
     return found
 
 
 def reset_cache() -> None:
-    """Drop the cached set — used by tests, and after a deliberate
+    """Drop the cached sets — used by tests, and after a deliberate
     bootstrap/unversion when the TTL is too long to wait out."""
-    global _cache, _cache_at, _refresh_failed_at
-    _cache, _cache_at, _refresh_failed_at = None, 0.0, None
+    _cache.clear()
+    _cache_at.clear()
+    _refresh_failed_at.clear()
 
 
 @dataclass(frozen=True)
@@ -230,10 +233,16 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     The management DB keeps naming the data source's logical key; a versioned graph's projection
     pin is where its content actually is once the graph has been moved. A source that is not
     versioned, or whose graph is unpinned (NULL, or the ``gv_<id>`` placeholder nothing reads),
-    keeps its own key. A pin on the default provider keeps the data source's provider. Uncached;
-    a failed graphver read raises, so a versioned read never silently lands on the old key."""
+    keeps its own key. A pin on the default provider keeps the data source's provider.
+
+    Whether the source is versioned comes from the cached set, trashed graphs included: a graph
+    stays versioned through the trash, so its restore is routed to the pin at once rather than
+    to a key a move may have dropped. A graph versioned since the set was cached reads its own
+    key until the next refresh, which comes before a move can drop that key
+    (``RETIRE_GRACE_SECS`` > ``CACHE_TTL_SECS``). With no set at all (graphver down and nothing
+    cached) the source reads its own key. The pin read is uncached, and a failure raises."""
     try:
-        versioned = ds_id in await versioned_data_source_ids()
+        versioned = ds_id in await versioned_data_source_ids(include_trashed=True)
     except VersionedLookupUnavailable as exc:
         logger.warning("versioned set unavailable, reading ds=%s from its own key: %s", ds_id, exc)
         return provider_id, graph_name

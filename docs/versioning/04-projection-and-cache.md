@@ -354,7 +354,10 @@ in flight is superseded), lowers the watermark to 0 (`reseeding`) and appends th
 `retired_keys`; reads fall back to Postgres until the reseed catches up. The worker's retire loop
 (`keymigrate.retire_moved_keys`) drops the old key under `gvproj` once the new key has reached the
 head at the move and `RETIRE_GRACE_SECS` have passed, unless something still reads or pins it; purge
-drops pending retired keys too. Until then, a move back onto the retired key reconciles it in place.
+drops pending retired keys too. A key without the projector's pass marker is dropped only when it is
+one of the graph's own `gvp_` keys, which a reseed cut short leaves unmarked; the retire loop keeps
+any other, with its `retired_keys` entry, so the inventory still shows it. Until then, a move back
+onto the retired key reconciles it in place.
 
 ---
 

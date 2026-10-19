@@ -52,12 +52,13 @@ def routed(monkeypatch):
     from backend.app.db.repositories import data_source_repo
 
     monkeypatch.setattr(versioned_sources, "physical_key", physical_key)
-    state = {"ds": _DataSource(), "versioned": {"ds_1"}, "row": None, "reads": 0}
+    state = {"ds": _DataSource(), "versioned": {"ds_1"}, "row": None, "reads": 0, "asked": []}
 
     async def _get_ds(_session, _ds_id):
         return state["ds"]
 
-    async def _versioned():
+    async def _versioned(**kw):
+        state["asked"].append(kw)
         if isinstance(state["versioned"], Exception):
             raise state["versioned"]
         return frozenset(state["versioned"])
@@ -104,6 +105,14 @@ async def test_an_unpinned_or_unversioned_source_reads_its_own_key(routed):
     provider = await mgr.get_provider("ws_1", MagicMock(), data_source_id="ds_1")
     assert provider.manager_cache_key == ("prov_A", "K1")
     assert routed["reads"] == reads                       # no graphver read for it
+
+
+async def test_a_trashed_graph_still_counts_as_versioned(routed):
+    # A graph stays versioned through the trash: a pod that cached the set while it was trashed
+    # must route its restore to the pin, not to a key a move may have dropped.
+    routed["row"] = ("graph_1", "prov_B", "K2")
+    assert await physical_key("ds_1", "prov_A", "K1") == ("prov_B", "K2")
+    assert routed["asked"] == [{"include_trashed": True}]
 
 
 async def test_an_unreadable_versioned_set_falls_back_to_the_data_sources_key(routed):
