@@ -46,6 +46,10 @@ workspace_router = APIRouter()  # /admin/workspaces/{workspace_id}/data-source-t
 admin_router = APIRouter()      # /admin/data-source-transfers (parties; checked per request)
 
 _STATUS = Query("open", pattern="^(open|all)$")
+#: Everyone party to a transfer administers a workspace — the one it leaves or the one it goes
+#: to. Checked per transfer by the service; this refuses everyone else up front, and confirms the
+#: session is still alive (an unconfirmable one is a 503, as for every admin route).
+_PARTY = requires("workspace:admin", workspace_any=True)
 
 
 async def _one(session: AsyncSession, row, claims: PermissionClaims, user: User):
@@ -144,7 +148,7 @@ async def incoming_transfers(
 @admin_router.get("/{transfer_id}", response_model=DataSourceTransferDetail)
 async def get_transfer(
     transfer_id: str = Path(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_PARTY),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -156,7 +160,7 @@ async def get_transfer(
 async def accept_transfer(
     transfer_id: str = Path(...),
     req: TransferAccept = Body(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_PARTY),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -169,7 +173,7 @@ async def accept_transfer(
 async def decline_transfer(
     transfer_id: str = Path(...),
     req: TransferResolve = Body(default_factory=TransferResolve),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_PARTY),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -182,7 +186,7 @@ async def decline_transfer(
 async def cancel_transfer(
     transfer_id: str = Path(...),
     req: TransferResolve = Body(default_factory=TransferResolve),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_PARTY),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -194,7 +198,7 @@ async def cancel_transfer(
 @admin_router.post("/{transfer_id}/undo", response_model=DataSourceTransferResponse)
 async def undo_transfer(
     transfer_id: str = Path(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(_PARTY),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):

@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,8 @@ from backend.app.db.models import DataSourceTransferORM
 
 #: Rows that record a move that happened (and possibly was undone since).
 _HAPPENED = ("completed", "undone")
+#: The most rows one list returns: a page, not the table.
+LIST_LIMIT = 200
 
 
 def _now() -> str:
@@ -84,8 +86,9 @@ async def list_for_source(
 
 async def list_for_workspace(
     session: AsyncSession, workspace_id: str, *, status: str = "open",
+    limit: Optional[int] = LIST_LIMIT,
 ) -> list[DataSourceTransferORM]:
-    """Requests into or out of one workspace, newest first."""
+    """Requests into or out of one workspace, newest first — at most ``limit`` (None: all)."""
     stmt = select(DataSourceTransferORM).where(
         (DataSourceTransferORM.to_workspace_id == workspace_id)
         | (DataSourceTransferORM.from_workspace_id == workspace_id),
@@ -94,15 +97,17 @@ async def list_for_workspace(
     clause = _status_clause(status)
     if clause is not None:
         stmt = stmt.where(clause)
-    return list((await session.execute(
-        stmt.order_by(DataSourceTransferORM.created_at.desc())
-    )).scalars().all())
+    stmt = stmt.order_by(DataSourceTransferORM.created_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def list_incoming(
     session: AsyncSession, to_workspace_ids: Optional[Iterable[str]], *, status: str = "open",
 ) -> list[DataSourceTransferORM]:
-    """Requests into the given workspaces (every workspace when None), newest first."""
+    """Requests into the given workspaces (every workspace when None), newest first — at most
+    :data:`LIST_LIMIT`."""
     stmt = select(DataSourceTransferORM).where(DataSourceTransferORM.kind == "request")
     if to_workspace_ids is not None:
         ids = list(to_workspace_ids)
@@ -113,22 +118,29 @@ async def list_incoming(
     if clause is not None:
         stmt = stmt.where(clause)
     return list((await session.execute(
-        stmt.order_by(DataSourceTransferORM.created_at.desc())
+        stmt.order_by(DataSourceTransferORM.created_at.desc()).limit(LIST_LIMIT)
     )).scalars().all())
 
 
-async def expire_lapsed(session: AsyncSession) -> int:
-    """Close every pending request whose window has passed, as of its expiry."""
-    result = await session.execute(
-        update(DataSourceTransferORM)
+async def expire_lapsed(session: AsyncSession) -> list[DataSourceTransferORM]:
+    """Close every pending request whose window has passed, as of its expiry, and return them.
+
+    A row another transaction holds — someone answering it right now — is skipped: that answer
+    decides it, or the next call expires it. So each expiry happens, and is reported, once."""
+    rows = list((await session.execute(
+        select(DataSourceTransferORM)
         .where(
             DataSourceTransferORM.status == "pending",
             DataSourceTransferORM.expires_at <= _now(),
         )
-        .values(status="expired", resolved_at=DataSourceTransferORM.expires_at)
-        .execution_options(synchronize_session=False)
-    )
-    return result.rowcount or 0
+        .with_for_update(skip_locked=True)
+    )).scalars().all())
+    for row in rows:
+        row.status = "expired"
+        row.resolved_at = row.expires_at
+    if rows:
+        await session.flush()
+    return rows
 
 
 async def create_pending(session: AsyncSession, **fields) -> tuple[DataSourceTransferORM, bool]:
@@ -177,5 +189,5 @@ async def resolve(
 async def open_for_workspace(
     session: AsyncSession, workspace_id: str,
 ) -> list[DataSourceTransferORM]:
-    """Pending requests into or out of a workspace — what deleting it closes."""
-    return await list_for_workspace(session, workspace_id, status="open")
+    """Pending requests into or out of a workspace — what deleting it closes. All of them."""
+    return await list_for_workspace(session, workspace_id, status="open", limit=None)

@@ -115,6 +115,9 @@ UNDO_DAYS = 7
 _VIEW_LIST_CAP = 500
 #: Rows per IN (...) when rewriting by id.
 _CHUNK = 500
+#: How long a retried move or answer, whose first try went through but whose response was lost,
+#: is given that result rather than an error.
+_REPLAY_WINDOW = timedelta(minutes=10)
 
 _ADMIN = "workspace:admin"
 _MANAGE = "workspace:datasource:manage"
@@ -138,6 +141,18 @@ def _parse(ts: Optional[str]) -> Optional[datetime]:
     except ValueError:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _recent(ts: Optional[str]) -> bool:
+    when = _parse(ts)
+    return when is not None and datetime.now(timezone.utc) - when <= _REPLAY_WINDOW
+
+
+def _answered_by(row: DataSourceTransferORM, user_id: str, answer: str) -> bool:
+    """The same answer from the same person, again: a retry whose first try went through."""
+    at = row.undone_at if answer == "undone" else row.resolved_at
+    by = row.undone_by if answer == "undone" else row.resolved_by
+    return row.status == answer and by == user_id and _recent(at)
 
 
 def _load(raw: Optional[str]) -> dict:
@@ -567,6 +582,10 @@ async def preflight(
     """
     source = await _live_workspace(session, ds.workspace_id)
     target = await _live_workspace(session, to_ws_id)
+    if transfer is None and not await _can_see(session, claims, target):
+        # A preview names the workspace, its sources and its people: someone who couldn't find
+        # the workspace gets the answer they would for one that isn't there.
+        raise HTTPException(status_code=404, detail=f"Workspace '{to_ws_id}' not found")
     if target.id == source.id:
         raise HTTPException(
             status_code=422,
@@ -1078,8 +1097,19 @@ async def _execute(
 async def move(session: AsyncSession, *, ds_id: str, from_ws_id: str, claims: PermissionClaims,
                user_id: str, req: DataSourceMoveRequest) -> DataSourceTransferORM:
     """Move a data source now, for someone who may in both workspaces."""
-    await transfer_repo.expire_lapsed(session)
-    ds = await source_in(session, ds_id, from_ws_id, lock=True)
+    await _expire_lapsed(session)
+    try:
+        ds = await source_in(session, ds_id, from_ws_id, lock=True)
+    except HTTPException:
+        # Not here any more. If this caller just moved it where they're asking to, this is a
+        # retry whose first try went through: answer with that move, not a 404.
+        latest = await transfer_repo.latest_move_for_source(session, ds_id)
+        if (latest is not None and latest.kind == "move" and latest.status == "completed"
+                and latest.created_by == user_id and latest.from_workspace_id == from_ws_id
+                and latest.to_workspace_id == req.target_workspace_id
+                and _recent(latest.completed_at)):
+            return latest
+        raise
     if not await advisory.claim_this_pass(session, ds.id):
         raise _conflict("aggregation_running",
                         "An aggregation run is starting on this source. Try again once it finishes.")
@@ -1094,6 +1124,11 @@ async def move(session: AsyncSession, *, ds_id: str, from_ws_id: str, claims: Pe
             "Moving a data source that has views takes administering both workspaces."
             if pre.has_views else
             "Moving a data source takes managing data sources in both workspaces.")
+    if pre.has_views:
+        # It takes workspace:admin, so it fails closed like every route that does: a session
+        # whose revocation can't be checked right now doesn't get to move other people's work.
+        from backend.app.auth.dependencies import assert_session_alive_or_503
+        await assert_session_alive_or_503(claims, permission=_ADMIN, user_id=user_id)
     _refuse(pre.blockers)
     if req.preview_token and req.preview_token != pre.token:
         raise _conflict("preview_stale", "Something changed since you reviewed this move. "
@@ -1118,22 +1153,30 @@ async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
                   claims: PermissionClaims, user_id: str,
                   req: DataSourceMoveRequest) -> DataSourceTransferORM:
     """Ask the destination's admins to take a source. Who keeps access is decided here."""
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     ds = await source_in(session, ds_id, from_ws_id, lock=True)
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
                           purpose="propose")
+    keep = _keep_set(req.keep, pre.losers)
+    plan = _plan(pre, keep)
+    waiting = await transfer_repo.pending_for_source(session, ds.id)
+    if (waiting is not None and waiting.created_by == user_id
+            and waiting.to_workspace_id == pre.target.id and _recent(waiting.created_at)
+            and _load(waiting.plan) == plan):
+        # The same request from the same person, just made: a retry whose first try went
+        # through. Answer with it rather than "already waiting".
+        return waiting
     # A run in progress will have finished by the time anyone reads the request.
     permanent = [b for b in pre.blockers if not b.transient]
     if any(b.code == "request_waiting" for b in permanent):
         raise _conflict("request_waiting", "A request to move it is already waiting for an answer.",
                         permanent)
     _refuse(permanent)
-    keep = _keep_set(req.keep, pre.losers)
     prov = current_provenance()
     row, created = await transfer_repo.create_pending(
         session, data_source_id=ds.id, data_source_label=_label(ds),
         from_workspace_id=pre.source.id, to_workspace_id=pre.target.id,
-        plan=json.dumps(_plan(pre, keep)), reason=prov.stated_reason if prov else None,
+        plan=json.dumps(plan), reason=prov.stated_reason if prov else None,
         created_by=user_id,
         expires_at=(datetime.now(timezone.utc) + timedelta(days=REQUEST_DAYS)).isoformat())
     if not created:
@@ -1179,8 +1222,10 @@ def _still_open(row: DataSourceTransferORM) -> None:
 async def accept(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
                  user_id: str, preview_token: str) -> DataSourceTransferORM:
     """Take the source: run the move the proposer planned, as it stands now."""
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id)
+    if _answered_by(row, user_id, "completed"):
+        return row
     _still_open(row)
     if not _is_admin(claims, row.to_workspace_id):
         await _deny(session, user_id, _ADMIN, row.to_workspace_id,
@@ -1190,6 +1235,8 @@ async def accept(session: AsyncSession, *, transfer_id: str, claims: PermissionC
     if ds is None:
         raise _conflict("blocked", "The data source has been deleted since this request was made.")
     row = await transfer_repo.get(session, transfer_id, for_update=True)
+    if _answered_by(row, user_id, "completed"):
+        return row  # a second click that queued behind the first
     _still_open(row)
     if not await advisory.claim_this_pass(session, ds.id):
         raise _conflict("aggregation_running",
@@ -1208,8 +1255,10 @@ async def accept(session: AsyncSession, *, transfer_id: str, claims: PermissionC
 
 async def decline(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
                   user_id: str, note: Optional[str]) -> DataSourceTransferORM:
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id, for_update=True)
+    if _answered_by(row, user_id, "declined"):
+        return row
     _still_open(row)
     if not _is_admin(claims, row.to_workspace_id):
         await _deny(session, user_id, _ADMIN, row.to_workspace_id,
@@ -1230,8 +1279,10 @@ async def decline(session: AsyncSession, *, transfer_id: str, claims: Permission
 
 async def cancel(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
                  user_id: str, note: Optional[str]) -> DataSourceTransferORM:
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id, for_update=True)
+    if _answered_by(row, user_id, "cancelled"):
+        return row
     _still_open(row)
     if row.created_by != user_id and not _is_admin(claims, row.from_workspace_id):
         await _deny(session, user_id, _ADMIN, row.from_workspace_id,
@@ -1338,13 +1389,17 @@ def _undo_refusal(row: DataSourceTransferORM) -> str:
 async def undo(session: AsyncSession, *, transfer_id: str, claims: PermissionClaims,
                user_id: str) -> DataSourceTransferORM:
     """Put a move back exactly as it was, from its manifest."""
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id)
+    if _answered_by(row, user_id, "undone"):
+        return row
     if not _may_undo(row, claims):
         await _deny(session, user_id, _ADMIN, row.to_workspace_id, _undo_refusal(row))
     # Lock order: the source, then the transfer — the order accept and moves take them in.
     ds = await _lock_live(session, row.data_source_id)
     row = await transfer_repo.get(session, transfer_id, for_update=True)
+    if _answered_by(row, user_id, "undone"):
+        return row  # a second click that queued behind the first
     ok, why = await undo_state(session, row, claims)
     if not ok or ds is None:
         raise _conflict("undo_unavailable", why or "This move can't be undone.")
@@ -1490,7 +1545,9 @@ async def _record_both(session: AsyncSession, event_type: str, ds: WorkspaceData
 
 
 async def _record_resolution(session: AsyncSession, row: DataSourceTransferORM,
-                             event_type: str) -> None:
+                             event_type: str, *, by_system: bool = False) -> None:
+    """One event in each workspace's activity. ``by_system``: nobody did it (a request lapsing),
+    so it is filed under no one rather than under whoever's request noticed."""
     names = await _workspace_names(session, [row.from_workspace_id, row.to_workspace_id])
     details = {
         "transferId": row.id,
@@ -1503,10 +1560,32 @@ async def _record_resolution(session: AsyncSession, row: DataSourceTransferORM,
     if row.resolution_note:
         details["note"] = row.resolution_note
     for ws_id in (row.from_workspace_id, row.to_workspace_id):
-        await recorder.record_for_request(
-            session, event_type, workspace_id=ws_id, data_source_id=row.data_source_id,
-            target_type="data_source", target_id=row.data_source_id,
-            target_label=row.data_source_label, details=details)
+        fields = dict(workspace_id=ws_id, data_source_id=row.data_source_id,
+                      target_type="data_source", target_id=row.data_source_id,
+                      target_label=row.data_source_label, details=details)
+        if by_system:
+            await recorder.record_activity(session, event_type=event_type, provenance=None, **fields)
+        else:
+            await recorder.record_for_request(session, event_type, **fields)
+
+
+async def _expire_lapsed(session: AsyncSession) -> None:
+    """Close the requests nobody answered in time — run before every transfer read and write, so
+    no one acts on one that has lapsed. Each is recorded in both workspaces' activity and the
+    person who asked hears about it."""
+    for row in await transfer_repo.expire_lapsed(session):
+        await _record_resolution(session, row, "workspace.data_source.transfer_expired",
+                                 by_system=True)
+        if not row.created_by:
+            continue
+        names = await _workspace_names(session, [row.to_workspace_id])
+        await notification_repo.notify(
+            session, user_ids=[row.created_by], kind="data_source.transfer_expired",
+            title=f'Your request to move "{row.data_source_label}" expired',
+            body=f"{names.get(row.to_workspace_id, 'The destination')}'s admins didn't answer "
+                 f"within {REQUEST_DAYS} days. You can ask again.",
+            link=f"/workspaces/{row.from_workspace_id}?ds={row.data_source_id}",
+            resource_type="data_source_transfer", resource_id=row.id)
 
 
 async def _workspace_names(session: AsyncSession, ws_ids: Iterable[str]) -> dict[str, str]:
@@ -1621,7 +1700,7 @@ async def _invalidate_reads(*, ds_id: str, provider_id: Optional[str], graph_nam
 
 async def preview(session: AsyncSession, *, ds: WorkspaceDataSourceORM, to_ws_id: str,
                   claims: PermissionClaims) -> TransferPreview:
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     pre = await preflight(session, ds=ds, to_ws_id=to_ws_id, claims=claims)
     owners = await _person_names(session, {v.created_by for v in pre.views[:_VIEW_LIST_CAP]})
     return _preview(pre, mode=pre.mode, owners=owners)
@@ -1630,6 +1709,17 @@ async def preview(session: AsyncSession, *, ds: WorkspaceDataSourceORM, to_ws_id
 async def _directory_on(session: AsyncSession) -> bool:
     return await feature_flags.is_enabled(
         _DIRECTORY_FLAG, session, default=fail_safe_default(_DIRECTORY_FLAG))
+
+
+async def _can_see(session: AsyncSession, claims: PermissionClaims, ws: WorkspaceORM, *,
+                   directory: Optional[bool] = None) -> bool:
+    """Whether the caller may learn the workspace is there: they can open it, or it's listed in
+    Find a workspace while that's on — the rule access requests follow."""
+    if workspace_access.can_open(claims, ws.id):
+        return True
+    if not ws.directory_listed:
+        return False
+    return await _directory_on(session) if directory is None else directory
 
 
 async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
@@ -1646,7 +1736,6 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
                 ViewORM.workspace_id == source_id, ViewORM.data_source_id.is_(None))) or 0) > 0
     need = _ADMIN if has_views else _MANAGE
     can_ask = _is_admin(claims, source_id)
-    org_wide = workspace_access.is_org_wide(claims)
     directory = await _directory_on(session)
 
     workspaces = (await session.execute(
@@ -1671,8 +1760,7 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
 
     out: list[TransferDestination] = []
     for ws in workspaces:
-        if not (org_wide or workspace_access.can_open(claims, ws.id)
-                or (directory and ws.directory_listed)):
+        if not await _can_see(session, claims, ws, directory=directory):
             continue
         direct = (has_permission(claims, need, workspace_id=source_id)
                   and has_permission(claims, need, workspace_id=ws.id))
@@ -1760,7 +1848,7 @@ async def detail(session: AsyncSession, *, transfer_id: str, claims: PermissionC
                  user_id: str) -> DataSourceTransferDetail:
     """A transfer, and — while it waits — the move it would make now, with the proposer's
     choices and what changed since they asked."""
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     row = await _visible_transfer(session, transfer_id, claims, user_id)
     response = (await to_responses(session, [row], claims, user_id=user_id))[0]
     if row.status != "pending":
@@ -1789,14 +1877,14 @@ async def detail(session: AsyncSession, *, transfer_id: str, claims: PermissionC
 
 async def history(session: AsyncSession, *, ds: WorkspaceDataSourceORM, claims: PermissionClaims,
                   user_id: str) -> list[DataSourceTransferResponse]:
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     rows = await transfer_repo.list_for_source(session, ds.id)
     return await to_responses(session, rows, claims, user_id=user_id)
 
 
 async def for_workspace(session: AsyncSession, *, ws_id: str, status_filter: str,
                         claims: PermissionClaims, user_id: str) -> list[DataSourceTransferResponse]:
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     rows = await transfer_repo.list_for_workspace(session, ws_id, status=status_filter)
     return await to_responses(session, rows, claims, user_id=user_id)
 
@@ -1804,7 +1892,7 @@ async def for_workspace(session: AsyncSession, *, ws_id: str, status_filter: str
 async def incoming(session: AsyncSession, *, status_filter: str, claims: PermissionClaims,
                    user_id: str) -> list[DataSourceTransferResponse]:
     """Requests into the workspaces the caller administers — all of them for an org admin."""
-    await transfer_repo.expire_lapsed(session)
+    await _expire_lapsed(session)
     ids = None if workspace_access.is_org_wide(claims) else [
         ws for ws in claims.ws_perms if _is_admin(claims, ws)]
     rows = await transfer_repo.list_incoming(session, ids, status=status_filter)

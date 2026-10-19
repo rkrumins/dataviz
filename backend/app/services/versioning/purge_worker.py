@@ -623,10 +623,63 @@ class Reaper:
                     logger.info("reaper: %s is past its grace period and is now gone", ds_id)
 
         orphans = await self._orphaned_package_sources()
-        if queued or reaped or orphans:
+        realigned = await self._realign_moved_graphs()
+        if queued or reaped or orphans or realigned:
             logger.info("reaper: %s purge(s) queued, %s data source(s) removed, %s orphaned "
-                        "package source(s) tombstoned", queued, reaped, orphans)
-        return {"queued": queued, "reaped": reaped, "orphans": orphans}
+                        "package source(s) tombstoned, %s graph(s) re-filed with their source",
+                        queued, reaped, orphans, realigned)
+        return {"queued": queued, "reaped": reaped, "orphans": orphans, "realigned": realigned}
+
+    async def _realign_moved_graphs(self) -> int:
+        """Re-file each live versioned graph under its data source's workspace where the two
+        disagree.
+
+        Moving a source re-files its graph in this store first and puts it back if the rest of the
+        move fails (``services/data_source_transfer.py``). If putting it back failed too, the graph
+        names a workspace its source isn't in — writable from there, unreachable from where the
+        source is — and moves made before graphs moved with their sources left the same split.
+        Relocation sets the workspace rather than swapping it, so filing it again is the whole
+        repair. A source whose row is locked (a move in flight holds it) is left for the next
+        pass, as is a graph a job is writing."""
+        from backend.app.db.models import WorkspaceDataSourceORM as DS
+        from backend.app.services.versioning import lifecycle
+
+        async with self._gv() as gs:
+            filed = dict((await gs.execute(select(GraphORM.data_source_id, GraphORM.workspace_id).where(
+                GraphORM.deleted_at.is_(None), GraphORM.fork_parent_graph_id.is_(None)))).all())
+        if not filed:
+            return 0
+        Session = self._app_sessions()
+        ids = sorted(filed)
+        astray: list[str] = []
+        async with Session() as s:
+            for i in range(0, len(ids), 500):
+                astray += [ds_id for ds_id, ws_id in (await s.execute(
+                    select(DS.id, DS.workspace_id).where(
+                        DS.id.in_(ids[i:i + 500]), DS.deleted_at.is_(None)))).all()
+                    if filed[ds_id] != ws_id]
+
+        realigned = 0
+        for ds_id in astray:
+            async with Session() as s:
+                # Held while the graph is re-filed, so no move of the source starts in between.
+                ws_id = await s.scalar(
+                    select(DS.workspace_id).where(DS.id == ds_id, DS.deleted_at.is_(None))
+                    .with_for_update(skip_locked=True))
+                if ws_id is None:
+                    continue
+                try:
+                    await lifecycle.relocate_graph(ds_id, ws_id)
+                except Exception as exc:
+                    logger.warning("reaper: the versioned graph of %s is filed under another "
+                                   "workspace and can't be moved to %s yet: %s", ds_id, ws_id, exc)
+                    continue
+                finally:
+                    await s.rollback()                  # nothing written here; frees the row
+            realigned += 1
+            logger.warning("reaper: re-filed the versioned graph of %s under %s, where its data "
+                           "source is", ds_id, ws_id)
+        return realigned
 
     async def _orphaned_package_sources(self) -> int:
         """Tombstone each live data source made from a view package (``extra_config.origin.kind =

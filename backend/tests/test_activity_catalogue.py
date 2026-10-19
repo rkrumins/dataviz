@@ -337,6 +337,9 @@ _TRANSFER = {
     ("workspace.data_source.transfer_cancelled",
      "Cancelled the request to move Orders to Risk",
      "The request to move Orders here from Finance was cancelled"),
+    ("workspace.data_source.transfer_expired",
+     "The request to move Orders to Risk expired unanswered",
+     "The request to move Orders here from Finance expired unanswered"),
 ])
 def test_a_transfer_reads_from_the_side_it_is_filed_under(event_type, leaving, arriving):
     """A transfer is recorded once in each workspace, and each copy reads from its own side."""

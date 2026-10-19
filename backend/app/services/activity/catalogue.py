@@ -680,6 +680,9 @@ _EVENT_META.update({
     # Explicitly info: "cancelled" would otherwise read as a warning.
     "workspace.data_source.transfer_cancelled": ("info", _transfer_summary(
         "Cancelled the request to move {s} to {ws}", "The request to move {s} here from {ws} was cancelled")),
+    "workspace.data_source.transfer_expired": ("info", _transfer_summary(
+        "The request to move {s} to {ws} expired unanswered",
+        "The request to move {s} here from {ws} expired unanswered")),
     "workspace.versioning.enabled": ("info", _envelope_summary("Turned on version control for {}")),
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
@@ -736,6 +739,7 @@ LABELS: dict[str, str] = {
     "workspace.data_source.transfer_requested": "Requested a data source transfer",
     "workspace.data_source.transfer_declined": "Declined a data source transfer",
     "workspace.data_source.transfer_cancelled": "Cancelled a data source transfer",
+    "workspace.data_source.transfer_expired": "A data source transfer expired",
     "workspace.datasource.moved": "Moved a data source",
     "workspace.versioning.enabled": "Turned on version control",
     "workspace.versioning.retried": "Retried version control",

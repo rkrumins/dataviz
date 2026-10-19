@@ -1661,9 +1661,9 @@ class DataSourceMoveRequest(BaseModel):
     the caller confirmed: if anything it showed has changed since, the move is
     refused (``preview_stale``) rather than doing something nobody read."""
 
-    target_workspace_id: str = Field(alias="targetWorkspaceId")
+    target_workspace_id: str = Field(alias="targetWorkspaceId", max_length=200)
     keep: Optional[List[TransferSubjectRef]] = None
-    preview_token: Optional[str] = Field(None, alias="previewToken")
+    preview_token: Optional[str] = Field(None, alias="previewToken", max_length=64)
 
     class Config:
         populate_by_name = True
@@ -1671,7 +1671,7 @@ class DataSourceMoveRequest(BaseModel):
 
 class TransferAccept(BaseModel):
     """Accepting a transfer request: the preview the reviewer read."""
-    preview_token: str = Field(alias="previewToken")
+    preview_token: str = Field(alias="previewToken", max_length=64)
 
     class Config:
         populate_by_name = True

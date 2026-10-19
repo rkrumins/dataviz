@@ -36,7 +36,7 @@ from backend.app.db.models import (
     WorkspaceDataSourceORM,
     WorkspaceORM,
 )
-from backend.app.db.repositories import user_repo
+from backend.app.db.repositories import data_source_transfer_repo, user_repo
 from backend.app.services import data_source_transfer, view_access
 from backend.app.services.aggregation.models import (
     AggregationDataSourceStateORM,
@@ -76,6 +76,9 @@ def _src(ws: str = A, ds: str = DS) -> str:
 async def world(db_session, monkeypatch):
     store = fake_version_store(monkeypatch)
     await build_world(db_session)
+    # An admin of only the source finds the destination the way anyone finds a workspace they're
+    # not in: through Find a workspace. Tests about who may see what turn it off.
+    directory(on=True)
     return store
 
 
@@ -182,6 +185,7 @@ async def test_the_token_changes_when_what_moves_changes(test_client, db_session
 
 async def test_destinations_say_how_it_could_go_there(test_client, db_session, world):
     """Only workspaces the caller could see anyway — and for each, a move, a request or why not."""
+    directory(on=False)
     async with acting_as(db_session, "cy"):
         listed = (await test_client.get(f"{_src()}/move-destinations")).json()
     assert [(d["id"], d["mode"]) for d in listed] == [(B, "direct")]
@@ -191,10 +195,36 @@ async def test_destinations_say_how_it_could_go_there(test_client, db_session, w
     assert [(d["id"], d["mode"]) for d in listed] == [(C, "direct"), (B, "direct")]
 
     async with acting_as(db_session, "ada"):
+        directory(on=False)
         assert (await test_client.get(f"{_src()}/move-destinations")).json() == []
         directory(on=True)
         listed = (await test_client.get(f"{_src()}/move-destinations")).json()
     assert {(d["id"], d["mode"]) for d in listed} == {(B, "request"), (C, "request")}
+
+
+async def test_a_workspace_you_could_not_find_is_not_there(test_client, db_session, world):
+    """A preview names the destination, its sources and its people; asking or moving names it
+    too. Someone who couldn't find the workspace gets what a workspace that isn't there gets."""
+    await db_session.execute(update(WorkspaceORM).where(WorkspaceORM.id == C)
+                             .values(directory_listed=False))
+    await db_session.commit()
+    async with acting_as(db_session, "ada"):
+        hidden = [
+            await test_client.get(f"{_src()}/move-preview", params={"to": C}),
+            await test_client.post(f"{_src()}/transfer-requests", json={"targetWorkspaceId": C},
+                                   headers=REASON),
+            await test_client.post(f"{_src()}/move", json={"targetWorkspaceId": C}, headers=REASON),
+        ]
+        directory(on=False)
+        unlisted_directory = await test_client.get(f"{_src()}/move-preview", params={"to": B})
+    assert [r.status_code for r in hidden] == [404, 404, 404]
+    assert {r.json()["detail"] for r in hidden} == {f"Workspace '{C}' not found"}
+    assert unlisted_directory.status_code == 404
+    assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
+    assert (await db_session.execute(select(DataSourceTransferORM))).first() is None
+
+    async with acting_as(db_session, "olga"):           # an org admin can open every workspace
+        assert (await test_client.get(f"{_src()}/move-preview", params={"to": C})).status_code == 200
 
 
 # ── what stands in the way ───────────────────────────────────────────
@@ -209,7 +239,8 @@ async def test_a_workspace_already_holding_the_graph_cannot_take_it(test_client,
         p = await _preview(test_client)
         r = await _move(test_client, token=False)
 
-    assert (listed[0]["mode"], listed[0]["reason"]) == (None, "Already has this graph")
+    there = next(d for d in listed if d["id"] == B)
+    assert (there["mode"], there["reason"]) == (None, "Already has this graph")
     assert [b["code"] for b in p["blockers"]] == ["already_connected"]
     assert r.status_code == 409 and r.json()["detail"]["error"] == "blocked"
     assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
@@ -521,8 +552,17 @@ async def test_only_the_destination_answers_and_only_parties_see_it(test_client,
         asked = (await _propose(test_client)).json()
         own = await test_client.post(f"{TRANSFERS}/{asked['id']}/accept", json={"previewToken": "x"})
     assert own.status_code == 403
+    # Someone who administers no workspace is refused before any transfer is looked up, so the
+    # answer is the same whether or not it exists.
     async with acting_as(db_session, "val"):
-        assert (await test_client.get(f"{TRANSFERS}/{asked['id']}")).status_code == 404
+        seen = await test_client.get(f"{TRANSFERS}/{asked['id']}")
+        missing = await test_client.get(f"{TRANSFERS}/xfer_nope")
+        undo = await test_client.post(f"{TRANSFERS}/{asked['id']}/cancel", json={})
+    assert [seen.status_code, missing.status_code, undo.status_code] == [403, 403, 403]
+    assert seen.json()["detail"]["permission"] == "workspace:admin"
+    # An admin of some other workspace gets past that, and finds nothing.
+    async with acting_as(db_session, "bea"):
+        assert (await test_client.get(f"{TRANSFERS}/xfer_nope")).status_code == 404
 
 
 async def test_an_unanswered_request_expires(test_client, db_session, world):
@@ -539,6 +579,22 @@ async def test_an_unanswered_request_expires(test_client, db_session, world):
     assert r.status_code == 409 and r.json()["detail"]["error"] == "expired"
     async with acting_as(db_session, "ada"):
         assert (await _propose(test_client)).status_code == 201       # free to ask again
+
+
+async def test_an_expired_request_is_on_record_and_its_proposer_hears(test_client, db_session, world):
+    async with acting_as(db_session, "ada"):
+        await _propose(test_client)
+    await db_session.execute(update(DataSourceTransferORM).values(
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()))
+    await db_session.commit()
+    async with acting_as(db_session, "bea"):
+        await test_client.get(TRANSFERS)                   # whoever looks first closes it…
+        await test_client.get(TRANSFERS)                   # …once
+
+    events = await _events(db_session, "workspace.data_source.transfer_expired")
+    assert sorted(e["workspace_id"] for e in events) == [A, B]
+    assert all("actor_id" not in e for e in events)        # nobody did it: not Bea, who looked
+    assert (PEOPLE["ada"], "data_source.transfer_expired") in await _bell(db_session)
 
 
 async def test_deleting_the_source_closes_its_request(test_client, db_session, world, monkeypatch):
@@ -631,6 +687,144 @@ async def test_a_request_is_the_destinations_to_send_back(test_client, db_sessio
     async with acting_as(db_session, "bea"):
         assert (await test_client.post(f"{TRANSFERS}/{asked['id']}/undo")).status_code == 200
     assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
+
+
+# ── retries, races and the janitor ───────────────────────────────────
+
+
+async def test_a_retried_move_gets_the_move_it_made(test_client, db_session, world):
+    """The first try went through and its answer was lost on the way back: trying again answers
+    with that move instead of "not found", and moves nothing twice."""
+    async with acting_as(db_session, "cy"):
+        first = await _move(test_client, token=False)
+        again = await _move(test_client, token=False)
+        elsewhere = await _move(test_client, to=C, token=False)
+    assert (again.status_code, again.json()["id"]) == (200, first.json()["id"])
+    assert elsewhere.status_code == 404                    # a different move is not a retry
+    assert world.relocations == [(DS, B, True)]
+    assert len((await db_session.execute(select(DataSourceTransferORM.id))).all()) == 1
+
+
+async def test_a_retried_answer_gets_the_answer_it_gave(test_client, db_session, world):
+    async with acting_as(db_session, "ada"):
+        asked = (await _propose(test_client)).json()
+        again = await _propose(test_client)
+        other = await _propose(test_client, keep=[])
+    assert (again.status_code, again.json()["id"]) == (201, asked["id"])
+    assert other.status_code == 409 and other.json()["detail"]["error"] == "request_waiting"
+
+    async with acting_as(db_session, "bea"):
+        token = (await test_client.get(f"{TRANSFERS}/{asked['id']}")).json()["preview"]["token"]
+        answers = [
+            await test_client.post(f"{TRANSFERS}/{asked['id']}/accept", json={"previewToken": token}),
+            await test_client.post(f"{TRANSFERS}/{asked['id']}/accept", json={"previewToken": token}),
+            await test_client.post(f"{TRANSFERS}/{asked['id']}/undo"),
+            await test_client.post(f"{TRANSFERS}/{asked['id']}/undo"),
+        ]
+    assert [r.status_code for r in answers] == [200, 200, 200, 200]
+    assert [r.json()["status"] for r in answers] == ["completed", "completed", "undone", "undone"]
+    assert world.relocations == [(DS, B, True), (DS, A, True)]
+    assert len(await _events(db_session, "workspace.data_source.moved")) == 2   # once, both sides
+
+
+async def test_a_retried_decline_or_cancel_is_answered_the_same(test_client, db_session, world):
+    async with acting_as(db_session, "ada"):
+        asked = (await _propose(test_client)).json()
+        cancels = [await test_client.post(f"{TRANSFERS}/{asked['id']}/cancel", json={})
+                   for _ in range(2)]
+        asked = (await _propose(test_client)).json()
+    async with acting_as(db_session, "bea"):
+        declines = [await test_client.post(f"{TRANSFERS}/{asked['id']}/decline",
+                                           json={"note": "Not now"}) for _ in range(2)]
+    assert [r.status_code for r in cancels + declines] == [200, 200, 200, 200]
+    assert len(await _events(db_session, "workspace.data_source.transfer_cancelled")) == 2
+    assert len(await _events(db_session, "workspace.data_source.transfer_declined")) == 2
+
+
+async def test_moving_views_fails_closed_when_a_session_cannot_be_checked(
+    test_client, db_session, world, monkeypatch,
+):
+    """It takes workspace:admin, and like every route that does, it refuses a session whose
+    revocation can't be checked right now rather than moving other people's work on trust."""
+    from fastapi import HTTPException
+
+    from backend.app.auth import dependencies
+
+    probed = []
+
+    async def unconfirmable(claims, *, permission, user_id):
+        probed.append(permission)
+        raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")
+
+    monkeypatch.setattr(dependencies, "assert_session_alive_or_503", unconfirmable)
+    async with acting_as(db_session, "cy"):
+        refused = await _move(test_client, token=False)
+        empty = await _move(test_client, ds=DS2, token=False)     # nothing built on it
+    assert (refused.status_code, probed) == (503, ["workspace:admin"])
+    assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
+    assert empty.status_code == 200
+
+
+async def test_a_view_is_only_born_where_its_source_is(test_client, db_session, world):
+    """A new view's source must be live and in its workspace, and stay there until the view is
+    saved: on Postgres the source's row is held FOR KEY SHARE, which waits out a move, so a view
+    created during one lands with its source rather than stranded where the source was."""
+    def view(ws: str) -> dict:
+        return {"name": "New", "workspaceId": ws, "dataSourceId": DS, "viewType": "graph",
+                "config": {}, "visibility": "private"}
+
+    async with acting_as(db_session, "cy"):
+        elsewhere = await test_client.post("/api/v1/views/", json=view(B))
+        assert (await _move(test_client)).status_code == 200
+        left_behind = await test_client.post("/api/v1/views/", json=view(A))
+        with_it = await test_client.post("/api/v1/views/", json=view(B))
+    assert [elsewhere.status_code, left_behind.status_code, with_it.status_code] == [422, 422, 201]
+    assert left_behind.json()["detail"] == "That data source isn't part of this workspace."
+
+
+async def test_lists_are_a_page_not_the_table(test_client, db_session, world):
+    over = data_source_transfer_repo.LIST_LIMIT + 5
+    db_session.add_all([DataSourceTransferORM(
+        id=f"xfer_{i:04d}", data_source_id=f"ds_{i}", data_source_label="Old", from_workspace_id=A,
+        to_workspace_id=B, kind="request", status="declined", plan="{}",
+        created_at=f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}+00:00",
+        resolved_at="2026-01-02T00:00:00+00:00") for i in range(over)])
+    await db_session.commit()
+    async with acting_as(db_session, "bea"):
+        incoming = (await test_client.get(TRANSFERS, params={"status": "all"})).json()
+        both_ways = (await test_client.get(f"/api/v1/admin/workspaces/{B}/data-source-transfers",
+                                           params={"status": "all"})).json()
+    assert len(incoming) == len(both_ways) == data_source_transfer_repo.LIST_LIMIT
+    assert incoming[0]["id"] == f"xfer_{over - 1:04d}"     # newest first
+
+
+async def test_the_reaper_refiles_a_graph_left_behind(db_session, world):
+    """A move that failed, and then failed to put its graph back, leaves the graph filed under a
+    workspace its source isn't in — as did moves made before graphs moved with their sources.
+    The reaper files it where the source is, and leaves alone what it can't touch yet."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from backend.app.services.versioning import purge_worker
+
+    @asynccontextmanager
+    async def app_sessions():
+        yield db_session
+
+    class _Graphs:
+        async def execute(self, _stmt):
+            return SimpleNamespace(all=lambda: [(DS, B), (DS2, A), ("ds_gone", C)])
+
+    @asynccontextmanager
+    async def graphver():
+        yield _Graphs()
+
+    reaper = purge_worker.Reaper(app_session_factory=lambda: app_sessions(),
+                                 graphver_session_factory=graphver)
+    assert await reaper._realign_moved_graphs() == 1
+    assert world.relocations == [(DS, A, True)]             # Ledger is home; the gone one isn't ours
+    world.busy = "export"                                   # a job writing it: next pass
+    assert await reaper._realign_moved_graphs() == 0
 
 
 # ── history ──────────────────────────────────────────────────────────
