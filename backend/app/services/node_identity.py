@@ -388,8 +388,13 @@ async def invalidate_node_identity(session, scopes, reason: str) -> None:
         logger.warning("node-identity graph-cache bump failed (%s): %s", reason, exc)
 
 
-async def load_node_identity(session, data_source: Any) -> ResolvedNodeIdentity:
+async def load_node_identity(
+    session, data_source: Any, *, workspace_id: Optional[str] = None,
+) -> ResolvedNodeIdentity:
     """Resolve the mapping for ``data_source`` (an ORM row or its id).
+
+    ``workspace_id`` resolves it as if the source lived there — how a move
+    tells whether the destination would name its entities differently.
 
     Reads each level by primary key, in sequence — deliberately NOT a join.
     ``workspaces`` and ``providers`` sit in different ownership domains and
@@ -415,8 +420,9 @@ async def load_node_identity(session, data_source: Any) -> ResolvedNodeIdentity:
         if getattr(ds, "provider_id", None):
             row = await session.get(ProviderORM, ds.provider_id)
             provider = _ProviderView(row) if row is not None else None
-        if getattr(ds, "workspace_id", None):
-            workspace = await session.get(WorkspaceORM, ds.workspace_id)
+        ws_id = workspace_id or getattr(ds, "workspace_id", None)
+        if ws_id:
+            workspace = await session.get(WorkspaceORM, ws_id)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
             "node-identity scope read failed for ds=%s (falling through to the "

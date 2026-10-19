@@ -2,24 +2,30 @@
 
 A catalog item belongs to exactly ONE workspace (uq_ds_catalog_item) and is
 allocated at onboarding. Getting that allocation wrong had no remedy short of
-detaching, which is destructive. This is the remedy, restricted to the case where
-it is provably safe: nothing is built on the source.
+detaching, which is destructive. This is the remedy.
 
-The zero-views rule is not caution, it is correctness:
-
-  * views.data_source_id is ON DELETE SET NULL, so detach-and-re-add does not
-    delete the old workspace's views — it silently ORPHANS them.
-  * Moving the row in place keeps data_source_id valid, but the view still carries
-    workspace_id = A while its source now lives in B. Members of A would read B's
-    data through a workspace-scoped RBAC check that no longer describes reality.
-
-Soft-deleted views count, because restoring one would recreate exactly that.
+It used to refuse any source with a view on it, because moving the row alone is
+wrong: views.data_source_id stays valid, but a view still carries workspace_id = A
+while its source now lives in B, and members of A would read B's data through a
+workspace-scoped check that no longer describes reality. Now the views go with the
+source — trashed ones too, because restoring one later would recreate exactly that.
+The full behaviour (access, requests, undo) is in test_data_source_transfers.py.
 """
+import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_repo
 from backend.common.models.management import ViewCreateRequest
+from tests.common.transfer_world import fake_version_store
+
+
+@pytest.fixture(autouse=True)
+def _version_store(monkeypatch):
+    """The version store runs on Postgres only; these sources aren't versioned."""
+    return fake_version_store(monkeypatch)
 
 
 async def _workspace(client: AsyncClient, name: str) -> str:
@@ -78,7 +84,8 @@ async def test_moves_a_clean_data_source(test_client: AsyncClient):
     assert resp.status_code == 200, resp.text
 
     # The row KEEPS ITS ID, so stats/polling/aggregation state follow it for free.
-    assert resp.json()["id"] == ds
+    assert resp.json()["dataSource"]["id"] == ds
+    assert resp.json()["status"] == "completed"
 
     gone = await test_client.get(f"/api/v1/admin/workspaces/{src}")
     assert all(d["id"] != ds for d in gone.json()["dataSources"])
@@ -87,37 +94,40 @@ async def test_moves_a_clean_data_source(test_client: AsyncClient):
     assert any(d["id"] == ds for d in arrived.json()["dataSources"])
 
 
-async def test_refuses_to_move_a_source_with_a_view(
+async def _workspace_of(session: AsyncSession, view_id: str) -> str:
+    return (await session.execute(
+        select(ViewORM.workspace_id).where(ViewORM.id == view_id))).scalar_one()
+
+
+async def test_a_source_with_a_view_takes_the_view_with_it(
     test_client: AsyncClient, db_session: AsyncSession,
 ):
-    """The whole point of the restriction."""
+    """What the old zero-views rule protected: the view never ends up in one workspace
+    reading a source that lives in another."""
     src = await _workspace(test_client, "Has A View")
     dst = await _workspace(test_client, "Elsewhere")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Busy"))
 
-    await _view_on(db_session, src, ds, "Revenue Lineage")
+    view = await _view_on(db_session, src, ds, "Revenue Lineage")
     await db_session.commit()
 
     resp = await test_client.post(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
-    assert resp.status_code == 409
-    assert "1 view is built on this data source" in resp.json()["detail"]
-
-    # And it did NOT move.
-    still = await test_client.get(f"/api/v1/admin/workspaces/{src}")
-    assert any(d["id"] == ds for d in still.json()["dataSources"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["viewCount"] == 1
+    assert await _workspace_of(db_session, view.id) == dst
 
 
-async def test_a_TRASHED_view_also_blocks_the_move(
+async def test_a_TRASHED_view_moves_too(
     test_client: AsyncClient, db_session: AsyncSession,
 ):
     """The subtle one.
 
-    A soft-deleted view still has a row pointing at the source. Restore it after a
-    move and you have a view in workspace A reading a source owned by workspace B —
-    exactly the state the rule exists to prevent. So the trash blocks it too.
+    A soft-deleted view still has a row pointing at the source. Left behind, restoring it
+    after the move would give a view in workspace A reading a source owned by workspace B.
+    So the trash moves with the source.
     """
     src = await _workspace(test_client, "Has Trash")
     dst = await _workspace(test_client, "Target")
@@ -131,9 +141,8 @@ async def test_a_TRASHED_view_also_blocks_the_move(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
-    assert resp.status_code == 409, (
-        "a view in the trash can be restored, which would strand it across workspaces"
-    )
+    assert resp.status_code == 200, resp.text
+    assert await _workspace_of(db_session, view.id) == dst
 
 
 async def test_moving_into_the_same_workspace_is_rejected(test_client: AsyncClient):
