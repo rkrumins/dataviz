@@ -168,11 +168,13 @@ Status key: **W** = fixed on s1/W, not on HEAD. **=** = unchanged by Stage 1 and
 
 ## 4. Recommended Stage 2
 
+> **Status at 57444bd8 (2026-10-19).** Each item in §4 and §5 now carries **Done** (with the commits that landed it), **Partial** or **Open**. "Open" means no commit in `360766d9..57444bd8` addresses it. Where the shipped work differs from the recommendation, the difference follows the status. §1–§3 still describe a98c0765.
+
 **Prerequisite (end of Stage 1, not Stage 2):**
 - ~~Fix N15~~: does not reproduce (see N15); an HTTP test pins the 404.
-- Merge s1/W.
-- Land C34–C37.
-- Promote versioning-e2e to required (C99).
+- Merge s1/W. **Done:** the save fences, the draft held `publishing` while its job is queued, import fences and the bounded draft lock landed as 4f433348, c8a6b464, ca63244d, 1644e590, 11463feb and f6b97365; the single FalkorDB writer (C33) as 43c63e5f.
+- Land C34–C37. **Done:** C34 c3e5047a (idempotent `/graph/changes`), C35 33a76a66 (one import per draft), C36 162f0ded and aa921312 (frontend save safety), C37 49d30953 (sync stop-gap).
+- Promote versioning-e2e to required (C99). **Open:** the `versioning-e2e` job in `.github/workflows/backend-tests.yml` still has `continue-on-error: true`.
 
 Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and projection visibility matters to every editor.
 
@@ -181,6 +183,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 ### (a) Graph → store visibility and projection health
 
 **2A-1 Projection fields on the per-graph API (S)**
+- **Status: Done** (ca02d9ac). The watermark carries every listed field. `retired_keys` is in the service answer but not on `WatermarkModel`.
 - Change:
   - extend `WatermarkModel` and `_watermark_model` (versioning.py:852-870, 1770-1780) with `projectionKey`, `providerId`, `providerName`, `owned`, `epoch`, `failedAttempts`, `nextRetryAt`, `livenessError`;
   - widen `projection_watermark` in service.py (around :2579);
@@ -191,12 +194,14 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
   - new: blank, bootstrap and fork graphs each return the `projection_state` key and provider.
 
 **2A-2 Placement by graph id (S)**
+- **Status: Done** (b73fbc4d). `GET /api/v1/admin/graph-store/placement?graphId=` and `/placements?graphIds=` resolve from `projection_state`; the caller needs `workspace:datasource:read` in the graph's workspace, and an unknown, trashed or unreadable graph is a 404.
 - Change: add a `graphId` mode to `GET /graph-store/placement(s)` (graph_store.py:290-393). It resolves from `projection_state`, not `ds.graph_name`.
 - Reuse `placement_keys_for` and the CRC16 `key_slot` (topology.py:351-375, 1669-1682).
 - Gate it on workspace read of the graph's workspace.
 - Tests: test_graph_store_api.py, including a fork key.
 
 **2A-3 ProjectionHealthCard v0 (M)**
+- **Status: Done** (d083763b). On the Versioning tab and on Data health, which every viewer now sees; Check sync and Rebuild only for managers. DataHealthTab has the `evicted` state, and the placement card says "aggregation rollup".
 - New component: `frontend/src/features/versioning/components/ProjectionHealthCard.tsx`. It shows:
   - provider name, key and a badge ("Platform copy" or "Customer graph");
   - node, shard, slot and memory (reuse GraphStorePlacementCard internals);
@@ -210,11 +215,13 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: DataHealthTab.test.tsx, a new ProjectionHealthCard test, a DataSourceVersioningTab test.
 
 **2A-4 Read-route chip (S)**
+- **Status: Done** (28544e80, f5a0ebf5). The watermark carries `readRoute {main: falkordb|postgres, drafts: overlay}`; `ReadRouteChip` in CanvasVersioningBar reads it.
 - Change: add derived `readRoute: {main: 'falkordb'|'postgres', drafts: 'overlay'}` to the watermark response, using the same rule as context_engine.py:158-185.
 - Show a chip in CanvasVersioningBar ("Serving from FalkorDB · {provider}" or "Serving from Postgres (catching up)"), with draft-overlay copy on drafts.
 - Tests: assertions in test_versioning_draft_read_routing.py; a frontend chip test.
 
 **2A-5 Fleet inventory (M/L; N1)**
+- **Status: Done** (27a37fd2; `retiredKeys` per row from 1d118868). Paged with `cursor`/`nextCursor`, filters `provider`, `status`, `workspaceId`, `kind`, `q`; live graphs only. Row actions: Rebuild, Check sync, Open source, Move… (44dd53b4) and Delete on forks (040198bc).
 - API: `GET /api/v1/admin/versioning/graphs?provider=&status=&workspaceId=&kind=main|fork|orphan&q=&cursor=` in versioning_admin.py.
   - Keyset paging over `GraphORM` ⋈ `ProjectionStateORM`, plus workspace and data-source names.
   - Do not apply the `present` filter from probes.py:1281-1289, so forks and orphans appear.
@@ -230,6 +237,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
   - a table component test.
 
 **2A-6 Topology overlay (M; N7)**
+- **Status: Done** (80f694d1, c604c817). Key rows carry `versioned {graphId, kind, owned, status, lag}`, a key only a versioned graph claims has `role: "versioned"`, and providers carry `versionedGraphs` and `versionedBytes`; `versionedUnread` says when graphver could not be read. Retired keys and trashed forks are not attributed, so they still show as unregistered.
 - Change:
   - join all `projection_state` rows into topology `_expected_graphs` (topology.py:1226-1322);
   - add `versioned{graphId, kind, owned, status, lag}` to `GraphOnShard` (schemas.py:155-172) and to graphStoreService.ts:118-129;
@@ -239,6 +247,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: test_graph_store_topology.py ("fork key attributed, not unregistered"), a ShardCard test.
 
 **2A-7 Provider safety (M; N4, N5)**
+- **Status: Done** (db526741, 10c22d9b, c8aabeb7). Delete is refused (409) while a live data source or any versioned graph, trashed included, is pinned to the provider or holds a retired key on it; the impact lists `versionedGraphs`. A move to another server answers 409 `versioned_graphs_pinned` without `confirmReseed=true` and 409 `versioned_graphs_bootstrapping` while a graph on it is still being enabled; a confirmed move reseeds, or answers 503 naming Reseed from Postgres.
 - Delete:
   - `has_workspaces` (provider_repo.py:235) must also count manual data sources by `provider_id`, and `projection_state.falkor_provider` through the graphver session;
   - `get_provider_impact` (provider_repo.py:250-284) lists the versioned graphs and keys.
@@ -249,6 +258,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: deleting a provider that hosts only a blank versioned model is refused; an edit with confirm reseeds.
 
 **2A-8 Watermark-reset UI (S/M; N9)**
+- **Status: Done** (f5a6c2d1). Reset rows read `reseeding` (migration `20261017_2000_gv_ps_reseeding`); the reset takes `dryRun`. The `node` scope is still deferred.
 - Add a per-provider "Reseed from Postgres" action in GraphProvidersPanel that calls versioning_admin.py:26, with a confirm dialog showing the count from 2A-5.
 - Replace the `last_error` sentinel (service.py:2682) with a `reseeding` status, so DataHealthTab no longer shows "failed".
 - Defer the optional `node` scope (doc 14:498).
@@ -257,6 +267,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 ### (b) Lifecycle and collaboration operations that already have APIs but no UI
 
 **2B-1 Hub actions (S)**
+- **Status: Done** (d083763b for Rebuild and Check sync on the tab's ProjectionHealthCard, 27a37fd2 on the inventory rows, c6c75380 for the hub's draft count and its failed-lookup error).
 - Make Rebuild and Check sync reachable from DataSourceVersioningTab and the 2A-5 rows. They reuse the existing endpoints at versioning.py:1789-1860.
 - Fix the hub's own bugs:
   - the "open drafts" miscount (DataSourceVersioningTab.tsx:134,147);
@@ -264,12 +275,14 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: a DataSourceVersioningTab test.
 
 **2B-2 Reviewers (M)**
+- **Status: Done** (4da667e1; 207198ea binds approvals to the head and hides Approve from the author and the draft's owner). `GET …/versioning/reviewers` feeds `ReviewerPicker` in CommitDialog; `PATCH …/pulls/{pr}` and `…/merge-requests/{pr}` take `reviewers`; `approve_pr` and `update_pr` lock the PR row (bounded, 503 `lock_busy`).
 - CommitDialog sends `reviewers` (the client accepts them, versioningApiService.ts:1393-1403). Add a minimal ReviewerPicker.
 - Allow reviewer edits on PATCH: versioning.py:3160-3170 and 3387-3397 → `update_pr` (service.py:2038-2054).
 - Fix the `approve_pr` race with `with_for_update` (service.py:2004-2017).
 - Tests: test_versioning_draft_mr.py (add reviewer after open; two concurrent approvals both persist); a PrDetailDrawer test showing Approve.
 
 **2B-3 Branch list (S/M; N16)**
+- **Status: Done** (fadeeeec; a9dffef5 adds `myRole`; 40ca49c6 lists group-shared drafts; fbb010c3 offers draft actions only to writers and managers). The filter runs in SQL before `LIMIT`, `status` defaults to open and publishing, `cursor` pages with an `X-Next-Cursor` header, and drafts come newest first after `main`. The reader's own drafts are not sorted first: the filter keeps drafts they cannot see from crowding theirs off the page. BranchManager has an Archived tab and shows publishing drafts.
 - Backend `list_branches` (service.py:4559-4586):
   - apply the viewer filter in SQL before LIMIT;
   - include shared drafts;
@@ -281,21 +294,25 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: a service test with more than 100 branches and a non-manager; BranchManager.test.tsx.
 
 **2B-4 Review inbox (S)**
+- **Status: Done** (700ceca1, f5a0ebf5). `status=open` on the PR list routes now means "not merged or closed"; the feed pages through every open PR and names a data source whose read failed.
 - Switch DataSourceReviewFeed to `listDataSourcePullRequests(status='open')` (versioningApiService.ts:1460; versioning.py:3354-3374).
 - Tests: a new inbox test.
 
 **2B-5 Purge reason (S; N11)**
+- **Status: Done** (8ed3a582, 44221d17). The trash list carries `purgeState` (none, queued, failed, blocked), `purgeReason` and `liveForks`; a data source whose purge exists in any status, completed included, is no longer restorable (409).
 - `purge_worker` returns the state and reason, not a boolean (purge_worker.py:583-588).
 - DeletedDataSources shows "Blocked: N live forks" or the failure reason.
 - Tests: test_graph_lifecycle_purge.py; a DeletedDataSources test.
 
 **2B-6 Members UI (M)**
+- **Status: Done** (8eab0a11, 1251412e, 35ba4bac), with 2C-4. BranchSettingsModal's members section: the owner and maintainers add, re-role and remove members; only the owner switches Private/Shared.
 - Add a members section to BranchSettingsModal using versioning.py:1452-1491.
 - Ship it only together with 2C-4. Building it on today's inverted semantics would mislead users.
 
 ### (c) Collaboration correctness: stop people overwriting each other
 
 **2C-1 Private-draft owner enforcement (M; N17, pulled forward from R3)**
+- **Status: Done** (c389c3d1; 774a49a3, f6f92cdf). Anyone but the owner gets 403 `not_draft_owner` on a private draft's writes, pull, publish, abandon, merge-request open, rename and members. Two deviations: there is no admin override, and `merge_mr` deliberately does not require the merger to own the draft.
 - `_require_edit` (service.py:4783-4785): a private draft is writable by its owner only (plus an explicit admin override).
 - Call it from:
   - `_apply_ops_once`;
@@ -306,16 +323,19 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: new HTTP-level two-user tests. Bob is refused write, pull, publish and abandon on Alice's private draft with 403/404.
 
 **2C-2 Private-draft read privacy (S/M; doc 13:636)**
+- **Status: Done** (da9eed55, f6f92cdf). Every read of a draft the caller cannot read answers 404, including state, diffs, commit log, entity history and exports; imports into it are hidden.
 - `ContextEngine.for_workspace` (context_engine.py:163-167) calls `_branch_readable` (service.py:4808-4819). Do the same in `/graph/neighbors`, merge-preview, view-changes, freshness and members.
 - Tests: a viewer gets 404 on `/graph/nodes?branchId=<private>`.
 
 **2C-3 Fork hardening (S; N3)**
+- **Status: Done** (816ae1cc). The route needs manage, takes no `dataSourceId` (a sent one is ignored), and refuses a fork past `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with 409 `fork_limit`.
 - The fork route requires MANAGE (versioning.py:3085-3096).
 - `dataSourceId` must be in the same workspace, unversioned and manageable, or the parameter is removed.
 - Add a per-graph fork cap until E7 lands.
 - Tests: extend test_versioning_fork.py.
 
 **2C-4 Shared-draft semantics (M)**
+- **Status: Done** (774a49a3, a050ca74, 40ca49c6). Editors write a shared draft, maintainers also publish, abandon and manage members, and anyone else gets 403 `not_owner_or_member` with the `required` role. Two deviations: workspace managers who are not members are refused, not admitted "per policy"; and the service looks up the caller's groups itself (503 `groups_unavailable` when it cannot), rather than the routes resolving `actor_groups`.
 - Implement the visibility table from plan:508-517 for the write path only:
   - shared drafts are writable by members, and by managers per policy;
   - `/graph/changes` calls `_require_edit`;
@@ -323,6 +343,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: test_versioning_shared.py at HTTP level.
 
 **2C-5 Publish permission and approval staleness (M)**
+- **Status: Done** (ca0472df, 207198ea; a person's direct main writes need publish since 10c0dd1e, and an API key's since e6815a25). Publish, merge, revert, restore, sync and `/graph/resync` need publish. The deviation: approvals are stored per reviewer in `merge_requests.approvals` (`headCommitId`, `headSeq`), not as `approved_head_commit_id`; a merge after a content commit answers 409 `approval_required` with the reviewer in `stale`, and an approve against a moved head answers 409 `head_moved`. Per-graph `review_required` is Open (R4).
 - Check `workspace:datasource:publish` on publish, merge, revert and restore. It is seeded but checked nowhere today.
 - Store `approved_head_commit_id` in `approve_pr`; `merge_mr` refuses when the head has moved (service.py:2443-2445). This is the R3 subset.
 - Change the inverted pin in test_versioning_rebase.py:83-86.
@@ -330,23 +351,27 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: test_versioning_pr_gate.py.
 
 **2C-6 Canvas refresh after pull (S; pulled forward from E10/E1)**
+- **Status: Done** (12a35bda).
 - `usePullLatestDraft` calls `bumpMainEpoch` and invalidates canvas queries (useVersioning.ts:545-563).
 - The rebase route bumps `CacheScope` (versioning.py:1721-1741).
 - Tests: a hook test; an API test that the cache generation bumps.
 
 **2C-7 Sweep predicate (S)**
+- **Status: Done** (b43c26d8; e0ffa664 adds the lifecycle clauses). The sweep also skips a graph that is not live (frozen) or was unfrozen within the TTL. A `publishing` draft is not `open`, so it was never swept.
 - `sweep_idle_drafts` (service.py:1626-1646) skips drafts that have an open PR, are `publishing`, have staged work, or belong to a tombstoned graph.
 - Tests: extend test_versioning_draft_sweep.py.
 
 ### (d) Missing lifecycle operations
 
 **2D-1 Move data source carries its graph (S/M; LIFECYCLE-12, pulled forward from doc 14)**
+- **Status: Done** (7d5bd23d, a4587264, 46776c87). The graph, its forks and their jobs move under each graph's lock and move lock (`gvmove`); any pending or running job on them answers 409 `job_active`, and a graph in neither workspace 409 `graph_moved`. Forks, enables and job starts racing the move get 404. A commit that raised but landed answers 200. The impact report counts live forks.
 - `move_data_source` (workspaces.py:814) updates `GraphORM.workspace_id` (including forks) through a new service method, under the graph lock, returning 409 when a job is active.
 - Tests:
   - add graphver cases to tests/test_data_source_move.py: history reachable in the new workspace and 404 in the old;
   - delete tombstones; impact shows versioned.
 
 **2D-2 Fork delete and purge (M; N6)**
+- **Status: Done** (12b2c75b, 1449c054, 25538438, 4190e666, 040198bc, e4d5c1e2, 46776c87). Delete moves the fork to the trash and `POST /graphs/{forkId}/restore` brings it back; the reaper purges it after `GRAPHVER_PURGE_GRACE_DAYS`, dropping only its own key. A parent's purge goes ahead past trashed forks no live fork reads through, and purges them with it. Fork delete and restore take no lifecycle key, so under a steady stream of saves they answer 503 `lock_busy` instead of waiting.
 - `DELETE /graphs/{forkId}` tombstones the fork, and the purge worker drops its owned key.
 - The reaper walks fork graphs (purge_worker.py:629-636).
 - Parent purge ignores tombstoned forks.
@@ -354,6 +379,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 - Tests: test_graph_lifecycle_purge.py with fork cases.
 
 **2D-3 Move a graph to another provider or key, "reseed move" without blue/green (L; N2)**
+- **Status: Done** (655e959a, 1cc2a286, 1d118868, 3029096d, 49661108, 44dd53b4, a35c32cd), as an admin route: `POST /api/v1/admin/versioning/graphs/{gid}/projection/move {providerId, key?}`, `system:admin`, not the workspace route proposed here. Only a platform-owned key moves: a customer's key, an unpinned graph or a key other data sources read answers 409 `projection_not_adopted`. Reads and rollups follow the pin, the self-heal re-points only unpinned graphs, and the old key is kept in `retired_keys` and dropped once the new key has caught up and 15 minutes have passed since the move. The Move… dialog is on the inventory row.
 - `POST /graphs/{gid}/projection/move {providerId, key?}`:
   - claim the target with `_claim_projection_key`;
   - set the pin, bump the epoch and set `projected=0`;
@@ -367,6 +393,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
   - a regression that the auto-repin no longer reverts the pin.
 
 **2D-4 Per-graph freeze plus minimal lifecycle state (M/L)**
+- **Status: Done** (fc184a41, e0ffa664, 81032cfa, a725c118, 96564e52, d5f2b782, 57444bd8). The deviation: only `live` and `frozen` are stored (migration `20261018_1200_gv_lifecycle`); `trashed` and `purging` stay derived from `deleted_at` and the purge job. `POST …/lifecycle/freeze` and `/unfreeze` take `{expectedRev}` and need publish and manage; every content write to a frozen, trashed or purging graph answers 409 `graph_not_writable`. The Version control tab shows "Editing is paused" and Pause/Resume.
 - Add a `lifecycle_state` column (live / frozen / trashed / purging) with CAS, read by the write prologue. This is a subset of doc 14 L0/L1.
 - Freeze and unfreeze routes and UI.
 - Tests: frozen graph refuses saves, publish and import with 409; reads still work.
@@ -384,46 +411,48 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 | 7 | 2D-3, 2D-4 |
 
 **Proof for Stage 2 as a whole:**
-- one multi-user HTTP story test. Alice and Bob each own a draft. Bob is refused on Alice's private draft. They co-edit a shared draft, pull with a conflict, review with an assigned reviewer, the approval goes stale after an edit, then merge. Then check history, the watermark key and placement.
-- add the test to versioning-e2e, now required.
+- one multi-user HTTP story test. Alice and Bob each own a draft. Bob is refused on Alice's private draft. They co-edit a shared draft, pull with a conflict, review with an assigned reviewer, the approval goes stale after an edit, then merge. Then check history, the watermark key and placement. **Done** (ad8b4b57, `tests/integration/test_stage2_collaboration_story.py`).
+- add the test to versioning-e2e, now required. **Partial:** it is in `backend/tests/ci-versioning-e2e-files.txt`, but the job is still informational (C99 Open).
 
 ---
 
 ## 5. What remains after Stage 2, before go-live
 
 **Go-live blockers:**
-- INGEST S0 bounded merge for rebase, previews, MR open and PR diffs (service.py:1433, 1657, 2281, 2315). Without it, many publishers on one graph livelock.
-- E4 OCC everywhere (version tokens on FalkorDB-served reads, creates and deletes).
-- E1 honest merges (expected head on rebase, publish and merge; cascade and structure conflicts).
-- TESTS-4 concurrent save, pull and publish load test at hundreds of users on one graph.
-- E9 metrics, alerts and worker roles.
-- E8 branch-scoped cache generations.
-- E7 eviction done right, if eviction is enabled at all: bytes, `last_read_at`, the "evicted stays evicted" churn fix, rehydrate, fork quota.
+- INGEST S0 bounded merge for rebase, previews, MR open and PR diffs (service.py:1433, 1657, 2281, 2315). Without it, many publishers on one graph livelock. **Open.**
+- E4 OCC everywhere (version tokens on FalkorDB-served reads, creates and deletes). **Open.**
+- E1 honest merges (expected head on rebase, publish and merge; cascade and structure conflicts). **Partial:** an approval takes an optional `expectedHeadCommitId` and answers 409 `head_moved` (207198ea); rebase, publish and merge take no expected head.
+- TESTS-4 concurrent save, pull and publish load test at hundreds of users on one graph. **Open:** no such test is in the e2e list.
+- E9 metrics, alerts and worker roles. **Open.**
+- E8 branch-scoped cache generations. **Open.** (12a35bda bumps the draft's cache scope after a pull, as a save already did; that is not E8.)
+- E7 eviction done right, if eviction is enabled at all: bytes, `last_read_at`, the "evicted stays evicted" churn fix, rehydrate, fork quota. **Partial:** the fork quota shipped as `GRAPHVER_MAX_FORKS_PER_GRAPH` (816ae1cc); the rest is Open.
 
 **ACCESS:**
-- R2–R4 remainder: review records, request changes and comments, per-graph `review_required` and protected main, draft reopen, abandon closing its PR, editor role instead of `datasource:manage` for everyone.
+- R2–R4 remainder: review records, request changes and comments, per-graph `review_required` and protected main, draft reopen, abandon closing its PR, editor role instead of `datasource:manage` for everyone. **Open.** Abandon still leaves its PR alone, and every draft write route still needs `workspace:datasource:manage`.
 
 **CONVERSION:**
-- L2–L4: blue/green KeyMigration including node relocate, lossless convert with a `gvp_` owned key, cutover and rollback, Adopt, preflight with a capacity check, detach (T10/T11), history backup and restore, the full lifecycle_events timeline, liveness and parity state.
+- L2–L4: blue/green KeyMigration including node relocate, lossless convert with a `gvp_` owned key, cutover and rollback, Adopt, preflight with a capacity check, detach (T10/T11), history backup and restore, the full lifecycle_events timeline, liveness and parity state. **Open**, apart from the reseed move (2D-3), which is phase 1 of KeyMigration.
 
 **INGEST:**
-- S1–S4: drift scan and re-sync as a worker job with UI, and retention or compaction (S4).
+- S1–S4: drift scan and re-sync as a worker job with UI, and retention or compaction (S4). **Open.**
 
 **Other plan items:**
-- E2 history attribution, E3 draft read semantics, E5 import OCC, E10 UX (main-head watch, error states).
+- E2 history attribution, E3 draft read semantics, E5 import OCC, E10 UX (main-head watch, error states). **Open.**
 
 **Unplanned, still open after Stage 2:**
-- N12 orphaned graphs list;
-- N13 branch GC;
-- N14 workspace drafts view and presence;
-- N18 budget UI;
-- N19 MERGE-11, field-level revert, restore expected head;
-- N20 bootstrap panel actions;
-- node-scoped watermark reset;
-- aggregation rollup jobs as a second FalkorDB writer on customer keys (until doc 14 D1.4 / `gvp_`).
+- N12 orphaned graphs list; **Partial:** the inventory lists them (`kind=orphan`, 27a37fd2); there is no cleanup.
+- N13 branch GC; **Open.**
+- N14 workspace drafts view and presence; **Open.**
+- N18 budget UI; **Open.**
+- N19 MERGE-11, field-level revert, restore expected head; **Open.**
+- N20 bootstrap panel actions; **Open.**
+- node-scoped watermark reset; **Open:** the reset is still per provider.
+- aggregation rollup jobs as a second FalkorDB writer on customer keys (until doc 14 D1.4 / `gvp_`). **Open.**
+
+N16 (BranchManager and BranchSwitcher hiding `publishing` drafts) is Done with 2B-3 (fadeeeec).
 
 **Explicitly out of scope:**
-- projecting versioned graphs into Neo4j, Spanner or DataHub (doc 14:71). Stage 2 only adds the guard (N10).
+- projecting versioned graphs into Neo4j, Spanner or DataHub (doc 14:71). Stage 2 only adds the guard (N10). **Done:** `POST …/versioning/graphs` refuses a non-FalkorDB data source with 422 `provider_unsupported` (db526741).
 
 ### Critical Files for Implementation
 - /home/user/dataviz/backend/app/api/v1/endpoints/versioning.py

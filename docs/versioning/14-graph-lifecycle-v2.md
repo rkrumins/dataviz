@@ -122,6 +122,8 @@ This spec covers the full lifecycle of a FalkorDB graph a customer already owns:
 | `detaching` / `trashed` / `purging` | as above where applicable | None |
 | no graph row | `ds.graph_name` | `ds.graph_name` |
 
+> **Shipped (Stage 2, 2D-4): `live` and `frozen`, with `trashed` and `purging` derived.** `graphs.lifecycle_state` takes only `live` and `frozen` (`ck_graphs_lifecycle_state`), beside `lifecycle_rev` and `lifecycle_changed_at`; `trashed` is `deleted_at` set, and `purging` is `deleted_at` set with a purge job in any status (`_assert_writable`, `service.py:634`). There is no `read_store`, `prior_state`, `writes_open_at` or route cache. Every content write to a non-live graph answers **409** `graph_not_writable {state, reason, retryable: false}` with `reason` equal to `state` and no `Retry-After`; a stored state the code does not know is refused the same way, with a generic message, and a freeze or unfreeze never overwrites it. A frozen graph keeps projecting and serving reads; its ingest coupling does not exist yet. The TTL sweep skips frozen, trashed and purging graphs, and a graph unfrozen less than one TTL ago. `physical_key` ships only its `read` half for live graphs (§7).
+
 ### 4. Transitions
 Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op, principal, job_id, reason, expected_rev=None, **cols)`.
 
@@ -161,6 +163,12 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 
 - Relocate, reseed and adopt-on-live are `live → live` (or `frozen → frozen`), with a projection epoch bump and a `lifecycle_events` row where `from == to` and `op` is set.
 - Every transition into `live` or `live_legacy` enqueues `ingest_redrive` for held `graph_not_writable` rejects (X-08).
+
+> **Shipped (Stage 2): T9 and the trash, restore and purge locks, without `transition()`** (81032cfa, 96564e52). There is no `lifecycle_state.transition`, `prior_state`, hook registry or `lifecycle_events`; freeze and unfreeze record activity `workspace.versioning.frozen` / `.unfrozen` when they change something.
+> - **T9** is `set_frozen` (`service.py:1814`): the advisory key `gvlifecycle:<gid>` exclusive, then `_lock_graph`, then `graphs FOR UPDATE`. An unknown or trashed graph is 404; a stored state other than `live` or `frozen` is 409 `graph_not_writable`; a freeze while the "enable version control" job is unfinished is 409 `integrity`; asking for the current state is a 200 that changes nothing, whatever `expectedRev` says; a stale `expectedRev` is 409 `version_conflict {resource: "lifecycle", currentVersion}`. Otherwise the state flips, `lifecycle_rev` goes up by one and `lifecycle_changed_at` is set. Only `live` ⇄ `frozen`; there is no job check and no ingest pause.
+> - **The key replaces "FOR UPDATE waits for KEY SHARE".** Row locks let each new KEY SHARE past a waiting FOR UPDATE, so a stream of draft saves could hold a freeze off. Draft writers, import and publish job creation take `gvlifecycle` shared before `_assert_writable`; a transition takes it exclusive first, so it waits for the saves in flight and later saves wait for it. Main writers do not take it; they hold `_lock_graph`, which a freeze takes after the key.
+> - **T13 / T14** (data-source trash and restore) set and clear `deleted_at` under `gvlifecycle` exclusive and then the graph row FOR UPDATE, without `_lock_graph` (`purge_worker.py`). A wait past `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` is 503 `lock_busy` and trashes or restores nothing. A restore is refused (409, a plain message) once a purge job of the data source's graph exists in any status, a completed one included (44221d17). Both need `workspace:datasource:manage`, not P or A.
+> - **T15**: queuing a purge takes the purge job row, then `gvlifecycle` exclusive, then the graph row. A permanent delete needs manage, not A; with forks still reading the graph it is 409 `{type: "live_forks", message}`.
 
 ### 5. Jobs
 `LifecycleRunner` reuses a JobLease mixin extracted from `bootstrap_worker.py:244-407` (`claim_one`, `_own`, heartbeat, `_run_phase`). `PurgeRunner` adopts the same mixin.
@@ -306,6 +314,8 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 - `projection_watermark.fresh` stays strict and is used for the UI only.
 - **Why stale pods are safe:** `writes_open_at ≥ swap + 2·TTL + bus latency`. Source and candidate are content-equal at the swap, so a stale pod serves identical data.
 
+> **Shipped (Stage 2): reads follow the pin** (3029096d, 49661108, a35c32cd). There is no `read_routes()` or route cache. `ProviderManager.get_provider` asks `versioned_sources.physical_key`: a versioned data source whose graph has a real pin reads the pinned key on the pinned provider, and its rollups use it too; an unversioned source, an unpinned graph or a `gv_<id>` placeholder keeps the data source's own key. The set of versioned sources counts trashed graphs (cached 600 s), so a moved graph that was trashed and restored keeps reading its pin. With graphver unreachable and nothing cached, the data source's own key is used and the fallback is logged. The self-heal (`ensure_projection_target`) re-points only an unpinned graph. The watermark carries `readRoute {main: falkordb | postgres, drafts: overlay}` for the canvas chip; ContextEngine still chooses FalkorDB only while `projected ≥ committed`.
+
 ### 8. External writes during the copy: re-scan converge
 - **Certificate:** every entity in window w equals the source at `verified_at(w)`; the snapshot is referentially whole; no Postgres extras.
 - Later source writes are drift. The source is never touched (D1), so drift is detectable. Release is blocked until drift is synced or acknowledged.
@@ -369,6 +379,12 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 ## Data model & migrations
 
 All revisions belong to the shared chain (§5). CONVERSION owns the lifecycle content of migrations 1300, 1500, 1600 and 2000, and needs 1200. ORM CHECKs equal the migration domains (widen-only; each `_REQUIRED` is a literal superset of the previous one).
+
+> **Shipped (Stages 1 and 2): parts of 1300 and 1500, under other names.** All run by alembic on the management database, acting on the `graphver` tables; with a separate `GRAPHVER_DB_URL` a versioning worker applies each at start (`_ensure_schema_upgrades`, `models.py`).
+> - **1300**, the freeze subset: `20261018_1200_gv_lifecycle` adds `lifecycle_state TEXT NOT NULL DEFAULT 'live'` with a CHECK of `live`/`frozen`, `lifecycle_rev BIGINT NOT NULL DEFAULT 0` and `lifecycle_changed_at`. No backfill: every graph reads `live`. A downgrade logs how many graphs were frozen and drops the columns, so editing resumes on them. A worker must complete this step at start (ten tries of 500 ms on a busy table, then it exits and its restart tries again).
+> - **1500**, in three pieces: `20261017_1500_gv_ps_keys` builds `uq_ps_key` (clearing tombstoned, non-owned duplicate pins first; live duplicates abort it); `20261017_1550_gv_ps_fencing` adds `epoch`, `failed_attempts` and `next_retry_at`; `20261018_1100_gv_ps_retired` adds `retired_keys`, whose entries are `{name, provider, retireAfter, afterSeq, movedBy}` rather than `{…, reason}`. There are no candidate, parity or liveness columns and no `uq_ps_candidate_key`.
+> - `20261017_2000_gv_ps_reseeding` lets `projection_state.status` be `reseeding` (not in this plan).
+> - 1200's `op` and `not_before`, 1600's tables, 1800's `ix_graphs_lifecycle` and 2000's `uq_jobs_lifecycle_active` are not built.
 
 **`20261010_1200_gv_jobs_types`** (shared, X-01)
 - `ck_jobs_type` = the full §4 union. The ORM at `models.py:349-357` is set to the identical tuple; today it lacks `purge` (STORE-4).
@@ -499,6 +515,14 @@ Auth column: R = read, M = manage, P = publish+manage, A = admin.
 | POST `/{ws}/data-sources/{ds}/versioning/history-imports` | `{exportJobId \| uploadId}` | 202 `{jobId, graphId}` | A | 409 `version_conflict` (graph exists); 422 `bundle_invalid {file, expectedSha, gotSha}` (requested §6 addition) |
 | POST `/api/v1/admin/versioning/watermarks/reset` | `{provider, node?}` | 200 `{graphsReset}` | system:admin | — |
 
+> **Shipped (Stage 2): four of these rows, and an admin move in place of relocate.** None is on the API-key surface.
+> - **Freeze / unfreeze** (`versioning.py:2019`, `:2035`): `{expectedRev}` → 200 `{graphId, state, rev}`, not a snapshot; no `reason`. Needs manage **and** publish, and the graph in the workspace (404 otherwise). Errors: 409 `version_conflict`; 409 `integrity` when freezing while version control is still being enabled; 409 `graph_not_writable` for a stored state other than `live` or `frozen`; 503 `lock_busy`. No `lifecycle_job_running`. A freeze works while `versioningEnabled` is off; an unfreeze does not. `/resolve` returns `lifecycleState` and `lifecycleRev`.
+> - **Projection rebuild and reconcile** are unchanged: manage, in place.
+> - **Watermark reset** takes `{provider, dryRun?}` (no `node`) and answers `{provider, graphsToReset}` on a dry run, else `{provider, graphsReset}`; reset rows read `reseeding`. Admin → Infrastructure has Reseed from Postgres per provider.
+> - **Relocate** is not built. Instead `POST /api/v1/admin/versioning/graphs/{gid}/projection/move {providerId, key?}` (`system:admin`) moves a pinned, platform-owned graph to another FalkorDB provider or key by reseeding it (§6; doc 04 §9). It refuses an unpinned graph, a customer key or a key other data sources read with 409 `projection_not_adopted {reason}`, a dedicated rollup graph with 422 `projection_mode_unsupported`, a running rollup rebuild with 409 `job_active`, a target key that is not this graph's with 422 `invalid_target_key`, a key in use with 409 `graph_key_in_use`, and an unfinished enablement with 409 `bootstrapping`; moving to where it already is answers 200 `changed: false`.
+> - `GET /api/v1/admin/versioning/graphs` lists every live versioned graph with its key, provider, owned flag, fork parent, status and retired keys, paged by `cursor`.
+> - The fork routes are `POST`/`GET …/graphs/{gid}/forks`, `DELETE …/graphs/{forkId}` and `POST …/graphs/{forkId}/restore` (doc 06).
+
 **Shims** (`graph.py`)
 - POST `/graph/bootstrap` (lifecycle v2 on) and POST `/graph/resync` (graph with `source_graph_name`) → 422 `client_upgrade_required {next:'preflight'|'drift-sync'}`.
 - GET `/graph/bootstrap/status` → the latest convert job.
@@ -515,11 +539,24 @@ Auth column: R = read, M = manage, P = publish+manage, A = admin.
   - If the commit fails, the graph moves back and the answer is 503. A commit that raised but landed (the row, read again, is in the target) keeps the graph there and answers 200. If the graph cannot move back, the 503 says to move the source again, and `workspace.data_source.move_incomplete` is recorded.
 - `GET …/impact?action=delete|detach|release|freeze`: the fixed `versioning_impact`.
 
+> **Shipped (Stage 2): the move as described** (7d5bd23d, a4587264, 46776c87), **and the trash and restore without lifecycle states.** The move refuses with 409 `job_active` while **any** job is pending or running on the graph or one of its forks, not only a mutating lifecycle job; it does not check `lifecycle_state`, so a frozen graph moves. Delete and restore need `workspace:datasource:manage`; a busy graph is 503 `lock_busy`, and a restore once a purge exists is 409. `?permanent=true` needs manage, not A, and with forks reading the graph is 409 `{type: "live_forks", message}`. The trash list (`GET …/data-sources/deleted`) carries `purgeState`, `purgeReason`, `liveForks` and `restorable`. The impact report counts live forks; there is no `action` parameter.
+
 **`POST /{ws}/versioning/graphs`** (`versioning.py:1185`)
 - Ignores client key names; mints owned keys for blank graphs only.
 - 409 `data_source_has_data {next:'preflight'}` (requested §6 addition).
 
+> **Shipped (Stage 2):** the graph is pinned to the data source's own key and provider, never a key the client names, and a data source on a provider other than FalkorDB is refused with 422 `provider_unsupported` (db526741). `data_source_has_data` is not built.
+
 ## Enforcement points (file:function → change)
+
+> **Shipped (Stage 2): the write gate and the pieces the 2D items needed.**
+> - `versioning/errors.py` holds `GraphNotWritable` (not a `ConcurrencyError`), `LockBusy`, `VersionConflict` and the fork and move errors; `keymigrate.py` is §6's phase 1. There is no `lifecycle_state.py`, `identity.py`, `source_client.py`, `source_baseline.py` or `lifecycle_runner.py`.
+> - `_assert_writable` (`service.py:634`) is a separate check beside `_assert_not_bootstrapping`, not a rename of it. It runs in opening a draft, `stage_changes`, `_checkpoint_once`, `publish`, `_rebase_draft_once`, `revert_commit`, `restore_to_commit`, `fork_graph` (the parent), `merge_pr` (the target), `merge_mr`, `bulk_ingest`, resync, `sync_ingest`, `_apply_ops_once`, and import and publish job creation. It is not called when a PR is opened. Draft writers take `gvlifecycle` shared before it (§4's shipped note); there is no `writes_open_at`.
+> - `sweep_idle_drafts` (`service.py:1752`) skips a graph that is deleted or not `live`, or whose `lifecycle_changed_at` is within the TTL; there is no `live_legacy` and no `system:ttl` actor.
+> - `ensure_projection_target` re-points only a graph with no key or the `gv_<id>` placeholder (49661108).
+> - `purge_worker.py`: a purge refuses while forks read the graph (`live_forks`), queues trashed forks no live fork reads through with their parent, waits for the reaper's purge of a deeper fork (46776c87), and its FalkorDB phase drops only owned keys and retired keys that carry this graph's marker or are its own `gvp_` keys. The reaper purges trashed forks after the grace period and re-queues purges that failed for infrastructure or live forks. Restore is refused once any purge job exists.
+> - `versioned_sources.physical_key` and `ProviderManager.get_provider` route reads by the pin (§7's shipped note); topology attributes each versioned key to its graph and marks keys only a versioned graph claims (80f694d1).
+> - `versioning_gate.py`: `/lifecycle/freeze` joined the write allowlist; `/lifecycle/unfreeze` did not.
 
 **New modules**
 - **`versioning/errors.py` (NEW, shared):**
@@ -733,6 +770,8 @@ The route chip reads "Serving from: platform copy · shard 2", "original graph",
 
 **Canvas.** The shared `useActiveBranchGuard` + `CanvasVersioningBar` show a read-only chip with reason and ETA for converting, ready, frozen and detaching. They handle `graph_not_writable` / `cutover_settling` (auto-retry) while keeping staged changes.
 
+> **Shipped (Stage 2): parts of Overview, Data health and Danger zone, without the tab set.** The Version control tab (`DataSourceVersioningTab`) shows "Editing is paused" and a Pause/Resume button to people with manage and publish (a725c118); it lists the graph's forks with Delete and Restore for managers (4190e666); and it carries `ProjectionHealthCard`: key, provider, platform-owned or customer key, placement, watermark, epoch, backoff and liveness, with Check sync and Rebuild for managers (d083763b). The same card is on Data health, which every viewer sees. The canvas `ReadRouteChip` says whether reads come from FalkorDB, Postgres or a draft overlay (28544e80). On a paused graph a refused save is not replayed, and opening a draft says editing is paused (d5f2b782). Admin → Infrastructure has the Versioned graphs inventory with Move…, Rebuild, Check sync and fork Delete, and Reseed from Postgres per provider. The trash shows "Blocked: N live forks" or the purge's failure reason (8ed3a582). No StateBadge, ConversionWizard, Drift & sync, History, Backups or Detach.
+
 **Copy.** Every lifecycle code in §6 has an entry in `features/versioning/model/accessCopy.ts`, covered by the completeness test.
 
 ## Failure modes & recovery
@@ -779,6 +818,8 @@ The route chip reads "Serving from: platform copy · shard 2", "original graph",
 | Move data source during a job | 409 `job_active` | Retry |
 | Eviction races swap | Evict skips (gvproj held) | n/a |
 | v1 jobs at deploy | `drain`: running → `live_legacy`; pending or failed → Restart with v2 | Adopt later |
+
+> **Shipped (Stage 2): the rows that apply.** *Freeze vs 50 in-flight draft saves* behaves as described; a freeze that cannot get past the saves within `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` is 503 `lock_busy` and changes nothing, as is a trash or restore. Import and publish job starts queue behind a freeze in the same way (57444bd8). *Move data source during a job* is 409 `job_active` for any pending or running job on the graph or its forks. *Purge transient error*: a purge that failed for infrastructure or live forks is re-queued by the reaper, and restore is refused once a purge exists. *`versioningEnabled` off mid-job*: mutating routes answer 403 except the allowlist, which includes freeze but not unfreeze. Fork delete and restore take no lifecycle key, so under a steady stream of saves on the fork they answer 503 `lock_busy` instead of waiting. The other rows concern parts not built.
 
 ## Rollout & migration of existing data
 

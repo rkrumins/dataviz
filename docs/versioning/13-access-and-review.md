@@ -23,6 +23,16 @@ I re-checked these code claims for this revision:
 
 ## Summary
 
+> **Shipped (Stage 2, at 57444bd8): the rules, not the machinery.** Private and shared drafts, 404 for
+> unreadable drafts, the publish permission and head-bound approvals are enforced. There is no
+> `access.py`, `Principal`, `Action` registry or `_authorize`; no `branches.visibility`; no per-graph
+> protection (`require_review`, quorum, bypass); no `pr_reviews`; no `access_events`; and no shadow
+> mode. The checks are the service's `_require_edit`, `_require_manage` and `_require_publish`
+> (`service.py:5499-5520`), `_branch_readable` (`service.py:5535`) for reads, and the routes'
+> `requires(...)`. They were enforced directly: the R1 fences and a subset of R3, with no R2. Each
+> section below that ships says how it differs; [03 §3.15](03-branching-commits-merge.md) describes the
+> shipped rules in one place.
+
 ### One decision point
 Every versioning action is decided by:
 - the pure module `backend/app/services/versioning/access.py`, which holds `Principal` (§1), the `Action` registry, `decide` and `explain`;
@@ -130,6 +140,8 @@ class Principal:
 
 **Groups** come from `user_repo.get_groups_for_user` (user_repo.py:1121). They are loaded only when a decision meets a `branch_members` row of type group. If the lookup fails, the call raises `GroupsUnavailable`, which maps to 503 groups_unavailable. It is never treated as "no groups".
 
+> **Shipped (Stage 2): groups only.** There is no `Principal` and no `principal_ctx`; the routes still pass `Viewer(actor, can_manage)` from `viewer_ctx`. Groups are looked up by the service (`_load_actor_groups`, `service.py:431`) on the read-only management pool, only when a group row could decide, and a deleted group is left out (40ca49c6). A failed lookup is **503** `groups_unavailable` `{retryable: true}` with `Retry-After: 2`, except in the branch list, which narrows to the caller's own rows instead.
+
 ### 2. Roles to capabilities (R0)
 
 | Role | R | M | P | A |
@@ -139,6 +151,8 @@ class Principal:
 | **workspace_publisher (new)** | Y | Y | Y | – |
 | workspace_data_engineer (granted P) | Y | Y | Y | – |
 | workspace_admin, org_admin, super_admin | Y | Y | Y (via category leaves) | Y |
+
+> **Shipped (Stage 1 seed, Stage 2 enforcement): as designed.** `20261017_1000_datasource_publish` seeds the permission and `workspace_publisher` (c1852aa1); the admin UI treats Publisher as a workspace role (08168c26). P is enforced since ca0472df. An API key never holds P (it is not in `KEY_GRANTABLE_PERMISSIONS`).
 
 ### 3. Branch relations and visibility
 
@@ -161,6 +175,14 @@ class Principal:
 - Adding the first member to a private draft sets `members`. Setting `private` deletes every member row in the same transaction.
 
 **Adopt-repair drafts (X-06).** These drafts are private, owned by the requesting human, and read by reviewers through PRp. There are no ownerless drafts.
+
+> **Shipped (Stage 2): two visibilities, not three** (c389c3d1, da9eed55, 774a49a3, a050ca74, 40ca49c6). There is no `visibility` column: a draft is private or shared by `is_shared`, and there is no `workspace` visibility. What ships, against the `private` and `members` rows:
+> - **READ:** O, any workspace M holder (not only A), members of a shared draft (any role, direct or through a group), and PRp, where PRp covers every PR raised from the draft, merged and closed ones included. There is no P∧LP relation. Anyone else gets 404 on every read path.
+> - **WRITE:** private O; shared O, bE, bM. A workspace manager who is not a member is refused (403 `not_draft_owner` on a private draft, `not_owner_or_member` with `required` on a shared one).
+> - **MANAGE:** name and description O or bM; visibility (`isShared`) O only; members O or bM. A gets nothing extra.
+> - **ABANDON:** O or bM. No REOPEN.
+> - **Publish directly:** private O; shared O or bM.
+> - Member rows on a private draft grant nothing; adding the first member shares it, and making it private deletes every member row.
 
 ### 4. Action registry
 This is `access.POLICY` and the CSV fixture. Key: L = legacy (shadowable); sink = audit sink; "+gate" = the review gate or a bypass applies when the graph is protected.
@@ -217,6 +239,17 @@ This is `access.POLICY` and the CSV fixture. Key: L = legacy (shadowable); sink 
 
 State `blocked` returns HOLD, not a denial.
 
+> **Shipped (Stage 2): no registry, and these bindings.** The permissions some actions get today, from route `requires(...)` and the service checks:
+> - READ_MAIN R; READ_DRAFT per §3's shipped note (404).
+> - DRAFT_WRITE (stage, `/graph/changes`, checkpoint, pull, import into a draft, open a merge request) M + §3 WRITE, on an open draft of the same graph; `main` named as the branch is 409 `main_write_forbidden`.
+> - DRAFT_MANAGE and DRAFT_ABANDON M + O/bM.
+> - PR_REVIEW (approve) M; not the author or the source draft's owner (403 `self_review`); `expectedHeadCommitId` optional. PR_EDIT and PR_CLOSE M.
+> - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared).
+> - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`). MAIN_SYNC (sync and `/graph/resync`) M + P.
+> - MAIN_WRITE_THROUGH and MAIN_BULK: a person needs P (403 `publish_required`); an API key passes only where its owner holds P.
+> - FORK M. REBUILD and RECONCILE M, not P. LIFECYCLE_FREEZE (freeze and unfreeze) M + P.
+> - There is no BYPASS, PR_COMMENT, PR_DISMISS_REVIEW, DRAFT_REOPEN, service principal or `system:*` principal.
+
 ### 5. Lifecycle × drafts/PRs (shared §9; ACCESS enforcement)
 
 | state | create/reopen draft; draft write; PR open, edit or review; merge/publish | close PR, abandon draft | reads | TTL sweep |
@@ -229,6 +262,8 @@ State `blocked` returns HOLD, not a denial.
 
 - Trash leaves drafts and PRs untouched, and restore makes them usable again.
 - A publish or merge job refused with GraphNotWritable resets the branch to `open` (X-22).
+
+> **Shipped (Stage 2): the `live`, `frozen`, `trashed` and `purging` rows** (e0ffa664, 81032cfa, 96564e52). Only `live` and `frozen` are stored; `trashed` and `purging` come from `deleted_at` and the purge job; there is no `cutover_settling` and no `writes_open_at`. On a frozen, trashed or purging graph, opening a draft, every draft write, publish and merge answer **409** `graph_not_writable {state, reason, retryable: false}`, never with `Retry-After`. Unlike the design, opening a merge request, approving, editing a PR's reviewers and closing a PR are not refused, nor is abandoning a draft; reads stay open. The TTL sweep skips these graphs, and also a graph unfrozen less than one TTL ago. A queued publish or merge refused for any reason, this one included, hands its draft back `open`.
 
 ### 6. Draft status machine (`branches.status`, CHECK unchanged)
 
@@ -245,6 +280,8 @@ State `blocked` returns HOLD, not a denial.
 | merged | – | – | terminal |
 
 `_require_open` raises `BranchNotOpen(status)`, which maps to 409 branch_closed.
+
+> **Shipped (Stage 1 and 2): without reopen and abandon reasons** (4f433348, c8a6b464, 1644e590, b43c26d8). `_require_open` answers 409 `branch_closed {status, branchId}`. A queued publish or merge checks writability, the open draft, the publisher's draft role (not for a review's merge), no running import and, for a merge, the approvals before it sets `publishing`. The job hands the draft back `open` at once when it is refused (any answer the route would have given); any other ending (an unexpected error, a lost lease, a timeout) is reopened by `release_publishing` on the transfer lane's reap loop, about every 60 s, with no JOB_TIMEOUT age. Abandon leaves the draft's PRs alone, records no `abandoned_by` or `abandon_reason`, and is idempotent on an abandoned draft; a merged or publishing one is 409 `branch_closed`. There is no reopen.
 
 ### 7. PR review model
 
@@ -281,6 +318,8 @@ State `blocked` returns HOLD, not a denial.
 - It needs `bypass.reason` of at least 10 characters (422 bypass_reason_required) and eligibility (403 bypass_not_allowed).
 - It sets `merged_via='bypass'`, `bypassed_by` and `bypass_reason`, and writes `access_events` with decision `bypassed` and `detail.unmet`.
 
+> **Shipped (Stage 2): requested reviewers and head-bound approvals only** (ca0472df, 4da667e1, 207198ea). There is no `pr_reviews` table: `merge_requests.approvals` (migration `20261018_1000_gv_mr_approvals`) holds `{actor: {headCommitId, headSeq, at}}` beside `approved_by`. `approval_status` is `pending`, `approved` or null (no reviewers); `merged_via` is `review` or `direct_publish`. Staleness is this section's neutral rule, computed when the PR is read or merged (`_approvals`, `service.py:2843`), including the 1000-row bound; an approval with no recorded head is stale. The merge gate (`_require_approvals`) needs every requested reviewer to stand; a PR with none needs nothing. There is no quorum, no `changes_requested`, no contributor rule, no dismissal, no re-check of the approver's standing at merge, and no bypass. Approve takes the PR row `FOR UPDATE` (bounded; 503 `lock_busy`); `PATCH` with `reviewers` replaces the list and re-judges `approval_status`. Any workspace manager who is not the author or the draft's owner may approve; only requested reviewers' approvals count.
+
 ### 8. Gate orders (shared §7; first failure wins, X-27)
 
 **Draft write.**
@@ -307,9 +346,11 @@ State `blocked` returns HOLD, not a denial.
 11. Squash with `stats.review` and `auto_rebased_*`.
 12. access_events.
 
-Note that today the approval check runs after `_compute_merge_bounded` (service.py:2121-2127). This order is reversed so that cheap authorization denials come before the merge computation.
+Note that when this spec was written, the approval check ran after `_compute_merge_bounded`. This order is reversed so that cheap authorization denials come before the merge computation.
 
 **Review submission.** Steps 2, 3 (branch FOR SHARE) and 4 of the draft-write gate, then PR FOR UPDATE, PR live, `_authorize`, then the head check.
+
+> **Shipped (Stage 2): these orders**, listed with their codes in [03 §3.15](03-branching-commits-merge.md). A **draft write** takes the lifecycle key shared, then `_assert_writable` (graphs FOR KEY SHARE), then the draft row FOR NO KEY UPDATE scoped to the graph (404), then an idempotent replay, `graph_not_writable`, `branch_closed` and the 403. The READ_DRAFT 404 comes earlier, at the route (`get_context_engine` on `/graph/changes`). **Publish** folds staged edits first (a checkpoint, which withdraws those of anyone who may no longer write the draft), then takes `_lock_graph`, `_assert_writable`, the draft row, `_require_open`, refuses a running import (409 `job_active`), re-runs while staged edits remain, then authorizes and applies `not_up_to_date {branchId, behindBy}`. **Merge** does the same with the PR-live check after `_lock_graph` and the approval gate in place of the authorization; the approval check now runs before the merge computation (207198ea). There is no `pending_changes`, review gate policy or bypass step. **Approve** locks the PR row, then checks it is live, `self_review`, then the head.
 
 ### 9. Lock order (shared §8)
 
@@ -331,6 +372,8 @@ How each path uses them:
 - **Policy PATCH and lifecycle transitions:** `_lock_graph` → `graphs FOR UPDATE`. This conflicts with KEY SHARE, so these wait for in-flight draft writes, and later writers see the new state.
 - **Main commits:** a plain UPDATE (NO KEY UPDATE), which does not contend with KEY SHARE.
 
+> **Shipped (Stage 2): with a lifecycle key in front** (96564e52). KEY SHARE against FOR UPDATE was not enough: overlapping draft saves let each new KEY SHARE past a waiting FOR UPDATE, so a stream of saves could hold a freeze off. Draft writers now take the advisory key `gvlifecycle:<gid>` shared before `graphs FOR KEY SHARE`, and a lifecycle transition (freeze, trash, restore, queuing a purge) takes it exclusive first. Freeze then takes `_lock_graph` and `graphs FOR UPDATE`; trash, restore and purge queuing take the graph row FOR UPDATE without `_lock_graph`. Branches are locked FOR NO KEY UPDATE, not FOR UPDATE. Approve and `PATCH` reviewers take `merge_requests FOR UPDATE`. A data-source move holds `gvmove:<gid>` exclusive after `_lock_graph`; import, export and publish job creation take it shared. Every one of these waits is bounded by `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (503 `lock_busy`).
+
 ### 10. Shadow mode (X-20)
 `GRAPHVER_ACCESS_ENFORCE` ∈ {shadow, enforce} applies only to actions with `legacy=True`.
 - In shadow, a denial records `would_deny` (metric `versioning_access_would_deny_total{action,code}` plus a sampled access_events row) and the action is allowed.
@@ -339,11 +382,15 @@ How each path uses them:
   - every non-legacy action (lifecycle, ingest, A-level, bypass, reopen, dismiss);
   - graph_not_writable.
 
+> **Not shipped.** There is no `GRAPHVER_ACCESS_ENFORCE`: every shipped rule enforces from the release that brings it.
+
 ---
 
 ## Data model & migrations
 
 The migrations follow the shared §5 chain. ACCESS owns entries 1, 5 and 9, and supplies column semantics to entry 4. The ORM CHECKs ship in the same PR as each migration, and every CHECK is widen-only.
+
+> **Shipped (Stage 1 and 2): M1 and one column of M5.** M1 shipped as `20261017_1000_datasource_publish` on the management database (see the R0 deviation note under Rollout). In place of M5, `20261018_1000_gv_mr_approvals` adds only `merge_requests.approvals JSONB` (graphver; a versioning worker on a separate `GRAPHVER_DB_URL` adds it at start, as a step it must complete). M4's ACCESS columns, the rest of M5 (`visibility`, abandon fields, `added_by`, the `merge_requests` columns and CHECKs, `pr_reviews`, `access_events`, the backfills) and M9 are not built.
 
 **M1 `20261010_1000_datasource_publish`** (management DB; modelled on `20260731_1300_view_publish.py`; `down_revision = 20260930_1000_outbox_type_time`)
 - INSERT permission `workspace:datasource:publish`, category workspace, description "Advance a versioned data source's Published version".
@@ -449,6 +496,8 @@ Every route depends on `principal_ctx`. Errors come from `versioning/errors.py`,
 
 **Capability envelope.** Every graph, branch and PR resource carries `access:{can, reasons, required}` (§12), produced by `access.explain`.
 
+> **Shipped (Stage 2): these codes, and no envelope.** Live 403s: `{type: "access_denied", code: "not_draft_owner", branchId, owner}`, `{…, code: "not_owner_or_member", required, branchId}`, `{…, code: "self_review", prId}`, `{…, code: "publish_required", required: "workspace:datasource:publish"}` for a person's direct write to `main`, and `{…, code: "needs_admin", required: "workspace:admin", …}` for sync overrides. A route that lacks a permission answers `{error: "missing_permission", permission, scope}`, which has no `type`; that is what a non-publisher gets on publish, merge, revert, restore and sync (no `needs_publish_permission`). An API key on a route it may not call gets `{error: "api_key_not_allowed"}`. 404 as above, plus PRs a non-manager neither authored nor was asked to review. Live 409s: `graph_not_writable {state, reason, retryable}` (no Retry-After), `branch_closed {status, branchId}`, `main_write_forbidden`, `pull_request_exists`, `approval_required {pending, stale}`, `head_moved {prId, headCommitId}`, `not_up_to_date {branchId, behindBy}`, `merge_conflict`, `version_conflict {resource: "lifecycle", currentVersion}`. 422 `ineligible_member {subjectId, reason}` and `ontology_violation`; 503 `lock_busy` (Retry-After) and `groups_unavailable`. Not live: `contributor_cannot_approve`, `not_eligible_reviewer`, `bypass_not_allowed`, `service_principal_forbidden`, `self_approval_forbidden`, `pr_closed`, `review_required`, `review_pending`, `changes_requested`, `pending_changes`, 410 `history_compacted`, `bypass_reason_required`, `ineligible_reviewer`, `client_upgrade_required`. Resources carry no `access` envelope; branch rows and `GET …/members` carry `myRole`.
+
 ### Graph policy
 | Method / path | Request → Response | Authz | Errors |
 |---|---|---|---|
@@ -471,6 +520,8 @@ The PATCH runs `_lock_graph` → `graphs FOR UPDATE` → CAS on `review_policy_v
 | POST `…/changes`, `/commit`, `/rebase`, `/claim` | §8 draft-write gate. The rebase response adds `reviewKept`. | DRAFT_WRITE |
 | POST `…/publish` | `{message, resolutions?, bypass?:{reason}}` → 200 `{commitId}` or 202 `{jobId}` (sets `publishing` and stores the snapshot) | DIRECT_PUBLISH plus the §8 gate |
 
+> **Shipped (Stage 2).** No policy routes. `GET …/branches` takes `status` (repeatable: `open`, `publishing`, `merged`, `abandoned`, `all`; default open and publishing), `viewId`, `limit` (1–500, default 100) and `cursor`, filters in SQL before `LIMIT`, and pages with the `X-Next-Cursor` response header; rows add `myRole` only (fadeeeec, a9dffef5, 40ca49c6). There is no `GET` of one branch, no `visibility` or `mine` filter. `PATCH …/branches/{bid}` takes `{name?, description?, isShared?}`; only the owner changes `isShared`. `GET …/members` returns `{members: [{subjectType, subjectId, role, name}], myRole}`; `POST …/members` checks eligibility (422 `ineligible_member`: `owner`, `unknown_user`, `unknown_group`, `no_read`, or `no_manage` for a role above viewer); a member cannot remove themselves unless they are a maintainer. `POST …/abandon` returns the branch, closes no PR, and is idempotent on an abandoned draft. There is no reopen. `POST …/publish` takes `{message, resolutions?}`; its 202 path stores no principal snapshot.
+
 ### Merge requests (`/merge-requests/*` and `/pulls/*` for forks)
 | Method / path | Notes | Authz |
 |---|---|---|
@@ -483,6 +534,8 @@ The PATCH runs `_lock_graph` → `graphs FOR UPDATE` → CAS on `review_policy_v
 | POST `…/reviews/{rid}/dismiss` | `{reason (10-500)}` | PR_DISMISS_REVIEW |
 | POST `/merge-requests/{id}/close` | `{reason?}` | PR_CLOSE |
 | POST `/merge-requests/{id}/merge` | `{message, resolutions?, bypass?}` → 200 or 202. The route resolves approver standing (≤ 20 users via `simulate_for_user`); a failed lookup returns 503. | PR_MERGE plus the §8 gate |
+
+> **Shipped (Stage 2)** (4da667e1, 207198ea, 700ceca1). `POST …/merge-requests` takes `{title?, description?, reviewers?}` and returns 201 `{prId}`. `PATCH /merge-requests/{id}` and `/pulls/{id}` take `{title?, description?, reviewers?}`; reviewers replace the list. `POST …/approve` (both prefixes) takes an optional `{expectedHeadCommitId}` and stays the only review route: there are no `/reviews`, dismiss or bypass routes. `PrResponse` adds `headCommitId` (the source draft's head now), `approvedBy` (standing approvals only on a live PR) and `staleApprovedBy`; there is no `requirements`, `approvedHeadCommitId` or `access`. A PR is visible to its author, its requested reviewers and every workspace manager; there is no `?reviewer=me`. `status=open` on the list routes means "not merged or closed". `GET …/versioning/reviewers` (M) lists the workspace's people who hold manage or `workspace:admin` through a workspace-scoped role, for the reviewer picker. The merge needs M and P and resolves no approver standing.
 
 ### Main operations
 - **POST `/graphs/{gid}/commits/{cid}/revert` and `/restore`.** These add `target:'main'|'draft'` and `bypass?`.
@@ -499,6 +552,8 @@ The PATCH runs `_lock_graph` → `graphs FOR UPDATE` → CAS on `review_policy_v
   - Commits use `summary.principal`.
 - **Exports, plan and stream.** A draft or as-of-draft scope requires READ_DRAFT.
 - **GET `/graphs/{gid}/access-events?action=&actor=&branchId=&prId=&decision=&before=&limit≤200`.** Keyset on (occurred_at, id). Returns `{items, nextCursor}`. Authz AUDIT_READ.
+
+> **Shipped (Stage 2)** (ca0472df, 10c0dd1e, 816ae1cc, 11463feb, da9eed55). Revert and restore need M + P and act on `main` only; there is no `target` and no 410. Sync and `/graph/resync` need M + P. `POST …/bulk-ingest` answers a person without P with 403 `publish_required`. Projection rebuild and reconcile need M. Forking needs M. An import names a draft the caller may write (403 otherwise; `main` is 409 `main_write_forbidden`, a closed draft 409 `branch_closed`), and with no `branchId` opens the caller's own draft inside the job's transaction; there is no `autoPublish` or principal snapshot. A view package's data import (`POST …/packages/{uploadId}/data`) goes through the same path, so a refused one leaves no draft either. Exports of a draft need the draft to be readable (404). There is no access-events route.
 
 ### Lifecycle and ingest routes
 These are owned by CONVERSION and INGEST. ACCESS only binds each route to its Action through `_authorize`, following the §4 registry.
@@ -520,12 +575,16 @@ These are owned by CONVERSION and INGEST. ACCESS only binds each route to its Ac
   - main returns 409 main_write_forbidden.
 - **Legacy mutations with no branchId** (`/save`, `/nodes/create`, `/edges*`, `/commands/batch`) on a versioned source are MAIN_WRITE_THROUGH.
 
+> **Shipped (Stage 1 and 2)** (4f433348, 920743fb, 10c0dd1e, e6815a25, 9ba039e7). `/graph/changes` needs a signed-in user (`get_current_user`), edit mode and M, and answers 409 `main_write_forbidden` for `main`, 404 for an unknown, foreign or unreadable branch, 409 `branch_closed` and the draft-role 403s. It does **not** add `require_versioning_enabled`. The legacy mutations with no `branchId` (or `main`) on a versioned source need P from a person (403 `publish_required`); an API key passes only where its owner holds P. A legacy write that omits `dataSourceId` is a write to the workspace's primary data source, so on a versioned primary it needs P too.
+
 ### `views.py`
 `GET /views/{id}?branchId`, `PUT /views/{id}/layout?branchId` and every library route that takes branchId call `require_branch_scope`: same graph, plus READ_DRAFT, or open plus DRAFT_WRITE for writes.
 
 ---
 
 ## Enforcement points (file:function → change)
+
+> **Shipped (Stage 1 and 2): a smaller set of changes.** `versioning/errors.py` exists and holds the mapped errors (`HTTP_MAPPED`), answered the same way by the versioning router's `_domain_errors` and an app-wide handler in `main.py`; `AccessDenied` moved there too, `ApprovalRequired` stays in `service.py`. There is no `access.py` or `review_gate.py`. In `service.py`: `_require_edit` refuses a private draft's non-owner (the inverted early return is gone); `_require_manage` and the new `_require_publish` are role checks; `_branch_readable` keeps the manager short-circuit; `_require_open` raises `BranchNotOpen`; `stage_changes`, `_checkpoint_once`, `_rebase_draft_once` and `_apply_ops_once` on a draft take the lifecycle key shared, `_assert_writable` and the scoped draft row lock (`_apply_ops_once` on `main` holds `_lock_graph` instead); `_checkpoint_once` withdraws the staged edits of anyone who may no longer write the draft; `approve_pr` and `update_pr` lock the PR row; `merge_mr` runs `_require_approvals` before the merge; `sweep_idle_drafts` has the live-PR, staged-work and graph-state exclusions; `list_branches` filters in SQL before `LIMIT`. `ContextEngine.for_workspace` checks the draft is readable and answers 404 (`branch_not_found`). In `api/v1/versioning_gate.py`, `require_publish_for_main` gates direct `main` writes. `create_import_job` checks the draft with `_require_edit` and, with no `branchId`, opens the new draft in the job's transaction, so a refused import leaves no draft.
 
 ### New modules
 - **`versioning/errors.py` (new, shared).** Moves `AccessDenied` (service.py:187, now with `code` and `required`) and `ApprovalRequired` (L191, now with `missing` and `stale`). Adds `BranchNotOpen`, `MainWriteForbidden`, `ReviewRequired(pr_id, can_stage_to_draft)`, `ReviewPending`, `ChangesRequested`, `PendingChanges`, `HeadMoved`, `VersionConflict(resource, current)`, `BypassReasonRequired`, `IneligibleMember`, `IneligibleReviewer`, `ClientUpgradeRequired` and `GroupsUnavailable`, and hosts CONVERSION's `GraphNotWritable` and `LockBusy`. service.py re-exports them.
@@ -729,6 +788,15 @@ These are owned by CONVERSION and INGEST. ACCESS only binds each route to its Ac
    - 403 or 404 on another user's draft: banner "You're viewing {owner}'s draft. Ask them to invite you"; edit tools follow `can.write`.
 9. **Reviews inbox (`PrListRow`, `WorkspaceReviewsInbox`).** An "Awaiting my review" filter, Close/Dismiss gated by `can.close` with an error toast, and "Changes requested" / "Stale approvals" Badges.
 
+> **Shipped (Stage 1 and 2): parts of screens 1, 2, 3, 4, 8 and 9.**
+> - **1.** Not `DraftAccessSection`: `BranchSettingsModal` keeps the Private/Shared choice and gains a members section (`BranchMembersSection`) with role changes, Remove and an add-person picker (8eab0a11, 1251412e, 35ba4bac). Only the owner switches visibility; choosing Private names who will lose access.
+> - **2.** `BranchManager` has an Archived tab and shows publishing drafts; draft actions are offered only to people who may take them (`myRole`; fadeeeec, a9dffef5, fbb010c3). No Reopen, no "Archives in N days".
+> - **3.** "Submit for review" has a `ReviewerPicker` (`features/versioning/components`, 4da667e1). No protected-main banner or bypass.
+> - **4.** `PrDetailDrawer` offers Approve to requested reviewers who are not the author or the draft's owner, sends the head it loaded as `expectedHeadCommitId`, reloads on `head_moved`, and shows each reviewer as approved, stale or not yet (207198ea). No `ApprovalStatusPanel`, quorum, comments or request-changes.
+> - **8.** The canvas keeps staged edits on `branch_closed` and offers to copy them to a new draft (ca63244d, aa921312); a save refused because editing is paused is not replayed, and opening a draft on a paused graph says so (d5f2b782). There is no `useActiveBranchGuard`.
+> - **9.** The inbox reads every open PR and names data sources whose PRs could not be read (700ceca1, f5a0ebf5). No "Awaiting my review" filter or review badges.
+> - Screens 5, 6 and 7 are not built.
+
 ---
 
 ## Failure modes & recovery
@@ -761,6 +829,17 @@ These are owned by CONVERSION and INGEST. ACCESS only binds each route to its Ac
 | A view-capability caller passes a draft branchId | 404, identical to a missing branch. | – |
 | Purge | access_events, lifecycle_events, ingest_source_revisions and the purge job row are kept. pr_reviews are deleted. | – |
 
+> **Shipped (Stage 2): how the rows that apply behave today.**
+> - **Save vs publish or merge:** as described: the squash holds `_lock_graph` and then the draft's row lock, so a save lands before it (and in the squash, or makes an approval stale) or after it (409 `branch_closed`).
+> - **Approval vs commit:** an approval records the head's own seq, so a commit after it makes it stale; `expectedHeadCommitId` gives 409 `head_moved`.
+> - **Staged edits at merge time:** there is no `pending_changes`. Publish and merge first fold staged edits into a checkpoint (a merge as the draft's owner), withdrawing those of anyone who may no longer write the draft; a staged edit folded in is a content commit, so it makes an approval stale.
+> - **Freeze or trash vs saves:** as described, through the lifecycle key; detach does not exist.
+> - **Queued publish refused:** the job records the refusal (`summary.error {status, detail}`), fails, and hands the draft back `open` at once; other endings are reopened within about 60 s. There is no principal snapshot or policy re-read.
+> - **Groups unreachable:** as described; the branch list narrows instead of failing.
+> - **Stale token carrying `datasource:*`:** still bounded only by the claims TTL; no forced refresh ran.
+> - **TTL sweep:** the exclusions ship; a swept draft cannot be reopened.
+> - **Abandon of a draft with an approved PR:** the PR stays open.
+
 ---
 
 ## Rollout & migration of existing data
@@ -778,16 +857,18 @@ The rollout follows the shared §17 order.
    - open private drafts with non-owner contributors;
    - PRs whose approvals were reset.
 
-> **Deviation (Stage 1, as shipped).** R0 shipped as `20261017_1000_datasource_publish` (down_revision `20261014_1200_aal_api_key`), with `rbac_seed`, `SYSTEM_ROLE_DEFAULTS`, `RoleName.WORKSPACE_PUBLISHER` and the `_SEED_LEAVES` / `_WORKSPACE_CATEGORY_LEAVES` change. Nothing checks publish yet, so:
-> - step 2, the forced claims refresh, moves to the R3 preconditions. Until then a session minted before R0 holds `workspace:datasource:*` until its next refresh;
+> **Deviation (Stage 1, as shipped).** R0 shipped as `20261017_1000_datasource_publish` (down_revision `20261014_1200_aal_api_key`), with `rbac_seed`, `SYSTEM_ROLE_DEFAULTS`, `RoleName.WORKSPACE_PUBLISHER` and the `_SEED_LEAVES` / `_WORKSPACE_CATEGORY_LEAVES` change. At R0 nothing checked publish (the migration's docstring still says so), so:
+> - step 2, the forced claims refresh, moved to the R3 preconditions. It has not run: a session minted before R0 holds `workspace:datasource:*` until its next refresh;
 > - step 5, the R0 report, moves to R2, where admins use it. Its activity inputs (M2, M10, possibly a separate `GRAPHVER_DB_URL`) are not readable from a management-DB migration. `docs/RBAC.md` lists who holds publish.
 >
-> API keys cannot carry `workspace:datasource:publish`: it is not in `KEY_GRANTABLE_PERMISSIONS`. Before R3 gates publish, revert, restore and merge, it must extend the key profile (`KeyScope`, `KEY_GRANTABLE_PERMISSIONS`, `api_keys._access`, the frontend ApiKeyWizard). Otherwise `test_api_key_surface.py::test_nothing_on_the_surface_needs_more_than_a_key_can_hold` fails and scripted callers lose publish.
+> API keys cannot carry `workspace:datasource:publish`: it is not in `KEY_GRANTABLE_PERMISSIONS`. Stage 2 did not extend the key profile. Instead, when publish became enforced (ca0472df), publish, both merges, revert, restore and sync left the API-key surface (a key gets 403 `api_key_not_allowed`), so `test_api_key_surface.py::test_nothing_on_the_surface_needs_more_than_a_key_can_hold` holds; and a key writes `main` directly only where the person who owns it holds publish (e6815a25). A script publishes by having a person land its draft.
 
 **R1: fences (enforce immediately, independent of the flag).**
 - branch_closed, the foreign-graph 404, main_write_forbidden on `/graph/changes` and imports, the `publishing` status during jobs, service and system principal restrictions, and graph_not_writable.
 - Every non-legacy action enforces from the day it ships.
 - Run `backend/scripts/versioning_access_backfill.py` (dry-run by default, `--apply`). For every open draft or fork_draft, distinct non-owner actors in `commits` or `working_changes` become `branch_members(role='editor', added_by='system:migration')`, a private draft becomes `members`, and each insert writes `migration.access_backfill`.
+
+> **Shipped (Stage 1): the fences, without the backfill.** `branch_closed`, the foreign-graph 404, `main_write_forbidden` on `/graph/changes` and imports, the `publishing` status during publish jobs and `graph_not_writable` (Stage 2) are enforced (c8a6b464, 4f433348, 11463feb, 1644e590, 920743fb, e0ffa664). There are no service or system principals to restrict, and no collaborator backfill: a non-owner who wrote someone's private draft before Stage 2 is refused from it now, until the owner shares it with them.
 
 **R2: shadow, after INGEST S2 (1–2 weeks).**
 - `GRAPHVER_ACCESS_ENFORCE=shadow` applies to legacy actions only.
@@ -800,6 +881,8 @@ The rollout follows the shared §17 order.
 - the API-key profile can carry publish (see the R0 deviation note).
 
 From R3, private drafts are owner-and-member only, main-advancing actions need P, `expectedHeadCommitId` is required and PR lists narrow.
+
+> **Shipped (Stage 2): an R3 subset, without R2 or its preconditions.** Enforced directly: private drafts are their owner's and shared drafts their members' (with no `workspace` visibility), unreadable drafts are 404, main-advancing actions need P, and approvals are bound to the head. `expectedHeadCommitId` stays optional; a non-manager's PR lists show the PRs they authored or were asked to review. None of the preconditions was met first: there was no shadow period, no claims refresh, and the key profile was not extended (see the R0 deviation note). R4 is not started.
 
 **R4 (after INGEST S4 report mode).** There is no global default. Admins enable `require_review` per graph, ingest graphs first: configure the sources and guardrails, then countersign the self-approved sources.
 
@@ -882,6 +965,8 @@ From R3, private drafts are owner-and-member only, main-advancing actions need P
   - publish and merge p95 < 3 s;
   - 0 authz 5xx;
   - no KEY SHARE lock waits > 50 ms p99 caused by main commits.
+
+> **Shipped (Stage 2): different files.** The shipped rules are pinned by `tests/integration/test_private_draft_owner.py`, `test_private_draft_read.py`, `test_shared_draft_members.py`, `test_versioning_main_write_publish.py`, `test_versioning_branch_list.py`, `test_versioning_pr_gate.py`, `test_versioning_draft_sweep.py`, `test_review_inbox_open_prs.py` and the end-to-end story `test_stage2_collaboration_story.py` (all in `backend/tests/ci-versioning-e2e-files.txt`), and by the unit files `test_versioning_access_groups.py`, `test_versioning_pr_reviewers_routes.py` and `test_api_key_scope.py` in the required list. Of the files named above only the ones this spec extends or keeps green exist (`test_permission_service.py`, `test_rbac_migration.py`, `ShareViewDialog.test.tsx`); there is no Playwright access spec and no load test.
 
 ---
 

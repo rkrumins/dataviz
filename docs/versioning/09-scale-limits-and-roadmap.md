@@ -5,7 +5,7 @@
 > gaps, and the prioritized roadmap. Nothing here is aspirational marketing; every limit traces to
 > code.
 
-**Re-checked against the code on 2026-10-09 (`42cae50`).**
+**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`).**
 
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Interactive edits and publishes are `O(change)`, not `O(graph)`. The remaining sharp edges are
@@ -126,8 +126,27 @@ unless the broadcast is missed. (The stats service and the control plane do not 
 ## 7. Security / authorization — closed
 
 The asymmetry this section used to flag is resolved: `/graph/changes` and every other `graph.py`
-mutation route now require `workspace:datasource:manage` (`require_ws_manage`), alongside edit mode,
-and `get_optional_user` only names the actor. See [06](06-api-reference.md).
+mutation route now require `workspace:datasource:manage` (`require_ws_manage`), alongside edit mode.
+`/graph/changes` also needs a signed-in user (`get_current_user`; there is no `system` fallback), and
+refuses `main` (409 `main_write_forbidden`) and a closed draft (409 `branch_closed`). See
+[06](06-api-reference.md).
+
+Stage 2 added who may do what on a draft and on `main` (see [03 §3.15](03-branching-commits-merge.md)
+and [13](13-access-and-review.md)):
+
+- **Drafts.** A private draft is written only by its owner (403 `not_draft_owner`), a shared one by
+  its editors and maintainers (403 `not_owner_or_member`). A draft the caller cannot read answers 404
+  on every read path.
+- **`main`.** Publish, merge, revert, restore, sync and `/graph/resync` need
+  `workspace:datasource:publish` on top of manage (403 `missing_permission`). A person's direct write
+  to a versioned graph's `main` (the graph routes with no draft, and bulk ingest) needs it too (403
+  `publish_required`); an API key may do that only if the person who owns it holds publish.
+- **Reviews.** Approvals are bound to the draft head the reviewer saw; the author and the draft's
+  owner cannot approve.
+
+What is still not there: per-graph protected `main` (`require_review`), review records with
+request-changes and comments, a bypass, an audit table of access decisions, and an editor role that
+writes drafts without `workspace:datasource:manage` (doc 13's R2–R4).
 
 *(Endpoint source/target type validation on the `/changes` path is also enforced server-side via the
 rich `validate_entities_rich` gate — see [05](05-ontology-governance.md) — closing an earlier
@@ -181,10 +200,12 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_READ_MAX_LAG` | `0` | staleness a read tolerates before Postgres fallback |
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | budget for an explicit operator rebuild |
-| `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit |
+| `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit, which the projector carries to FalkorDB. `0` opts out only data sources without version control; a versioned graph is always written through versioning |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | `0` (dormant) | per-provider RAM-budget eviction |
-| `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts |
+| `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts (not those with a live PR or staged edits, nor on a deleted, frozen or recently unfrozen graph) |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
+| `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
+| `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | live forks per graph; one more is 409 `fork_limit` |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 | `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |
@@ -221,6 +242,51 @@ Status as of 2026-10-09 in brackets.
 
 **Done since the last revision of this list:** the projector wiring gap (the standalone worker's
 rollup hook, §6) and the `/changes` authorization asymmetry (§7).
+
+### Delivered by the go-live Stages 1 and 2 (to `57444bd8`)
+
+The item-by-item record, with commits, is the gap audit in the repository,
+`docs/audits/versioning-stage2-gap-audit-2026-10.md` §4–§5.
+
+**Stage 1: a save, an import or a re-sync can no longer lose people's work.**
+- A save to a merged, abandoned or publishing draft answers 409 `branch_closed`, and one to `main`
+  409 `main_write_forbidden`; a draft's writers take turns on its row lock, and a queued publish holds
+  its draft `publishing` until the job ends.
+- Every write that advances `main` takes the graph lock, and every lock wait is bounded by
+  `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (503 `lock_busy` with `Retry-After`).
+- Canvas edits to a versioned graph are written to Postgres only; the projector is FalkorDB's one
+  writer for them.
+- `/graph/changes` takes an `Idempotency-Key`, so a retried save lands once; one import runs per draft.
+- A re-sync refuses to undo curation (409 `curation_at_risk`) or delete most of a graph (409
+  `mass_delete_blocked`) unless a workspace admin overrides it.
+- The `versioning-e2e` CI job runs the `GRAPHVER_E2E` suite, informational for now.
+
+**Stage 2: visibility, lifecycle operations, and people not overwriting each other.**
+- *Visibility:* the watermark names each graph's FalkorDB key, provider and retry state; placement by
+  graph id; a projection health card for every viewer; the canvas read-route chip; the Versioned
+  graphs inventory on Admin → Infrastructure; versioned keys on the Graph store page; Reseed from
+  Postgres.
+- *Lifecycle:* a data source's move carries its graph, forks and jobs; fork delete, restore, list and
+  purge; a projection move to another FalkorDB provider or key (admin); freeze and unfreeze; the
+  trash says why a purge is blocked; provider delete and move account for versioned graphs.
+- *Collaboration:* private drafts are their owner's, shared drafts their members', unreadable drafts
+  404; advancing `main` needs `workspace:datasource:publish`; approvals are bound to the head;
+  reviewers can be asked for; the branch list pages and shows group-shared drafts; the review inbox
+  keeps every open PR.
+
+### Still open after Stage 2
+
+- The bounded merge for rebase, merge previews, merge-request open and PR diffs (plan INGEST S0):
+  without it many publishers on one graph can livelock on "not up to date".
+- Version tokens on FalkorDB-served reads (E4), and an expected head on rebase, publish and merge (E1;
+  only approve takes one today).
+- A load test of concurrent save, pull and publish at hundreds of users on one graph (TESTS-4), and
+  making `versioning-e2e` a required job (C99).
+- ACCESS R2–R4 ([13](13-access-and-review.md)): protected `main`, review records, bypass, draft reopen,
+  abandon closing its PR, and an editor role.
+- CONVERSION L2–L4 ([14](14-graph-lifecycle-v2.md)): blue/green KeyMigration, lossless convert, cutover
+  and rollback, adopt, detach, history backup.
+- The items numbered 1–9 above.
 
 ---
 
