@@ -36,7 +36,7 @@ import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBra
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import { BRANCH_VOCAB, canWriteDraft, ownerName } from '../model/branchVocab'
+import { BRANCH_VOCAB, canManageDraft, canWriteDraft, ownerName } from '../model/branchVocab'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -140,6 +140,8 @@ export function CanvasVersioningBar({
   const me = useAuthStore((s) => s.user?.id)
   const activeDraft = branchesQ.data?.find((b) => b.branchId === branchId)
   const readOnlyDraft = activeDraft && !canWriteDraft(activeDraft, me) ? activeDraft : null
+  // Discarding or directly publishing it is its owner's or a maintainer's; an editor requests review.
+  const manageable = !activeDraft || canManageDraft(activeDraft, me)
 
   // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate
   // publishing under you shows up promptly instead of whenever the bar happens to re-render. This
@@ -396,7 +398,7 @@ export function CanvasVersioningBar({
 
             {/* Destructive AND icon-only, so the `title` was also its only
                 accessible name — the conversion has to hand that back. */}
-            {!readOnlyDraft && (
+            {manageable && (
             <HoverTip
               className="inline-flex"
               label="Throw this draft away"
@@ -433,6 +435,7 @@ export function CanvasVersioningBar({
           branchId={branchId}
           changeSet={changeSet}
           onClose={() => setShowPublish(false)}
+          canPublishDraft={manageable}
         />
       )}
 

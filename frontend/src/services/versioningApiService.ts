@@ -724,7 +724,8 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
       : d
       ? JSON.stringify(d)
       : fallback
-  return new Error(msg)
+  // The status rides along: a 4xx is an answer (the request was not applied), a 5xx may not be.
+  return Object.assign(new Error(msg), { status })
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`

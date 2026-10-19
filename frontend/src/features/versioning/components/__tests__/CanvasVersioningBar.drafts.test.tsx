@@ -3,7 +3,8 @@
  *   • it reads the open and publishing drafts only — never every draft ever made — and learns that
  *     its own draft was closed from that one draft's status (its freshness), for the guard;
  *   • it offers Publish and Discard only on a draft the user can write, and names the owner of one
- *     they can only look at.
+ *     they can only look at; an editor of a shared draft gets Publish (to request review) but not
+ *     Discard, which needs its owner or a maintainer.
  */
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -87,4 +88,16 @@ describe('CanvasVersioningBar on a draft', () => {
     expect(screen.queryByRole('button', { name: 'Discard draft' })).not.toBeInTheDocument()
     expect(screen.getByText(/Bob Stone’s draft · view only/)).toBeInTheDocument()
   })
+
+  it('offers an editor of a shared draft Publish but not Discard; a maintainer both', () => {
+    branchesData = [draft({ owner: 'bob', isShared: true, myRole: 'editor' })]
+    const { unmount } = render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(screen.getByRole('button', { name: /Publish/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Discard draft' })).not.toBeInTheDocument()
+    unmount()
+    branchesData = [draft({ owner: 'bob', isShared: true, myRole: 'maintainer' })]
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(screen.getByRole('button', { name: 'Discard draft' })).toBeInTheDocument()
+  })
 })
+

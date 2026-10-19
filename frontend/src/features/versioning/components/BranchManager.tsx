@@ -25,7 +25,7 @@ import type { Branch, BranchStatusFilter } from '@/services/versioningApiService
 import {
   useBranches, useOpenDraft, useAbandonDraft,
 } from '../hooks/useVersioning'
-import { BRANCH_VOCAB, canWriteDraft, draftStatus, ownerName } from '../model/branchVocab'
+import { BRANCH_VOCAB, canManageDraft, canWriteDraft, draftStatus, ownerName } from '../model/branchVocab'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
@@ -57,6 +57,7 @@ export function BranchManager({
   onClose: () => void
 }) {
   const { notify } = useAppNotifications()
+  const me = useAuthStore((s) => s.user?.id)
   const hasView = !!viewId
   // Branch-per-view: default to THIS view's own drafts. "Show all data-source drafts" is an
   // explicit, secondary toggle (default OFF) for the data-source-wide rollup — mirrors the
@@ -286,6 +287,7 @@ export function BranchManager({
         <PublishDraftDialog
           wsId={wsId} graphId={graphId} branchId={publishBranch.branchId}
           onClose={() => setPublishBranch(null)}
+          canPublishDraft={canManageDraft(publishBranch, me)}
         />
       )}
       {archiveBranch && (
@@ -316,9 +318,11 @@ function DraftCard({
   onArchive: () => void
 }) {
   const status = draftStatus(branch.baseCommitSeq, mainHead)
-  // Someone else's draft opens to look at; what would change it is offered to writers only.
+  // Someone else's draft opens to look at; what would change it is offered to writers only, and
+  // renaming or archiving it to its owner or a maintainer.
   const me = useAuthStore((s) => s.user?.id)
   const canWrite = canWriteDraft(branch, me)
+  const canManageIt = canManageDraft(branch, me)
   const live = branch.status === 'open'
   const closed = branch.status === 'merged' || branch.status === 'abandoned'
   return (
@@ -397,7 +401,7 @@ function DraftCard({
             </button>
           </HoverTip>
         )}
-        {canWrite && (
+        {canManageIt && (
         <HoverTip className="inline-flex" label="Rename this draft, describe it, or copy a link to it">
           <button
             onClick={onSettings}
@@ -408,7 +412,7 @@ function DraftCard({
           </button>
         </HoverTip>
         )}
-        {canManage && canWrite && live && (
+        {canManage && canManageIt && live && (
           <HoverTip
             className="inline-flex"
             label={`${BRANCH_VOCAB.archive} this draft`}

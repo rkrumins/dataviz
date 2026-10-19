@@ -109,4 +109,25 @@ describe('useStagedDraftPersistence — a reload while a save runs', () => {
     // The settled create leaves the staged list even though Edit B's save failed, so no later save sends it.
     expect(p2.useStagedChangesStore.getState().changes.map((c) => c.summary)).toEqual(['Edit B'])
   })
+
+  it('a save whose edits were discarded is never sent afterwards', async () => {
+    const p = await load()
+    renderHook(() => p.useStagedDraftPersistence(KEY, 'br1', true))
+    const stage = (urn: string) => act(() => {
+      p.useStagedChangesStore.getState().stage({
+        type: 'update_entity', targetId: urn, targetUrn: urn,
+        before: { description: '' }, after: { description: urn }, summary: urn,
+      })
+    })
+    stage('urn:a')
+    apply.mockRejectedValueOnce(new Error('The request timed out.'))
+    await expect(p.saveStagedChangesToDraft(p.useStagedChangesStore.getState().changes, target)).rejects.toThrow()
+    act(() => { p.useStagedChangesStore.getState().discardAll() })
+    stage('urn:b')
+    apply.mockResolvedValueOnce({ commitId: 'c1', assigned: {} })
+    await p.saveStagedChangesToDraft(p.useStagedChangesStore.getState().changes, target)
+    expect(apply).toHaveBeenCalledTimes(2)
+    expect(apply.mock.calls[1][3]).toEqual([expect.objectContaining({ id: 'urn:b' })])
+  })
 })
+

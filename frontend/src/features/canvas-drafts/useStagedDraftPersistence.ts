@@ -27,7 +27,7 @@ import type { LineageEdge, LineageNode } from '@/store/canvas'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { layoutWriter } from '@/store/canvasLayoutBridge'
 import { assignEntities } from '@/components/canvas/context-view/assignmentMutations'
-import { getPendingSave, resumePendingSave } from '@/features/versioning/model/saveStagedChangesToDraft'
+import { clearPendingSave, getPendingSave, resumePendingSave } from '@/features/versioning/model/saveStagedChangesToDraft'
 import {
   clearSnapshot,
   markSnapshotCommitting,
@@ -101,7 +101,7 @@ export function buildSnapshot(scopeKey: string, branchId: string | null): Staged
     pendingNodes: pending.nodes,
     pendingEdges: pending.edges,
     pins,
-    pendingSave: getPendingSave() ?? undefined,
+    pendingSave: getPendingSave(scopeKey) ?? undefined,
   }
 }
 
@@ -130,7 +130,7 @@ export function useStagedDraftPersistence(
     }
     if (verdict === 'noop' || !snapshot) return
     // A save that was in flight (or never answered): saving this batch again reuses its key.
-    if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave)
+    if (snapshot.pendingSave) resumePendingSave(snapshot.pendingSave, scopeKey)
 
     // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
     // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
@@ -185,6 +185,7 @@ export function useStagedDraftPersistence(
       if (state.changes.length === 0) {
         if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
         clearSnapshot(scopeKey)
+        clearPendingSave(scopeKey)   // saved or discarded: a save of discarded edits is never sent
         return
       }
       if (writeTimerRef.current) clearTimeout(writeTimerRef.current)

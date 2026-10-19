@@ -44,6 +44,12 @@ export function canWriteDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, 
   return (!!me && b.owner === me) || (!!b.isShared && (b.myRole === 'editor' || b.myRole === 'maintainer'))
 }
 
+/** Can `me` discard, archive, rename or directly publish this draft? Its owner can, and a maintainer
+ *  of a shared one; an editor only edits it (and can request review). */
+export function canManageDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, me?: string | null): boolean {
+  return (!!me && b.owner === me) || (!!b.isShared && b.myRole === 'maintainer')
+}
+
 export type StatusTone = 'ok' | 'attention' | 'neutral'
 
 export interface DraftStatus {

@@ -20,6 +20,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { unsavedCountOnBranch, useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { readSnapshot, writeSnapshot } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { copyStagedToNewDraft } from '../copyStagedToNewDraft'
+import { getPendingSave, resumePendingSave } from '../saveStagedChangesToDraft'
 
 const openDraftMock = vi.mocked(openDraft)
 
@@ -132,6 +133,12 @@ describe('copyStagedToNewDraft', () => {
     })
     await copyStagedToNewDraft('br_old', null)
     expect(unsavedCountOnBranch(useStagedChangesStore.getState(), 'br_old')).toBe(0)
+  })
+
+  it('leaves no unanswered save behind on the closed draft to be sent later', async () => {
+    resumePendingSave({ body: '[]', key: 'k-old', sent: { c1: '{}' } }, OLD)
+    await copyStagedToNewDraft('br_old', null)
+    expect(getPendingSave(OLD)).toBeNull()
   })
 
   it('opens no draft when there is nothing to copy', async () => {

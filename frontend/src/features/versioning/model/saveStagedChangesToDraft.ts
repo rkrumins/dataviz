@@ -41,40 +41,63 @@ export interface DraftSaveTarget {
   pruneTempAssignments?: () => void
 }
 
-/** A save that may have reached the server: a retry of the very same batch reuses its key, so the
- *  server answers with what that save did instead of applying it twice. Any other batch first sends
- *  this one again, exactly, under its key (see `settle`). */
-let pendingSave: PendingSave | null = null
+/** A save that may have reached the server, per draft (the staged store's scope key): a retry of the
+ *  very same batch reuses its key, so the server answers with what that save did instead of applying
+ *  it twice. Any other batch on that draft first sends this one again, exactly, under its key (see
+ *  `settle`). It is never sent on, or carried into the snapshot of, any other draft. */
+const pendingSaves = new Map<string | null, PendingSave>()
 
-/** The save that may have reached the server, for the staged-draft snapshot to carry over a reload. */
-export function getPendingSave(): PendingSave | null {
-  return pendingSave
+/** The save on this draft that may have reached the server, for its staged-draft snapshot to carry over a reload. */
+export function getPendingSave(scope: string | null): PendingSave | null {
+  return pendingSaves.get(scope) ?? null
 }
 
-/** After a reload, take back the save the snapshot carried, so it is settled before anything else. */
-export function resumePendingSave(save: PendingSave): void {
-  pendingSave = save
+/** After a reload, take back the save the draft's snapshot carried, so it is settled before anything else. */
+export function resumePendingSave(save: PendingSave, scope: string | null): void {
+  pendingSaves.set(scope, save)
 }
 
-/** The server answered and applied nothing: a save is all or nothing. */
-const refused = (e: unknown) =>
-  [MergeConflictError, IntegrityError, OntologyViolationError, BranchClosedError, NotDraftOwnerError,
+/** The draft's staged edits are gone (saved, discarded or copied away): there is nothing left to settle. */
+export function clearPendingSave(scope: string | null): void {
+  pendingSaves.delete(scope)
+}
+
+/** The server answered and applied nothing: a save is all or nothing. Any other 4xx is an answer
+ *  too; only a lost answer, a timeout (408), a throttle (429) or a server error may have applied it. */
+const refused = (e: unknown) => {
+  const status = (e as { status?: unknown } | null)?.status
+  return [MergeConflictError, IntegrityError, OntologyViolationError, BranchClosedError, NotDraftOwnerError,
     DraftRoleRequiredError, MainWriteForbiddenError].some((cls) => e instanceof cls)
+    || (typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429)
+}
 
 /** Send a save that may have reached the server again, exactly as it went, under its key: the server
  *  answers with what it did if it committed, and applies it if it never arrived — never twice. A
  *  refusal means it was not applied, so there is nothing to settle; any other failure keeps the key. */
-async function settle(save: PendingSave): Promise<{ res: GraphChangesResult; ids: Set<string> } | null> {
+async function settle(save: PendingSave, scope: string | null): Promise<{ res: GraphChangesResult; sent: Record<string, string> } | null> {
   const [wsId, dsId, branchId, ops, message] = JSON.parse(save.body) as [string, string, string, GraphChangeOp[], string | null]
   try {
     const res = await applyGraphChanges(wsId, dsId, branchId, ops, message ?? undefined, save.key)
-    pendingSave = null
-    return { res, ids: new Set(save.ids ?? []) }   // a snapshot written before ids were kept has none
+    pendingSaves.delete(scope)
+    return { res, sent: save.sent ?? {} }
   } catch (e) {
     if (!refused(e)) throw e
-    pendingSave = null
+    pendingSaves.delete(scope)
     return null
   }
+}
+
+/** A change the settled save carried and the user edited since, re-based onto what that save stored:
+ *  it now edits the entity that save left, from the value it sent, at the token the server returned —
+ *  so a create is never sent twice, and the edit does not conflict with the user's own save. */
+function rebase(c: StagedChange, sentAfter: unknown, res: GraphChangesResult): StagedChange {
+  if (c.type === 'move_entity') return c   // the server moves the node from wherever it is now
+  const created = c.type === 'create_entity' ? res.assigned?.[c.targetUrn ?? c.targetId] : undefined
+  const view = res.entities?.[created ?? c.targetUrn ?? c.targetId]
+  const before = { ...(c.before as object), ...(sentAfter as object), version: view?.version ?? undefined }
+  return created
+    ? { ...c, type: 'update_entity', targetId: created, targetUrn: created, before, discard: undefined }
+    : { ...c, before }
 }
 
 export async function saveStagedChangesToDraft(
@@ -102,14 +125,26 @@ export async function saveStagedChangesToDraft(
   }
 
   // ── An earlier save that may have committed (no answer came back, or a reload cut it off) ────
-  // Unless this is that very batch again, it is settled first, exactly as it went, under its key —
-  // so a committed create is never sent a second time under a new key. Only the changes it did not
-  // carry go next, their references to what it created resolved to the real ids.
-  const settled = pendingSave && pendingSave.body !== bodyOf(ops) ? await settle(pendingSave) : null
+  // Unless this is that very batch again, it is settled first, exactly, under its key — so a
+  // committed create is never sent a second time under a new key. Only the changes it did not carry,
+  // or that were edited since it went out, go next, their references to what it created resolved to
+  // the real ids. A save that does not say what it carried (an older snapshot) is only resent as is.
+  const scope = useStagedChangesStore.getState()._scopeKey
+  const pending = pendingSaves.get(scope)
+  const settled = pending?.sent && pending.body !== bodyOf(ops) ? await settle(pending, scope) : null
   let rest = changes
+  const edited = new Map<string, StagedChange>()
   if (settled) {
     const resolve = (id: string) => settled.res.assigned?.[id] ?? id
-    rest = changes.filter((c) => !settled.ids.has(c.id))
+    for (const c of changes) {
+      const sent = settled.sent[c.id]
+      if (sent !== undefined && sent !== JSON.stringify(c.after ?? null)) edited.set(c.id, rebase(c, JSON.parse(sent), settled.res))
+    }
+    // Staged as re-based, so a later save sends the edit even if this one fails.
+    if (edited.size > 0) {
+      useStagedChangesStore.setState((s) => ({ changes: s.changes.map((c) => edited.get(c.id) ?? c) }))
+    }
+    rest = changes.flatMap((c) => edited.get(c.id) ?? (settled.sent[c.id] !== undefined ? [] : [c]))
     ops = stagedChangesToOps(rest, resolve).map((op) => (op.id ? { ...op, id: resolve(op.id) } : op))
   }
 
@@ -119,23 +154,28 @@ export async function saveStagedChangesToDraft(
   let res: GraphChangesResult = settled?.res ?? { assigned: {} }
   if (ops.length > 0) {
     const body = bodyOf(ops)
-    const key = pendingSave?.body === body ? pendingSave.key : newRequestId()
-    pendingSave = { body, key, ids: rest.map((c) => c.id) }
+    const prior = pendingSaves.get(scope)
+    const key = prior?.body === body ? prior.key : newRequestId()
+    const save: PendingSave = { body, key, sent: Object.fromEntries(rest.map((c) => [c.id, JSON.stringify(c.after ?? null)])) }
+    pendingSaves.set(scope, save)
     // The key rides in the crash snapshot before the request leaves, so a reload mid-save keeps it.
-    const scope = useStagedChangesStore.getState()._scopeKey
-    if (scope) markSnapshotCommitting(scope, pendingSave)
+    if (scope) markSnapshotCommitting(scope, save)
     let next: GraphChangesResult
     try {
       next = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message, key)
     } catch (e) {
-      // The settled save did commit: its changes leave the staged list, so no later save resends them.
+      // The settled save did commit: what it carried, unchanged since, leaves the staged list, so no
+      // later save resends it. An edit made since stays staged (re-based), and on the canvas as made.
       if (settled) {
-        reconcileSaved(changes.filter((c) => settled.ids.has(c.id)), settled.res, target)
-        useStagedChangesStore.getState().clearSaved(settled.ids)
+        const carried = changes.filter((c) => settled.sent[c.id] !== undefined)
+        const stillEdited = new Set([...edited.values()].map((c) => c.targetUrn ?? c.targetId))
+        reconcileSaved(carried, { ...settled.res, entities: Object.fromEntries(
+          Object.entries(settled.res.entities ?? {}).filter(([id]) => !stillEdited.has(id))) }, target)
+        useStagedChangesStore.getState().clearSaved(carried.filter((c) => !edited.has(c.id)).map((c) => c.id))
       }
       throw e
     }
-    pendingSave = null
+    pendingSaves.delete(scope)
     res = {
       ...next,
       assigned: { ...res.assigned, ...next.assigned },

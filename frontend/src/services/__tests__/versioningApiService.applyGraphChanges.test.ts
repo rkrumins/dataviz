@@ -29,4 +29,11 @@ describe('applyGraphChanges', () => {
     const init = vi.mocked(fetchWithTimeout).mock.calls[0][1] as RequestInit
     expect(init.headers).toBeUndefined()
   })
+
+  it('says which status a plain refusal came back with, so a save knows the server answered', async () => {
+    vi.mocked(fetchWithTimeout).mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'branch_not_found' }), { status: 404 }))
+    await expect(applyGraphChanges('ws', 'ds', 'br', [], 'm', 'k1')).rejects.toMatchObject({ status: 404 })
+  })
 })
+

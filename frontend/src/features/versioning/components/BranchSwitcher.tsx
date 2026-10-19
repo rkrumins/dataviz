@@ -21,7 +21,7 @@ import { useActiveView } from '@/store/schema'
 import { useBranches, useMergeRequests, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
-import { BRANCH_VOCAB, canWriteDraft, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
+import { BRANCH_VOCAB, canManageDraft, canWriteDraft, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
 import { isLivePr } from '../model/prStatus'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
@@ -269,7 +269,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
             )}
             {drafts.map((b) => {
               const status = draftStatus(b.baseCommitSeq, mainHead)
-              // Someone else's draft opens to look at; what would change it is offered to writers only.
+              // Someone else's draft opens to look at; what would change it is offered to writers only,
+              // its settings to its owner or a maintainer.
               const canWrite = canWriteDraft(b, me)
               return (
                 <BranchRow
@@ -296,7 +297,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                       branchId={b.branchId} behind={status.behind}
                     />
                   ) : undefined}
-                  settingsSlot={canManage && canWrite ? (
+                  settingsSlot={canManage && canManageDraft(b, me) ? (
                     <HoverTip
                       className="inline-flex shrink-0"
                       label="Rename this draft, describe it, or copy a link to it"

@@ -42,9 +42,13 @@ export interface CommitDialogProps {
   onLeave?: () => void
   /** Called once the draft is published. */
   onPublished?: () => void
+  /** False for an editor of a shared draft: only its owner or a maintainer publishes it directly. */
+  canPublishDraft?: boolean
 }
 
-export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
+export function CommitDialog({
+  workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished, canPublishDraft = true,
+}: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
   /** Who must approve before the review can merge. */
@@ -308,14 +312,16 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
               className="inline-flex"
               label={!canPublish
                 ? 'Publishing straight to the live version needs the publish permission on this workspace'
+                : !canPublishDraft
+                ? 'Only the draft’s owner or a maintainer can publish a shared draft'
                 : inReview
                   ? 'Publish straight to the live version, bypassing the open review'
                   : 'Publish straight to the live version, skipping review'}
-              detail={canPublish ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
+              detail={canPublish && canPublishDraft ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges || unsaved > 0 || !canPublish}
+              disabled={busy || !hasChanges || unsaved > 0 || !canPublish || !canPublishDraft}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass

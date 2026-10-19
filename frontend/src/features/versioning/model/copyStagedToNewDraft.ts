@@ -13,6 +13,7 @@ import { openDraft } from '@/services/versioningApiService'
 import { buildSnapshot } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { clearSnapshot, readSnapshot, writeSnapshot } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { invalidateVersioningCaches } from './ensureDraftOpen'
+import { clearPendingSave } from './saveStagedChangesToDraft'
 
 export async function copyStagedToNewDraft(fromBranchId: string, viewId: string | null): Promise<string> {
   const { workspaceId, dataSourceId, graphId } = useBranchStore.getState()
@@ -35,6 +36,7 @@ export async function copyStagedToNewDraft(fromBranchId: string, viewId: string 
     throw new Error('Couldn’t copy your unsaved changes — they are still on the closed draft.')
   }
   clearSnapshot(fromKey)
+  clearPendingSave(fromKey)
   // The edits left the closed draft: none stay live or parked there to count against it, or to come
   // back if it is handed back open.
   const staged = useStagedChangesStore.getState()

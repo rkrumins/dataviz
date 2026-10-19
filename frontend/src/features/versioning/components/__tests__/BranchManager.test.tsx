@@ -4,7 +4,8 @@
  *   • Archive on a card opens a confirm, and confirming calls the abandon mutation with the id;
  *   • a draft being published stays listed, badged 'Publishing…';
  *   • the Archived tab lists merged and abandoned drafts;
- *   • Pull latest, Publish, Settings and Archive only on drafts the user can write.
+ *   • Pull latest and Publish only on drafts the user can write; Settings and Archive only on drafts
+ *     the user owns or maintains.
  * Child sub-flows (settings/publish/pull) are stubbed so the test stays focused on the manager.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
@@ -164,4 +165,16 @@ describe('BranchManager', () => {
     // Someone else's draft still opens, to look at.
     expect(screen.getAllByRole('button', { name: /^View$/ })).toHaveLength(2)
   })
+
+  it('offers an editor of a shared draft Pull latest and Publish, but not Settings or Archive', () => {
+    branchesData = [
+      draft({ branchId: 'br_ed', name: 'Shared, editor', owner: 'bob', isShared: true, myRole: 'editor' }),
+    ]
+    renderManager()
+    expect(screen.getByTestId('pull-br_ed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Publish$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Draft settings' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive this draft' })).not.toBeInTheDocument()
+  })
 })
+

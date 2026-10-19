@@ -31,12 +31,13 @@ const KEY_PREFIX = 'synodic:staged-draft:'
 const SNAPSHOT_VERSION = 1
 
 /** The serializable fields of a StagedChange (closures dropped). */
-/** A save that may have reached the server: its request body, its Idempotency-Key, and the ids of
- *  the staged changes it carried. */
+/** A save that may have reached the server: its request body, its Idempotency-Key, and the staged
+ *  changes it carried — each one's id → its `after` as sent (JSON), so an edit made since is told
+ *  apart. Absent in snapshots written before it existed: such a save is only ever resent as is. */
 export interface PendingSave {
   body: string
   key: string
-  ids: string[]
+  sent?: Record<string, string>
 }
 
 export type SerializableChange = Pick<

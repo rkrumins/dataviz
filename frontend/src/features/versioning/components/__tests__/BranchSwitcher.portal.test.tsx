@@ -148,7 +148,7 @@ describe('BranchSwitcher menu', () => {
     expect(useBranchesArgs).toHaveBeenCalledWith('ws1', 'g1', 'v1')
   })
 
-  it('offers Pull latest and Settings only on drafts the user can write; others\' read-only, named', () => {
+  it('offers Pull latest on drafts the user can write, Settings on those they own or maintain; others\' read-only, named', () => {
     branchesData = [
       draft({ branchId: 'br_own', name: 'Mine' }),
       draft({ branchId: 'br_bob', name: 'Bob private', owner: 'bob', userNames: { bob: 'Bob Stone' } }),
@@ -158,7 +158,7 @@ describe('BranchSwitcher menu', () => {
     renderInBlurredHeader()
     openMenu()
     expect(screen.queryAllByTestId(/^pull-/).map((el) => el.dataset.testid)).toEqual(['pull-br_own', 'pull-br_ed'])
-    expect(screen.getAllByRole('button', { name: 'Draft settings' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Draft settings' })).toHaveLength(1)   // not the editor's
     expect(screen.getByText(/Bob Stone · .*view only/)).toBeInTheDocument()
     expect(screen.getAllByText(/view only/)).toHaveLength(2)
   })

@@ -1,7 +1,8 @@
 /**
  * CommitDialog — "Publish now" advances the live version, which needs the publish permission on
  * the workspace. Someone who can edit but not publish sees it disabled, with the reason, and can
- * still submit the draft for review.
+ * still submit the draft for review. So does an editor of a shared draft, which only its owner or a
+ * maintainer may publish.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -35,10 +36,11 @@ const changeSet = buildChangeSet([
   { entityId: 'e1', kind: 'node', status: 'added', label: 'Orders', origin: { source: 'committed' } },
 ] as never)
 
-const renderDialog = () =>
+const renderDialog = (canPublishDraft?: boolean) =>
   render(
     <MemoryRouter>
-      <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={() => {}} />
+      <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={() => {}}
+        canPublishDraft={canPublishDraft} />
     </MemoryRouter>,
   )
 
@@ -64,4 +66,15 @@ describe('CommitDialog — publish permission', () => {
     renderDialog()
     expect(screen.getByRole('button', { name: /publish now/i })).toBeEnabled()
   })
+
+  it('disables "Publish now" for an editor of a shared draft, says why, and still offers review', async () => {
+    canPublish = true
+    renderDialog(false)
+    const publish = screen.getByRole('button', { name: /publish now/i })
+    expect(publish).toBeDisabled()
+    await userEvent.setup().hover(publish.parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/owner or a maintainer/i)
+    expect(screen.getByRole('button', { name: /submit for review/i })).toBeEnabled()
+  })
 })
+
