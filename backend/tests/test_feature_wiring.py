@@ -234,6 +234,9 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
         mint an API key: a gateway that re-signs someone in silently from a session it still
         holds proves nothing about who is at the keyboard. Whether gateway users need keys
         badly enough to accept that is the operator's call, not a default.
+      * ``workspaceDirectoryEnabled`` — ON shows every listed workspace's name, purpose and
+        approvers to everyone who can sign in. Where workspace names are themselves
+        sensitive that is a disclosure, so the operator turns it on knowingly.
     """
     # A single-select ladder has no "off" rung to ship on, so the boolean
     # question this test asks does not apply to it.
@@ -246,6 +249,7 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
     assert off_by_default == [
         "analyticsPublicEnabled", "analyticsShowEmailAddresses",
         "analyticsWorkspaceVisibility", "apiKeySsoRoundTripStepUp", "signupEnabled",
+        "workspaceDirectoryEnabled",
     ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "
@@ -378,11 +382,12 @@ def test_a_flag_that_widens_access_fails_closed():
     """The posture rule, pinned. `signupEnabled` decides whether a stranger may create an
     account; `semanticLayerNonAdminEditing` decides whether a non-admin may write;
     `apiKeysEnabled` decides whether a bearer credential is honoured at all, and
-    `apiKeySsoRoundTripStepUp` whether a sign-in nobody proved may mint one. If we cannot
+    `apiKeySsoRoundTripStepUp` whether a sign-in nobody proved may mint one, and
+    `workspaceDirectoryEnabled` whether everyone learns which workspaces exist. If we cannot
     read any of them, we must assume the admin wanted the NARROWER world."""
     for key in (
         "signupEnabled", "semanticLayerNonAdminEditing", "apiKeysEnabled",
-        "apiKeySsoRoundTripStepUp",
+        "apiKeySsoRoundTripStepUp", "workspaceDirectoryEnabled",
     ):
         assert FEATURE_WIRING[key].posture == "security"
         assert FEATURE_WIRING[key].fail_safe_default is False

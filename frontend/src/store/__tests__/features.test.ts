@@ -161,7 +161,7 @@ describe('fail-open seeds', () => {
     }
   })
 
-  it('fails CLOSED for the two flags that widen access', async () => {
+  it('fails CLOSED for the flags that widen access', async () => {
     vi.mocked(fetchPublicFeatureValues).mockResolvedValue(null)
     await useFeaturesStore.getState().loadFeatures()
 
@@ -169,6 +169,8 @@ describe('fail-open seeds', () => {
     expect(featureEnabled('signupEnabled')).toBe(false)
     // Same logic — this one decides whether a NON-admin may write to a semantic layer.
     expect(featureEnabled('semanticLayerNonAdminEditing')).toBe(false)
+    // And this one whether everyone learns which workspaces exist.
+    expect(featureEnabled('workspaceDirectoryEnabled')).toBe(false)
   })
 
   it('seeds the placement contract preview OFF', () => {

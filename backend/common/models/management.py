@@ -964,6 +964,12 @@ class WorkspaceUpdateRequest(BaseModel):
     # The layout template new views here start from: a built-in, an
     # organization template or this workspace's own. None = untouched; "" clears.
     default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
+    # Joining: listed in Find a workspace; who decides membership ('app' —
+    # approvers here, 'idp' — the identity provider's groups); and a note for
+    # people asking. None = untouched; "" clears the note.
+    directory_listed: Optional[bool] = Field(None, alias="directoryListed")
+    access_mode: Optional[Literal["app", "idp"]] = Field(None, alias="accessMode")
+    access_note: Optional[str] = Field(None, alias="accessNote", max_length=500)
 
     class Config:
         populate_by_name = True
@@ -992,6 +998,11 @@ class WorkspaceResponse(BaseModel):
     name_property: Optional[str] = Field(None, alias="nameProperty")
     #: The layout template a new view here starts from, if any.
     default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
+    #: Joining: listed in Find a workspace, who decides membership, and the
+    #: note shown to people asking.
+    directory_listed: bool = Field(True, alias="directoryListed")
+    access_mode: str = Field("app", alias="accessMode")
+    access_note: Optional[str] = Field(None, alias="accessNote")
 
     class Config:
         populate_by_name = True

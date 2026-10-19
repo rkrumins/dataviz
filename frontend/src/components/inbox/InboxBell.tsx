@@ -23,12 +23,14 @@ import {
     CheckCheck,
     CheckCircle2,
     Clock,
+    KeyRound,
     KeySquare,
     LayoutTemplate,
     Megaphone,
     Share2,
     ShieldAlert,
     Sparkles,
+    UserPlus,
     XCircle,
     type LucideIcon,
 } from 'lucide-react'
@@ -93,6 +95,34 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
+    },
+    // Asking to join a workspace: the ask reaches its approvers; the answer,
+    // a group to join at the identity provider, or the access arriving
+    // reaches the person who asked.
+    'access_request.submitted': {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.denied': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'access_request.routed': {
+        Icon: KeyRound,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access_request.fulfilled': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

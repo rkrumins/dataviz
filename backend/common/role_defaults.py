@@ -68,6 +68,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
             "workspace:provider:read",
@@ -95,6 +96,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
             "workspace:provider:read",
@@ -155,6 +157,25 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
+            "workspace:ontology:read",
+            "workspace:provider:read",
+            "workspace:view:create",
+            "workspace:view:delete",
+            "workspace:view:edit",
+            "workspace:view:read",
+        }),
+    ),
+    RoleName.WORKSPACE_STEWARD.value: SystemRoleDefault(
+        description=(
+            "Everything a workspace member can do, plus answering access "
+            "requests and adding people as viewers or members."
+        ),
+        scope_type="global",
+        permissions=frozenset({
+            "workspace:catalog:read",
+            "workspace:datasource:manage",
+            "workspace:datasource:read",
+            "workspace:members:add",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",

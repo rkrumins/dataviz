@@ -20,6 +20,7 @@ import {
     Sparkles, GitBranch, Lock, Mail, ExternalLink,
 } from 'lucide-react'
 import type { UserAccessResponse, AccessBinding } from '@/services/permissionsService'
+import { ProvenanceChip } from './ProvenanceChip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
@@ -463,6 +464,12 @@ function BindingList({
                                 {b.viaGroup.name}
                             </span>
                         )}
+                        {b.expiresAt && (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">
+                                until {new Date(b.expiresAt).toLocaleDateString()}
+                            </span>
+                        )}
+                        <ProvenanceChip provenance={b.provenance} className="shrink-0" />
                     </div>
                 )
             })}

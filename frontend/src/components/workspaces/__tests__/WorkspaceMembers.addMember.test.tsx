@@ -4,16 +4,19 @@
  * It loaded the admin user list once — whose default page is fifty — and
  * filtered that in the browser, so anyone past the first fifty could not be
  * added to a workspace at all. It now asks the server for each page of
- * matches, searched by what the admin types.
+ * matches, searched by what the admin types. (A Super Admin's picker; for
+ * everyone else it searches the people directory — see the steward tests.)
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render as rtlRender, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ReactElement } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/workspaceMembersService', () => ({
     workspaceMembersService: {
         list: vi.fn(), listEffective: vi.fn(), create: vi.fn(),
-        revoke: vi.fn(), previewRevoke: vi.fn(),
+        revoke: vi.fn(), previewRevoke: vi.fn(), grantOptions: vi.fn(),
     },
 }))
 vi.mock('@/services/adminUserService', () => ({
@@ -25,8 +28,9 @@ vi.mock('@/services/groupsService', () => ({
 vi.mock('@/services/permissionsService', () => ({
     permissionsService: { listRoles: vi.fn() },
 }))
-vi.mock('@/services/accessRequestsService', () => ({
-    accessRequestsService: { listForWorkspace: vi.fn(), approve: vi.fn(), deny: vi.fn() },
+vi.mock('@/services/accessRequestsService', async (orig) => ({
+    ...(await orig<typeof import('@/services/accessRequestsService')>()),
+    accessRequestsService: { listToAnswer: vi.fn(), approve: vi.fn(), deny: vi.fn(), route: vi.fn() },
 }))
 
 import { WorkspaceMembers } from '../WorkspaceMembers'
@@ -36,8 +40,13 @@ import {
     type AdminUserResponse,
     type ListUsersParams,
 } from '@/services/adminUserService'
-import { permissionsService } from '@/services/permissionsService'
 import { accessRequestsService } from '@/services/accessRequestsService'
+import { useAuthStore } from '@/store/auth'
+
+function render(ui: ReactElement) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return rtlRender(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
+}
 
 const listUsers = vi.mocked(adminUserService.listUsers)
 const lastCall = () => listUsers.mock.lastCall?.[0]
@@ -62,8 +71,15 @@ beforeEach(() => {
         grantedAt: '2025-01-01T00:00:00Z', grantedBy: null, expiresAt: null,
         subject: { type: 'user', id: 'usr_5', displayName: 'Person 5', secondary: 'person5@example.com' },
     }])
-    vi.mocked(accessRequestsService.listForWorkspace).mockResolvedValue([])
-    vi.mocked(permissionsService.listRoles).mockResolvedValue([])
+    vi.mocked(accessRequestsService.listToAnswer).mockResolvedValue([])
+    vi.mocked(workspaceMembersService.grantOptions).mockResolvedValue({
+        tier: 'admin', accessMode: 'app', groups: [], idpRoutes: [],
+        roles: [
+            { name: 'workspace_member', description: null, isSystem: true },
+            { name: 'workspace_viewer', description: null, isSystem: true },
+        ],
+    })
+    useAuthStore.setState({ permissions: { sid: 's', global: ['system:admin'], ws: {} } } as never)
     // 60 active accounts on the server, 25 to a page.
     listUsers.mockImplementation(async ({ offset = 0, limit }: ListUsersParams) => ({
         items: Array.from({ length: Math.max(0, Math.min(limit, 60 - offset)) }, (_, i) => person(offset + i)),

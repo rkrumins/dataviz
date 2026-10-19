@@ -395,6 +395,26 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "or with a password",
         ),
     ),
+    # Widens who learns which workspaces exist: when it cannot be read, assume it
+    # is off, and a workspace's name stays with the people who can open it.
+    "workspaceDirectoryEnabled": FeatureWiring(
+        key="workspaceDirectoryEnabled",
+        posture="security",
+        server_gates=(
+            "GET /workspace-directory — refused while off",
+            "POST /access-requests and GET /me/access-requests — name a workspace the person "
+            "cannot open only while this is on and the workspace is listed",
+        ),
+        ui_surfaces=(
+            "The Find a workspace tab on Workspaces, and its entry in search",
+            "The way in offered to someone with no workspace — on the Dashboard, Workspaces "
+            "and My Access",
+        ),
+        still_allowed=(
+            "Asking to join from a link someone shared, and answering every request",
+            "Workspaces, their access settings and every request are kept",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",

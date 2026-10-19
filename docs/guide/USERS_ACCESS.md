@@ -222,6 +222,7 @@ do their job; you can always raise it later.
 | --- | --- | --- |
 | **Workspace admin** | `workspace_admin` | Everything inside that workspace — settings, members, deletion, data and views. Nothing outside it. |
 | **Data engineer** | `workspace_data_engineer` | Owns the workspace's data — data sources, semantic layers, catalog items and views — without managing members or workspace settings. |
+| **Workspace steward** | `workspace_steward` | A **Workspace member** who also lets people in: adds them as viewers or members and answers their access requests (`workspace:members:add`). Can't remove people or change how people get in. |
 | **Workspace member** | `workspace_member` | The everyday contributor: creates, edits and deletes views, and manages data sources. |
 | **Workspace viewer** | `workspace_viewer` | Read-only: opens the workspace's views and sees its data sources, semantic layers and providers. |
 
@@ -514,11 +515,17 @@ It's saved in the browser you're using, so set it again on another device.
 
 Every signed-in person has a **My access** page (profile menu → **My access**)
 that plainly answers *"what am I allowed to do, and how did I get it?"* — their
-roles, scopes and effective permissions. It also lists their **My access
-requests**, each marked **Pending**, **Approved** or **Denied**. Point confused
-users there before they file a ticket; it resolves most "why can't I…?"
-questions on its own. What people see when they ask for access is covered in
-[Requesting Access](/guide/requesting-access).
+roles, scopes and effective permissions. Each role says how it came about —
+**Added directly**, **Approved request**, **Exception**, **Identity provider**,
+**Team** or **Organization-wide** — and when it ends, if it does. The page also
+lists their **My access requests**, each with where it stands: **Waiting for
+approval**, **Waiting on your identity provider**, **Approved**, **Declined** or
+**Withdrawn**. Point confused users there before they file a ticket; it
+resolves most "why can't I…?" questions on its own. What people see when they
+ask for access is covered in [Requesting Access](/guide/requesting-access).
+
+The same chips appear on **Administration → Permissions → By user** and on a
+workspace's **People with access** list.
 
 ---
 

@@ -88,6 +88,8 @@ async def create_binding(
     scope_id: Optional[str] = None,
     granted_by: Optional[str] = None,
     expires_at: Optional[str] = None,
+    access_request_id: Optional[str] = None,
+    idp_exception: bool = False,
 ) -> RoleBindingORM:
     _validate(subject_type, scope_type, scope_id, role_name)
     binding = RoleBindingORM(
@@ -98,6 +100,8 @@ async def create_binding(
         scope_id=scope_id,
         granted_by=granted_by,
         expires_at=expires_at,
+        access_request_id=access_request_id,
+        idp_exception=idp_exception,
     )
     session.add(binding)
     await session.flush()

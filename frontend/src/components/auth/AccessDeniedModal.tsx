@@ -9,27 +9,19 @@
  *
  * Phase 4.3 — when the failing path is workspace-scoped (the URL
  * contains a ``ws_xxx`` segment), the card surfaces a "Request
- * access" primary action that expands an inline composer: pick a
- * role, add an optional justification, submit. The card stays open
- * while the composer is in use; auto-dismiss only fires while the
- * card is in its compact display state.
+ * access" primary action that opens Request access — the same guided
+ * dialog Find a workspace uses. A refused edit in a view shared
+ * read-only preselects the level that edits.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    ShieldAlert, ChevronDown, X, Send, Check, Loader2, AlertCircle, Eye,
+    ShieldAlert, ChevronDown, X, Send, Eye,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAppNotifications } from '@/components/ui/notifications'
-import {
-    permissionsService,
-    type RoleDefinitionResponse,
-} from '@/services/permissionsService'
-import {
-    accessRequestsService,
-} from '@/services/accessRequestsService'
+import { RequestAccessDialog } from '@/components/access/RequestAccessDialog'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import type { View } from '@/services/viewApiService'
 import { MOTION } from '@/lib/motion'
@@ -80,27 +72,26 @@ export function AccessDeniedModal() {
     const location = useLocation()
     const queryClient = useQueryClient()
     const [showDetails, setShowDetails] = useState(false)
-    const [composerOpen, setComposerOpen] = useState(false)
+    /** Request access, open on its own: the card goes, the dialog stays. */
+    const [asking, setAsking] = useState<{ wsId: string; edit: boolean } | null>(null)
 
     useEffect(() => {
         function onDenied(e: Event) {
             const ce = e as CustomEvent<DenialEvent>
             setEvent(ce.detail)
             setShowDetails(false)
-            setComposerOpen(false)
         }
         window.addEventListener('auth:access-denied', onDenied)
         return () => window.removeEventListener('auth:access-denied', onDenied)
     }, [])
 
-    // Auto-dismiss after 6 s. Pause when the user expands details OR
-    // opens the request-access composer.
+    // Auto-dismiss after 6 s. Pause when the user expands details.
     useEffect(() => {
         if (!event) return
-        if (showDetails || composerOpen) return
+        if (showDetails) return
         const t = setTimeout(() => setEvent(null), 6_000)
         return () => clearTimeout(t)
-    }, [event, showDetails, composerOpen])
+    }, [event, showDetails])
 
     // Is the caller sitting in a view that was SHARED with them (read-only
     // reach)? Then the denial isn't a fault to fix — it's the expected
@@ -135,6 +126,14 @@ export function AccessDeniedModal() {
     )
 
     return (
+        <>
+        {asking && (
+            <RequestAccessDialog
+                workspaceId={asking.wsId}
+                defaultRole={asking.edit ? 'workspace_member' : undefined}
+                onClose={() => setAsking(null)}
+            />
+        )}
         <AnimatePresence>
             {event && (
                 <motion.div
@@ -166,9 +165,12 @@ export function AccessDeniedModal() {
                             <p className="text-sm font-semibold text-ink leading-snug">{headline}</p>
                             <p className="text-xs text-ink-secondary mt-0.5 leading-snug break-words">{headlineMessage}</p>
 
-                            {wsId && !composerOpen && (
+                            {wsId && (
                                 <button
-                                    onClick={() => setComposerOpen(true)}
+                                    onClick={() => {
+                                        setAsking({ wsId, edit: !!readOnlyShare })
+                                        setEvent(null)
+                                    }}
                                     className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/15 transition-colors"
                                 >
                                     <Send className="w-3 h-3" />
@@ -210,22 +212,9 @@ export function AccessDeniedModal() {
                         </button>
                     </div>
 
-                    <AnimatePresence>
-                        {composerOpen && wsId && (
-                            <RequestAccessComposer
-                                wsId={wsId}
-                                onClose={() => setComposerOpen(false)}
-                                onSubmitted={() => {
-                                    setComposerOpen(false)
-                                    setEvent(null)
-                                }}
-                            />
-                        )}
-                    </AnimatePresence>
-
                     {/* Auto-dismiss progress bar — hidden while details
-                        are expanded or the composer is in use */}
-                    {!showDetails && !composerOpen && (
+                        are expanded */}
+                    {!showDetails && (
                         <div className="h-0.5 w-full bg-black/5 dark:bg-white/5">
                             <motion.div
                                 className="h-full bg-amber-500/60"
@@ -238,166 +227,7 @@ export function AccessDeniedModal() {
                 </motion.div>
             )}
         </AnimatePresence>
+        </>
     )
 }
 
-
-function RequestAccessComposer({
-    wsId, onClose, onSubmitted,
-}: {
-    wsId: string
-    onClose: () => void
-    onSubmitted: () => void
-}) {
-    const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
-    const [selectedRole, setSelectedRole] = useState<string>('')
-    const [justification, setJustification] = useState('')
-    const [submitting, setSubmitting] = useState(false)
-    const [loadError, setLoadError] = useState<string | null>(null)
-    const { notify } = useAppNotifications()
-
-    useEffect(() => {
-        let cancelled = false
-        permissionsService.listRoles({ workspaceId: wsId })
-            .then(rs => {
-                if (cancelled) return
-                setRoles(rs)
-                // Default to the lowest-privilege role we can offer —
-                // gives the user the path of least resistance.
-                const preferred = rs.find(r => r.name === 'viewer')
-                    ?? rs.find(r => r.name === 'user')
-                    ?? rs[0]
-                if (preferred) setSelectedRole(preferred.name)
-            })
-            .catch(err => {
-                if (cancelled) return
-                setLoadError(err instanceof Error ? err.message : String(err))
-            })
-        return () => { cancelled = true }
-    }, [wsId])
-
-    const handleSubmit = async () => {
-        if (!selectedRole) return
-        setSubmitting(true)
-        try {
-            await accessRequestsService.submit({
-                targetType: 'workspace',
-                targetId: wsId,
-                requestedRole: selectedRole,
-                justification: justification.trim() || null,
-            })
-            notify('success', 'Access request submitted. The workspace admin will review it.')
-            onSubmitted()
-        } catch (err) {
-            notify(
-                'error',
-                err instanceof Error ? err.message : 'Failed to submit request',
-            )
-        } finally {
-            setSubmitting(false)
-        }
-    }
-
-    return (
-        <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2 }}
-            className="border-t border-glass-border bg-glass-base/30"
-        >
-            <div className="p-3 space-y-3">
-                <div className="flex items-center justify-between">
-                    <span className="text-[11px] uppercase tracking-wider font-bold text-ink-muted">
-                        Request access to <code className="font-mono font-semibold text-ink normal-case tracking-normal">{wsId}</code>
-                    </span>
-                    <button
-                        onClick={onClose}
-                        className="text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
-                    >
-                        Cancel
-                    </button>
-                </div>
-
-                {loadError ? (
-                    <div className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
-                        <span>Couldn't load roles — {loadError}</span>
-                    </div>
-                ) : roles === null ? (
-                    <div className="flex items-center gap-2 text-xs text-ink-muted">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Loading roles…
-                    </div>
-                ) : roles.length === 0 ? (
-                    <p className="text-xs text-ink-muted">No bindable roles in this workspace.</p>
-                ) : (
-                    <>
-                        <div>
-                            <label className="text-[10px] uppercase tracking-wider font-bold text-ink-muted block mb-1">
-                                Role
-                            </label>
-                            <div className="flex flex-wrap gap-1.5">
-                                {roles.map(r => (
-                                    <button
-                                        key={r.name}
-                                        type="button"
-                                        onClick={() => setSelectedRole(r.name)}
-                                        disabled={submitting}
-                                        className={cn(
-                                            'inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors',
-                                            selectedRole === r.name
-                                                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
-                                                : 'bg-canvas-elevated text-ink-secondary border-glass-border hover:border-emerald-500/30',
-                                        )}
-                                    >
-                                        {selectedRole === r.name && <Check className="w-3 h-3" />}
-                                        {r.name}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="text-[10px] uppercase tracking-wider font-bold text-ink-muted block mb-1">
-                                Why do you need this? <span className="normal-case font-normal opacity-70">(optional)</span>
-                            </label>
-                            <textarea
-                                value={justification}
-                                onChange={e => setJustification(e.target.value)}
-                                disabled={submitting}
-                                rows={2}
-                                placeholder="Helps the admin decide quickly."
-                                className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border focus:border-emerald-500/40 focus:ring-1 focus:ring-emerald-500/30 outline-none resize-none"
-                            />
-                        </div>
-
-                        <div className="flex items-center gap-2 justify-end">
-                            <button
-                                onClick={onClose}
-                                disabled={submitting}
-                                className="text-xs font-semibold px-3 py-1.5 rounded-lg text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                            >
-                                Not now
-                            </button>
-                            <button
-                                onClick={handleSubmit}
-                                disabled={submitting || !selectedRole}
-                                className={cn(
-                                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors',
-                                    'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20',
-                                    'disabled:opacity-50 disabled:cursor-not-allowed',
-                                )}
-                            >
-                                {submitting
-                                    ? <Loader2 className="w-3 h-3 animate-spin" />
-                                    : <Send className="w-3 h-3" />}
-                                Submit request
-                            </button>
-                        </div>
-                    </>
-                )}
-            </div>
-        </motion.div>
-    )
-}

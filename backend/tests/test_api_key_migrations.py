@@ -9,8 +9,10 @@ Within that:
   own build. Only cheap revisions may follow it (``20261018_1200_layout_templates``
   adds three nullable columns and swaps a CHECK; ``20261018_1300_tpl_lifecycle``
   adds nullable columns, two empty tables and a v1 row per template, and swaps
-  a CHECK), since on a database upgrading through them the lock is also held
-  while they run;
+  a CHECK; ``20261019_1000_ws_access`` adds columns with constant defaults,
+  swaps CHECKs, builds a partial index on the small ``access_requests`` and
+  seeds a permission and a role), since on a database upgrading through them
+  the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -32,9 +34,10 @@ from alembic.script import ScriptDirectory
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _EARLIER = "20261013_1200_activity_api_key.py"
 _LAST = "20261014_1200_aal_api_key.py"
-#: The revision after the ledger's, then the chain's head.
+#: The revisions after the ledger's, then the chain's head.
 _NEXT = "20261018_1200_layout_templates"
-_HEAD = "20261018_1300_tpl_lifecycle"
+_THEN = "20261018_1300_tpl_lifecycle"
+_HEAD = "20261019_1000_ws_access"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -44,6 +47,7 @@ _ON_LIVE_TABLES = {
     "20261013_1300_api_key_scale.py": ("upgrade", "downgrade"),
     _LAST: ("upgrade", "downgrade"),
     f"{_NEXT}.py": ("upgrade", "downgrade"),
+    f"{_THEN}.py": ("upgrade", "downgrade"),
     f"{_HEAD}.py": ("upgrade", "downgrade"),
 }
 
@@ -120,12 +124,13 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_the_chain_ends_two_cheap_revisions_after_the_ledger_revision():
+def test_the_chain_ends_three_cheap_revisions_after_the_ledger_revision():
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _NEXT
+    assert script.get_revision(_HEAD).down_revision == _THEN
+    assert script.get_revision(_THEN).down_revision == _NEXT
     assert script.get_revision(_NEXT).down_revision == _LAST[:-3]
 
 

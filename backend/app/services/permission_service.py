@@ -475,6 +475,9 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
     "workspace:datasource:read",
+    # Answering access requests and adding people: a workspace admin can do
+    # whatever a Workspace steward can.
+    "workspace:members:add",
     "workspace:view:create",
     "workspace:view:edit",
     "workspace:view:delete",
@@ -1306,6 +1309,18 @@ async def reconcile_sso_targets(
     if created or revoked or reactivated or memberships_added or memberships_removed:
         await session.flush()
 
+    # 6. A request someone was pointed to the identity provider for closes
+    # the moment the access arrives. In a savepoint, and never allowed to
+    # fail a sign-in: on any error the request simply stays open.
+    from backend.app.services.workspace_access import fulfil_idp_routed_requests
+
+    requests_fulfilled = 0
+    try:
+        async with session.begin_nested():
+            requests_fulfilled = await fulfil_idp_routed_requests(session, user_id=user_id)
+    except Exception:  # noqa: BLE001 — the sign-in matters more than the request
+        logger.exception("Could not close access requests for %s after an SSO sign-in", user_id)
+
     return {
         "user_id": user_id,
         "groups": list(idp_groups),
@@ -1315,6 +1330,7 @@ async def reconcile_sso_targets(
         "reactivated": reactivated,
         "memberships_added": memberships_added,
         "memberships_removed": memberships_removed,
+        "requests_fulfilled": requests_fulfilled,
     }
 
 

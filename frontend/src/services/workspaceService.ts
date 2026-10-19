@@ -6,6 +6,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import type { AccessRequestStatus, WorkspaceAccessMode } from './accessRequestsService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -122,6 +123,40 @@ export interface WorkspaceUpdateRequest {
     nameProperty?: string
     /** The layout template new views here start from (workspace:admin); "" clears it. */
     defaultLayoutTemplateId?: string
+    /** Listed in Find a workspace (while the deployment's switch is on). */
+    directoryListed?: boolean
+    /** Who decides membership: approvers here, or the identity provider's groups. */
+    accessMode?: WorkspaceAccessMode
+    /** Shown to people asking to join; "" clears it. */
+    accessNote?: string
+}
+
+/** Your open request on a Find a workspace entry. */
+export interface WorkspaceDirectoryRequest {
+    id: string
+    status: AccessRequestStatus
+    requestedRole: string
+    createdAt: string
+    idpGroup: string | null
+}
+
+/** A workspace in Find a workspace: what it is, who is in it and who answers
+ *  requests (ids — name them with the people lookup), how access works, and
+ *  where you stand. */
+export interface WorkspaceDirectoryEntry {
+    id: string
+    name: string
+    description: string | null
+    dataSourceCount: number
+    peopleCount: number
+    approverIds: string[]
+    approverCount: number
+    accessMode: WorkspaceAccessMode
+    accessNote: string | null
+    directoryListed: boolean
+    canOpen: boolean
+    yourRoles: string[]
+    openRequest: WorkspaceDirectoryRequest | null
 }
 
 export interface WorkspaceResponse {
@@ -148,6 +183,11 @@ export interface WorkspaceResponse {
     nameProperty?: string | null
     /** The layout template a new view here starts from, if any. */
     defaultLayoutTemplateId?: string | null
+    /** Joining: listed in Find a workspace, who decides membership, and the
+     *  note shown to people asking. Absent on servers that predate them. */
+    directoryListed?: boolean
+    accessMode?: WorkspaceAccessMode
+    accessNote?: string | null
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string
@@ -338,6 +378,12 @@ export const workspaceService = {
     /** The same totals day by day over the last 30 days — see {@link WorkspaceSummaryTrend}. */
     summaryTrend(): Promise<WorkspaceSummaryTrend> {
         return request<WorkspaceSummaryTrend>(`${ADMIN_API}/summary/trend`)
+    },
+
+    /** Find a workspace — refused while the deployment's switch is off. */
+    async directory(): Promise<WorkspaceDirectoryEntry[]> {
+        const body = await request<{ entries: WorkspaceDirectoryEntry[] }>('/api/v1/workspace-directory')
+        return body.entries
     },
 
     /**
