@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
@@ -461,19 +461,26 @@ async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> 
             GroupMemberORM.user_id == user_id, GroupMemberORM.source == "sso",
         )
     )).scalars().all())
+    # Only what the identity provider gave them: their own SSO bindings, and
+    # the bindings of groups it made them a member of.
+    granted = [and_(
+        RoleBindingORM.subject_type == "user",
+        RoleBindingORM.subject_id == user_id,
+        RoleBindingORM.source == "sso",
+    )]
+    if sso_groups:
+        granted.append(and_(
+            RoleBindingORM.subject_type == "group",
+            RoleBindingORM.subject_id.in_(sso_groups),
+        ))
     candidates = (await session.execute(
         select(RoleBindingORM).where(
             RoleBindingORM.scope_type == "workspace",
             RoleBindingORM.scope_id.in_(ws_ids),
+            or_(*granted),
         )
     )).scalars().all()
-    reached = {
-        b.scope_id for b in candidates
-        if not _is_expired(b.expires_at, now=now) and (
-            (b.subject_type == "user" and b.subject_id == user_id and b.source == "sso")
-            or (b.subject_type == "group" and b.subject_id in sso_groups)
-        )
-    }
+    reached = {b.scope_id for b in candidates if not _is_expired(b.expires_at, now=now)}
     names = dict((await session.execute(
         select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ws_ids))
     )).all())
