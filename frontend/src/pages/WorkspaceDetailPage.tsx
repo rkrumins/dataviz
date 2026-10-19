@@ -101,10 +101,12 @@ export function WorkspaceDetailPage() {
     // disappears when the admin turns version control off.
     const versioningEnabled = useFeature('versioningEnabled')
 
-    // Workspace admin permission gates the Members tab. The store's
+    // Letting people in opens the Members tab — admins and stewards; the
+    // admins also remove people and set how people get in. The store's
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+    const canAddMembers = usePermission('workspace:members:add', wsId ?? null)
     // The Activity tab: a workspace admin reads this workspace's activity; an
     // auditor reads everything recorded against it, through the platform log.
     const isAuditor = usePermission('system:audit:read')
@@ -526,8 +528,8 @@ export function WorkspaceDetailPage() {
                     ...(versioningEnabled
                         ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' }]
                         : []),
-                    ...(canManageMembers
-                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
+                    ...(canAddMembers
+                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Who is in, their requests to join, and how people get in' }]
                         : []),
                     ...(activityScope
                         ? [{ id: 'activity' as const, label: 'Activity', icon: History, hint: 'Who changed what in this workspace, when, and why' }]
@@ -745,8 +747,8 @@ export function WorkspaceDetailPage() {
             )}
 
             {/* ── Members Tab (RBAC) ──────────────────────── */}
-            {activeSection === 'members' && canManageMembers && wsId && (
-                <WorkspaceMembers workspaceId={wsId} />
+            {activeSection === 'members' && canAddMembers && wsId && (
+                <WorkspaceMembers workspaceId={wsId} canManage={canManageMembers} />
             )}
 
             {activeSection === 'activity' && activityScope && (

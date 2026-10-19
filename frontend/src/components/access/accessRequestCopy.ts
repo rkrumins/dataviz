@@ -1,6 +1,7 @@
 /**
  * How access requests read — the levels someone may ask for, in plain
- * language, and what each status means to the person waiting.
+ * language, what each status means to the person waiting, and how a
+ * grant came about.
  *
  * Shared by Request access, Find a workspace, My Access and the Requests
  * tab, so a request reads the same wherever it appears.
@@ -8,6 +9,7 @@
 import { CheckCircle2, Clock, KeyRound, Undo2, XCircle, type LucideIcon } from 'lucide-react'
 
 import type { AccessRequestStatus, RequestableRole } from '@/services/accessRequestsService'
+import type { AccessProvenance } from '@/services/workspaceMembersService'
 import { SYSTEM_ROLE_LABELS, type SystemRole } from '@/store/auth'
 
 /** The built-in levels, as someone asking would put them. */
@@ -67,4 +69,25 @@ export const STATUS_META: Record<AccessRequestStatus, StatusMeta> = {
 /** What to do while a request waits on the identity provider. */
 export function idpInstruction(group: string, provider?: string | null): string {
     return `Ask your IT team to add you to “${group}”${provider ? ` in ${provider}` : ''}. Your access arrives the next time you sign in after that.`
+}
+
+/** The sentence behind a provenance chip. */
+export function provenanceSentence(p: AccessProvenance, nameOf: (id: string) => string = id => id): string {
+    const when = p.at ? ` on ${new Date(p.at).toLocaleDateString()}` : ''
+    const by = p.by ? ` by ${nameOf(p.by)}` : ''
+    const groups = p.idpGroups.length ? p.idpGroups.map(g => `“${g}”`).join(', ') : 'a group'
+    switch (p.origin) {
+        case 'request':
+            return `Approved${by}${when}, answering their request.`
+        case 'exception':
+            return `Granted here${by}${when} as an exception: this workspace’s access is otherwise decided by its identity provider.`
+        case 'idp':
+            return `Through ${groups}${p.idpProvider ? ` in ${p.idpProvider}` : ''} — their identity provider adds and removes it.`
+        case 'team':
+            return `A member of the team${p.source ? ` “${p.source}”` : ''}${p.by ? `, added${by}` : ''}${when}${p.requestId ? ' when their request was approved' : ''}.`
+        case 'org_role':
+            return `${p.source ? roleLabel(p.source) : 'An organization role'} reaches every workspace.`
+        default:
+            return `Added${by}${when}.`
+    }
 }

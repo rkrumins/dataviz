@@ -7,16 +7,19 @@
  *   - Add Member modal: subject-type toggle + search picker + role grid
  *   - Revoke confirm modal
  *
- * Authorization: the parent page only mounts this tab for callers with
- * ``workspace:admin`` on the workspace. The component still calls the
- * backend on every action — backend remains source of truth.
+ * Authorization: the parent page mounts this tab for callers who may let
+ * people in (``workspace:members:add`` — admins and stewards). A steward
+ * (``canManage`` false) adds people as Viewer or Member; removing people,
+ * binding groups and the access settings stay with ``workspace:admin``.
+ * The component still calls the backend on every action — backend remains
+ * source of truth.
  */
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
-    ChevronDown, ChevronUp, ChevronRight, Inbox, Check, XCircle, Clock,
+    ChevronDown, ChevronUp, ChevronRight, Clock,
     UserCheck,
 } from 'lucide-react'
 import {
@@ -30,15 +33,12 @@ import {
     type GroupMemberResponse,
 } from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import {
-    permissionsService,
-    type RoleDefinitionResponse,
-} from '@/services/permissionsService'
-import {
-    accessRequestsService,
-    type AccessRequestResponse,
-} from '@/services/accessRequestsService'
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
+import { searchDirectory } from '@/services/userDirectoryService'
+import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
+import { WorkspaceAccessSettings } from './WorkspaceAccessSettings'
+import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
+import { useAuthStore } from '@/store/auth'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
@@ -271,7 +271,11 @@ function GroupMemberLine({ member: m }: { member: GroupMemberResponse }) {
 
 // ── Main component ───────────────────────────────────────────────────
 
-export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceMembers({ workspaceId, canManage = true }: {
+    workspaceId: string
+    /** Workspace admin: removes people, binds groups, sets how people get in. */
+    canManage?: boolean
+}) {
     const [members, setMembers] = useState<WorkspaceMemberResponse[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
@@ -408,6 +412,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         label: string,
         expiresIn?: string | null,
         reason?: string,
+        exception?: boolean,
     ) => {
         setActionLoading('add')
         setError(null)
@@ -415,6 +420,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             await workspaceMembersService.create(workspaceId, {
                 subjectType, subjectId, role,
                 expiresIn: expiresIn ?? null,
+                exception: exception || undefined,
             }, { reason })
             await fetchMembers()
             const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
@@ -484,13 +490,21 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                 </div>
                 <div className="flex-1">
                     <h3 className="text-base font-bold text-ink">Members</h3>
-                    <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
-                        Bind users or groups to this workspace. Each binding grants a role —
-                        <span className="font-semibold"> Admin</span>,
-                        <span className="font-semibold"> User</span>, or
-                        <span className="font-semibold"> Viewer</span>.
-                        Group bindings cascade to every member of the group.
-                    </p>
+                    {canManage ? (
+                        <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
+                            Bind users or groups to this workspace. Each binding grants a role —
+                            <span className="font-semibold"> Admin</span>,
+                            <span className="font-semibold"> User</span>, or
+                            <span className="font-semibold"> Viewer</span>.
+                            Group bindings cascade to every member of the group.
+                        </p>
+                    ) : (
+                        <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
+                            As a steward you let people in as <span className="font-semibold">Viewer</span> or
+                            <span className="font-semibold"> Member</span>, and answer their requests. Removing
+                            people and changing their access stays with the workspace’s admins.
+                        </p>
+                    )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                     <button
@@ -510,6 +524,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                     </button>
                 </div>
             </div>
+
+            {/* Requests waiting on this workspace's admins and stewards. */}
+            <ReviewRequestsPanel workspaceId={workspaceId} hideWhenEmpty />
 
             {/* View toggle: the raw bindings, or the flattened list of
                 everyone who can actually get in. */}
@@ -725,16 +742,18 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                             )}
                                         </td>
 
-                                        {/* Actions */}
+                                        {/* Actions — removing people is the admins' */}
                                         <td className="px-5 py-4 text-right">
-                                            <button
-                                                onClick={() => void handleRequestRevoke(m)}
-                                                disabled={isActing}
-                                                title="Revoke binding"
-                                                className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors disabled:opacity-50"
-                                            >
-                                                {isActing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-                                            </button>
+                                            {canManage && (
+                                                <button
+                                                    onClick={() => void handleRequestRevoke(m)}
+                                                    disabled={isActing}
+                                                    title="Revoke binding"
+                                                    className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors disabled:opacity-50"
+                                                >
+                                                    {isActing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                                                </button>
+                                            )}
                                         </td>
                                     </motion.tr>
 
@@ -799,11 +818,8 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             </>
             )}
 
-            {/* Pending access requests inbox (Phase 4.3) */}
-            <PendingRequestsPanel
-                workspaceId={workspaceId}
-                onResolved={fetchMembers}
-            />
+            {/* How people get in — listed, who decides, the note for people asking */}
+            {canManage && <WorkspaceAccessSettings workspaceId={workspaceId} />}
 
             {/* Modals */}
             {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
@@ -886,18 +902,28 @@ function AddMemberModal({
         label: string,
         expiresIn?: string | null,
         reason?: string,
+        exception?: boolean,
     ) => Promise<void>
     submitting: boolean
 }) {
     const reason = useReasonDraft('member-add')
     const [subjectType, setSubjectType] = useState<SubjectType>('user')
+    // What the caller may grant here: a steward adds people as Viewer or
+    // Member; an admin any role whose permissions they hold, groups too.
+    const { options } = useGrantOptions(workspaceId)
+    const canBindGroups = options?.tier === 'admin'
+    const idpRun = options?.accessMode === 'idp'
+    const [exception, setException] = useState(false)
+    // Only a Super Admin may list every account; everyone else picks from
+    // the people directory any signed-in user can search.
+    const listsAccounts = useAuthStore(s => s.can('system:admin'))
     /** One page of matching active users; null until the first arrives. */
-    const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
+    const [users, setUsers] = useState<Pick<AdminUserResponse, 'id' | 'displayName' | 'email'>[] | null>(null)
     /** Active users matching the search across every page. */
     const [userTotal, setUserTotal] = useState(0)
     const [userPage, setUserPage] = useState(0)
     const [groups, setGroups] = useState<GroupResponse[] | null>(null)
-    const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[] | null>(null)
+    const availableRoles = options?.roles ?? null
     const [search, setSearch] = useState('')
     const [selected, setSelected] = useState<{ id: string; label: string } | null>(null)
     const [role, setRole] = useState<RoleName>('workspace_member')
@@ -906,39 +932,6 @@ function AddMemberModal({
     // it to an ISO ``expires_at`` on the server side.
     const [expiresIn, setExpiresIn] = useState<string>('')
     const { notify } = useAppNotifications()
-
-    // Phase 3: pull the bindable roles for *this* workspace — global
-    // roles plus any role scoped to this workspace. The picker only
-    // shows what the binding endpoint will accept.
-    useEffect(() => {
-        ;(async () => {
-            try {
-                const all = await permissionsService.listRoles({ workspaceId })
-                // Filter out roles that wouldn't grant anything when
-                // bound at workspace scope. The resolver's category x
-                // scope filter silently drops mismatched bindings, so
-                // binding e.g. ``super_admin`` (system-category perms
-                // only) at workspace scope is a no-op — showing it
-                // here would mislead admins. Keep:
-                //   * workspace-scoped roles (workspace_admin / member
-                //     / viewer / data_engineer + workspace-scoped
-                //     custom roles), and
-                //   * global roles whose grant includes any
-                //     ``workspace:*`` perm.
-                // Drop:
-                //   * global roles whose grant is entirely
-                //     ``system:*`` (super_admin / org_admin /
-                //     org_auditor) — these belong on /admin/users.
-                const bindable = all.filter((r) => {
-                    if (r.scopeType === 'workspace') return true
-                    return r.permissions.some((p) => p.startsWith('workspace:'))
-                })
-                setAvailableRoles(bindable)
-            } catch (err) {
-                notify('error', err instanceof Error ? err.message : 'Failed to load roles')
-            }
-        })()
-    }, [workspaceId, notify])
 
     // Subject id → role pairs already bound, so we can disable them in
     // the picker (the API would 409 anyway).
@@ -959,14 +952,18 @@ function AddMemberModal({
     useEffect(() => {
         if (subjectType !== 'user') return
         let cancelled = false
-        adminUserService.listUsers({
-            status: 'active',
-            search: debouncedSearch,
-            sort: 'name',
-            order: 'asc',
-            limit: USER_PICKER_PAGE_SIZE,
-            offset: userPage * USER_PICKER_PAGE_SIZE,
-        })
+        const page = listsAccounts
+            ? adminUserService.listUsers({
+                status: 'active',
+                search: debouncedSearch,
+                sort: 'name',
+                order: 'asc',
+                limit: USER_PICKER_PAGE_SIZE,
+                offset: userPage * USER_PICKER_PAGE_SIZE,
+            })
+            : searchDirectory(debouncedSearch, { types: ['user'], limit: USER_PICKER_PAGE_SIZE })
+                .then(({ users: found }) => ({ items: found, total: found.length }))
+        page
             .then(({ items, total }) => {
                 if (cancelled) return
                 setUsers(items)
@@ -976,7 +973,7 @@ function AddMemberModal({
                 if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load')
             })
         return () => { cancelled = true }
-    }, [subjectType, debouncedSearch, userPage, notify])
+    }, [subjectType, debouncedSearch, userPage, listsAccounts, notify])
 
     useEffect(() => {
         ;(async () => {
@@ -1003,7 +1000,8 @@ function AddMemberModal({
             .sort((a, b) => a.name.localeCompare(b.name))
     }, [subjectType, users, groups, search])
 
-    const valid = !!selected
+    const needsException = idpRun && subjectType === 'user'
+    const valid = !!selected && (!needsException || exception)
     const conflict = selected ? existingForType.has(`${selected.id}:${role}`) : false
 
     return (
@@ -1026,7 +1024,8 @@ function AddMemberModal({
                 </button>
             </div>
 
-            {/* Subject-type toggle */}
+            {/* Subject-type toggle — groups are bound by admins only */}
+            {canBindGroups && (
             <div className="flex gap-1 bg-black/5 dark:bg-white/5 rounded-xl p-1 mb-4 w-fit">
                 {(['user', 'group'] as const).map(t => (
                     <button
@@ -1042,6 +1041,7 @@ function AddMemberModal({
                     </button>
                 ))}
             </div>
+            )}
 
             {/* Picker + role grid side by side */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -1074,7 +1074,7 @@ function AddMemberModal({
                         ) : (
                             candidates.map(c => {
                                 const isUser = subjectType === 'user'
-                                const u = isUser ? (c as AdminUserResponse) : null
+                                const u = isUser ? (c as Pick<AdminUserResponse, 'id' | 'displayName' | 'email'>) : null
                                 const g = !isUser ? (c as GroupResponse) : null
                                 const id = isUser ? u!.id : g!.id
                                 const label = isUser ? u!.displayName : g!.name
@@ -1103,7 +1103,7 @@ function AddMemberModal({
                             })
                         )}
                     </div>
-                    {subjectType === 'user' && (
+                    {subjectType === 'user' && listsAccounts && (
                         <TablePagination
                             className="justify-end"
                             page={userPage}
@@ -1142,7 +1142,6 @@ function AddMemberModal({
                                 const isCustom = !r.isSystem
                                 const Icon = isCustom ? Users2 : cfg.icon
                                 const isSelected = role === r.name
-                                const isWsScoped = r.scopeType === 'workspace'
                                 const description = r.description
                                     ?? (isCustom
                                         ? 'Custom role — see Permissions for its bundle.'
@@ -1169,11 +1168,6 @@ function AddMemberModal({
                                                 )}>
                                                     {isBuiltinRole(r.name) ? cfg.label : r.name}
                                                 </p>
-                                                {isWsScoped && (
-                                                    <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full text-[9px] font-bold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
-                                                        ws-scoped
-                                                    </span>
-                                                )}
                                                 {isCustom && (
                                                     <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20">
                                                         custom
@@ -1240,6 +1234,24 @@ function AddMemberModal({
                 )}
             </AnimatePresence>
 
+            {/* A workspace whose identity provider decides who is in: adding
+                a person here is an exception, and is labelled as one. */}
+            {needsException && (
+                <label className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3 text-xs text-amber-800 dark:text-amber-300 cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={exception}
+                        onChange={e => setException(e.target.checked)}
+                        className="mt-0.5"
+                    />
+                    <span>
+                        <span className="font-semibold">Add them here as an exception.</span>{' '}
+                        This workspace’s access is decided by your identity provider; this grant won’t follow
+                        their groups, and People with access marks it as an exception.
+                    </span>
+                </label>
+            )}
+
             <ReasonField draft={reason} audience="workspace" disabled={submitting} className="mt-5" />
 
             {/* Footer */}
@@ -1256,7 +1268,7 @@ function AddMemberModal({
                         if (!selected) return
                         void onSubmit(
                             subjectType, selected.id, role, selected.label,
-                            expiresIn || null, reason.take(),
+                            expiresIn || null, reason.take(), needsException && exception,
                         )
                     }}
                     disabled={!valid || conflict || submitting}
@@ -1272,204 +1284,3 @@ function AddMemberModal({
     )
 }
 
-
-// ── Pending access requests inbox (Phase 4.3) ────────────────────────
-
-function PendingRequestsPanel({
-    workspaceId, onResolved,
-}: {
-    workspaceId: string
-    onResolved: () => void | Promise<void>
-}) {
-    const [requests, setRequests] = useState<AccessRequestResponse[] | null>(null)
-    const [error, setError] = useState<string | null>(null)
-    const [acting, setActing] = useState<string | null>(null)
-    const [denyingId, setDenyingId] = useState<string | null>(null)
-    const [denyNote, setDenyNote] = useState('')
-    const { notify } = useAppNotifications()
-
-    const fetchPending = useCallback(async () => {
-        setError(null)
-        try {
-            const data = await accessRequestsService.listForWorkspace(workspaceId, {
-                status: 'pending',
-            })
-            setRequests(data)
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to load requests')
-        }
-    }, [workspaceId])
-
-    useEffect(() => { void fetchPending() }, [fetchPending])
-
-    const handleApprove = async (req: AccessRequestResponse) => {
-        setActing(req.id)
-        try {
-            await accessRequestsService.approve(req.id)
-            notify('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
-            await fetchPending()
-            await onResolved()
-        } catch (err) {
-            notify('error', err instanceof Error ? err.message : 'Approve failed')
-        } finally {
-            setActing(null)
-        }
-    }
-
-    const handleDeny = async (req: AccessRequestResponse) => {
-        setActing(req.id)
-        try {
-            await accessRequestsService.deny(req.id, { note: denyNote.trim() || null })
-            notify('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
-            setDenyingId(null)
-            setDenyNote('')
-            await fetchPending()
-        } catch (err) {
-            notify('error', err instanceof Error ? err.message : 'Deny failed')
-        } finally {
-            setActing(null)
-        }
-    }
-
-    if (requests === null && !error) {
-        return null  // initial silent load — keep the page calm
-    }
-
-    if (error) {
-        return (
-            <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4 flex items-start gap-3">
-                <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-red-600 dark:text-red-400">Couldn't load access requests</p>
-                    <p className="text-xs text-ink-muted mt-0.5">{error}</p>
-                </div>
-                <button
-                    onClick={() => void fetchPending()}
-                    className="text-xs font-semibold text-red-600 dark:text-red-400 hover:underline"
-                >
-                    Retry
-                </button>
-            </div>
-        )
-    }
-
-    const list = requests ?? []
-    if (list.length === 0) {
-        return null  // empty state suppressed — admins don't need a no-news panel
-    }
-
-    return (
-        <motion.div
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.18 }}
-            className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[0.04] to-amber-500/0 overflow-hidden"
-        >
-            <div className="px-5 py-3 border-b border-amber-500/15 flex items-center gap-2">
-                <Inbox className="w-4 h-4 text-amber-500" />
-                <h3 className="text-sm font-bold text-ink">Pending access requests</h3>
-                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-700 dark:text-amber-300">
-                    {list.length}
-                </span>
-            </div>
-            <div className="divide-y divide-amber-500/10">
-                {list.map(req => {
-                    const isActing = acting === req.id
-                    const denying = denyingId === req.id
-                    const v = roleVisualFor(req.requestedRole)
-                    return (
-                        <div key={req.id} className="px-5 py-3.5 flex items-start gap-3">
-                            <UserAvatar
-                                userId={req.requester.id}
-                                name={req.requester.displayName ?? req.requester.email ?? req.requester.id}
-                                shape="gradient"
-                                className="w-9 h-9 text-xs font-bold"
-                            />
-                            <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                    <p className="text-sm font-semibold text-ink truncate">
-                                        {req.requester.displayName ?? req.requester.id}
-                                    </p>
-                                    {req.requester.email && (
-                                        <p className="text-xs text-ink-muted truncate">{req.requester.email}</p>
-                                    )}
-                                    <span className={cn(
-                                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border',
-                                        v.badge,
-                                    )}>
-                                        wants {v.label}
-                                    </span>
-                                </div>
-                                {req.justification && (
-                                    <p className="text-xs text-ink-secondary mt-1 break-words">
-                                        “{req.justification}”
-                                    </p>
-                                )}
-                                <p className="text-[10px] text-ink-muted mt-1 flex items-center gap-1">
-                                    <Clock className="w-2.5 h-2.5" />
-                                    Requested {timeAgo(req.createdAt)}
-                                </p>
-
-                                {denying && (
-                                    <motion.div
-                                        initial={{ opacity: 0, height: 0 }}
-                                        animate={{ opacity: 1, height: 'auto' }}
-                                        className="mt-2 space-y-2"
-                                    >
-                                        <textarea
-                                            value={denyNote}
-                                            onChange={e => setDenyNote(e.target.value)}
-                                            disabled={isActing}
-                                            placeholder="Why are you denying? (optional, shown to the requester)"
-                                            rows={2}
-                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border focus:border-red-500/40 focus:ring-1 focus:ring-red-500/30 outline-none resize-none"
-                                        />
-                                        <div className="flex gap-2 justify-end">
-                                            <button
-                                                onClick={() => { setDenyingId(null); setDenyNote('') }}
-                                                disabled={isActing}
-                                                className="text-xs font-semibold px-3 py-1.5 rounded-lg text-ink-secondary hover:text-ink"
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button
-                                                onClick={() => void handleDeny(req)}
-                                                disabled={isActing}
-                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30 hover:bg-red-500/20 disabled:opacity-50"
-                                            >
-                                                {isActing ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
-                                                Confirm deny
-                                            </button>
-                                        </div>
-                                    </motion.div>
-                                )}
-                            </div>
-                            {!denying && (
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                    <button
-                                        onClick={() => void handleApprove(req)}
-                                        disabled={isActing}
-                                        title="Approve"
-                                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20 disabled:opacity-50 transition-colors"
-                                    >
-                                        {isActing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                                        Approve
-                                    </button>
-                                    <button
-                                        onClick={() => { setDenyingId(req.id); setDenyNote('') }}
-                                        disabled={isActing}
-                                        title="Deny"
-                                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20 disabled:opacity-50 transition-colors"
-                                    >
-                                        <XCircle className="w-3 h-3" />
-                                        Deny
-                                    </button>
-                                </div>
-                            )}
-                        </div>
-                    )
-                })}
-            </div>
-        </motion.div>
-    )
-}

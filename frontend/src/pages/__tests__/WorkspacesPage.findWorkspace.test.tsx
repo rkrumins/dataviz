@@ -2,17 +2,19 @@
  * The Workspaces page offers Find a workspace as a tab while its switch is
  * on, and opens on it for someone who has no workspace and can't create
  * one. With the switch off there is no tab, and the empty state says whom
- * to ask instead of offering to create a workspace they can't.
+ * to ask instead of offering to create a workspace they can't. Whoever
+ * lets people in somewhere gets a Requests tab with what is waiting.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listWorkspaces, auth } = vi.hoisted(() => ({
+const { listWorkspaces, listToAnswer, auth } = vi.hoisted(() => ({
     listWorkspaces: vi.fn(),
-    auth: { canCreate: false },
+    listToAnswer: vi.fn(),
+    auth: { canCreate: false, answers: false },
 }))
 
 vi.mock('@/services/workspaceService', () => ({
@@ -34,9 +36,20 @@ vi.mock('@/features/tour/TourLaunchButton', () => ({ TourLaunchButton: () => nul
 vi.mock('@/components/workspaces/WorkspaceDirectory', () => ({
     WorkspaceDirectory: () => <div>the directory</div>,
 }))
+vi.mock('@/components/access/ReviewRequestsPanel', () => ({
+    ReviewRequestsPanel: () => <div>the requests</div>,
+}))
+vi.mock('@/services/accessRequestsService', async (orig) => ({
+    ...(await orig<typeof import('@/services/accessRequestsService')>()),
+    accessRequestsService: { listToAnswer },
+}))
 vi.mock('@/store/auth', () => ({
     useAuthStore: (selector: (s: unknown) => unknown) =>
-        selector({ can: (p: string) => p !== 'system:workspaces:create' || auth.canCreate, permissions: { ws: {} } }),
+        selector({
+            can: (p: string) => (p === 'system:workspaces:create' && auth.canCreate)
+                || (p === 'workspace:members:add' && auth.answers),
+            permissions: { ws: auth.answers ? { w1: ['workspace:members:add'] } : {} },
+        }),
 }))
 vi.mock('@/components/admin/WorkspaceCard', () => ({
     WorkspaceCard: ({ ws }: { ws: { id: string; name: string } }) => <div>{ws.name}</div>,
@@ -64,6 +77,8 @@ const SALES = {
 beforeEach(() => {
     vi.clearAllMocks()
     auth.canCreate = false
+    auth.answers = false
+    listToAnswer.mockResolvedValue([])
     useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, workspaceDirectoryEnabled: true } })
 })
 
@@ -103,5 +118,18 @@ describe('WorkspacesPage — Find a workspace', () => {
         renderPage()
         expect(await screen.findByText('Create a workspace to get started')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Find a workspace' })).toBeInTheDocument()
+    })
+
+    it('gives whoever lets people in a Requests tab with what is waiting', async () => {
+        const user = userEvent.setup()
+        auth.answers = true
+        listToAnswer.mockResolvedValue([{ id: 'ar_1' }, { id: 'ar_2' }])
+        listWorkspaces.mockResolvedValue([SALES])
+        renderPage()
+        const requests = await screen.findByRole('tab', { name: /Requests/ })
+        await waitFor(() => expect(requests).toHaveTextContent('2'))
+        await user.click(requests)
+        expect(await screen.findByText('the requests')).toBeInTheDocument()
+        expect(listToAnswer).toHaveBeenCalledWith({ status: 'open', workspaceId: undefined })
     })
 })

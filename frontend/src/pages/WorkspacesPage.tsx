@@ -39,6 +39,8 @@ import { motion } from 'framer-motion'
 import { useFeature } from '@/store/features'
 import { WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
 import { WorkspaceDirectory } from '@/components/workspaces/WorkspaceDirectory'
+import { ReviewRequestsPanel } from '@/components/access/ReviewRequestsPanel'
+import { useRequestsToAnswer } from '@/hooks/useWorkspaceAccess'
 
 function providerLabel(type: string): string {
     if (type === 'neo4j') return 'Neo4j'
@@ -422,18 +424,26 @@ export function WorkspacesPage() {
     // would mislead them into clicking a CTA they can't use.
     const showPipelineNudge = !isLoading && isPlatformAdmin && providers.length === 0
 
-    /* ── Tabs: your workspaces, and — while the switch is on — Find a workspace.
-       Someone with no workspace who can't create one lands on Find a workspace. ── */
+    /* ── Tabs: your workspaces; Find a workspace while the switch is on; and the
+       requests waiting on whoever lets people in somewhere. Someone with no
+       workspace who can't create one lands on Find a workspace. ── */
     const directoryOn = useFeature(WORKSPACE_DIRECTORY_FEATURE)
+    const canAnswer = useAuthStore(s =>
+        s.can('system:org-admin')
+        || Object.keys(s.permissions.ws).some(ws => s.can('workspace:members:add', ws)))
+    const { requests: waiting } = useRequestsToAnswer('open', { enabled: canAnswer })
     const tabParam = searchParams.get('tab')
-    const tab: 'mine' | 'discover' =
-        directoryOn && (tabParam === 'discover'
-            || (tabParam === null && !isLoading && workspaces.length === 0 && !canCreateWorkspace))
-            ? 'discover'
-            : 'mine'
+    const tab: 'mine' | 'discover' | 'requests' =
+        canAnswer && tabParam === 'requests'
+            ? 'requests'
+            : directoryOn && (tabParam === 'discover'
+                || (tabParam === null && !isLoading && workspaces.length === 0 && !canCreateWorkspace))
+                ? 'discover'
+                : 'mine'
     const tabs = [
         { id: 'mine' as const, label: 'Your workspaces', count: isLoading ? null : workspaces.length },
         ...(directoryOn ? [{ id: 'discover' as const, label: 'Find a workspace', count: null }] : []),
+        ...(canAnswer ? [{ id: 'requests' as const, label: 'Requests', count: waiting?.length ?? null }] : []),
     ]
 
     // Live counts per health state. Without these the Health menu offered filters
@@ -520,6 +530,7 @@ export function WorkspacesPage() {
                                     <span className={cn(
                                         'px-1.5 py-px rounded-full text-[10px] font-semibold tabular-nums',
                                         selected ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-400' : 'bg-black/5 dark:bg-white/5',
+                                        t.id === 'requests' && !!t.count && !selected && 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
                                     )}>
                                         {t.count}
                                     </span>
@@ -531,6 +542,8 @@ export function WorkspacesPage() {
             )}
 
             {tab === 'discover' && <WorkspaceDirectory />}
+
+            {tab === 'requests' && <ReviewRequestsPanel />}
 
             {tab === 'mine' && (
                 <>
