@@ -327,13 +327,15 @@ def test_fork_delete_restore_and_list_routes_e2e():
         f = await _child(svc, gid)
         url = f"/api/v1/ws1/versioning/graphs/{f}"
         async with _client((R,)) as c:
-            assert (await c.delete(url)).status_code == 403
+            r = await c.delete(url)
+            assert r.status_code == 403, r.text
             assert (await c.post(url + "/restore")).status_code == 403
         async with _client((R, M)) as c:
             r = await c.delete(url)
             assert r.status_code == 204, r.text
             assert (await c.get(url)).status_code == 404
-            assert (await c.delete(url)).status_code == 404
+            r = await c.delete(url)
+            assert r.status_code == 404, r.text
             r = await c.delete(f"/api/v1/ws1/versioning/graphs/{gid}")
             assert r.status_code == 409 and r.json()["detail"]["type"] == "not_a_fork", r.text
 
@@ -349,7 +351,8 @@ def test_fork_delete_restore_and_list_routes_e2e():
         async with _client((R, M)) as c:
             assert (await c.post(url + "/restore")).status_code == 204
             assert (await c.get(url)).status_code == 200
-            assert (await c.delete(url)).status_code == 204
+            r = await c.delete(url)
+            assert r.status_code == 204, r.text
             assert await create_purge_job(graph_id=f, workspace_id="ws1", actor="reaper",
                                           require_tombstoned=True)
             r = await c.post(url + "/restore")

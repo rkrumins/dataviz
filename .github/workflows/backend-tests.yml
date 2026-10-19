@@ -164,6 +164,8 @@ jobs:
     # Informational until it has a track record, like live-engine.
     name: Versioned graph against Postgres + FalkorDB (informational)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 60
     continue-on-error: true
     services:

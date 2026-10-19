@@ -164,6 +164,7 @@ class ContextEngine:
         # reader so the change shows immediately; once the projection catches up, use the live
         # FalkorDB provider (hot path). A non-versioned data source ignores branch_id (live provider).
         norm = (branch_id or "").strip()
+        graph = None
         if data_source_id:
             from .versioning.service import GraphVersioningService
             from .versioned_sources import serves_pin

@@ -41,10 +41,10 @@ from backend.app.services.versioning.service import (
 
 
 def _raised(exc: Exception) -> HTTPException:
-    with pytest.raises(HTTPException) as info:
+    def run():
         with _domain_errors():
             raise exc
-    return info.value
+    return pytest.raises(HTTPException, run).value
 
 
 def test_a_closed_draft_is_409_branch_closed_not_404():
