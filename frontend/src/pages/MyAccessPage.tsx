@@ -24,9 +24,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import { useQueryClient } from '@tanstack/react-query'
 import {
-    Loader2, AlertCircle, Shield, RefreshCw, Sparkles, Clock,
-    CheckCircle2, XCircle, Inbox,
+    Loader2, AlertCircle, Shield, RefreshCw, Sparkles, Inbox, ArrowRight, Undo2,
 } from 'lucide-react'
 import {
     permissionsService,
@@ -34,12 +34,21 @@ import {
     type UserAccessResponse,
 } from '@/services/permissionsService'
 import {
-    accessRequestsService,
+    OPEN_STATUSES,
     type AccessRequestResponse,
 } from '@/services/accessRequestsService'
 import { AccessSummary } from '@/components/access/AccessSummary'
+import { STATUS_META, idpInstruction, roleLabel } from '@/components/access/accessRequestCopy'
 import { AccountShell } from '@/components/account/AccountShell'
+import { PersonChip } from '@/components/ui/PersonChip'
 import { useAppNotifications } from '@/components/ui/notifications'
+import {
+    WORKSPACE_ACCESS_KEY,
+    WORKSPACE_DIRECTORY_FEATURE,
+    useAccessRequestActions,
+    useMyAccessRequests,
+} from '@/hooks/useWorkspaceAccess'
+import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
@@ -48,7 +57,8 @@ export function MyAccessPage() {
     useDocumentTitle('My Access')
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [permissions, setPermissions] = useState<PermissionResponse[] | null>(null)
-    const [requests, setRequests] = useState<AccessRequestResponse[] | null>(null)
+    const { requests } = useMyAccessRequests()
+    const queryClient = useQueryClient()
     const [loading, setLoading] = useState(true)
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -58,13 +68,12 @@ export function MyAccessPage() {
         if (!silent) setLoading(true)
         setError(null)
         try {
-            // Permission catalogue + my requests are best-effort —
-            // used only for the summary banner / pending list. Their
-            // failures don't block the page.
-            const [accessRes, permsRes, reqsRes] = await Promise.allSettled([
+            // The permission catalogue is best-effort — used only for the
+            // summary banner. Its failure doesn't block the page. (Requests
+            // come from their own query, shared with Find a workspace.)
+            const [accessRes, permsRes] = await Promise.allSettled([
                 permissionsService.getMyAccess(),
                 permissionsService.listPermissions(),
-                accessRequestsService.listMine(),
             ])
             if (accessRes.status === 'rejected') {
                 throw accessRes.reason instanceof Error
@@ -73,7 +82,6 @@ export function MyAccessPage() {
             }
             setAccess(accessRes.value)
             setPermissions(permsRes.status === 'fulfilled' ? permsRes.value : [])
-            setRequests(reqsRes.status === 'fulfilled' ? reqsRes.value : [])
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to load access'
             setError(message)
@@ -91,6 +99,7 @@ export function MyAccessPage() {
 
     const handleRefresh = () => {
         setRefreshing(true)
+        void queryClient.invalidateQueries({ queryKey: WORKSPACE_ACCESS_KEY })
         load(true)
     }
 
@@ -158,6 +167,7 @@ function PlainEnglishSummary({
     access: UserAccessResponse
     permissions: PermissionResponse[]
 }) {
+    const directoryOn = useFeature(WORKSPACE_DIRECTORY_FEATURE)
     const isAdmin = access.effectiveGlobal.includes('system:admin')
     const isOrgAdmin = access.effectiveGlobal.includes('system:org-admin')
     const wsCount = Object.keys(access.effectiveWs).length
@@ -247,9 +257,18 @@ function PlainEnglishSummary({
                 </div>
                 <div className="min-w-0">
                     <p className="text-sm font-bold text-ink">You don't have any workspace access yet.</p>
-                    <p className="text-xs text-ink-secondary mt-0.5">
-                        Ask an administrator to add you to a workspace, or request access from a workspace's settings page.
-                    </p>
+                    {directoryOn ? (
+                        <p className="text-xs text-ink-secondary mt-0.5">
+                            Find a workspace your team works in and ask to join it — its admins answer.{' '}
+                            <Link to="/workspaces?tab=discover" className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline">
+                                Find a workspace
+                            </Link>
+                        </p>
+                    ) : (
+                        <p className="text-xs text-ink-secondary mt-0.5">
+                            Ask an administrator to add you to a workspace, or a colleague for a link to theirs — opening it lets you request access.
+                        </p>
+                    )}
                 </div>
             </motion.div>
         )
@@ -331,35 +350,15 @@ function summariseCapabilities(
 
 // ── My access requests panel ────────────────────────────────────────
 
-const STATUS_CHIP: Record<string, { icon: typeof Clock; pill: string; label: string }> = {
-    pending: {
-        icon: Clock,
-        pill: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        label: 'Pending',
-    },
-    approved: {
-        icon: CheckCircle2,
-        pill: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-        label: 'Approved',
-    },
-    denied: {
-        icon: XCircle,
-        pill: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
-        label: 'Denied',
-    },
-}
-
 
 function MyRequestsPanel({ requests }: { requests: AccessRequestResponse[] }) {
-    // Sort: pending first, then approved/denied by most recent.
-    const sorted = useMemo(() => {
-        const order = { pending: 0, approved: 1, denied: 2 } as const
-        return [...requests].sort((a, b) => {
-            const o = (order[a.status] ?? 3) - (order[b.status] ?? 3)
-            if (o !== 0) return o
-            return (b.createdAt ?? '').localeCompare(a.createdAt ?? '')
-        })
-    }, [requests])
+    // Open requests first, then the answered ones by most recent.
+    const sorted = useMemo(() => [...requests].sort((a, b) => {
+        const o = Number(!OPEN_STATUSES.includes(a.status)) - Number(!OPEN_STATUSES.includes(b.status))
+        if (o !== 0) return o
+        return (b.createdAt ?? '').localeCompare(a.createdAt ?? '')
+    }), [requests])
+    const open = sorted.filter(r => OPEN_STATUSES.includes(r.status)).length
 
     return (
         <motion.div
@@ -372,50 +371,125 @@ function MyRequestsPanel({ requests }: { requests: AccessRequestResponse[] }) {
                 <Inbox className="w-4 h-4 text-ink-secondary" />
                 <h3 className="text-sm font-bold text-ink">My access requests</h3>
                 <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-black/5 dark:bg-white/5 text-ink-muted">
-                    {sorted.length}
+                    {open > 0 ? `${open} open` : sorted.length}
                 </span>
             </div>
             <div className="divide-y divide-glass-border">
-                {sorted.map(r => {
-                    const chip = STATUS_CHIP[r.status] ?? STATUS_CHIP.pending
-                    const ChipIcon = chip.icon
-                    return (
-                        <div key={r.id} className="px-5 py-3 flex items-start gap-3">
-                            <span className={cn(
-                                'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border shrink-0',
-                                chip.pill,
-                            )}>
-                                <ChipIcon className="w-2.5 h-2.5" />
-                                {chip.label}
-                            </span>
-                            <div className="min-w-0 flex-1">
-                                <p className="text-sm font-semibold text-ink truncate">
-                                    {r.target.label ?? r.target.id}
-                                    <span className="font-normal text-ink-muted ml-1.5">as {r.requestedRole}</span>
-                                </p>
-                                {r.justification && (
-                                    <p className="text-xs text-ink-secondary mt-0.5 break-words">
-                                        “{r.justification}”
-                                    </p>
-                                )}
-                                {r.status === 'denied' && r.resolutionNote && (
-                                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">
-                                        Reason: {r.resolutionNote}
-                                    </p>
-                                )}
-                                <p className="text-[10px] text-ink-muted mt-1">
-                                    Submitted {formatRelative(r.createdAt)}
-                                    {r.resolvedAt && (
-                                        <> · Resolved {formatRelative(r.resolvedAt)}</>
-                                    )}
-                                </p>
-                            </div>
-                        </div>
-                    )
-                })}
+                {sorted.map(r => <MyRequestRow key={r.id} request={r} />)}
             </div>
         </motion.div>
     )
+}
+
+
+function MyRequestRow({ request: r }: { request: AccessRequestResponse }) {
+    const { notify } = useAppNotifications()
+    const { withdraw } = useAccessRequestActions()
+    const meta = STATUS_META[r.status] ?? STATUS_META.pending
+    const ChipIcon = meta.icon
+    const isOpen = OPEN_STATUSES.includes(r.status)
+
+    const onWithdraw = () => withdraw.mutate(r.id, {
+        onSuccess: () => notify('success', 'Request withdrawn.'),
+        onError: (err) => notify('error', (err as Error).message),
+    })
+
+    return (
+        <div className="px-5 py-3 flex items-start gap-3">
+            <span className={cn(
+                'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border shrink-0',
+                meta.pill,
+            )}>
+                <ChipIcon className="w-2.5 h-2.5" />
+                {meta.label}
+            </span>
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-ink truncate">
+                    {r.target.label ?? <span>A workspace you asked to join <code className="font-mono text-[11px] text-ink-muted">{r.target.id}</code></span>}
+                    <span className="font-normal text-ink-muted ml-1.5">as {roleLabel(r.requestedRole)}</span>
+                </p>
+                {r.justification && (
+                    <p className="text-xs text-ink-secondary mt-0.5 break-words">
+                        “{r.justification}”
+                    </p>
+                )}
+                <RequestOutcome request={r} />
+                <p className="text-[10px] text-ink-muted mt-1">
+                    Asked {formatRelative(r.createdAt)}
+                    {r.resolvedAt && r.status !== 'withdrawn' && (
+                        <> · Answered {formatRelative(r.resolvedAt)}</>
+                    )}
+                    {r.fulfilledAt && (
+                        <> · Access arrived {formatRelative(r.fulfilledAt)}</>
+                    )}
+                </p>
+            </div>
+            <div className="shrink-0 flex flex-col items-end gap-1.5">
+                {r.status === 'approved' && r.target.label && (
+                    <Link
+                        to={`/workspaces/${r.target.id}`}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                        Open <ArrowRight className="w-3 h-3" />
+                    </Link>
+                )}
+                {isOpen && (
+                    <button
+                        type="button"
+                        onClick={onWithdraw}
+                        disabled={withdraw.isPending}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                    >
+                        {withdraw.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Undo2 className="w-3 h-3" />}
+                        Withdraw
+                    </button>
+                )}
+            </div>
+        </div>
+    )
+}
+
+
+/** How the request was answered — or what it's waiting on. */
+function RequestOutcome({ request: r }: { request: AccessRequestResponse }) {
+    const by = r.resolvedBy ? <PersonChip id={r.resolvedBy} size="xs" link={false} /> : null
+    if (r.status === 'pending') {
+        return <p className="text-xs text-ink-muted mt-1">Waiting for the workspace’s admins and stewards to answer.</p>
+    }
+    if (r.status === 'awaiting_idp' && r.idpGroup) {
+        return (
+            <div className="mt-1.5 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] px-2.5 py-1.5">
+                <p className="text-xs text-ink">{idpInstruction(r.idpGroup, r.idpProvider)}</p>
+                {r.resolutionNote && <p className="text-xs text-ink-secondary mt-1">“{r.resolutionNote}”</p>}
+                {by && <p className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-muted">Pointed there by {by}</p>}
+            </div>
+        )
+    }
+    if (r.status === 'approved') {
+        const what = r.fulfilledAt && r.idpGroup
+            ? <>Granted through your identity provider’s group “{r.idpGroup}”.</>
+            : r.grantedGroup
+                ? <>Added to the team “{r.grantedGroup.name ?? r.grantedGroup.id}”.</>
+                : <>Granted {roleLabel(r.grantedRole ?? r.requestedRole)}{r.idpException ? ' as an exception' : ''}{r.accessExpiresAt ? ` until ${new Date(r.accessExpiresAt).toLocaleDateString()}` : ''}.</>
+        return (
+            <div className="mt-1">
+                <p className="text-xs text-emerald-700 dark:text-emerald-400">{what}</p>
+                {r.resolutionNote && <p className="text-xs text-ink-secondary mt-0.5">“{r.resolutionNote}”</p>}
+                {by && <p className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-muted">Approved by {by}</p>}
+            </div>
+        )
+    }
+    if (r.status === 'denied') {
+        return (
+            <div className="mt-1">
+                {r.resolutionNote && (
+                    <p className="text-xs text-rose-600 dark:text-rose-400">Reason: {r.resolutionNote}</p>
+                )}
+                {by && <p className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-muted">Declined by {by}</p>}
+            </div>
+        )
+    }
+    return <p className="text-xs text-ink-muted mt-1">You withdrew it.</p>
 }
 
 

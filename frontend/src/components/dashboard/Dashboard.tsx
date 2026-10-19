@@ -53,6 +53,7 @@ import { WorkspaceGrid } from './WorkspaceGrid'
 import { TemplateGrid } from './TemplateGrid'
 import { DashboardSemanticLayers } from './DashboardSemanticLayers'
 import { DashboardOnboarding } from './DashboardOnboarding'
+import { DashboardJoinWorkspace } from './DashboardJoinWorkspace'
 import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -112,6 +113,9 @@ export function Dashboard() {
     // A brand-new instance = no workspaces. (The old `dashboardTier` heuristic
     // keyed off the fake recentViews count, so it decided layout from noise.)
     const isOnboarding = (workspaces?.length ?? 0) === 0 && !onboardingDismissedAt
+    // No workspace and no way to create one: the way in is joining one.
+    const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
+    const needsToJoin = (workspaces?.length ?? 0) === 0 && !canCreateWorkspace
 
     const handleSelectHit = useCallback((hit: SearchHit) => {
         if (searchQuery.trim()) recordRecentSearch(searchQuery)
@@ -177,6 +181,17 @@ export function Dashboard() {
     // a cold start: the reload on every visit keeps what is already on screen. ──
     if (isLoadingWorkspaces && (workspaces?.length ?? 0) === 0) {
         return <DashboardSkeleton />
+    }
+
+    // ── Not in a workspace yet, and can't create one: how to join one ─────────
+    if (needsToJoin) {
+        return (
+            <div className="w-full h-full bg-canvas overflow-y-auto custom-scrollbar">
+                <PageContainer className="pb-28">
+                    <DashboardJoinWorkspace />
+                </PageContainer>
+            </div>
+        )
     }
 
     // ── Onboarding: first-run experience for new users ────────────────────────

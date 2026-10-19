@@ -35,6 +35,10 @@ import { PageContainer } from '@/components/layout/PageContainer'
 import { cn } from '@/lib/utils'
 import { Check } from 'lucide-react'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
+import { motion } from 'framer-motion'
+import { useFeature } from '@/store/features'
+import { WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
+import { WorkspaceDirectory } from '@/components/workspaces/WorkspaceDirectory'
 
 function providerLabel(type: string): string {
     if (type === 'neo4j') return 'Neo4j'
@@ -418,6 +422,20 @@ export function WorkspacesPage() {
     // would mislead them into clicking a CTA they can't use.
     const showPipelineNudge = !isLoading && isPlatformAdmin && providers.length === 0
 
+    /* ── Tabs: your workspaces, and — while the switch is on — Find a workspace.
+       Someone with no workspace who can't create one lands on Find a workspace. ── */
+    const directoryOn = useFeature(WORKSPACE_DIRECTORY_FEATURE)
+    const tabParam = searchParams.get('tab')
+    const tab: 'mine' | 'discover' =
+        directoryOn && (tabParam === 'discover'
+            || (tabParam === null && !isLoading && workspaces.length === 0 && !canCreateWorkspace))
+            ? 'discover'
+            : 'mine'
+    const tabs = [
+        { id: 'mine' as const, label: 'Your workspaces', count: isLoading ? null : workspaces.length },
+        ...(directoryOn ? [{ id: 'discover' as const, label: 'Find a workspace', count: null }] : []),
+    ]
+
     // Live counts per health state. Without these the Health menu offered filters
     // that matched nothing (every workspace was "unknown"), so choosing one just
     // blanked the page.
@@ -474,327 +492,388 @@ export function WorkspacesPage() {
                 </div>
             </div>
 
-            {/* A failed refresh used to erase the provider/ontology detail silently.
-                Now it keeps it and admits it might be stale. */}
-            {(listFailed || probeFailed) && !isLoading && (
-                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5 flex items-center gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
-                    <p className="text-xs text-ink-muted flex-1">
-                        {listFailed
-                            ? "Couldn't refresh the workspace list — what's shown may be out of date."
-                            : "Couldn't refresh provider and semantic-layer details — showing the last known values."}
-                    </p>
-                    <button
-                        onClick={() => loadData()}
-                        className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
-                    >
-                        Retry
-                    </button>
+            {tabs.length > 1 && (
+                <div role="tablist" aria-label="Workspaces" className="flex flex-wrap items-center gap-1 border-b border-slate-200 dark:border-slate-700">
+                    {tabs.map(t => {
+                        const selected = tab === t.id
+                        return (
+                            <button
+                                key={t.id}
+                                type="button"
+                                role="tab"
+                                aria-selected={selected}
+                                onClick={() => setParam('tab', t.id === 'mine' ? (workspaces.length === 0 ? 'mine' : null) : t.id)}
+                                className={cn(
+                                    'relative -mb-px flex items-center gap-1.5 px-3.5 py-2.5 text-sm font-medium transition-colors',
+                                    selected ? 'text-ink' : 'text-ink-muted hover:text-ink',
+                                )}
+                            >
+                                {selected && (
+                                    <motion.span
+                                        layoutId="workspaces-tab-indicator"
+                                        transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+                                        className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-indigo-500"
+                                    />
+                                )}
+                                {t.label}
+                                {t.count !== null && (
+                                    <span className={cn(
+                                        'px-1.5 py-px rounded-full text-[10px] font-semibold tabular-nums',
+                                        selected ? 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-400' : 'bg-black/5 dark:bg-white/5',
+                                    )}>
+                                        {t.count}
+                                    </span>
+                                )}
+                            </button>
+                        )
+                    })}
                 </div>
             )}
 
-            {/* Pipeline nudge when no providers exist */}
-            {showPipelineNudge && (
-                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-4 flex items-start gap-3">
-                    <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
-                    <div className="flex-1">
-                        <p className="text-sm font-semibold text-ink">No data sources connected yet</p>
-                        <p className="text-xs text-ink-muted mt-0.5">
-                            A workspace groups connected data sources. Set up your ingestion pipeline first, then create a workspace to use it.
-                        </p>
-                    </div>
-                    <Link
-                        to="/ingestion?tab=providers"
-                        className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition-colors"
-                    >
-                        Set up Ingestion →
-                    </Link>
-                </div>
-            )}
+            {tab === 'discover' && <WorkspaceDirectory />}
 
-            {/* ── Summary banner ── */}
-            {!isLoading && workspaces.length > 0 && (
-                <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-                    <div className="h-1 w-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-500" />
-                    <div className="p-5">
-                        {/* Top row — key metrics */}
-                        <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
-                            <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
-                                    <Database className="w-5 h-5 text-indigo-500" />
-                                </div>
-                                <div>
-                                    <div className="text-lg font-bold text-ink">{globalSummary.totalDs}</div>
-                                    <div className="text-[10px] text-ink-muted uppercase tracking-wider">Data Sources</div>
-                                </div>
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
-                                    <CircleDot className="w-5 h-5 text-emerald-500" />
-                                </div>
-                                <div>
-                                    <div className="text-lg font-bold text-ink">{compact(globalSummary.totalNodes)}</div>
-                                    <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Nodes</div>
-                                </div>
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
-                                    <ArrowRightLeft className="w-5 h-5 text-violet-500" />
-                                </div>
-                                <div>
-                                    <div className="text-lg font-bold text-ink">{compact(globalSummary.totalEdges)}</div>
-                                    <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Edges</div>
-                                </div>
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
-                                    <Eye className="w-5 h-5 text-cyan-500" />
-                                </div>
-                                <div>
-                                    <div className="text-lg font-bold text-ink">{totalViews}</div>
-                                    <div className="text-[10px] text-ink-muted uppercase tracking-wider">Views</div>
-                                </div>
-                            </div>
-
-                            {/* Separator + schema types from ontologies */}
-                            {(globalSummary.totalEntityTypes > 0 || globalSummary.totalRelTypes > 0) && (
-                                <>
-                                    <div className="w-px h-10 bg-glass-border hidden lg:block" />
-                                    <div>
-                                        <div className="text-[10px] text-ink-muted uppercase tracking-wider mb-1.5">
-                                            Governed by {globalSummary.ontologyCount} {globalSummary.ontologyCount === 1 ? 'ontology' : 'ontologies'}
-                                        </div>
-                                        <div className="flex items-center gap-3">
-                                            {globalSummary.totalEntityTypes > 0 && (
-                                                <span className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                                                    <span className="w-2 h-2 rounded-full bg-amber-400" />
-                                                    <span className="font-bold text-ink">{globalSummary.totalEntityTypes}</span> entity types
-                                                </span>
-                                            )}
-                                            {globalSummary.totalRelTypes > 0 && (
-                                                <span className="flex items-center gap-1.5 text-xs text-ink-secondary">
-                                                    <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                                                    <span className="font-bold text-ink">{globalSummary.totalRelTypes}</span> relationship types
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </>
-                            )}
-
-                            {/* Providers */}
-                            {globalSummary.uniqueProviders.length > 0 && (
-                                <>
-                                    <div className="w-px h-10 bg-glass-border hidden lg:block" />
-                                    <div>
-                                        <div className="text-[10px] text-ink-muted uppercase tracking-wider mb-1.5">Connected via</div>
-                                        <div className="flex items-center gap-2">
-                                            {globalSummary.uniqueProviders.map(pt => {
-                                                const Logo = getProviderLogo(pt)
-                                                return (
-                                                    <span key={pt} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-[11px] font-medium text-ink-secondary">
-                                                        <Logo className="w-4 h-4" />
-                                                        {providerLabel(pt)}
-                                                        <span className="text-ink-muted/70">{globalSummary.providerCounts[pt]}</span>
-                                                    </span>
-                                                )
-                                            })}
-                                        </div>
-                                    </div>
-                                </>
-                            )}
-                        </div>
-
-                        {/* Marketing-style tagline */}
-                        <div className="mt-4 pt-4 border-t border-glass-border/50 flex items-center gap-2">
-                            <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                            <p className="text-xs text-ink-muted">
-                                {globalSummary.totalNodes > 0 && (
-                                    <span>Your workspaces manage <span className="font-semibold text-ink">{compact(globalSummary.totalNodes)} nodes</span> and <span className="font-semibold text-ink">{compact(globalSummary.totalEdges)} edges</span></span>
-                                )}
-                                {globalSummary.totalEntityTypes > 0 && (
-                                    <span>{globalSummary.totalNodes > 0 ? ', classified into ' : 'Classified into '}<span className="font-semibold text-ink">{globalSummary.totalEntityTypes} entity types</span> and <span className="font-semibold text-ink">{globalSummary.totalRelTypes} relationship types</span> via ontologies</span>
-                                )}
-                                {totalViews > 0 && (
-                                    <span>{globalSummary.totalNodes > 0 || globalSummary.totalEntityTypes > 0 ? ', powering ' : 'Powering '}<Link to="/explorer" className="font-semibold text-indigo-500 hover:underline">{totalViews} view{totalViews !== 1 ? 's' : ''}</Link> for your team</span>
-                                )}
-                                {(globalSummary.totalNodes > 0 || globalSummary.totalEntityTypes > 0 || totalViews > 0) && <span>.</span>}
+            {tab === 'mine' && (
+                <>
+                    {/* A failed refresh used to erase the provider/ontology detail silently.
+                        Now it keeps it and admits it might be stale. */}
+                    {(listFailed || probeFailed) && !isLoading && (
+                        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5 flex items-center gap-2.5">
+                            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                            <p className="text-xs text-ink-muted flex-1">
+                                {listFailed
+                                    ? "Couldn't refresh the workspace list — what's shown may be out of date."
+                                    : "Couldn't refresh provider and semantic-layer details — showing the last known values."}
                             </p>
+                            <button
+                                onClick={() => loadData()}
+                                className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+                            >
+                                Retry
+                            </button>
                         </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Select-all lived only in the list header, so in grid view bulk
-                selection had no entry point at all. */}
-            {!isLoading && filtered.length > 0 && (
-                <div className="flex items-center justify-between gap-3 -mb-2">
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const allSelected = filtered.every(w => selectedIds.has(w.id))
-                            setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
-                        }}
-                        className="inline-flex items-center gap-2 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
-                    >
-                        <span className={cn(
-                            'w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-colors',
-                            filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
-                                ? 'bg-indigo-500 border-indigo-500'
-                                : selectedIds.size > 0
-                                    ? 'border-indigo-400/70'
-                                    : 'border-ink-muted/35 hover:border-indigo-500',
-                        )}>
-                            {filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
-                                ? <Check className="w-3 h-3 text-white" strokeWidth={3} />
-                                // Partial selection reads as a dash, not a tick.
-                                : selectedIds.size > 0
-                                    ? <span className="w-2 h-0.5 rounded-full bg-indigo-400" />
-                                    : null}
-                        </span>
-                        {selectedIds.size > 0
-                            ? `${selectedIds.size} selected`
-                            : `Select all ${filtered.length}`}
-                    </button>
-
-                    {selectedIds.size > 0 && (
-                        <button
-                            type="button"
-                            onClick={clearSelection}
-                            className="text-xs font-medium text-ink-muted hover:text-ink transition-colors"
-                        >
-                            Clear
-                        </button>
                     )}
-                </div>
-            )}
 
-            {/* ── Filter toolbar ── */}
-            <div data-tour="workspaces-toolbar">
-                <WorkspaceFilterToolbar
-                    search={searchInput}
-                    onSearchChange={setSearchInput}
-                    sort={sortKey}
-                    onSortChange={s => setParam('sort', s === 'newest' ? null : s)}
-                    layout={layout}
-                    onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
-                    healthFilter={healthFilter}
-                    onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
-                    healthCounts={healthCounts}
-                    totalCount={workspaces.length}
-                    filteredCount={filtered.length}
-                />
-            </div>
+                    {/* Pipeline nudge when no providers exist */}
+                    {showPipelineNudge && (
+                        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-4 flex items-start gap-3">
+                            <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+                            <div className="flex-1">
+                                <p className="text-sm font-semibold text-ink">No data sources connected yet</p>
+                                <p className="text-xs text-ink-muted mt-0.5">
+                                    A workspace groups connected data sources. Set up your ingestion pipeline first, then create a workspace to use it.
+                                </p>
+                            </div>
+                            <Link
+                                to="/ingestion?tab=providers"
+                                className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition-colors"
+                            >
+                                Set up Ingestion →
+                            </Link>
+                        </div>
+                    )}
 
-            {/* Content */}
-            {isLoading ? (
-                layout === 'grid' ? (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-                        {Array.from({ length: 6 }).map((_, i) => <WorkspaceCardSkeleton key={i} />)}
+                    {/* ── Summary banner ── */}
+                    {!isLoading && workspaces.length > 0 && (
+                        <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-500" />
+                            <div className="p-5">
+                                {/* Top row — key metrics */}
+                                <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+                                            <Database className="w-5 h-5 text-indigo-500" />
+                                        </div>
+                                        <div>
+                                            <div className="text-lg font-bold text-ink">{globalSummary.totalDs}</div>
+                                            <div className="text-[10px] text-ink-muted uppercase tracking-wider">Data Sources</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                                            <CircleDot className="w-5 h-5 text-emerald-500" />
+                                        </div>
+                                        <div>
+                                            <div className="text-lg font-bold text-ink">{compact(globalSummary.totalNodes)}</div>
+                                            <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Nodes</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
+                                            <ArrowRightLeft className="w-5 h-5 text-violet-500" />
+                                        </div>
+                                        <div>
+                                            <div className="text-lg font-bold text-ink">{compact(globalSummary.totalEdges)}</div>
+                                            <div className="text-[10px] text-ink-muted uppercase tracking-wider">Graph Edges</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
+                                            <Eye className="w-5 h-5 text-cyan-500" />
+                                        </div>
+                                        <div>
+                                            <div className="text-lg font-bold text-ink">{totalViews}</div>
+                                            <div className="text-[10px] text-ink-muted uppercase tracking-wider">Views</div>
+                                        </div>
+                                    </div>
+
+                                    {/* Separator + schema types from ontologies */}
+                                    {(globalSummary.totalEntityTypes > 0 || globalSummary.totalRelTypes > 0) && (
+                                        <>
+                                            <div className="w-px h-10 bg-glass-border hidden lg:block" />
+                                            <div>
+                                                <div className="text-[10px] text-ink-muted uppercase tracking-wider mb-1.5">
+                                                    Governed by {globalSummary.ontologyCount} {globalSummary.ontologyCount === 1 ? 'ontology' : 'ontologies'}
+                                                </div>
+                                                <div className="flex items-center gap-3">
+                                                    {globalSummary.totalEntityTypes > 0 && (
+                                                        <span className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                                                            <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                                            <span className="font-bold text-ink">{globalSummary.totalEntityTypes}</span> entity types
+                                                        </span>
+                                                    )}
+                                                    {globalSummary.totalRelTypes > 0 && (
+                                                        <span className="flex items-center gap-1.5 text-xs text-ink-secondary">
+                                                            <span className="w-2 h-2 rounded-full bg-indigo-400" />
+                                                            <span className="font-bold text-ink">{globalSummary.totalRelTypes}</span> relationship types
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {/* Providers */}
+                                    {globalSummary.uniqueProviders.length > 0 && (
+                                        <>
+                                            <div className="w-px h-10 bg-glass-border hidden lg:block" />
+                                            <div>
+                                                <div className="text-[10px] text-ink-muted uppercase tracking-wider mb-1.5">Connected via</div>
+                                                <div className="flex items-center gap-2">
+                                                    {globalSummary.uniqueProviders.map(pt => {
+                                                        const Logo = getProviderLogo(pt)
+                                                        return (
+                                                            <span key={pt} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-[11px] font-medium text-ink-secondary">
+                                                                <Logo className="w-4 h-4" />
+                                                                {providerLabel(pt)}
+                                                                <span className="text-ink-muted/70">{globalSummary.providerCounts[pt]}</span>
+                                                            </span>
+                                                        )
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+
+                                {/* Marketing-style tagline */}
+                                <div className="mt-4 pt-4 border-t border-glass-border/50 flex items-center gap-2">
+                                    <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                    <p className="text-xs text-ink-muted">
+                                        {globalSummary.totalNodes > 0 && (
+                                            <span>Your workspaces manage <span className="font-semibold text-ink">{compact(globalSummary.totalNodes)} nodes</span> and <span className="font-semibold text-ink">{compact(globalSummary.totalEdges)} edges</span></span>
+                                        )}
+                                        {globalSummary.totalEntityTypes > 0 && (
+                                            <span>{globalSummary.totalNodes > 0 ? ', classified into ' : 'Classified into '}<span className="font-semibold text-ink">{globalSummary.totalEntityTypes} entity types</span> and <span className="font-semibold text-ink">{globalSummary.totalRelTypes} relationship types</span> via ontologies</span>
+                                        )}
+                                        {totalViews > 0 && (
+                                            <span>{globalSummary.totalNodes > 0 || globalSummary.totalEntityTypes > 0 ? ', powering ' : 'Powering '}<Link to="/explorer" className="font-semibold text-indigo-500 hover:underline">{totalViews} view{totalViews !== 1 ? 's' : ''}</Link> for your team</span>
+                                        )}
+                                        {(globalSummary.totalNodes > 0 || globalSummary.totalEntityTypes > 0 || totalViews > 0) && <span>.</span>}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Select-all lived only in the list header, so in grid view bulk
+                        selection had no entry point at all. */}
+                    {!isLoading && filtered.length > 0 && (
+                        <div className="flex items-center justify-between gap-3 -mb-2">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const allSelected = filtered.every(w => selectedIds.has(w.id))
+                                    setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
+                                }}
+                                className="inline-flex items-center gap-2 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+                            >
+                                <span className={cn(
+                                    'w-[18px] h-[18px] rounded-[5px] border-2 flex items-center justify-center transition-colors',
+                                    filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                        ? 'bg-indigo-500 border-indigo-500'
+                                        : selectedIds.size > 0
+                                            ? 'border-indigo-400/70'
+                                            : 'border-ink-muted/35 hover:border-indigo-500',
+                                )}>
+                                    {filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                        ? <Check className="w-3 h-3 text-white" strokeWidth={3} />
+                                        // Partial selection reads as a dash, not a tick.
+                                        : selectedIds.size > 0
+                                            ? <span className="w-2 h-0.5 rounded-full bg-indigo-400" />
+                                            : null}
+                                </span>
+                                {selectedIds.size > 0
+                                    ? `${selectedIds.size} selected`
+                                    : `Select all ${filtered.length}`}
+                            </button>
+
+                            {selectedIds.size > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={clearSelection}
+                                    className="text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                                >
+                                    Clear
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ── Filter toolbar ── */}
+                    <div data-tour="workspaces-toolbar">
+                        <WorkspaceFilterToolbar
+                            search={searchInput}
+                            onSearchChange={setSearchInput}
+                            sort={sortKey}
+                            onSortChange={s => setParam('sort', s === 'newest' ? null : s)}
+                            layout={layout}
+                            onLayoutChange={l => setParam('layout', l === 'grid' ? null : l)}
+                            healthFilter={healthFilter}
+                            onHealthFilterChange={h => setParam('health', h === 'all' ? null : h)}
+                            healthCounts={healthCounts}
+                            totalCount={workspaces.length}
+                            filteredCount={filtered.length}
+                        />
                     </div>
-                ) : (
-                    <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                        {Array.from({ length: 6 }).map((_, i) => <WorkspaceListRowSkeleton key={i} />)}
-                    </div>
-                )
-            ) : filtered.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
-                    <Database className="w-12 h-12 text-ink-muted mb-4" />
-                    {/* Nothing on screen AND the list request failed: we do not
-                        know what is here, so we must not say there is nothing. */}
-                    {listFailed && workspaces.length === 0 ? (
-                        <>
-                            <h3 className="text-lg font-bold text-ink mb-1">Couldn't load your workspaces</h3>
-                            <p className="text-sm text-ink-muted">The request failed — retry above to see what's here.</p>
-                        </>
+
+                    {/* Content */}
+                    {isLoading ? (
+                        layout === 'grid' ? (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                                {Array.from({ length: 6 }).map((_, i) => <WorkspaceCardSkeleton key={i} />)}
+                            </div>
+                        ) : (
+                            <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+                                {Array.from({ length: 6 }).map((_, i) => <WorkspaceListRowSkeleton key={i} />)}
+                            </div>
+                        )
+                    ) : filtered.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
+                            <Database className="w-12 h-12 text-ink-muted mb-4" />
+                            {/* Nothing on screen AND the list request failed: we do not
+                                know what is here, so we must not say there is nothing. */}
+                            {listFailed && workspaces.length === 0 ? (
+                                <>
+                                    <h3 className="text-lg font-bold text-ink mb-1">Couldn't load your workspaces</h3>
+                                    <p className="text-sm text-ink-muted">The request failed — retry above to see what's here.</p>
+                                </>
+                            ) : (
+                                <>
+                                    <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
+                                    <p className="text-sm text-ink-muted">
+                                        {searchQuery
+                                            ? 'Try a different search term'
+                                            : canCreateWorkspace
+                                                ? 'Create a workspace to get started'
+                                                : directoryOn
+                                                    ? 'Find one your team works in and ask to join it'
+                                                    : 'Ask an administrator to add you, or a colleague for a link to their workspace'}
+                                    </p>
+                                    {!searchQuery && directoryOn && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setParam('tab', 'discover')}
+                                            className="mt-4 px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-md"
+                                        >
+                                            Find a workspace
+                                        </button>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    ) : layout === 'grid' ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                            {filtered.map((ws, i) => (
+                                <div key={ws.id} className="ws-card-stagger" style={{ animationDelay: `${Math.min(i * 40, 300)}ms` }}>
+                                    <WorkspaceCard
+                                        ws={ws}
+                                        isSelected={selectedIds.has(ws.id)}
+                                        onToggleSelect={() => toggleSelect(ws.id)}
+                                        selectionActive={selectedIds.size > 0}
+                                        stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
+                                        healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
+                                        dsProviders={wsProviderInfoMap[ws.id] || []}
+                                        schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
+                                        usage={wsUsage?.[ws.id]}
+                                        onOpen={() => navigate(`/workspaces/${ws.id}`)}
+                                        onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
+                                        onDelete={() => handleDelete(ws.id)}
+                                        onSetDefault={() => handleSetDefault(ws.id)}
+                                        onManageMembers={
+                                            can('workspace:admin', ws.id)
+                                                ? () => navigate(`/workspaces/${ws.id}?tab=members`)
+                                                : undefined
+                                        }
+                                    />
+                                </div>
+                            ))}
+                        </div>
                     ) : (
-                        <>
-                            <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
-                            <p className="text-sm text-ink-muted">{searchQuery ? 'Try a different search term' : 'Create a workspace to get started'}</p>
-                        </>
-                    )}
-                </div>
-            ) : layout === 'grid' ? (
-                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-                    {filtered.map((ws, i) => (
-                        <div key={ws.id} className="ws-card-stagger" style={{ animationDelay: `${Math.min(i * 40, 300)}ms` }}>
-                            <WorkspaceCard
-                                ws={ws}
-                                isSelected={selectedIds.has(ws.id)}
-                                onToggleSelect={() => toggleSelect(ws.id)}
-                                selectionActive={selectedIds.size > 0}
-                                stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
-                                healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
-                                dsProviders={wsProviderInfoMap[ws.id] || []}
-                                schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
-                                usage={wsUsage?.[ws.id]}
-                                onOpen={() => navigate(`/workspaces/${ws.id}`)}
-                                onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
-                                onDelete={() => handleDelete(ws.id)}
-                                onSetDefault={() => handleSetDefault(ws.id)}
-                                onManageMembers={
-                                    can('workspace:admin', ws.id)
-                                        ? () => navigate(`/workspaces/${ws.id}?tab=members`)
-                                        : undefined
-                                }
-                            />
+                        <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
+                            <div className={cn(
+                                'grid gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold',
+                                // The SAME template the rows use — see WORKSPACE_LIST_GRID.
+                                WORKSPACE_LIST_GRID,
+                            )}>
+                                {/* Select-all: the fastest way to bulk-act, and it selects only
+                                    what's currently FILTERED — not the whole catalogue. */}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const allSelected = filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
+                                        setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
+                                    }}
+                                    aria-label="Select all workspaces"
+                                    className="w-4 h-4 rounded border border-glass-border bg-canvas hover:border-indigo-500 transition-colors"
+                                />
+                                <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Created</span><span>Updated</span><span></span>
+                            </div>
+                            {filtered.map((ws, i) => (
+                                <WorkspaceListRow
+                                    key={ws.id}
+                                    ws={ws}
+                                    index={i}
+                                    isSelected={selectedIds.has(ws.id)}
+                                    onToggleSelect={() => toggleSelect(ws.id)}
+                                    stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
+                                    healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
+                                    dsProviders={wsProviderInfoMap[ws.id] || []}
+                                    onOpen={() => navigate(`/workspaces/${ws.id}`)}
+                                    onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
+                                    onDelete={() => handleDelete(ws.id)}
+                                    onSetDefault={() => handleSetDefault(ws.id)}
+                                    onManageMembers={
+                                        can('workspace:admin', ws.id)
+                                            ? () => navigate(`/workspaces/${ws.id}?tab=members`)
+                                            : undefined
+                                    }
+                                />
+                            ))}
                         </div>
-                    ))}
-                </div>
-            ) : (
-                <div className="rounded-2xl border border-glass-border overflow-hidden bg-canvas-elevated">
-                    <div className={cn(
-                        'grid gap-3 px-4 py-2.5 border-b border-glass-border/50 text-[10px] uppercase tracking-wider text-ink-muted font-bold',
-                        // The SAME template the rows use — see WORKSPACE_LIST_GRID.
-                        WORKSPACE_LIST_GRID,
-                    )}>
-                        {/* Select-all: the fastest way to bulk-act, and it selects only
-                            what's currently FILTERED — not the whole catalogue. */}
-                        <button
-                            type="button"
-                            onClick={() => {
-                                const allSelected = filtered.length > 0 && filtered.every(w => selectedIds.has(w.id))
-                                setSelectedIds(allSelected ? new Set() : new Set(filtered.map(w => w.id)))
-                            }}
-                            aria-label="Select all workspaces"
-                            className="w-4 h-4 rounded border border-glass-border bg-canvas hover:border-indigo-500 transition-colors"
-                        />
-                        <span></span><span></span><span>Name</span><span>Providers</span><span>Sources</span><span>Nodes</span><span>Edges</span><span>Types</span><span>Created</span><span>Updated</span><span></span>
-                    </div>
-                    {filtered.map((ws, i) => (
-                        <WorkspaceListRow
-                            key={ws.id}
-                            ws={ws}
-                            index={i}
-                            isSelected={selectedIds.has(ws.id)}
-                            onToggleSelect={() => toggleSelect(ws.id)}
-                            stats={dsStats[ws.id] || { nodes: 0, edges: 0, types: 0 }}
-                            healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
-                            dsProviders={wsProviderInfoMap[ws.id] || []}
-                            onOpen={() => navigate(`/workspaces/${ws.id}`)}
-                            onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
-                            onDelete={() => handleDelete(ws.id)}
-                            onSetDefault={() => handleSetDefault(ws.id)}
-                            onManageMembers={
-                                can('workspace:admin', ws.id)
-                                    ? () => navigate(`/workspaces/${ws.id}?tab=members`)
-                                    : undefined
-                            }
-                        />
-                    ))}
-                </div>
-            )}
+                    )}
 
-            {/* Bulk selection bar */}
-            <WorkspaceBulkBar
-                selectedCount={selectedIds.size}
-                onDelete={canDeleteAllSelected ? () => void deletion.open(selectedWorkspaces) : undefined}
-                onClearSelection={clearSelection}
-                blockedReason="You can only delete workspaces you administer"
-            />
+                    {/* Bulk selection bar */}
+                    <WorkspaceBulkBar
+                        selectedCount={selectedIds.size}
+                        onDelete={canDeleteAllSelected ? () => void deletion.open(selectedWorkspaces) : undefined}
+                        onClearSelection={clearSelection}
+                        blockedReason="You can only delete workspaces you administer"
+                    />
+                </>
+            )}
 
             {/* Delete — single or bulk, same honest blast radius */}
             <DangerConfirmDialog

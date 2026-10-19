@@ -69,6 +69,10 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     analyticsPrivacyMode: 'strict',
     analyticsWorkspaceVisibility: false,
     signupEnabled: false,                 // fail CLOSED — this one is a door
+    // Fail CLOSED too: on, it tells everyone which workspaces exist. Guessing
+    // "on" before the served value lands would show the directory to a
+    // deployment that keeps workspace names to their members.
+    workspaceDirectoryEnabled: false,
     // Fail OPEN, unlike signupEnabled, and the asymmetry is the point: seeding
     // this `false` would re-create the bug it exists to control. A visitor
     // holding an invite would be turned away by a value we had not fetched yet,

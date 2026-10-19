@@ -95,6 +95,16 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'sidebar', key: 'workspaces' },
     },
     {
+        id: 'find-a-workspace',
+        category: 'Page',
+        title: 'Find a workspace',
+        description: 'Browse workspaces and ask to join one',
+        keywords: ['join', 'request access', 'ask', 'discover', 'directory', 'browse', 'teams'],
+        path: '/workspaces?tab=discover',
+        gate: { kind: 'sidebar', key: 'workspaces' },
+        feature: 'workspaceDirectoryEnabled',
+    },
+    {
         id: 'ingestion',
         category: 'Page',
         title: 'Ingestion',
