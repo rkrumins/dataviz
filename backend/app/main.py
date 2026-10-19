@@ -1649,6 +1649,20 @@ async def lifespan(_app: FastAPI):
             name="api-key-housekeeping",
         )
 
+    # Access reminders: time-limited access about to end, requests nobody has
+    # answered, access reviews past due. Same owner role, a lock per pass.
+    _app.state._access_housekeeping_shutdown = asyncio.Event()
+    _app.state._access_housekeeping_task = None
+    if runs_scheduler():
+        from .services.access_housekeeping import run_sweeper as _run_access_housekeeping
+        _app.state._access_housekeeping_task = asyncio.create_task(
+            _run_access_housekeeping(
+                get_jobs_session,
+                _app.state._access_housekeeping_shutdown,
+            ),
+            name="access-housekeeping",
+        )
+
     # Product-event retention sweep. ``product_events`` now takes a row per
     # view open, lineage trace and graph search, so it grows with usage and
     # needs a horizon. Same owner role, same reason.
@@ -1840,6 +1854,21 @@ async def lifespan(_app: FastAPI):
             _key_hk_task.cancel()
             try:
                 await _key_hk_task
+            except (asyncio.CancelledError, Exception):
+                pass  # cancelled on purpose, past its grace: shutting down regardless
+
+    # Stop the access reminders before DB pool teardown, same shape.
+    _access_hk_shutdown = getattr(_app.state, "_access_housekeeping_shutdown", None)
+    _access_hk_task = getattr(_app.state, "_access_housekeeping_task", None)
+    if _access_hk_shutdown is not None:
+        _access_hk_shutdown.set()
+    if _access_hk_task is not None and not _access_hk_task.done():
+        try:
+            await asyncio.wait_for(_access_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _access_hk_task.cancel()
+            try:
+                await _access_hk_task
             except (asyncio.CancelledError, Exception):
                 pass  # cancelled on purpose, past its grace: shutting down regardless
 

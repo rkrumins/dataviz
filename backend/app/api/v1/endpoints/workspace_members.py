@@ -11,7 +11,12 @@ a time as Viewer or Member (``workspace_access`` holds the ceilings).
   GET    /admin/workspaces/{ws_id}/members                list bindings + roles
   GET    /admin/workspaces/{ws_id}/members/grant-options  what the caller may grant
   POST   /admin/workspaces/{ws_id}/members                create binding
+  PUT    /admin/workspaces/{ws_id}/members/{binding}/expiry  move its end date
   DELETE /admin/workspaces/{ws_id}/members/{binding}      revoke binding
+
+A person hears in their Inbox when they are added, removed, or their end
+date moves. People who reach the workspace through a team don't: the team
+was bound, not them.
 """
 from __future__ import annotations
 
@@ -25,7 +30,13 @@ from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
 from backend.app.db.models import GroupORM, WorkspaceORM
-from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
+from backend.app.db.repositories import (
+    binding_repo,
+    group_repo,
+    notification_repo,
+    role_repo,
+    user_repo,
+)
 from backend.app.services import workspace_access
 from backend.app.services.permission_service import PermissionClaims, simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
@@ -468,6 +479,22 @@ async def create_member_binding(
             "reactivated": outcome == "reactivated",
         },
     )
+    if body.subject_type == "user":
+        until = f" until {binding.expires_at[:10]}" if binding.expires_at else ""
+        await notification_repo.notify(
+            session,
+            user_ids=[body.subject_id],
+            kind="workspace.member_added",
+            title=f"You were added to {ws.name}",
+            body=f"As {workspace_access.role_label(body.role)}{until}." + (
+                " Granted as an exception: its identity provider otherwise decides who is in."
+                if exception else ""
+            ),
+            link=f"/workspaces/{ws_id}",
+            actor_id=admin.id,
+            resource_type="workspace",
+            resource_id=ws_id,
+        )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
     return WorkspaceMemberResponse(
         binding_id=binding.id,
@@ -503,6 +530,9 @@ async def update_member_expiry(
     shortening is rare and the JWT TTL is the floor on staleness.
     Callers who want immediate effect should follow up with the
     revoke endpoint instead.
+
+    The person hears about it, is reminded again before the new end, and a
+    request they made to keep the access reads as answered.
     """
     binding = await binding_repo.get_binding(session, binding_id)
     if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
@@ -515,6 +545,26 @@ async def update_member_expiry(
         session, binding_id, expires_at=body.expires_at,
     )
     assert updated is not None  # we just fetched it
+    updated.expiry_reminded_at = None
+    if updated.subject_type == "user":
+        ends = f"now ends on {updated.expires_at[:10]}" if updated.expires_at else "no longer ends"
+        await workspace_access.settle_extension_requests(
+            session, binding_id=binding_id, resolver_id=admin.id,
+            note=f"A workspace admin changed it: your access {ends}.",
+            expires_at=updated.expires_at,
+        )
+        ws = await session.get(WorkspaceORM, ws_id)
+        await notification_repo.notify(
+            session,
+            user_ids=[updated.subject_id],
+            kind="workspace.access_end_changed",
+            title=f"Your access to {ws.name if ws else 'a workspace'} {ends}",
+            body=f"Your {workspace_access.role_label(updated.role_name)} access was changed by a workspace admin.",
+            link=f"/workspaces/{ws_id}",
+            actor_id=admin.id,
+            resource_type="role_binding",
+            resource_id=binding_id,
+        )
 
     await user_repo.create_outbox_event(
         session,
@@ -560,6 +610,10 @@ async def revoke_member_binding(
             detail="Binding not found in this workspace",
         )
     await binding_repo.delete_binding(session, binding_id)
+    if binding.subject_type == "user":
+        ws = await session.get(WorkspaceORM, ws_id)
+        if ws is not None:
+            await workspace_access.notify_removed(session, ws, binding, actor_id=admin.id)
 
     # Phase 7: kill the affected user's (or every group member's)
     # live sessions so the demotion takes effect immediately rather

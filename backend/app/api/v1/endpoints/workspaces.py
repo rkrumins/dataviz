@@ -426,7 +426,10 @@ async def update_workspace(
         getattr(old_ws, "identity_property", None),
         getattr(old_ws, "name_property", None),
     )
-    ws = await workspace_repo.update_workspace(session, workspace_id, req)
+    try:
+        ws = await workspace_repo.update_workspace(session, workspace_id, req)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
 

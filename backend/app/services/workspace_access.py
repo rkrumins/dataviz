@@ -16,8 +16,11 @@ the identity provider grants it:
 * **The identity provider.** A workspace whose access its IdP decides is
   reached through the IdP groups its mappings route into it.
 * **Provenance.** Every grant says how it came about: added directly, an
-  approved request, an exception, the identity provider's groups, a team,
-  or an organization-wide role (:class:`ProvenanceReader`).
+  approved request, an exception, joining an open workspace, the identity
+  provider's groups, a team, or an organization-wide role
+  (:class:`ProvenanceReader`).
+* **Exceptions end** once the identity provider grants what they did
+  (:func:`retire_covered_exceptions`).
 """
 from __future__ import annotations
 
@@ -50,6 +53,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.common.roles import role_label  # noqa: F401 — read as workspace_access.role_label
 
 logger = logging.getLogger(__name__)
 
@@ -61,22 +65,10 @@ STEWARD_GRANTABLE_ROLES = frozenset({"workspace_viewer", "workspace_member"})
 ORG_WIDE_PERMISSIONS = ("system:admin", "system:org-admin", "system:org-viewer")
 #: The order requestable roles are offered in; custom roles follow by name.
 _ROLE_ORDER = ("workspace_viewer", "workspace_member", "workspace_data_engineer")
-#: How the built-in workspace roles read in a sentence (the Inbox).
-_ROLE_LABELS = {
-    "workspace_viewer": "Viewer",
-    "workspace_member": "Member",
-    "workspace_data_engineer": "Data engineer",
-    "workspace_steward": "Steward",
-    "workspace_admin": "Admin",
-}
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def role_label(role_name: str) -> str:
-    return _ROLE_LABELS.get(role_name, role_name)
 
 
 def is_org_wide(claims: PermissionClaims) -> bool:
@@ -380,7 +372,14 @@ class ProvenanceReader:
                 if m.target_type == "role_binding"
                 and (m.scope_type, m.scope_id, m.role_name) == (b.scope_type, b.scope_id, b.role_name)
             ], at=b.granted_at)
-        origin = "exception" if b.idp_exception else "request" if b.access_request_id else "direct"
+        if b.idp_exception:
+            origin = "exception"
+        elif b.access_request_id:
+            # Nobody answers their own request: one "approved" by its asker
+            # is a workspace open to everyone, joined.
+            origin = "joined" if b.granted_by == user_id else "request"
+        else:
+            origin = "direct"
         return {"origin": origin, "by": b.granted_by, "at": b.granted_at, "request_id": b.access_request_id}
 
     def membership(self, m: Optional[GroupMemberORM], group: Optional[GroupORM], user_id: str) -> dict:
@@ -442,27 +441,17 @@ async def provenance_reader(session: AsyncSession, user_ids: Iterable[str]) -> P
     return ProvenanceReader(mappings, await provider_names(session), asserted)
 
 
-async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> int:
-    """Close the person's requests that wait on their identity provider in
-    workspaces it now grants them — called by the SSO reconciler, the
-    moment that access arrives. Returns how many it closed."""
-    waiting = (await session.execute(
-        select(AccessRequestORM).where(
-            AccessRequestORM.requester_id == user_id,
-            AccessRequestORM.status == "awaiting_idp",
-        )
-    )).scalars().all()
-    if not waiting:
-        return 0
-    ws_ids = sorted({r.target_id for r in waiting})
-    now = _now()
+async def _idp_grants(
+    session: AsyncSession, user_id: str, ws_ids: list[str], now: datetime,
+) -> list[RoleBindingORM]:
+    """The person's current grants in ``ws_ids`` that their identity provider
+    gave them: their own SSO bindings, and the bindings of groups it made
+    them a member of."""
     sso_groups = list((await session.execute(
         select(GroupMemberORM.group_id).where(
             GroupMemberORM.user_id == user_id, GroupMemberORM.source == "sso",
         )
     )).scalars().all())
-    # Only what the identity provider gave them: their own SSO bindings, and
-    # the bindings of groups it made them a member of.
     granted = [and_(
         RoleBindingORM.subject_type == "user",
         RoleBindingORM.subject_id == user_id,
@@ -480,7 +469,24 @@ async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> 
             or_(*granted),
         )
     )).scalars().all()
-    reached = {b.scope_id for b in candidates if not _is_expired(b.expires_at, now=now)}
+    return [b for b in candidates if not _is_expired(b.expires_at, now=now)]
+
+
+async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> int:
+    """Close the person's requests that wait on their identity provider in
+    workspaces it now grants them — called by the SSO reconciler, the
+    moment that access arrives. Returns how many it closed."""
+    waiting = (await session.execute(
+        select(AccessRequestORM).where(
+            AccessRequestORM.requester_id == user_id,
+            AccessRequestORM.status == "awaiting_idp",
+        )
+    )).scalars().all()
+    if not waiting:
+        return 0
+    ws_ids = sorted({r.target_id for r in waiting})
+    now = _now()
+    reached = {b.scope_id for b in await _idp_grants(session, user_id, ws_ids, now)}
     names = dict((await session.execute(
         select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ws_ids))
     )).all())
@@ -528,3 +534,169 @@ async def fulfil_idp_routed_requests(session: AsyncSession, *, user_id: str) -> 
     if closed:
         await session.flush()
     return closed
+
+
+async def settle_extension_requests(
+    session: AsyncSession,
+    *,
+    binding_id: str,
+    note: str,
+    resolver_id: Optional[str] = None,
+    expires_at: Optional[str] = None,
+) -> int:
+    """Close the open requests to keep a grant once its end has been decided
+    another way — an admin moved it, or the identity provider took over.
+    They read as answered. Returns how many it closed."""
+    rows = (await session.execute(
+        select(AccessRequestORM).where(
+            AccessRequestORM.binding_id == binding_id,
+            AccessRequestORM.status.in_(("pending", "awaiting_idp")),
+        )
+    )).scalars().all()
+    now = _now().isoformat()
+    for row in rows:
+        row.status = "approved"
+        row.resolved_at = now
+        row.resolved_by = resolver_id
+        row.resolution_note = note
+        row.granted_role = row.requested_role
+        row.access_expires_at = expires_at
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
+async def retire_covered_exceptions(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    asserted: Iterable[tuple[str, Optional[str], str]] = (),
+) -> int:
+    """End the person's exceptions that their identity provider now covers —
+    called by the SSO reconciler once it has applied their groups, with the
+    ``(scope_type, scope_id, role_name)`` grants their provider asserted.
+
+    An exception (a grant made in the app for a workspace whose access its
+    identity provider decides) is covered two ways:
+
+    * **The provider grants the same role.** The exception holds the only
+      binding that role can have, so the reconciler couldn't add its own:
+      the exception *becomes* the provider's grant — no end, no gap — even
+      one that has already lapsed, which would otherwise keep the provider's
+      grant out for good.
+    * **The provider's other grants in the workspace** carry every workspace
+      permission it did: the exception ends.
+
+    The person and whoever granted it hear about it; a request to keep it
+    closes, answered. Returns how many ended."""
+    now = _now()
+    asserted = set(asserted)
+    exceptions = list((await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.subject_type == "user",
+            RoleBindingORM.subject_id == user_id,
+            RoleBindingORM.scope_type == "workspace",
+            RoleBindingORM.idp_exception.is_(True),
+        )
+    )).scalars().all())
+    taken_over = [b for b in exceptions if (b.scope_type, b.scope_id, b.role_name) in asserted]
+    live = [b for b in exceptions if b not in taken_over and not _is_expired(b.expires_at, now=now)]
+    ended: list[RoleBindingORM] = []
+    if live:
+        from_idp: dict[str, set[str]] = {}
+        for b in await _idp_grants(session, user_id, sorted({b.scope_id for b in live}), now):
+            from_idp.setdefault(b.scope_id, set()).add(b.role_name)
+        perms = await role_repo.role_names_with_permissions(
+            session, sorted({b.role_name for b in live} | {r for roles in from_idp.values() for r in roles}),
+        )
+
+        def workspace_perms(roles) -> set[str]:
+            return {p for r in roles for p in perms.get(r, []) if p.startswith("workspace:")}
+
+        ended = [
+            b for b in live
+            if workspace_perms([b.role_name])
+            and workspace_perms([b.role_name]) <= workspace_perms(from_idp.get(b.scope_id, ()))
+        ]
+    retired = taken_over + ended
+    if not retired:
+        return 0
+    names = dict((await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(
+            WorkspaceORM.id.in_(sorted({b.scope_id for b in retired}))
+        )
+    )).all())
+    person = (await user_repo.get_identities_by_ids(session, [user_id])).get(user_id)
+    who = (person["name"] or person["email"]) if person else "Someone"
+    for b in retired:
+        granter = b.granted_by
+        if b in taken_over:
+            # Exactly what the reconciler would have written.
+            b.source, b.idp_exception, b.access_request_id = "sso", False, None
+            b.granted_by, b.granted_at = None, now.isoformat()
+            b.expires_at = b.expiry_reminded_at = None
+        else:
+            b.expires_at = now.isoformat()
+        name = names.get(b.scope_id) or "the workspace"
+        await settle_extension_requests(
+            session, binding_id=b.id, note="Your identity provider now grants this access.",
+        )
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.workspace.exception_retired",
+            payload={
+                "workspace_id": b.scope_id,
+                "binding_id": b.id,
+                "user_id": user_id,
+                "role": b.role_name,
+            },
+        )
+        await notification_repo.notify(
+            session,
+            user_ids=[user_id],
+            kind="access.exception_retired",
+            title=f"Your access to {name} now comes from your identity provider",
+            body=(
+                f"Your {role_label(b.role_name)} access was an exception. Your identity "
+                "provider's groups grant it now, so the exception has ended."
+            ),
+            link=f"/workspaces/{b.scope_id}",
+            resource_type="role_binding",
+            resource_id=b.id,
+        )
+        if granter and granter != user_id:
+            await notification_repo.notify(
+                session,
+                user_ids=[granter],
+                kind="access.exception_retired",
+                title=f"{who}'s exception in {name} has ended",
+                body="Their identity provider now grants the same access.",
+                link=f"/workspaces/{b.scope_id}?tab=members",
+                resource_type="role_binding",
+                resource_id=b.id,
+            )
+    await session.flush()
+    return len(retired)
+
+
+async def notify_removed(
+    session: AsyncSession, ws: WorkspaceORM, binding: RoleBindingORM, *, actor_id: str, why: str = "",
+) -> None:
+    """Tell a person their grant was removed — and whether that leaves them
+    any way in."""
+    left = (await roles_held(session, binding.subject_id, [ws.id])).get(ws.id)
+    role = role_label(binding.role_name)
+    await notification_repo.notify(
+        session,
+        user_ids=[binding.subject_id],
+        kind="workspace.member_removed",
+        title=(
+            f"Your {role} access to {ws.name} was removed" if left
+            else f"You no longer have access to {ws.name}"
+        ),
+        body=(why or "A workspace admin removed it.") + " If you think it's a mistake, ask its admins.",
+        link="/my/access",
+        actor_id=actor_id,
+        resource_type="workspace",
+        resource_id=ws.id,
+    )

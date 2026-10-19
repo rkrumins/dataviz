@@ -219,9 +219,10 @@ async def test_the_roles_anyone_may_ask_for_are_access_never_authority(world, db
         missing = await world.get(f"{URL}/requestable-roles", params={"workspaceId": "ws_nope"})
     assert res.status_code == 200, res.text
     # Admin and steward administer or let people in; platform roles aren't workspace roles.
-    assert [r["name"] for r in res.json()] == [
+    assert [r["name"] for r in res.json()["roles"]] == [
         "workspace_viewer", "workspace_member", "workspace_data_engineer",
     ]
+    assert (res.json()["requestPolicy"], res.json()["joinRole"]) == ("approval", None)
     assert missing.status_code == 404
 
 

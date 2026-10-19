@@ -81,6 +81,7 @@ async def list_workspace_directory(
             access_mode=w.access_mode or "app",
             access_note=w.access_note,
             directory_listed=w.directory_listed is not False,
+            request_policy=w.request_policy or "approval",
             can_open=workspace_access.can_open(claims, w.id),
             your_roles=sorted(held.get(w.id, set())),
             open_request=WorkspaceDirectoryRequest(
