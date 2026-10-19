@@ -182,6 +182,11 @@ jobs:
           --health-retries 20
       falkordb:
         image: falkordb/falkordb:v4.18.11
+        env:
+          # The image's own FALKORDB_ARGS less its RESULTSET_SIZE 10000, which cuts every
+          # reply at 10,000 rows without an error. Every FALKORDB_ARGS this repo deploys
+          # leaves it unlimited, and the bootstrap refuses a capped server.
+          FALKORDB_ARGS: MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE -1
         ports:
           - 6379:6379
         options: >-

@@ -740,6 +740,7 @@ class BootstrapRunner:
             # A fresh read: a new job, a restart, or a re-check — nothing has been copied yet in
             # any of them, so the tallies start from zero. A recorded decision is kept: the read
             # it was made on may well come out the same (its fingerprint says).
+            await self._require_whole_replies(client)
             summary.update(_fresh_tallies(await self._count(client, _MAX_NODE_ID)))
             summary.pop("duplicates", None)
             async with self._session() as s:
@@ -836,6 +837,25 @@ class BootstrapRunner:
             else:
                 hidden += int(n or 0)
         return visible, hidden
+
+    async def _require_whole_replies(self, client) -> None:
+        """Refuse a graph server that cuts replies short. FalkorDB's ``RESULTSET_SIZE`` caps every
+        reply at that many rows and drops the rest with no error and no marker, and the stock
+        ``falkordb/falkordb`` image ships it at 10000. Every read here takes its reply as the whole
+        answer, so a capped server reads as a smaller graph: a pre-flight window cut short hides
+        duplicates, a copy window skips items, and a collapse that saw only some of a copy's
+        relationships deletes the rest with the copy. A server that will not say (or a client
+        with no raw command) reads as uncapped."""
+        from backend.app.providers.shard_capacity import _read_config_int
+
+        cap = await _read_config_int(client, None, "RESULTSET_SIZE")
+        if cap is not None:
+            raise BootstrapFailure(
+                f"The graph server returns at most {cap:,} rows per query and drops the rest "
+                "without saying so (its RESULTSET_SIZE setting), so the copy could miss items "
+                "and a duplicate collapse could delete relationships it never saw. Set "
+                "RESULTSET_SIZE to -1 (no limit) on the graph server, then resume.",
+                "infrastructure")
 
     async def _count(self, client, cypher: str) -> Optional[int]:
         # Deliberately NOT ``read_only``, though the cypher only reads: this is the

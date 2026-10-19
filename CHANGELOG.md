@@ -393,6 +393,12 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
 - Enabling version control onto a FalkorDB key another versioned graph already uses answers **409
   `graph_key_in_use`**. Eviction unloads only keys the platform created, never a customer's own
   graph.
+- Enabling version control now fails at its first step, before reading anything, on a FalkorDB
+  server whose `RESULTSET_SIZE` is set. That setting drops every row past it without an error,
+  and the stock `falkordb/falkordb` image ships it at `10000`. Through it, the copy missed items
+  and failed as "the source changed", and a duplicate collapse could delete relationships it
+  never saw. The job's error says so. Set `RESULTSET_SIZE -1` in the server's `FALKORDB_ARGS`
+  (every compose, k8s and Helm file here already leaves it unlimited), then resume the job.
 
 ### Known limitations
 
