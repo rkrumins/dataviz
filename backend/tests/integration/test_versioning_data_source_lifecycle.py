@@ -233,6 +233,14 @@ def test_main_heads_report_only_graphs_whose_version_control_is_on():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_main_heads_answer_the_same_one_source_per_read(monkeypatch):
+    from backend.app.services.versioning import service
+
+    monkeypatch.setattr(service, "_HEADS_PER_READ", 1)
+    asyncio.run(_run(_main_heads))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_a_graph_in_the_trash_answers_none_of_its_routes():
     asyncio.run(_run(_trashed_graph_answers_nothing))
 

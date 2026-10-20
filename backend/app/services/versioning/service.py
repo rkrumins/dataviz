@@ -4459,35 +4459,41 @@ class GraphVersioningService:
         While version control is still being turned on the graph is left out: until the job
         finishes the graph isn't one yet, and a cancelled enable deletes it — the next enable
         makes a new graph id — so nothing that might vanish is handed out. Three indexed reads
-        however many sources: the graphs with their ``main``, any unfinished enable among them,
-        and the head commits."""
+        per ``_HEADS_PER_READ`` sources: the graphs with their ``main``, any unfinished enable
+        among them, and the head commits."""
         ids = list(data_source_ids)
         if not ids:
             return {}
+        out: Dict[str, Dict[str, object]] = {}
         async with self._session() as s:
-            graphs = (await s.execute(
-                select(GraphORM.id, GraphORM.data_source_id, GraphORM.kind,
-                       GraphORM.main_head_commit_seq, BranchORM.id)
-                .join(BranchORM, (BranchORM.graph_id == GraphORM.id) & (BranchORM.kind == "main"))
-                .where(GraphORM.data_source_id.in_(ids), GraphORM.workspace_id == workspace_id,
-                       GraphORM.deleted_at.is_(None))
-            )).all()
-            if not graphs:
-                return {}
-            enabling = set((await s.execute(
-                select(JobORM.graph_id).where(
-                    JobORM.job_type == "bootstrap", JobORM.graph_id.in_([g[0] for g in graphs]),
-                    JobORM.status.in_(_UNFINISHED_ENABLEMENT))
-            )).scalars())
-            live = [g for g in graphs if g[0] not in enabling]
-            heads: Dict[str, Tuple[str, str]] = {}
-            if live:
-                heads = {gid: (cid, at) for gid, cid, at in (await s.execute(
-                    select(CommitORM.graph_id, CommitORM.id, CommitORM.created_at).where(
-                        CommitORM.graph_id.in_([g[0] for g in live]),      # partition pruning
-                        tuple_(CommitORM.graph_id, CommitORM.branch_id, CommitORM.commit_seq).in_(
-                            [(gid, main, seq) for gid, _ds, _kind, seq, main in live]))
-                )).all()}
+            for chunk in _chunks(ids, _HEADS_PER_READ):
+                out.update(await self._main_heads(s, workspace_id, chunk))
+        return out
+
+    async def _main_heads(self, s, workspace_id: str, ids: List[str]) -> Dict[str, Dict[str, object]]:
+        graphs = (await s.execute(
+            select(GraphORM.id, GraphORM.data_source_id, GraphORM.kind,
+                   GraphORM.main_head_commit_seq, BranchORM.id)
+            .join(BranchORM, (BranchORM.graph_id == GraphORM.id) & (BranchORM.kind == "main"))
+            .where(GraphORM.data_source_id.in_(ids), GraphORM.workspace_id == workspace_id,
+                   GraphORM.deleted_at.is_(None))
+        )).all()
+        if not graphs:
+            return {}
+        enabling = set((await s.execute(
+            select(JobORM.graph_id).where(
+                JobORM.job_type == "bootstrap", JobORM.graph_id.in_([g[0] for g in graphs]),
+                JobORM.status.in_(_UNFINISHED_ENABLEMENT))
+        )).scalars())
+        live = [g for g in graphs if g[0] not in enabling]
+        heads: Dict[str, Tuple[str, str]] = {}
+        if live:
+            heads = {gid: (cid, at) for gid, cid, at in (await s.execute(
+                select(CommitORM.graph_id, CommitORM.id, CommitORM.created_at).where(
+                    CommitORM.graph_id.in_([g[0] for g in live]),      # partition pruning
+                    tuple_(CommitORM.graph_id, CommitORM.branch_id, CommitORM.commit_seq).in_(
+                        [(gid, main, seq) for gid, _ds, _kind, seq, main in live]))
+            )).all()}
         return {
             ds: {"graph_id": gid, "kind": kind, "main_head_commit_seq": int(seq),
                  "main_head_commit_id": heads.get(gid, (None, None))[0],
@@ -7175,6 +7181,9 @@ _PG_MAX_BIND_PARAMS = 32000
 # Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
 # a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
 _IN_LIST_MAX = 20000
+
+# Data sources per round of ``main_heads``: its head-commit read binds four parameters per graph.
+_HEADS_PER_READ = _PG_MAX_BIND_PARAMS // 5
 
 # Rows per statement where a draft's first read builds its overlay (``_head_index``): the read runs
 # on the web process's event loop, and each statement's rows are turned into Python objects there
