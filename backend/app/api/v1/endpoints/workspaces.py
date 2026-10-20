@@ -1093,6 +1093,11 @@ async def move_data_source(
     Soft-deleted views count. Restoring one afterwards would recreate exactly the
     situation above, so a source with a view in the trash cannot move either.
 
+    A versioned source's graph moves with it: the graph records its workspace, and every
+    tenant check on it reads that. It moves last — after the flush has caught a clash — so
+    when version control refuses (it is busy, or holds drafts or reviews by people of this
+    workspace) or can't be reached, the request fails and the move rolls back whole.
+
     Requires datasource:manage on BOTH workspaces — the decorator covers the source
     workspace; the target is checked below. Moving a source INTO a workspace you
     don't administer would otherwise be a way to plant data in it.
@@ -1157,6 +1162,19 @@ async def move_data_source(
     ds.is_primary = False  # primacy is per-workspace; it isn't inherited
     await session.flush()
 
+    from backend.app.services.versioning import purge_worker
+    try:
+        graph_id = await purge_worker.rehome_graph_for_data_source(
+            data_source_id=ds_id, to_workspace_id=target_id)
+    except purge_worker.MoveBlocked as blocked:
+        raise HTTPException(status_code=409, detail=str(blocked))
+    except Exception:
+        logger.exception("could not move the versioned graph of %s", ds_id)
+        raise HTTPException(
+            status_code=503,
+            detail="The version store is unavailable, so this can't be moved right now. "
+                   "Nothing has been changed. Try again shortly.")
+
     # Both workspaces' cached provider handles now describe the wrong shape.
     await provider_registry.evict_workspace(workspace_id, session)
     await provider_registry.evict_workspace(target_id, session)
@@ -1171,6 +1189,7 @@ async def move_data_source(
             "to_workspace_id": target_id,
             "to_workspace_name": target.name,
             "actor_id": user.id,
+            "graph_id": graph_id,  # its version history, moved with it; None when external
         },
     )
 

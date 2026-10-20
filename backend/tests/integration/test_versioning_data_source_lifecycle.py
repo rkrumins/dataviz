@@ -5,11 +5,17 @@ are live, in the workspace asking, and whose "enable version control" job (if an
 each with the head of ``main``. A source that is absent is not versioned there.
 
 A graph in the trash answers none of its routes, and answers them again once restored.
+
+Moving a data source files its graph — and the graph's jobs — under the new workspace, unless
+version control is busy with it or holds drafts or reviews; and the reaper files a graph left
+behind by an earlier move under its source's workspace, trashing it if the source is in the
+trash, without ever removing a source row whose graph still stands.
 """
 import asyncio
 import os
 
 import pytest
+from sqlalchemy import select, update
 
 from backend.app.services.versioning import db, models, purge_worker
 from backend.app.services.versioning.service import GraphVersioningService
@@ -113,6 +119,105 @@ async def _trashed_graph_answers_nothing() -> None:
         assert (await c.get(graph)).status_code == 200
 
 
+async def _graph(gid):
+    async with db.graphver_session() as s:
+        g = await s.get(models.GraphORM, gid)
+        jobs = (await s.execute(select(models.JobORM.workspace_id).where(
+            models.JobORM.graph_id == gid))).scalars().all()
+        return g.workspace_id, g.deleted_at, g.deleted_by, set(jobs)
+
+
+async def _a_move_carries_the_graph() -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    svc = GraphVersioningService()
+    ds = _ds()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+    await _publish(svc, gid, "alice", "A", "add A")
+    async with db.graphver_session() as s:
+        s.add(models.JobORM(job_type="export", graph_id=gid, workspace_id="ws_a",
+                            data_source_id=ds, status="completed"))
+
+    # someone's open draft holds it back, and nothing is written
+    draft = await svc.open_draft(graph_id=gid, owner="bob")
+    with pytest.raises(purge_worker.MoveBlocked, match="1 open draft is on this .* abandon it first"):
+        await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
+    assert (await _graph(gid))[0] == "ws_a"
+    await svc.abandon_draft(graph_id=gid, branch_id=draft, actor="bob")
+
+    # so does version control at work on it
+    async with db.graphver_session() as s:
+        busy = models.JobORM(job_type="export", graph_id=gid, workspace_id="ws_a",
+                             data_source_id=ds, status="running")
+        s.add(busy)
+    with pytest.raises(purge_worker.MoveBlocked, match="busy"):
+        await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
+    async with db.graphver_session() as s:
+        (await s.get(models.JobORM, busy.id)).status = "completed"
+
+    # free of both, the graph and its jobs move; moving again changes nothing
+    assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == gid
+    assert await _graph(gid) == ("ws_b", None, None, {"ws_b"})
+    assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == gid
+
+    # its history answers where it went, and only there
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as c:
+        assert (await c.get(f"/api/v1/ws_b/versioning/graphs/{gid}")).status_code == 200
+        assert (await c.get(f"/api/v1/ws_a/versioning/graphs/{gid}")).status_code == 404
+    assert (await svc.main_heads(workspace_id="ws_b", data_source_ids=[ds]))[ds]["graph_id"] == gid
+    assert await svc.main_heads(workspace_id="ws_a", data_source_ids=[ds]) == {}
+
+    # an external source has nothing to move
+    assert await purge_worker.rehome_graph_for_data_source(data_source_id=_ds(), to_workspace_id="ws_b") is None
+
+
+async def _the_reaper_refiles_graphs_left_behind() -> None:
+    """The management side is a SQLite holding the data sources' table: the reaper reads it by
+    id alone, never joined to the version store."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda c: DS.__table__.create(c))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    svc = GraphVersioningService()
+    moved, trashed, home, expired = _ds(), _ds(), _ds(), _ds()
+    gids = {ds: (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+            for ds in (moved, trashed, home, expired)}
+    async with sessions() as s:
+        s.add_all([
+            DS(id=moved, workspace_id="ws_b", provider_id="prov_a", graph_name=moved),
+            DS(id=trashed, workspace_id="ws_b", provider_id="prov_a", graph_name=trashed,
+               deleted_at="2026-10-19T00:00:00+00:00"),
+            DS(id=home, workspace_id="ws_a", provider_id="prov_a", graph_name=home),
+            # past its grace period, its graph touched just now — so not yet re-filed
+            DS(id=expired, workspace_id="ws_b", provider_id="prov_a", graph_name=expired,
+               deleted_at="2026-01-01T00:00:00+00:00"),
+        ])
+        await s.commit()
+    async with db.graphver_session() as s:     # settled: untouched for longer than the window
+        await s.execute(update(models.GraphORM).where(
+            models.GraphORM.id.in_([gids[moved], gids[trashed], gids[home]]))
+            .values(updated_at="2026-01-01T00:00:00+00:00"))
+
+    result = await purge_worker.Reaper(app_session_factory=sessions).run_once()
+    assert result["rehomed"] >= 2
+
+    assert (await _graph(gids[moved]))[:3] == ("ws_b", None, None)
+    workspace, deleted_at, deleted_by, _jobs = await _graph(gids[trashed])
+    assert (workspace, deleted_by) == ("ws_b", "reaper") and deleted_at is not None
+    assert (await _graph(gids[home]))[:2] == ("ws_a", None)
+
+    # the expired source's graph stands, filed elsewhere: its row is kept, not removed
+    assert (await _graph(gids[expired]))[0] == "ws_a"
+    async with sessions() as s:
+        assert await s.get(DS, expired) is not None
+    await engine.dispose()
+
+
 async def _run(*steps) -> None:
     await models.create_schema_and_partitions()
     try:
@@ -130,3 +235,13 @@ def test_main_heads_report_only_graphs_whose_version_control_is_on():
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_a_graph_in_the_trash_answers_none_of_its_routes():
     asyncio.run(_run(_trashed_graph_answers_nothing))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_moved_source_takes_its_graph_unless_version_control_holds_it():
+    asyncio.run(_run(_a_move_carries_the_graph))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_the_reaper_refiles_graphs_an_earlier_move_left_behind():
+    asyncio.run(_run(_the_reaper_refiles_graphs_left_behind))
