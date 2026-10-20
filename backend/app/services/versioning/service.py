@@ -388,6 +388,11 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
 
+# An "enable version control" job in one of these states means its graph isn't a graph yet: the
+# head is parked at genesis and the import is half-written. A failed job counts — it must be
+# resumed or cancelled, never written around (_assert_not_bootstrapping).
+_UNFINISHED_ENABLEMENT = ("pending", "running", "failed")
+
 # The "nothing came in" answer for a pull that was already up to date (see _incoming_from_main).
 # Same shape as a real one, so a client never has to special-case the no-op.
 _EMPTY_INCOMING: Dict[str, object] = {
@@ -575,7 +580,7 @@ class GraphVersioningService:
         (``ix_jobs_graph_status``)."""
         unfinished = await s.scalar(select(JobORM.status).where(
             JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
-            JobORM.status.in_(("pending", "running", "failed")),
+            JobORM.status.in_(_UNFINISHED_ENABLEMENT),
         ).limit(1))
         if unfinished == "failed":
             raise ConcurrencyError(
@@ -4441,6 +4446,54 @@ class GraphVersioningService:
                                        GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
+
+    async def main_heads(
+        self, *, workspace_id: str, data_source_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, object]]:
+        """``{data_source_id: {graph_id, kind, main_head_commit_seq, main_head_commit_id,
+        main_head_committed_at}}`` for each of ``data_source_ids`` whose version control is on in
+        ``workspace_id``: a live graph there (the tenancy rule :meth:`resolve_graph` applies) whose
+        "enable version control" job, if it had one, finished. A source that is absent is not
+        versioned here.
+
+        While version control is still being turned on the graph is left out: until the job
+        finishes the graph isn't one yet, and a cancelled enable deletes it — the next enable
+        makes a new graph id — so nothing that might vanish is handed out. Three indexed reads
+        however many sources: the graphs with their ``main``, any unfinished enable among them,
+        and the head commits."""
+        ids = list(data_source_ids)
+        if not ids:
+            return {}
+        async with self._session() as s:
+            graphs = (await s.execute(
+                select(GraphORM.id, GraphORM.data_source_id, GraphORM.kind,
+                       GraphORM.main_head_commit_seq, BranchORM.id)
+                .join(BranchORM, (BranchORM.graph_id == GraphORM.id) & (BranchORM.kind == "main"))
+                .where(GraphORM.data_source_id.in_(ids), GraphORM.workspace_id == workspace_id,
+                       GraphORM.deleted_at.is_(None))
+            )).all()
+            if not graphs:
+                return {}
+            enabling = set((await s.execute(
+                select(JobORM.graph_id).where(
+                    JobORM.job_type == "bootstrap", JobORM.graph_id.in_([g[0] for g in graphs]),
+                    JobORM.status.in_(_UNFINISHED_ENABLEMENT))
+            )).scalars())
+            live = [g for g in graphs if g[0] not in enabling]
+            heads: Dict[str, Tuple[str, str]] = {}
+            if live:
+                heads = {gid: (cid, at) for gid, cid, at in (await s.execute(
+                    select(CommitORM.graph_id, CommitORM.id, CommitORM.created_at).where(
+                        CommitORM.graph_id.in_([g[0] for g in live]),      # partition pruning
+                        tuple_(CommitORM.graph_id, CommitORM.branch_id, CommitORM.commit_seq).in_(
+                            [(gid, main, seq) for gid, _ds, _kind, seq, main in live]))
+                )).all()}
+        return {
+            ds: {"graph_id": gid, "kind": kind, "main_head_commit_seq": int(seq),
+                 "main_head_commit_id": heads.get(gid, (None, None))[0],
+                 "main_head_committed_at": heads.get(gid, (None, None))[1]}
+            for gid, ds, kind, seq, _main in live
+        }
 
     @staticmethod
     def _draft_ref(b: BranchORM) -> dict:
