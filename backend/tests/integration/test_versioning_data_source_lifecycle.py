@@ -3,6 +3,8 @@
 ``main_heads`` is what the data-source list reports with ``include=versioning``: only graphs that
 are live, in the workspace asking, and whose "enable version control" job (if any) finished —
 each with the head of ``main``. A source that is absent is not versioned there.
+
+A graph in the trash answers none of its routes, and answers them again once restored.
 """
 import asyncio
 import os
@@ -68,6 +70,49 @@ async def _main_heads() -> None:
     assert await svc.main_heads(workspace_id="ws_a", data_source_ids=[ds_a]) == {}
 
 
+def _app():
+    """The versioning router alone, as a reader of every workspace a request names."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, Request
+
+    from backend.app.api.v1.endpoints import versioning
+    from backend.app.auth.dependencies import get_current_user, get_permission_claims
+    from backend.app.services.permission_service import PermissionClaims
+
+    async def user():
+        return SimpleNamespace(id="alice", email="alice@example.com")
+
+    async def claims(request: Request):
+        return PermissionClaims(sid="", global_perms=(), ws_perms={
+            request.path_params["ws_id"]: ("workspace:datasource:read",)})
+
+    app = FastAPI()
+    app.include_router(versioning.router, prefix="/api/v1/{ws_id}/versioning")
+    app.dependency_overrides[get_current_user] = user
+    app.dependency_overrides[get_permission_claims] = claims
+    return app
+
+
+async def _trashed_graph_answers_nothing() -> None:
+    from httpx import ASGITransport, AsyncClient
+
+    svc = GraphVersioningService()
+    ds = _ds()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as c:
+        graph = f"/api/v1/ws_a/versioning/graphs/{gid}"
+        assert (await c.get(graph)).status_code == 200
+
+        await purge_worker.tombstone_graphs_for_data_source(
+            data_source_id=ds, workspace_id="ws_a", actor="alice")
+        assert (await c.get(graph)).status_code == 404
+        assert (await c.get(f"{graph}/watermark")).status_code == 404
+
+        assert await purge_worker.restore_graphs_for_data_source(data_source_id=ds, workspace_id="ws_a")
+        assert (await c.get(graph)).status_code == 200
+
+
 async def _run(*steps) -> None:
     await models.create_schema_and_partitions()
     try:
@@ -80,3 +125,8 @@ async def _run(*steps) -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_main_heads_report_only_graphs_whose_version_control_is_on():
     asyncio.run(_run(_main_heads))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_graph_in_the_trash_answers_none_of_its_routes():
+    asyncio.run(_run(_trashed_graph_answers_nothing))

@@ -423,9 +423,12 @@ async def graph_in_workspace(
     """Resolve a graph and assert it lives in ``ws_id`` — 404 (not 403) on a
     cross-tenant miss so graph existence doesn't leak across workspaces.
 
+    A graph in the trash is gone too: deleting its data source hides it from every read at
+    once, and one being purged is coming apart row by row.
+
     An API key must also cover the data source behind the graph."""
     meta = await svc.get_graph(graph_id)
-    if meta is None or meta["workspace_id"] != ws_id:
+    if meta is None or meta.get("deleted_at") or meta["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="graph not found in workspace")
     await api_key_auth.hold_to_data_source(request, meta.get("data_source_id"), ws_id)
     return meta
@@ -446,7 +449,7 @@ async def pr_in_workspace(
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
     base = await svc.get_graph(str(pr["target_graph_id"]))
-    if base is None or base["workspace_id"] != ws_id:
+    if base is None or base.get("deleted_at") or base["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     if not (viewer.can_manage or pr.get("actor") == viewer.actor
             or viewer.actor in (pr.get("reviewers") or [])):

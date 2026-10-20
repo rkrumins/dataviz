@@ -4671,6 +4671,7 @@ class GraphVersioningService:
             "fork_base_commit_seq": g.fork_base_commit_seq,
             "main_head_commit_seq": g.main_head_commit_seq,
             "created_by": g.created_by, "created_at": g.created_at,
+            "deleted_at": g.deleted_at,
         }
 
     @staticmethod
