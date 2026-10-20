@@ -18,9 +18,9 @@ this file, so the DDL is guarded (docs/MIGRATIONS.md, "Guard the DDL; never
 guard the data"). Revision id is kept <=32 chars (alembic_version.version_num
 is VARCHAR(32)).
 
-Revision ID: 20261019_1400_ds_transfers
-Revises: 20261019_1000_ws_access
-Create Date: 2026-10-19 14:00
+Revision ID: 20261020_1000_ds_transfers
+Revises: 20261019_1600_access_life
+Create Date: 2026-10-20 10:00
 """
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "20261019_1400_ds_transfers"
-down_revision: Union[str, None] = "20261019_1000_ws_access"
+revision: str = "20261020_1000_ds_transfers"
+down_revision: Union[str, None] = "20261019_1600_access_life"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

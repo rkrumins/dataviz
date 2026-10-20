@@ -2,7 +2,7 @@
  * A steward's Members tab: they add people (picked from the directory any
  * signed-in user can search) as Viewer or Member; removing people, binding
  * groups and the access settings stay with admins. Where the identity
- * provider decides who is in, adding a person needs the exception ticked.
+ * provider decides who is in, adding a person is an exception — the admins'.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -82,20 +82,16 @@ describe('WorkspaceMembers — as a steward', () => {
         }, { reason: undefined }))
     })
 
-    it('needs the exception ticked where the identity provider decides', async () => {
+    it('leaves exceptions to the admins where the identity provider decides', async () => {
         const user = userEvent.setup()
         members.grantOptions.mockResolvedValue({ ...STEWARD_OPTIONS, accessMode: 'idp' })
         renderTab(false)
         await user.click(await screen.findByRole('button', { name: 'Add member' }))
         await user.click(await screen.findByRole('button', { name: /Ana T/ }))
 
-        const add = screen.getByRole('button', { name: 'Add to workspace' })
-        expect(add).toBeDisabled()
-        await user.click(screen.getByRole('checkbox', { name: /Add them here as an exception/ }))
-        expect(add).toBeEnabled()
-        await user.click(add)
-        await waitFor(() => expect(members.create).toHaveBeenCalledWith(
-            'ws_fin', expect.objectContaining({ exception: true }), expect.anything(),
-        ))
+        expect(screen.getByRole('button', { name: 'Add to workspace' })).toBeDisabled()
+        expect(screen.queryByRole('checkbox', { name: /Add them here as an exception/ })).not.toBeInTheDocument()
+        expect(screen.getByText(/only the workspace’s admins can add someone here as an exception/)).toBeInTheDocument()
+        expect(members.create).not.toHaveBeenCalled()
     })
 })

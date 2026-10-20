@@ -6,7 +6,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
-import type { AccessRequestStatus, WorkspaceAccessMode } from './accessRequestsService'
+import type { AccessRequestStatus, RequestPolicy, WorkspaceAccessMode } from './accessRequestsService'
 import type { DataSourceTransferResponse } from './dataSourceTransferService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
@@ -130,6 +130,9 @@ export interface WorkspaceUpdateRequest {
     accessMode?: WorkspaceAccessMode
     /** Shown to people asking to join; "" clears it. */
     accessNote?: string
+    /** How it takes requests. Open needs access decided here, not by the
+     *  identity provider. */
+    requestPolicy?: RequestPolicy
 }
 
 /** Your open request on a Find a workspace entry. */
@@ -155,6 +158,8 @@ export interface WorkspaceDirectoryEntry {
     accessMode: WorkspaceAccessMode
     accessNote: string | null
     directoryListed: boolean
+    /** Absent on servers that predate it — read as 'approval'. */
+    requestPolicy?: RequestPolicy
     canOpen: boolean
     yourRoles: string[]
     openRequest: WorkspaceDirectoryRequest | null
@@ -189,6 +194,7 @@ export interface WorkspaceResponse {
     directoryListed?: boolean
     accessMode?: WorkspaceAccessMode
     accessNote?: string | null
+    requestPolicy?: RequestPolicy
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string

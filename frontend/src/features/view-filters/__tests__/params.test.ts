@@ -2,7 +2,7 @@
  * Every view request — the list, the stats bar, the counts — is built here, so
  * this is where "the same filters" is decided.
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveFilters, toQueryParams } from '../params'
 import { EMPTY_FILTERS, ME } from '../model'
 
@@ -34,6 +34,8 @@ describe('resolveFilters', () => {
 })
 
 describe('toQueryParams', () => {
+  afterEach(() => { vi.useRealTimers() })
+
   it('sends nothing for an empty filter set', () => {
     const p = toQueryParams(resolveFilters(EMPTY_FILTERS, CTX))
     expect(Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined))).toEqual({})
@@ -47,6 +49,10 @@ describe('toQueryParams', () => {
   })
 
   it('intersects Recent with a created rule: the later lower bound wins', () => {
+    // Recent counts back from the clock: put the clock on the context's day,
+    // or the test changes its answer a week after it was written.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 9, 12, 12))
     const narrow = toQueryParams(resolveFilters({ ...EMPTY_FILTERS, category: 'recently-added', created: 'today' }, CTX))
     expect(narrow.createdAfter).toBe(new Date(2026, 9, 12).toISOString())
 

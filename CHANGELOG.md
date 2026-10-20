@@ -103,7 +103,7 @@ where it went.
 
 ### Upgrading
 
-- **Run the upgrade job.** Migration `20261019_1400_ds_transfers` adds `data_source_transfers`,
+- **Run the upgrade job.** Migration `20261020_1000_ds_transfers` adds `data_source_transfers`,
   the record of every move and request, with one open request per data source, and allows a view
   activity entry to say `moved`. Downgrading removes the table and those entries.
 
@@ -118,6 +118,98 @@ where it went.
   but people in the new workspace can't open the template.
 - The picker on **Add Source** doesn't count views that read a source as the workspace's default,
   so it may offer a move the server then refuses, saying why.
+
+---
+
+## [Unreleased] — Access that looks after itself once it's granted
+
+### Added
+
+**Hear before your access ends, and ask to keep it.** Time-limited access to a workspace is
+announced in your Inbox before it ends — a week ahead for access granted for more than two weeks,
+two days ahead for shorter access, once per end date; a day or two of cover isn't announced. On
+**My access**, **Ask to keep it** beside the grant sends its admins and stewards a request tied to
+it; they choose how much longer (30 days unless they pick 7, 90 or no end) and the same grant is
+extended. An admin can also move a grant's end from the **Members** tab — **Change** beside its
+**Expires in …** badge — which answers such a request.
+
+**People hear about changes to their access.** Your Inbox tells you when someone adds you to a
+workspace (at which level, until when, and whether as an exception), removes you (and whether
+that leaves you any way in), or changes when your access ends.
+
+**Requests don't sit unanswered.** After three days a waiting request is brought up again with the
+workspace's admins and stewards; after a week it goes to the Org Admins. The **Requests** tab says
+**Waiting N days**, and **Sent to the Org Admins** once it has.
+
+**Open and closed workspaces.** A workspace's admins choose how people ask, under **How people get
+in → How people ask**: **Approvers decide** (as before), **Open to everyone** — anyone joins as a
+Viewer at once, and more is still asked for — or **Closed to requests**, where admins add people
+themselves. Find a workspace offers **Join** on open workspaces and says **Not taking requests** on
+closed ones; **Request access** starts with **Join now** or says who to ask. A joined grant reads
+**Joined** wherever access is listed. A workspace its identity provider controls can't be open.
+
+**Access reviews.** On the **Members** tab, an admin starts a review of the grants made in the
+workspace — people's and teams' — due in 7, 14 or 30 days, and keeps or removes each, seeing how
+it came about, when it ends and when the person last signed in. Removing takes the access away at
+once and tells the person why; people let in by the identity provider or an organization-wide role
+are counted, not reviewed. A review completes once everything is decided, downloads as a CSV, and
+one past its due date is flagged to the workspace's admins. Nothing is ever removed automatically.
+
+**Join a workspace, in Getting started.** Someone who can't create a workspace now starts with
+**Join a workspace** — Find a workspace while it's on, My access while it's off — ticked off once
+they're in one.
+
+### Changed
+
+- **Exceptions end on their own** once the identity provider grants the same access, at the
+  person's next sign-in. An exception for the role a group grants becomes that group's grant —
+  no gap — and one the groups' roles already cover is ended. The person and whoever granted it
+  hear about it, and a request to keep it closes as approved.
+- `GET /access-requests/requestable-roles` returns `{roles, requestPolicy, joinRole}` instead of a
+  bare list.
+- **Exceptions are the admins', and they always end.** Only a workspace's admins let someone in
+  around its identity provider — stewards point people to the group — and an exception needs an
+  end date, 90 days away at most. Keeping one going, from a request to keep it or with **Change**,
+  confirms it as an exception again with a new end; those requests, and their reminders, go to the
+  admins only.
+- **Letting someone in says what it opens.** Answering a request and **Add member** list the
+  workspace's data sources, restricted ones first: any role reads all of them. Choosing **Open to
+  everyone** says the same — a joiner reads restricted sources too — and, for a workspace hidden
+  from Find a workspace, that anyone with a link can still join. These warn; the admin decides.
+
+### Security
+
+- **Only a workspace's admins change whether a data source is restricted.** The mark is what
+  stops members publishing views over a source to everyone, but any member who could edit the
+  source could clear it, then publish. Changing it now needs `workspace:admin` (403 otherwise);
+  everything else about a source is still a member's to edit.
+
+### Fixed
+
+- An exception that had lapsed no longer keeps the identity provider's grant of the same role out
+  for good: the provider couldn't add its own binding while the exception's row held the role.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261019_1600_access_life` adds
+  `workspaces.request_policy` (every workspace starts as **Approvers decide**),
+  `role_bindings.expiry_reminded_at`, `access_requests.binding_id`, `reminded_at` and
+  `escalated_at`, and the `access_reviews` and `access_review_items` tables. It waits at most 5
+  seconds for a lock and can simply be run again.
+- The reminders run in the control plane (or the all-in-one process), hourly. Time-limited access
+  already ending within a week is announced on the first pass, and requests already waiting more
+  than three days — or a week — are brought up on it too.
+- Downgrading drops the access reviews and every workspace's request policy; requests to keep
+  access become ordinary requests for the same role.
+- Exceptions granted before this release keep the end they had, or none: find any without one
+  with an access review, or give it one with **Change**.
+
+### Known limitations
+
+- Reminders are Inbox messages only; nothing is emailed.
+- Requests waiting on the identity provider aren't brought up: IT has them.
+- In a workspace its identity provider controls, memberships of teams (groups managed in {brand})
+  bound there still aren't policed; an access review is the way to go through them.
 
 ---
 

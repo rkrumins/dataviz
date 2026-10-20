@@ -27,6 +27,7 @@ describe('ProvenanceChip', () => {
         ['direct', 'Added directly'],
         ['request', 'Approved request'],
         ['exception', 'Exception'],
+        ['joined', 'Joined'],
         ['idp', 'Identity provider'],
         ['team', 'Team'],
         ['org_role', 'Organization-wide'],
@@ -58,6 +59,8 @@ describe('ProvenanceChip', () => {
             .toBe('Approved by Bob, answering their request.')
         expect(provenanceSentence(provenance({ origin: 'exception', by: 'usr_wanda' }), names))
             .toMatch(/^Granted here by Wanda as an exception/)
+        expect(provenanceSentence(provenance({ origin: 'joined' }), names))
+            .toBe('Joined — the workspace is open to everyone.')
         expect(provenanceSentence(provenance({ origin: 'idp', idpGroups: ['finance-analysts'], idpProvider: 'Entra ID' })))
             .toBe('Through “finance-analysts” in Entra ID — their identity provider adds and removes it.')
         expect(provenanceSentence(provenance({ origin: 'team', source: 'Close team', by: 'usr_wanda', requestId: 'ar_1' }), names))

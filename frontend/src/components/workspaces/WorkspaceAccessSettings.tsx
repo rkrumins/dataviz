@@ -1,6 +1,6 @@
 /**
- * How people get into this workspace — the three settings its admins
- * choose, on the Members tab:
+ * How people get into this workspace — the settings its admins choose, on
+ * the Members tab:
  *
  * - **Listed in Find a workspace.** Everyone who can sign in sees its name,
  *   description and who answers requests — once an administrator turns
@@ -8,16 +8,21 @@
  * - **Who decides.** Approvers here (admins and stewards answer requests),
  *   or the identity provider's groups — then an approver points people to
  *   the group that grants it, and anything granted here is an exception.
+ * - **How people ask.** Approvers decide; open to everyone (anyone joins as
+ *   a Viewer at once — not where the identity provider decides); or closed
+ *   to requests, so admins add people themselves. Opening it says what that
+ *   opens: a Viewer reads every data source here, restricted ones included,
+ *   and a hidden workspace can still be joined by anyone with a link.
  * - **A note for people asking.** "Say which team you're on."
  */
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Loader2, ShieldCheck, SlidersHorizontal } from 'lucide-react'
+import { AlertTriangle, DoorOpen, KeyRound, Loader2, Lock, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { WORKSPACE_ACCESS_KEY, WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
-import type { WorkspaceAccessMode } from '@/services/accessRequestsService'
+import type { RequestPolicy, WorkspaceAccessMode } from '@/services/accessRequestsService'
 import { workspaceService } from '@/services/workspaceService'
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
@@ -37,6 +42,27 @@ const MODES: { value: WorkspaceAccessMode; title: string; body: string; icon: ty
     },
 ]
 
+const POLICIES: { value: RequestPolicy; title: string; body: string; icon: typeof ShieldCheck }[] = [
+    {
+        value: 'approval',
+        title: 'Approvers decide',
+        body: 'People ask; its admins and stewards answer.',
+        icon: ShieldCheck,
+    },
+    {
+        value: 'open',
+        title: 'Open to everyone',
+        body: 'Anyone can join as a Viewer at once. More still needs approval.',
+        icon: DoorOpen,
+    },
+    {
+        value: 'closed',
+        title: 'Closed to requests',
+        body: 'Nobody can ask to join; admins add people. People here can still ask to keep their access.',
+        icon: Lock,
+    },
+]
+
 export function WorkspaceAccessSettings({ workspaceId }: { workspaceId: string }) {
     const { notify } = useAppNotifications()
     const queryClient = useQueryClient()
@@ -46,24 +72,37 @@ export function WorkspaceAccessSettings({ workspaceId }: { workspaceId: string }
         queryFn: () => workspaceService.get(workspaceId),
     })
     // Edits sit over the saved values until they are saved.
-    const [draft, setDraft] = useState<{ listed?: boolean; mode?: WorkspaceAccessMode; note?: string }>({})
+    const [draft, setDraft] = useState<{
+        listed?: boolean; mode?: WorkspaceAccessMode; policy?: RequestPolicy; note?: string
+    }>({})
     const [saving, setSaving] = useState(false)
     const savedListed = ws?.directoryListed !== false
     const savedMode = ws?.accessMode ?? 'app'
+    const savedPolicy = ws?.requestPolicy ?? 'approval'
     const savedNote = ws?.accessNote ?? ''
     const listed = draft.listed ?? savedListed
     const mode = draft.mode ?? savedMode
+    const policy = draft.policy ?? savedPolicy
     const note = draft.note ?? savedNote
     const setListed = (value: boolean) => setDraft(d => ({ ...d, listed: value }))
-    const setMode = (value: WorkspaceAccessMode) => setDraft(d => ({ ...d, mode: value }))
+    // The identity provider decides who is in: nobody joins on their own.
+    const setMode = (value: WorkspaceAccessMode) => setDraft(d => ({
+        ...d, mode: value, ...(value === 'idp' && policy === 'open' ? { policy: 'approval' as const } : {}),
+    }))
+    const setPolicy = (value: RequestPolicy) => setDraft(d => ({ ...d, policy: value }))
     const setNote = (value: string) => setDraft(d => ({ ...d, note: value }))
 
-    const dirty = !!ws && (listed !== savedListed || mode !== savedMode || note.trim() !== savedNote)
+    const dirty = !!ws && (
+        listed !== savedListed || mode !== savedMode || policy !== savedPolicy || note.trim() !== savedNote
+    )
+    const restricted = (ws?.dataSources ?? []).filter(d => d.isRestricted)
 
     const save = async () => {
         setSaving(true)
         try {
-            await workspaceService.update(workspaceId, { directoryListed: listed, accessMode: mode, accessNote: note.trim() })
+            await workspaceService.update(workspaceId, {
+                directoryListed: listed, accessMode: mode, requestPolicy: policy, accessNote: note.trim(),
+            })
             await queryClient.invalidateQueries({ queryKey: WORKSPACE_ACCESS_KEY })
             setDraft({})
             notify('success', 'Access settings saved.')
@@ -123,6 +162,63 @@ export function WorkspaceAccessSettings({ workspaceId }: { workspaceId: string }
                         )
                     })}
                 </div>
+            </fieldset>
+
+            <fieldset>
+                <legend className="text-sm font-semibold text-ink mb-2">How people ask</legend>
+                <div role="radiogroup" className="grid gap-2 md:grid-cols-3">
+                    {POLICIES.map(p => {
+                        const selected = policy === p.value
+                        // Joining on your own would go round the identity provider.
+                        const unavailable = p.value === 'open' && mode === 'idp'
+                        const Icon = p.icon
+                        return (
+                            <button
+                                key={p.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={selected}
+                                disabled={!ws || unavailable}
+                                title={unavailable ? 'Not while your identity provider decides who is in' : undefined}
+                                onClick={() => setPolicy(p.value)}
+                                className={cn(
+                                    'flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors',
+                                    selected
+                                        ? 'border-indigo-500/50 bg-indigo-500/[0.06] ring-1 ring-indigo-500/30'
+                                        : 'border-glass-border hover:border-indigo-500/30',
+                                    unavailable && 'opacity-50 cursor-not-allowed hover:border-glass-border',
+                                )}
+                            >
+                                <Icon className={cn('w-4 h-4 mt-0.5 shrink-0', selected ? 'text-indigo-500' : 'text-ink-muted')} />
+                                <span className="min-w-0">
+                                    <span className="block text-sm font-semibold text-ink">{p.title}</span>
+                                    <span className="block text-xs text-ink-muted mt-0.5">
+                                        {unavailable ? 'Not while your identity provider decides who is in.' : p.body}
+                                    </span>
+                                </span>
+                            </button>
+                        )
+                    })}
+                </div>
+                {policy === 'open' && (restricted.length > 0 || !listed) && (
+                    <div role="note" className="mt-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                        <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
+                        <div className="space-y-1">
+                            {restricted.length > 0 && (
+                                <span className="block">
+                                    Anyone who joins reads every data source here — the restricted
+                                    {restricted.length === 1 ? ' one' : ' ones'} included:{' '}
+                                    <span className="font-semibold">{restricted.map(d => d.label || d.id).join(', ')}</span>.
+                                </span>
+                            )}
+                            {!listed && (
+                                <span className="block">
+                                    It’s hidden from Find a workspace, but anyone with a link to it can still join.
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
             </fieldset>
 
             <label className="block">

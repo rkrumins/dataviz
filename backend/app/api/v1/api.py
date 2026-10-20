@@ -15,7 +15,7 @@ from .endpoints import (
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
-    permissions_admin, access_requests, rbac_search, directory, notifications,
+    permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
     versioning,
     admin_idp_groups,
@@ -224,6 +224,12 @@ api_router.include_router(
     access_requests.admin_router,
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
+)
+# Access reviews — a workspace admin keeps or removes each grant.
+api_router.include_router(
+    access_reviews.router,
+    prefix="/admin/workspaces/{ws_id}/access-reviews",
+    tags=["admin:access-reviews"],
 )
 # Moving a data source, with its views, to another workspace — directly or
 # by asking the destination. Three prefixes so the gate is naturally scoped:

@@ -14,6 +14,12 @@ Admins everywhere — see one list across their workspaces and answer:
   that access arrives (``workspace_access.fulfil_idp_routed_requests``).
 * **deny** — with a reason the person sees.
 
+A workspace takes requests one of three ways (``request_policy``): its
+approvers decide; it is open — anyone joins as a Viewer at once, and more
+still needs approval; or it is closed to requests. Someone whose
+time-limited access is ending asks to keep it: a request like any other,
+tied to the grant, that extends it when approved.
+
 The requester can withdraw an open request, and everyone involved hears
 through the Inbox. A requester sees a workspace's name only if they could
 see it anyway: they can open it, or it is listed in Find a workspace while
@@ -23,6 +29,8 @@ Routes (mounted from ``api.py``):
 
   GET    /api/v1/access-requests/requestable-roles?workspaceId=
   POST   /api/v1/access-requests
+  POST   /api/v1/access-requests/extend
+  POST   /api/v1/access-requests/join
   GET    /api/v1/me/access-requests?status=
   POST   /api/v1/me/access-requests/{id}/withdraw
   GET    /api/v1/admin/access-requests?status=open&workspaceId=
@@ -39,6 +47,7 @@ or ``rbac.group.member_added`` for the access an approval grants.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
@@ -54,22 +63,27 @@ from backend.app.db.models import (
     GroupORM,
     IdpGroupRoleMappingORM,
     IdpProviderORM,
+    RoleBindingORM,
     UserIdentityORM,
     WorkspaceORM,
 )
 from backend.app.db.repositories import (
     access_request_repo,
+    binding_repo,
     group_repo,
     notification_repo,
     role_repo,
     user_repo,
 )
+from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.services import workspace_access
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission, resolve
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    AccessExtensionCreate,
+    AccessJoinCreate,
     AccessRequestApprove,
     AccessRequestCreate,
     AccessRequestGroupRef,
@@ -79,12 +93,15 @@ from backend.common.models.rbac import (
     AccessRequestRoute,
     AccessRequestTarget,
     RequestableRole,
+    RequestOptions,
 )
 
 
 logger = logging.getLogger(__name__)
 
 _DIRECTORY_FLAG = "workspaceDirectoryEnabled"
+#: What joining a workspace open to everyone grants.
+_JOIN_ROLE = "workspace_viewer"
 
 # Three routers — each mounts on a different prefix in api.py so the
 # auth gate is naturally scoped.
@@ -103,6 +120,17 @@ def _idp_managed(message: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"type": "idp_managed", "message": message},
+    )
+
+
+def _closed() -> HTTPException:
+    """The typed refusal for a workspace that takes no requests."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "type": "closed",
+            "message": "This workspace isn't taking requests. Ask its admins to add you.",
+        },
     )
 
 
@@ -154,6 +182,12 @@ async def _to_responses(
     )).all()) if group_ids else {}
     providers = await _providers_by_idp_group(session, {r.idp_group for r in rows if r.idp_group})
     directory_on = await _directory_on(session) if reader is not None else False
+    binding_ids = sorted({r.binding_id for r in rows if r.binding_id})
+    bindings = {
+        b.id: b for b in (await session.execute(
+            select(RoleBindingORM).where(RoleBindingORM.id.in_(binding_ids))
+        )).scalars().all()
+    } if binding_ids else {}
 
     out = []
     for r in rows:
@@ -192,9 +226,16 @@ async def _to_responses(
             ),
             idp_group=r.idp_group,
             idp_provider=providers.get(r.idp_group) if r.idp_group else None,
-            idp_exception=bool(r.idp_exception),
+            # A request to keep an exception is about one, answered or not.
+            idp_exception=bool(r.idp_exception or (
+                r.binding_id in bindings and bindings[r.binding_id].idp_exception
+            )),
             access_expires_at=r.access_expires_at,
             fulfilled_at=r.fulfilled_at,
+            binding_id=r.binding_id,
+            current_expires_at=bindings[r.binding_id].expires_at if r.binding_id in bindings else None,
+            reminded_at=r.reminded_at,
+            escalated_at=r.escalated_at,
         ))
     return out
 
@@ -298,7 +339,7 @@ async def _name_for(session: AsyncSession, ws: WorkspaceORM, user_id: str) -> st
 
 @public_router.get(
     "/requestable-roles",
-    response_model=list[RequestableRole],
+    response_model=RequestOptions,
     response_model_by_alias=True,
 )
 async def list_requestable_roles(
@@ -306,14 +347,21 @@ async def list_requestable_roles(
     _user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """The roles anyone may ask for in a workspace — never its name, so a
-    shared link works without telling a stranger what the workspace is."""
-    await _live_workspace(session, workspace_id)
-    return [
+    """The roles anyone may ask for in a workspace, and how it takes
+    requests — never its name, so a shared link works without telling a
+    stranger what the workspace is."""
+    ws = await _live_workspace(session, workspace_id)
+    roles = [
         RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
         for r, perms in await workspace_access.workspace_roles(session, workspace_id)
         if workspace_access.is_requestable(perms)
     ]
+    policy = ws.request_policy or "approval"
+    return RequestOptions(
+        roles=roles,
+        request_policy=policy,
+        join_role=_JOIN_ROLE if policy == "open" and any(r.name == _JOIN_ROLE for r in roles) else None,
+    )
 
 
 @public_router.post(
@@ -339,6 +387,8 @@ async def submit_access_request(
     if body.target_type != "workspace":
         raise HTTPException(status_code=400, detail="Only target_type='workspace' is supported")
     ws = await _live_workspace(session, body.target_id)
+    if (ws.request_policy or "approval") == "closed":
+        raise _closed()
 
     perms = dict(
         (r.name, p) for r, p in await workspace_access.workspace_roles(session, ws.id)
@@ -369,6 +419,11 @@ async def submit_access_request(
         justification=body.justification,
     )
     if not created:
+        if row.binding_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You've asked to keep your access to this workspace. Ask for more once that's answered.",
+            )
         response.status_code = status.HTTP_200_OK
         return (await _to_responses(session, [row], reader=claims))[0]
 
@@ -404,6 +459,153 @@ async def submit_access_request(
         resource_id=row.id,
     )
     return (await _to_responses(session, [row], reader=claims))[0]
+
+
+@public_router.post(
+    "/extend",
+    response_model=AccessRequestResponse,
+    response_model_by_alias=True,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ask_to_keep_access(
+    body: AccessExtensionCreate,
+    response: Response,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Ask to keep time-limited access before it ends — a request the
+    workspace's approvers answer like any other, and that extends the grant
+    when approved. Only your own grant made here, with an end still ahead;
+    the identity provider's grants don't end this way. A workspace closed to
+    requests still takes these: its people are asking to stay."""
+    binding = await binding_repo.get_binding(session, body.binding_id)
+    if (
+        binding is None or binding.subject_type != "user" or binding.subject_id != user.id
+        or binding.scope_type != "workspace"
+    ):
+        raise HTTPException(status_code=404, detail="Access not found")
+    if binding.source != "local" or not binding.expires_at or _is_expired(
+        binding.expires_at, now=datetime.now(timezone.utc),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only access granted here with an end date still ahead can be kept",
+        )
+    ws = await _live_workspace(session, binding.scope_id)
+    claims = await resolve(session, user.id)
+    row, created = await access_request_repo.create(
+        session,
+        requester_id=user.id,
+        target_type="workspace",
+        target_id=ws.id,
+        requested_role=binding.role_name,
+        justification=body.justification,
+        binding_id=binding.id,
+    )
+    if not created:
+        # The one open request per workspace may be another one.
+        if row.binding_id != binding.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You already have an open request for this workspace. Withdraw it, or wait for "
+                       "its answer, to ask to keep this access.",
+            )
+        response.status_code = status.HTTP_200_OK
+        return (await _to_responses(session, [row], reader=claims))[0]
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.access_request.created",
+        payload={
+            "request_id": row.id,
+            "requester_id": user.id,
+            "target_type": row.target_type,
+            "target_id": row.target_id,
+            "workspace_id": row.target_id,
+            "requested_role": row.requested_role,
+            "binding_id": binding.id,
+        },
+    )
+    if binding.idp_exception:
+        # Only admins keep an exception going.
+        approvers = await notification_repo.users_who_can(
+            session, workspace_id=ws.id, permission="workspace:admin",
+        )
+    else:
+        _people, approvers = (await workspace_access.audience(session, [ws.id]))[ws.id]
+    recipients = approvers or await notification_repo.users_with_global_permission(
+        session, "system:org-admin",
+    )
+    who = await _requester_name(session, user.id)
+    await notification_repo.notify(
+        session,
+        user_ids=recipients,
+        kind="access_request.submitted",
+        title=f"{who} asks to keep their access to {ws.name}",
+        body=(
+            f"{workspace_access.role_label(binding.role_name)} access ends on {binding.expires_at[:10]}"
+            + (f": “{row.justification}”" if row.justification else ".")
+        ),
+        link="/workspaces?tab=requests",
+        actor_id=user.id,
+        resource_type="access_request",
+        resource_id=row.id,
+    )
+    return (await _to_responses(session, [row], reader=claims))[0]
+
+
+@public_router.post(
+    "/join",
+    response_model=AccessRequestResponse,
+    response_model_by_alias=True,
+    status_code=status.HTTP_201_CREATED,
+)
+async def join_open_workspace(
+    body: AccessJoinCreate,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Join a workspace open to everyone, as a Viewer, at once. Recorded as
+    a request answered as it was made, so the workspace's request history
+    shows who joined, and the grant reads as joined. Anything more than
+    Viewer is asked for as usual."""
+    ws = await _live_workspace(session, body.workspace_id)
+    if (ws.request_policy or "approval") != "open" or (ws.access_mode or "app") != "app":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"type": "not_open", "message": "This workspace isn't open to join. Ask for access instead."},
+        )
+    claims = await resolve(session, user.id)
+    if workspace_access.can_open(claims, ws.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You can already open this workspace")
+    if _JOIN_ROLE not in {r.name for r, _p in await workspace_access.workspace_roles(session, ws.id)}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This workspace has no Viewer role to join as")
+
+    row = await access_request_repo.record_join(
+        session, requester_id=user.id, target_id=ws.id, role=_JOIN_ROLE,
+        note="Joined — the workspace is open to everyone.",
+    )
+    binding, _outcome = await workspace_access.grant_role(
+        session, subject_type="user", subject_id=user.id, role=_JOIN_ROLE, ws_id=ws.id,
+        granted_by=user.id, request_id=row.id,
+    )
+    revoked = await revoke_subject_sessions(
+        "user", user.id, session=session, reason="workspace_binding_added",
+    )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.member_joined",
+        payload={
+            "workspace_id": ws.id,
+            "binding_id": binding.id,
+            "user_id": user.id,
+            "actor_id": user.id,
+            "role": _JOIN_ROLE,
+            "access_request_id": row.id,
+            "sessions_revoked": revoked,
+        },
+    )
+    return (await _to_responses(session, [row]))[0]
 
 
 # ── Self-service: my requests ────────────────────────────────────────
@@ -559,6 +761,8 @@ async def approve_access_request(
     """
     body = body or AccessRequestApprove()
     row, claims, ws = await _load_open_for_answer(session, request_id, answerer)
+    if row.binding_id:
+        return await _approve_extension(session, row, claims, ws, answerer, body)
     idp_mode = (ws.access_mode or "app") == "idp"
 
     granted_role: Optional[str] = None
@@ -616,6 +820,10 @@ async def approve_access_request(
                 "Its identity provider decides who is in this workspace. Point the request to "
                 "the provider's group, or confirm granting the role here as an exception."
             )
+        if idp_mode:
+            refusal = workspace_access.exception_refusal(claims, ws.id, body.expires_at)
+            if refusal:
+                raise HTTPException(status_code=refusal[0], detail=refusal[1])
         binding, outcome = await workspace_access.grant_role(
             session,
             subject_type="user",
@@ -701,6 +909,105 @@ async def approve_access_request(
     logger.info(
         "Access request %s approved by %s (workspace=%s, role=%s, group=%s, exception=%s)",
         resolved.id, answerer.id, ws.id, granted_role, granted_group_id, exception,
+    )
+    return (await _to_responses(session, [resolved]))[0]
+
+
+async def _approve_extension(
+    session: AsyncSession,
+    row: AccessRequestORM,
+    claims: PermissionClaims,
+    ws: WorkspaceORM,
+    answerer: User,
+    body: AccessRequestApprove,
+) -> AccessRequestResponse:
+    """Approve a request to keep access: the grant gets the end chosen
+    (``expiresIn`` / ``expiresAt``; neither means no end), within what the
+    answerer could grant. An exception stays one — so keeping it is the
+    admins' decision, confirmed as an exception again, with a new end."""
+    binding = await binding_repo.get_binding(session, row.binding_id)
+    if binding is None or binding.scope_id != ws.id or binding.subject_id != row.requester_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That access has been removed; they can ask to join again",
+        )
+    await _grantable_role(session, claims, ws.id, binding.role_name)
+    if binding.idp_exception:
+        if not body.exception:
+            raise _idp_managed(
+                "This access is an exception to the identity provider. Confirm keeping it as "
+                "an exception, or point them to the provider's group."
+            )
+        refusal = workspace_access.exception_refusal(claims, ws.id, body.expires_at)
+        if refusal:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
+    lapsed = _is_expired(binding.expires_at, now=datetime.now(timezone.utc))
+    binding.expires_at = body.expires_at
+    binding.expiry_reminded_at = None
+    await session.flush()
+    revoked = 0
+    if lapsed:
+        # It ended while the request waited: the person's sessions carry
+        # claims without it.
+        revoked = await revoke_subject_sessions(
+            "user", row.requester_id, session=session, reason="workspace_binding_added",
+        )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.member_expiry_updated",
+        payload={
+            "workspace_id": ws.id,
+            "binding_id": binding.id,
+            "subject_type": "user",
+            "subject_id": row.requester_id,
+            "role": binding.role_name,
+            "new_expires_at": binding.expires_at,
+            "actor_id": answerer.id,
+            "access_request_id": row.id,
+            "sessions_revoked": revoked,
+        },
+    )
+    resolved = await access_request_repo.resolve(
+        session,
+        request_id=row.id,
+        new_status="approved",
+        resolver_id=answerer.id,
+        note=body.note,
+        granted_role=binding.role_name,
+        access_expires_at=binding.expires_at,
+        idp_exception=bool(binding.idp_exception),
+    )
+    assert resolved is not None  # locked by the caller
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.access_request.approved",
+        payload={
+            "request_id": resolved.id,
+            "requester_id": resolved.requester_id,
+            "target_type": resolved.target_type,
+            "target_id": resolved.target_id,
+            "workspace_id": resolved.target_id,
+            "requested_role": resolved.requested_role,
+            "granted_role": binding.role_name,
+            "binding_id": binding.id,
+            "expires_at": binding.expires_at,
+            "actor_id": answerer.id,
+        },
+    )
+    ends = f"now ends on {binding.expires_at[:10]}" if binding.expires_at else "no longer ends"
+    await notification_repo.notify(
+        session,
+        user_ids=[resolved.requester_id],
+        kind="access_request.approved",
+        title=f"You can keep your access to {ws.name}",
+        body=" ".join(filter(None, [
+            f"Your {workspace_access.role_label(binding.role_name)} access {ends}.",
+            resolved.resolution_note,
+        ])),
+        link=f"/workspaces/{ws.id}",
+        actor_id=answerer.id,
+        resource_type="access_request",
+        resource_id=resolved.id,
     )
     return (await _to_responses(session, [resolved]))[0]
 
@@ -828,11 +1135,12 @@ async def deny_access_request(
             "note": resolved.resolution_note,
         },
     )
+    asked = "keep your access to" if resolved.binding_id else "join"
     await notification_repo.notify(
         session,
         user_ids=[resolved.requester_id],
         kind="access_request.denied",
-        title=f"Your request to join {await _name_for(session, ws, resolved.requester_id)} was declined",
+        title=f"Your request to {asked} {await _name_for(session, ws, resolved.requester_id)} was declined",
         body=resolved.resolution_note or "No reason was given.",
         link="/my/access",
         actor_id=answerer.id,

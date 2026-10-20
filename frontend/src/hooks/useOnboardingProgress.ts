@@ -7,7 +7,9 @@
  *
  *   • Set up the platform  — admins / provider-readers: connect → assets →
  *                            workspace → ontology. Auto-detected from real counts.
- *   • Explore your data    — everyone: create a view, trace lineage.
+ *   • Explore your data    — everyone: create a view, trace lineage — and,
+ *                            for someone who can't create a workspace, first
+ *                            join one.
  *   • Collaborate & govern — admins (invite team, access) and, when the
  *                            versioning flag is on, reviewing a change.
  *
@@ -21,7 +23,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { LucideIcon } from 'lucide-react'
 import {
   DatabaseZap, Boxes, Layers, Compass, GitBranch, PlusCircle,
-  Users, ShieldCheck, GitPullRequest,
+  Users, ShieldCheck, GitPullRequest, DoorOpen,
 } from 'lucide-react'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -128,7 +130,9 @@ export function useOnboardingProgress(): OnboardingProgressResult {
   const isPlatformAdmin = usePermission('system:admin')
   const isOrgAdmin = usePermission('system:org-admin')
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
+  const canCreateWorkspace = usePermission('system:workspaces:create')
   const versioningEnabled = useFeature('versioningEnabled')
+  const directoryEnabled = useFeature('workspaceDirectoryEnabled')
 
   // Who sees what. Setup is for people who can actually connect data; the
   // governance steps are admin/flag scoped. Explore is for everyone.
@@ -152,7 +156,17 @@ export function useOnboardingProgress(): OnboardingProgressResult {
       ]))
     }
 
+    // Someone who can't make a workspace starts by getting into one.
+    const join = !canSetup && !canCreateWorkspace
+      ? [makeStep('join-workspace', 'Join a workspace',
+        directoryEnabled
+          ? 'Find the workspace your team works in and ask to join — or join one open to everyone.'
+          : 'Ask an administrator to add you, or open a link to a workspace and ask there.',
+        DoorOpen, counts.workspaceCount > 0,
+        { href: directoryEnabled ? '/workspaces?tab=discover' : '/my/access', guideSlug: 'requesting-access' })]
+      : []
     out.push(makeTrack('explore', 'Explore your data', 'See how everything connects', 'explore', Compass, [
+      ...join,
       makeStep('create-view', 'Create a view', 'Build your first curated view of the lineage graph.', PlusCircle, counts.viewCount > 0 || did('create-view'), { href: '/workspaces', guideSlug: 'creating-views' }),
       makeStep('trace-lineage', 'Trace lineage', 'Follow data upstream and downstream on the canvas.', GitBranch, did('trace-lineage'), { href: '/explorer', guideSlug: 'reading-lineage', manual: true }),
     ]))
@@ -170,7 +184,7 @@ export function useOnboardingProgress(): OnboardingProgressResult {
     }
 
     return out.filter((t): t is OnboardingTrack => t !== null)
-  }, [counts, manual, canSetup, isAdmin, versioningEnabled])
+  }, [counts, manual, canSetup, canCreateWorkspace, directoryEnabled, isAdmin, versioningEnabled])
 
   const allSteps = tracks.flatMap((t) => t.steps)
   const completedCount = allSteps.filter((s) => s.done).length

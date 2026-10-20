@@ -64,7 +64,7 @@ Two kinds of people look after who gets in:
 | Role | Can | Can't |
 | --- | --- | --- |
 | **Workspace admin** | Add users and groups at any workspace role whose permissions they hold, answer requests, remove people, and choose [how people get in](#how-people-get-in) | — |
-| **Workspace steward** | Add people as **Workspace viewer** or **Workspace member**, and answer requests at those levels — otherwise a **Workspace member** | Bind groups, remove people or change anyone's access, or change how people get in |
+| **Workspace steward** | Add people as **Workspace viewer** or **Workspace member**, and answer requests at those levels — otherwise a **Workspace member** | Bind groups, remove people or change anyone's access, let someone in as an exception, or change how people get in |
 
 A steward suits the team lead who knows who should be in, without handing them
 the workspace.
@@ -80,13 +80,32 @@ the workspace.
    **30d** or **90d** — access then revokes itself, which suits contractors
    and temporary cover.
 6. If the workspace's identity provider decides who is in, tick **Add them
-   here as an exception** to add a person (see [When the identity provider
-   decides](#when-the-identity-provider-decides)).
+   here as an exception** to add a person — admins only, and an exception
+   always ends, so **Permanent** isn't offered (see [When the identity
+   provider decides](#when-the-identity-provider-decides)).
 7. Select **Add to workspace**.
+
+The dialog lists the workspace's data sources, restricted ones first: any
+role here reads all of them — there are no per-source grants inside a
+workspace — so check the list before letting someone into a workspace that
+holds a sensitive one.
 
 **You should now see** the user or group in the members list with its role. A
 binding with a duration shows how long it has left, in an **Expires in …**
 badge. Adding someone whose earlier access had ended gives it back to them.
+
+The person hears in their **Inbox** when you add them, remove them or change
+when their access ends; a team's members aren't told when the team is bound.
+Someone with time-limited access is reminded before it ends — a week ahead for
+access granted for more than two weeks, two days ahead for shorter access — and
+can ask to keep it ([Requesting Access](/guide/requesting-access#keep-access-thats-about-to-end)).
+
+To change when a binding ends, select **Change** beside its **Expires in …**
+badge and choose **End in 7 days**, **End in 30 days**, **End in 90 days** or
+**No end date** — counted from today. Only admins change it; a request the
+person made to keep the access reads as answered. An exception keeps an end
+— **No end date** isn't offered — and the menu says it **Stays an
+exception**.
 
 ![a workspace's Members tab with the Add member dialog open, showing the User and Group toggle, the Role list and the Access duration choices](/docs-assets/guide/workspace-admin-members.png)
 
@@ -119,6 +138,7 @@ and its chips to answer "why?":
 | **Added directly** | Someone added them with **Add member**. |
 | **Approved request** | They asked, and an admin or steward approved it. |
 | **Exception** | Added here although the identity provider decides who is in — it won't follow their groups. |
+| **Joined** | They joined themselves, as a Viewer, while the workspace was open to everyone. |
 | **Identity provider** | A group in your organization's identity provider — it adds and removes them. |
 | **Team** | They belong to a team (a group managed in {brand}) bound here. |
 | **Organization-wide** | An Org Admin or Super Admin role, which reaches every workspace. |
@@ -149,6 +169,17 @@ Org Admins.
 4. Select **Approve**, **Add to team**, **Point to group** or **Grant
    exception**.
 
+A request that has waited a day or more shows **Waiting N days**. After three
+days without an answer, {brand} reminds the workspace's admins and stewards;
+after a week it tells the Org Admins, and the request shows **Sent to the Org
+Admins**. Requests waiting on the identity provider aren't brought up — IT has
+them.
+
+A request **to keep access** ("asks to keep **Member** — ends …") comes from
+someone whose time-limited access is ending. **Review** asks only how much
+longer — **30 days** unless you choose **7 days**, **90 days** or **No end
+date** — and **Let them keep it** extends the same grant.
+
 | The workspace | Your choices |
 | --- | --- |
 | **Approved in the app** | **Grant a role** — what they asked for or another level you may grant, with **No end date** or for **7**, **30** or **90 days**. **Add to a team** — appears when a team is bound here whose every role you could grant, so they get what their colleagues have. |
@@ -168,13 +199,14 @@ The requester follows it on **My access**.
 
 ### How people get in
 
-The **How people get in** card at the foot of the **Members** tab holds three
+The **How people get in** card at the foot of the **Members** tab holds four
 settings. Only admins see it.
 
 | Setting | What it does |
 | --- | --- |
 | **Listed in Find a workspace** | On (the default): everyone who can sign in sees its name, description and who answers requests in **Find a workspace** — once an administrator has switched **Find a workspace** on ([Feature Switches](/guide/feature-switches)). Off: only its members see it there. |
 | **Who decides who is in** | **Approved in the app** (the default): admins and stewards answer requests and add people here. **Through your identity provider**: membership follows your identity provider's groups, approvers point people to the group that grants it, and anything granted here is an exception. |
+| **How people ask** | **Approvers decide** (the default): people ask, and admins and stewards answer. **Open to everyone**: anyone can join as a **Workspace viewer** at once, without approval — more is still asked for; not available while the identity provider decides who is in. A Viewer reads every data source here, restricted ones included, and a workspace hidden from Find a workspace can still be joined by anyone with a link — the card says so when either applies. **Closed to requests**: nobody can ask to join, and admins add people with **Add member**; people already in can still ask to keep access that's ending. |
 | **A note for people asking** | Shown to people as they ask — "Say which team you're on", for example. Up to 500 characters. |
 
 Select **Save** after changing them.
@@ -192,10 +224,41 @@ Then:
   and the request closes itself. It warns you when they have never signed in
   through the identity provider.
 - **Grant an exception** and **Add them here as an exception** let someone in
-  without the group — for a contractor, or while IT catches up. Exceptions are
-  labelled wherever access is listed, and don't end on their own when the
-  person later joins the group; remove them once they have.
+  without the group — for a contractor, or while IT catches up. Only admins
+  grant them — a steward points people to the group — and they always end,
+  within 90 days. Keeping one going, from a request to keep it or with
+  **Change**, keeps it an exception, with a new end within 90 days. Exceptions are
+  labelled wherever access is listed, and end on their own once the person's
+  identity provider groups grant the same access: at their next sign-in, an
+  exception for the role a group grants becomes that group's grant — no gap —
+  and one the groups' roles cover is ended. The person and whoever granted it
+  hear about it.
 - Groups can still be bound with **Add member**.
+
+### Reviewing who has access
+
+An **access review** goes through the grants made here — people's and teams' —
+so you can keep or remove each. The **Access reviews** card sits at the foot of
+the **Members** tab; only admins see it.
+
+1. Under **Access reviews**, choose when it's due — **7**, **14** or **30
+   days** — and select **Start a review**. It takes a snapshot of the grants as
+   they stand. People who get in through the identity provider or an
+   organization-wide role are counted, not reviewed — removing them here
+   wouldn't hold.
+2. For each grant, select **Keep** or **Remove**. The row shows the role, how
+   it came about, when it was granted and ends, and when the person last
+   signed in. **Remove** asks you to confirm, then takes the access away at
+   once; the person hears why. A kept grant can still be removed while the
+   review is open.
+3. When every grant is decided, select **Complete review**.
+
+**You should now see** the review under the earlier ones, with how many grants
+were kept and removed. **Download CSV** saves the review for your records;
+**Cancel review** stops it, and what was already removed stays removed.
+
+> **Note:** Nothing is removed unless you remove it. A review past its due
+> date is only flagged — its admins and whoever started it hear once.
 
 ---
 

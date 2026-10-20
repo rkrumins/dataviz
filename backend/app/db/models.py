@@ -666,6 +666,10 @@ class WorkspaceORM(Base):
     access_mode = Column(Text, nullable=False, default="app", server_default="app")
     # Shown to people asking to join: how access works here, who to ask.
     access_note = Column(Text, nullable=True)
+    # How it takes requests: 'approval' — its approvers decide; 'open' —
+    # anyone may join as a Viewer at once (more still needs approval);
+    # 'closed' — no requests, its admins add people.
+    request_policy = Column(Text, nullable=False, default="approval", server_default="approval")
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -689,6 +693,9 @@ class WorkspaceORM(Base):
         Index("idx_workspaces_is_default", "is_default"),
         Index("idx_workspaces_deleted_at", "deleted_at"),
         CheckConstraint("access_mode IN ('app', 'idp')", name="ck_workspaces_access_mode"),
+        CheckConstraint(
+            "request_policy IN ('approval', 'open', 'closed')", name="ck_workspaces_request_policy",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -2940,6 +2947,9 @@ class RoleBindingORM(Base):
     # Granted in the app for a workspace whose access its identity provider
     # decides — an exception people should be able to see as one.
     idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When the person was told this time-limited grant is about to end; NULL
+    # again whenever its end date moves, so they hear once per end date.
+    expiry_reminded_at = Column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -3123,6 +3133,12 @@ class AccessRequestORM(Base):
     idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
     # When access routed to the identity provider actually arrived.
     fulfilled_at = Column(Text, nullable=True)
+    # A request to keep access that is about to end: the grant it extends.
+    binding_id = Column(Text, nullable=True)
+    # When the approvers were reminded of it still waiting, and when it went
+    # on to the Org Admins.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -3167,6 +3183,77 @@ class AccessRequestORM(Base):
             f"role={self.requested_role!r} "
             f"status={self.status!r}>"
         )
+
+
+class AccessReviewORM(Base):
+    """A workspace admin's review of who holds access to the workspace.
+
+    Started by an admin with a due date; every grant it covers is a row in
+    ``access_review_items``, kept or removed. ``open`` → ``completed`` once
+    every item is decided, or ``cancelled``. Nothing is removed unless a
+    reviewer removes it. One open review per workspace
+    (``uq_access_reviews_one_open``). No FK on ``workspace_id``, like
+    ``access_requests``: workspaces are soft-deleted.
+    """
+    __tablename__ = "access_reviews"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rev_{uuid.uuid4().hex[:12]}")
+    workspace_id = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open", server_default="open")
+    started_by = Column(Text, nullable=True)
+    started_at = Column(Text, nullable=False, default=_now)
+    due_at = Column(Text, nullable=False)
+    completed_at = Column(Text, nullable=True)
+    completed_by = Column(Text, nullable=True)
+    # When the workspace's admins were told it is past its due date.
+    overdue_notified_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_access_reviews_workspace", "workspace_id", "started_at"),
+        Index(
+            "uq_access_reviews_one_open", "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
+        CheckConstraint(
+            "status IN ('open', 'completed', 'cancelled')", name="ck_access_reviews_status",
+        ),
+    )
+
+
+class AccessReviewItemORM(Base):
+    """One grant in an access review, as it stood when the review began —
+    a person's or a team's role in the workspace, how it came about — and
+    what the reviewer decided."""
+    __tablename__ = "access_review_items"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rvi_{uuid.uuid4().hex[:12]}")
+    review_id = Column(
+        Text, ForeignKey("access_reviews.id", ondelete="CASCADE"), nullable=False,
+    )
+    subject_type = Column(Text, nullable=False)   # user | group
+    subject_id = Column(Text, nullable=False)
+    role_name = Column(Text, nullable=False)
+    binding_id = Column(Text, nullable=True)
+    # direct | request | exception | joined | team — as provenance reads it.
+    origin = Column(Text, nullable=True)
+    granted_at = Column(Text, nullable=True)
+    expires_at = Column(Text, nullable=True)
+    decision = Column(Text, nullable=True)        # NULL until decided: keep | remove
+    decided_by = Column(Text, nullable=True)
+    decided_at = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_access_review_items_review", "review_id"),
+        CheckConstraint(
+            "subject_type IN ('user', 'group')", name="ck_access_review_items_subject_type",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('keep', 'remove')", name="ck_access_review_items_decision",
+        ),
+    )
 
 
 # ------------------------------------------------------------------ #

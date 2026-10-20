@@ -6,7 +6,8 @@
  * for), a search and a filter, then a card per workspace: what it is for,
  * how many people and data sources it has, who answers its requests, how
  * people get in — and the one thing to do: Open it, see where your request
- * is, or Request access.
+ * is, Join one open to everyone, or Request access. One closed to requests
+ * says to ask its admins.
  *
  * Behind the Find a workspace switch; the Workspaces page only offers the
  * tab while it is on.
@@ -14,15 +15,17 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-    AlertTriangle, ArrowRight, Boxes, Clock, Database, EyeOff, KeyRound, Search, Send, ShieldCheck, Users,
+    AlertTriangle, ArrowRight, Boxes, Clock, Database, DoorOpen, EyeOff, KeyRound, Loader2, Lock, Search, Send,
+    ShieldCheck, Users,
 } from 'lucide-react'
 
 import { StatTile } from '@/components/explorer/ExplorerStatsBar'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { Segmented } from '@/components/ui/Segmented'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { RequestAccessDialog } from '@/components/access/RequestAccessDialog'
 import { STATUS_META, idpInstruction, roleLabel } from '@/components/access/accessRequestCopy'
-import { useWorkspaceDirectory } from '@/hooks/useWorkspaceAccess'
+import { useAccessRequestActions, useWorkspaceDirectory } from '@/hooks/useWorkspaceAccess'
 import type { WorkspaceDirectoryEntry } from '@/services/workspaceService'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
@@ -180,6 +183,13 @@ function DirectoryCard({ entry, onAsk }: { entry: WorkspaceDirectoryEntry; onAsk
     const idp = entry.accessMode === 'idp'
     const request = entry.openRequest
     const extra = entry.approverCount - entry.approverIds.length
+    const policy = entry.requestPolicy ?? 'approval'
+    const { join } = useAccessRequestActions()
+    const { notify } = useAppNotifications()
+    const joinNow = () => join.mutate(entry.id, {
+        onSuccess: r => notify('success', `You joined ${entry.name} as ${roleLabel(r.grantedRole ?? r.requestedRole)}.`),
+        onError: err => notify('error', (err as Error).message),
+    })
     return (
         <article className="group h-full flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated p-5 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 hover:border-emerald-500/30">
             <header className="flex items-start gap-3">
@@ -198,6 +208,11 @@ function DirectoryCard({ entry, onAsk }: { entry: WorkspaceDirectoryEntry; onAsk
                             {idp ? <KeyRound className="w-2.5 h-2.5" /> : <ShieldCheck className="w-2.5 h-2.5" />}
                             {idp ? 'Through your identity provider' : 'Approved in the app'}
                         </span>
+                        {policy === 'open' && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-teal-500/20 bg-teal-500/10 px-2 py-0.5 text-[10px] font-semibold text-teal-600 dark:text-teal-400">
+                                <DoorOpen className="w-2.5 h-2.5" /> Open to everyone
+                            </span>
+                        )}
                         {!entry.directoryListed && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-slate-500/20 bg-slate-500/10 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-400">
                                 <EyeOff className="w-2.5 h-2.5" /> Hidden from this list
@@ -259,6 +274,29 @@ function DirectoryCard({ entry, onAsk }: { entry: WorkspaceDirectoryEntry; onAsk
                     </div>
                 ) : request ? (
                     <RequestState request={request} />
+                ) : policy === 'closed' ? (
+                    <p className="flex items-center gap-1.5 text-xs text-ink-muted">
+                        <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                        Not taking requests — ask its admins to add you.
+                    </p>
+                ) : policy === 'open' && !idp ? (
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={joinNow}
+                            disabled={join.isPending}
+                            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-teal-600 text-white shadow-md shadow-teal-500/20 hover:bg-teal-700 disabled:opacity-60"
+                        >
+                            {join.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <DoorOpen className="w-4 h-4" />} Join
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onAsk}
+                            className="px-3 py-2 rounded-xl text-xs font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                            Ask for more
+                        </button>
+                    </div>
                 ) : (
                     <button
                         type="button"

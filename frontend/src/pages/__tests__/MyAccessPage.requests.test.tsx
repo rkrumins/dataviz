@@ -2,8 +2,9 @@
  * My Access follows every request to its end: waiting for approval (with
  * Withdraw), waiting on the identity provider (with what to ask IT), and
  * how it was answered — the role or team, an exception, an end date, a
- * reason. Someone with no workspace is pointed to Find a workspace while
- * it is on, and told whom to ask while it is off.
+ * reason — and asking to keep access reads as such. Someone with no
+ * workspace is pointed to Find a workspace while it is on, and told whom to
+ * ask while it is off.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -111,6 +112,23 @@ describe('MyAccessPage — your requests', () => {
         expect(within(hr).getByText('Reason: HR is closed to contractors')).toBeInTheDocument()
 
         expect(within(row('Engineering')).getByText('You withdrew it.')).toBeInTheDocument()
+    })
+
+    it('reads a request to keep access as one', async () => {
+        requests.listMine.mockResolvedValue([
+            request({ id: 'ar_6', bindingId: 'bnd_1', currentExpiresAt: '2026-10-25T00:00:00Z' }),
+            request({
+                id: 'ar_7', bindingId: 'bnd_2', status: 'approved', target: { type: 'workspace', id: 'ws_ops', label: 'Operations' },
+                accessExpiresAt: '2026-12-01T00:00:00Z', resolvedBy: 'usr_wanda', resolvedAt: '2026-10-18T11:00:00Z',
+            }),
+        ])
+        renderPage()
+
+        expect(await screen.findByText('1 open')).toBeInTheDocument()
+        const finance = row('Finance')
+        expect(within(finance).getByText('Keep your access to')).toBeInTheDocument()
+        expect(within(finance).getByText(/Your access ends on/)).toBeInTheDocument()
+        expect(within(row('Operations')).getByText(/You can keep it: it now ends on/)).toBeInTheDocument()
     })
 
     it('withdraws an open request', async () => {

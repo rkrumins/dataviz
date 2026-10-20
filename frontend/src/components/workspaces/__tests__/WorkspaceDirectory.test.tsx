@@ -1,8 +1,9 @@
 /**
  * Find a workspace: a card per workspace with what it is for, who is in it,
  * who answers and how people get in — and the one thing to do: Open it, see
- * where your request is, or Request access. The banner counts double as
- * filters, and search reads names and descriptions.
+ * where your request is, Join one open to everyone, or Request access —
+ * and one closed to requests says so. The banner counts double as filters,
+ * and search reads names and descriptions.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -10,13 +11,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { directory, requestableRoles } = vi.hoisted(() => ({
+const { directory, requestableRoles, join } = vi.hoisted(() => ({
     directory: vi.fn(),
     requestableRoles: vi.fn(),
+    join: vi.fn(),
 }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { directory } }))
 vi.mock('@/services/accessRequestsService', () => ({
-    accessRequestsService: { requestableRoles, submit: vi.fn() },
+    accessRequestsService: { requestableRoles, submit: vi.fn(), join },
 }))
 vi.mock('@/components/ui/PersonChip', () => ({
     PersonChip: ({ id }: { id: string }) => <span>{`person:${id}`}</span>,
@@ -64,7 +66,11 @@ beforeEach(() => {
     vi.clearAllMocks()
     useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, workspaceDirectoryEnabled: true } })
     directory.mockResolvedValue(ENTRIES)
-    requestableRoles.mockResolvedValue([{ name: 'workspace_viewer', description: null, isSystem: true }])
+    requestableRoles.mockResolvedValue({
+        roles: [{ name: 'workspace_viewer', description: null, isSystem: true }],
+        requestPolicy: 'approval',
+        joinRole: null,
+    })
 })
 
 describe('WorkspaceDirectory', () => {
@@ -111,6 +117,25 @@ describe('WorkspaceDirectory', () => {
         await user.click(await waitFor(() => within(card('Finance')).getByRole('button', { name: /Request access/ })))
         expect(await screen.findByRole('dialog', { name: 'Ask to join Finance' })).toBeInTheDocument()
         expect(requestableRoles).toHaveBeenCalledWith('ws_fin')
+    })
+
+    it('joins one open to everyone at once, and says when one takes no requests', async () => {
+        const user = userEvent.setup()
+        directory.mockResolvedValue([
+            entry({ id: 'ws_open', name: 'Open house', requestPolicy: 'open' }),
+            entry({ id: 'ws_shut', name: 'Shut', requestPolicy: 'closed' }),
+        ])
+        join.mockResolvedValue({ id: 'ar_9', status: 'approved', requestedRole: 'workspace_viewer', grantedRole: 'workspace_viewer' })
+        renderDirectory()
+
+        const open = within(await waitFor(() => card('Open house')))
+        expect(open.getByText('Open to everyone')).toBeInTheDocument()
+        await user.click(open.getByRole('button', { name: 'Join' }))
+        await waitFor(() => expect(join).toHaveBeenCalledWith('ws_open'))
+
+        const shut = within(card('Shut'))
+        expect(shut.getByText(/Not taking requests/)).toBeInTheDocument()
+        expect(shut.queryByRole('button', { name: /Request access/ })).not.toBeInTheDocument()
     })
 
     it('asks nothing while the switch is off', () => {

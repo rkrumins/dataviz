@@ -1,6 +1,7 @@
 /**
- * useWorkspaceAccess — finding a workspace, asking to join, following the
- * request, and answering requests.
+ * useWorkspaceAccess — finding a workspace, asking to join (or joining one
+ * open to everyone), asking to keep access, following the request, and
+ * answering requests.
  *
  * One query-key family, so asking, withdrawing, answering or a change to
  * the caller's own permissions refreshes every list that shows a request at
@@ -67,7 +68,8 @@ export function useMyAccessRequests(status?: AccessRequestFilter) {
     return { requests: query.data, isLoading: query.isLoading, error: query.error as Error | null }
 }
 
-/** What may be asked for in a workspace — never its name. */
+/** What may be asked for in a workspace, and how it takes requests —
+ *  never its name. */
 export function useRequestableRoles(workspaceId: string | null) {
     const query = useQuery({
         queryKey: [...WORKSPACE_ACCESS_KEY, 'requestable', workspaceId],
@@ -76,10 +78,17 @@ export function useRequestableRoles(workspaceId: string | null) {
         staleTime: 5 * 60_000,
         retry: false,
     })
-    return { roles: query.data, isLoading: query.isLoading, error: query.error as Error | null }
+    return {
+        roles: query.data?.roles,
+        requestPolicy: query.data?.requestPolicy ?? 'approval',
+        joinRole: query.data?.joinRole ?? null,
+        isLoading: query.isLoading,
+        error: query.error as Error | null,
+    }
 }
 
-/** Ask to join, and take a request back. */
+/** Ask to join, join an open workspace, ask to keep access, and take a
+ *  request back. */
 export function useAccessRequestActions() {
     const queryClient = useQueryClient()
     const refresh = () => queryClient.invalidateQueries({ queryKey: WORKSPACE_ACCESS_KEY })
@@ -87,11 +96,19 @@ export function useAccessRequestActions() {
         mutationFn: (req: AccessRequestCreateRequest) => accessRequestsService.submit(req),
         onSuccess: refresh,
     })
+    const join = useMutation({
+        mutationFn: (workspaceId: string) => accessRequestsService.join(workspaceId),
+        onSuccess: refresh,
+    })
+    const extend = useMutation({
+        mutationFn: (req: { bindingId: string; justification?: string | null }) => accessRequestsService.extend(req),
+        onSuccess: refresh,
+    })
     const withdraw = useMutation({
         mutationFn: (requestId: string) => accessRequestsService.withdraw(requestId),
         onSuccess: refresh,
     })
-    return { submit, withdraw }
+    return { submit, join, extend, withdraw }
 }
 
 /** Every request the caller answers, across their workspaces — empty for
