@@ -13,6 +13,7 @@
  * something is in the way) can be told from a refusal or an outage.
  */
 import { TIMEOUTS } from '@/config/timeouts'
+import type { RequestPolicy } from './accessRequestsService'
 import { authFetch } from './apiClient'
 import { withReason } from './activityReason'
 
@@ -112,6 +113,8 @@ export interface TransferAccess {
     gainsPeople: number
     gainsViews: number
     adminViews: number
+    /** How the destination takes people — how anyone who loses access gets back in. */
+    requestPolicy: RequestPolicy
     loses: TransferSubject[]
 }
 

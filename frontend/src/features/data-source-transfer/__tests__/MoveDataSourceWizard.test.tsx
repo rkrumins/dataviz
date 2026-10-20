@@ -139,7 +139,7 @@ describe('MoveDataSourceWizard', () => {
         await user.click(await screen.findByRole('radio', { name: /^Operations/ }))
         await user.click(next())
         await user.click(await screen.findByRole('button', { name: /^Next/ }))
-        expect(await screen.findByText(/told how to ask to join Operations once its admins accept/)).toBeInTheDocument()
+        expect(await screen.findByText('Once Operations’s admins accept, they’re told how to ask to join Operations')).toBeInTheDocument()
         await user.click(next())
         await user.click(await screen.findByRole('checkbox', { name: /^I understand/ }))
 
@@ -151,12 +151,27 @@ describe('MoveDataSourceWizard', () => {
         expect(await screen.findByRole('heading', { name: 'Request sent to Operations' })).toBeInTheDocument()
     })
 
+    it.each([
+        ['approval', 'They’re told how to ask to join Risk'],
+        ['open', 'They’re told they can join Risk, which is open to everyone'],
+        ['closed', 'They’re told to ask Risk’s admins to add them, as it takes no requests'],
+    ] as const)('says how to get back into a destination whose policy is %s', async (requestPolicy, told) => {
+        const user = userEvent.setup()
+        svc.preview.mockResolvedValue(preview({ access: { ...preview().access, requestPolicy } }))
+        renderWizard()
+        await toConfirm(user)
+        expect(screen.getByText(told)).toBeInTheDocument()
+
+        await user.click(next())
+        expect(await screen.findByText(`${told}, and both workspaces’ admins are told who.`)).toBeInTheDocument()
+    })
+
     it('skips Destination when it is preset, and Access when no views move', async () => {
         const user = userEvent.setup()
         svc.preview.mockResolvedValue(preview({
             views: [],
             viewCounts: { total: 0, trashed: 0, followsDefault: 0, private: 0, workspace: 0, enterprise: 0, publishRequested: 0 },
-            access: { creators: 0, sharedWith: 0, everyone: 0, gainsPeople: 0, gainsViews: 0, adminViews: 0, loses: [] },
+            access: { creators: 0, sharedWith: 0, everyone: 0, gainsPeople: 0, gainsViews: 0, adminViews: 0, requestPolicy: 'approval', loses: [] },
         }))
         renderWizard({ presetDestinationId: 'ws_risk' })
 

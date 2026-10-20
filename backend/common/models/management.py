@@ -1746,6 +1746,7 @@ class TransferAccess(BaseModel):
     gainsPeople: int = 0          # the destination's audience for workspace views
     gainsViews: int = 0
     adminViews: int = 0           # private views the destination's admins can now open
+    requestPolicy: str = "approval"  # the destination's: how anyone losing access gets in
     loses: List[TransferSubject] = []
 
 

@@ -25,7 +25,7 @@ is rebuilt. The steps:
   resolve first (an aggregation run or a version-history job in progress) and what to know (the
   workspace's last source leaving, its primary source, views published to everyone, requests to
   publish, layout templates that stay behind, open drafts whose owners can't reach the new
-  workspace).
+  workspace, a restricted source going to a workspace open to everyone).
 - **Access** shows who keeps access, who gains it and who loses it. The new workspace's own
   members, groups and identity-provider mappings decide who reads the moved views, so the people
   and groups who read them only through the old workspace lose them — each listed with where their
@@ -34,7 +34,8 @@ is rebuilt. The steps:
   access, for **I understand … lose access**.
 
 **Nobody is left guessing.** Everyone who loses access gets an Inbox notice saying where the views
-went, linking to the new workspace's **Ask to join**. Both workspaces' admins are told who, the
+went and how to get back in, the way the new workspace takes people: **Ask to join**, **Join** when
+it's open to everyone, or its admins when it's closed to requests. Both workspaces' admins are told who, the
 source's panel says how many, and the move records each person and group. Nothing is copied to
 keep the old audience reading: a copy would grow with people × views and would outlive an
 identity provider removing someone.
@@ -80,6 +81,10 @@ where it went.
   row, so a concurrent move either takes the new view along or has finished and the view is
   refused.
 - API keys can't reach any of these routes.
+- A restricted source going to a workspace open to everyone, where anyone who joins reads it, is
+  flagged in the preview, as opening a workspace that holds one is. It's a warning, not a refusal,
+  and part of what the preview's token covers: a destination that opens after you read the preview
+  sends you back to it.
 
 ### Resilience
 

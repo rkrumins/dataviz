@@ -335,7 +335,8 @@ How you move it depends on what you run:
    workspaces can't take it**, each with the reason, such as **Already has this graph**.
 3. **What moves** — check how many views move (and how many are in the trash or
    follow the workspace's default source), its version history, and what you should
-   know. Anything under **Resolve before moving** — an aggregation run or a
+   know — such as a restricted source going to a workspace that's open to everyone,
+   where anyone who joins can read it. Anything under **Resolve before moving** — an aggregation run or a
    version-history job in progress, say — has to finish before you can continue. A
    source with more than 50,000 views can't be moved in one go.
 4. **Access** — see who **keeps access**, who **gains access** and who **loses
@@ -352,9 +353,10 @@ How you move it depends on what you run:
 **You should now see** "*Source* now lives in *workspace*", with **Open in
 *workspace*** and **Undo**.
 
-Everyone who lost access gets an Inbox notice saying where the views went, with a
-link to the new workspace where they can **Ask to join**. Both workspaces' admins are
-told who lost access, and the source's panel says how many. To give someone access
+Everyone who lost access gets an Inbox notice saying where the views went and how to
+get back in, the way the new workspace takes people: **Ask to join** where approvers
+decide, **Join** where it's open to everyone, or asking its admins where it's closed to
+requests. Both workspaces' admins are told who lost access, and the source's panel says how many. To give someone access
 again, add them or their group to the new workspace — or, where your identity
 provider decides, map their identity-provider group to it, so the provider keeps
 deciding.

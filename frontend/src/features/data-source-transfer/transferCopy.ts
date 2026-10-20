@@ -12,6 +12,7 @@ import {
     type LucideIcon,
 } from 'lucide-react'
 
+import type { RequestPolicy } from '@/services/accessRequestsService'
 import type {
     DataSourceTransferResponse, TransferIssue, TransferStatus, TransferSubject,
 } from '@/services/dataSourceTransferService'
@@ -32,6 +33,19 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 export function whoLoses(people: number, groups: number): string {
     return [people && plural(people, 'person', 'people'), groups && plural(groups, 'group')]
         .filter(Boolean).join(' and ') || 'No one'
+}
+
+/**
+ * What the people who lose access are told about getting into `toName`: what its own page offers
+ * them, by how it takes people. For a request, that happens once its admins accept.
+ */
+export function toldHowBackIn(policy: RequestPolicy, toName: string, request = false): string {
+    const how = policy === 'open'
+        ? `they can join ${toName}, which is open to everyone`
+        : policy === 'closed'
+            ? `to ask ${toName}’s admins to add them, as it takes no requests`
+            : `how to ask to join ${toName}`
+    return request ? `Once ${toName}’s admins accept, they’re told ${how}` : `They’re told ${how}`
 }
 
 /** Whether `iso` falls within the last `days` days. */

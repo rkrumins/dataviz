@@ -29,6 +29,7 @@ export function preview(over: Partial<TransferPreview> = {}): TransferPreview {
         viewCounts: { total: 2, trashed: 1, followsDefault: 0, private: 0, workspace: 1, enterprise: 0, publishRequested: 0 },
         access: {
             creators: 1, sharedWith: 0, everyone: 0, gainsPeople: 12, gainsViews: 1, adminViews: 0,
+            requestPolicy: 'approval',
             loses: [
                 subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, role: 'Viewer', views: 1, via: 'group' }),
                 subject(),

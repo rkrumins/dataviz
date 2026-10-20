@@ -36,6 +36,7 @@ function renderDialog() {
 const PLAN = preview({
     access: {
         creators: 1, sharedWith: 0, everyone: 0, gainsPeople: 12, gainsViews: 1, adminViews: 0,
+        requestPolicy: 'approval',
         loses: [
             subject({ type: 'group', id: 'grp_analysts', name: 'Analysts', email: null, memberCount: 5, via: 'idp' }),
             subject(),

@@ -16,7 +16,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import type { TransferAccess, TransferSubject } from '@/services/dataSourceTransferService'
-import { plural, subjectKey, whoLoses } from './transferCopy'
+import { plural, subjectKey, toldHowBackIn, whoLoses } from './transferCopy'
 
 const SEARCH_FROM = 10
 
@@ -59,7 +59,7 @@ export function AccessPlanList({ access, fromName, toName, requestMode = false }
                     headline={loses.length ? whoLoses(loses.length - groups, groups) : 'No one'}
                 >
                     {loses.length
-                        ? `They’re told how to ask to join ${toName}${requestMode ? ' once its admins accept' : ''}`
+                        ? toldHowBackIn(access.requestPolicy, toName, requestMode)
                         : `Everyone who reads these views can still read them in ${toName}`}
                 </SummaryCard>
             </div>

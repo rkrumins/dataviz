@@ -326,6 +326,11 @@ Guards around those rules:
   workspace, holding the source's row `FOR KEY SHARE` until the view is saved: a move (which holds
   it `FOR UPDATE`) either waits for the view and takes it along, or has finished and the view is
   refused.
+- **Restricted sources don't slip into open workspaces unsaid.** Every role reads every source in its
+  workspace, restricted ones included, so a restricted source going to a workspace whose
+  `request_policy` is `open` is flagged in the preview (`restricted_open`) — a warning, not a
+  refusal, as choosing **Open to everyone** is. It is part of the preview's token: a destination
+  that opens after the preview was read sends the mover back to it (409 `preview_stale`).
 
 What happens to access. The destination's own membership governs the moved views — nothing is
 copied to stretch the old workspace's audience across. Grants (`resource_grants`) are keyed by view,
@@ -335,7 +340,9 @@ view's admin reach becomes the destination's admins. The people and groups who r
 through the old workspace lose them; the preview lists them with where their access came from
 (`app`, `group`, or `idp` — an SSO role mapping, or a group the identity provider fills), and a move
 or request that takes anyone's access needs the preview's token (`preview_required`). Afterwards
-they are told how to ask to join, both workspaces' admins are told who, and the move records them.
+they are told how to get back in by the destination's `request_policy` — ask to join, join one open
+to everyone, or ask its admins where it's closed to requests — both workspaces' admins are told
+who, and the move records them.
 Access is given back the usual way — a role or group in the destination, or an identity-provider
 mapping where the provider decides — never by copying it, which would outlive the provider removing
 someone. A pending publication request is put to the destination's publishers.

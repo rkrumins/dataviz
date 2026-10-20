@@ -77,7 +77,7 @@ export function DataSourceLifecycle({ wsId, dataSourceId, onChanged }: {
                     {moved.lostAccess.people + moved.lostAccess.groups > 0 && (
                         <span className="block text-[11px] text-ink-muted mt-0.5">
                             {whoLoses(moved.lostAccess.people, moved.lostAccess.groups)} in {workspaceLabel(moved.fromWorkspace.name)} lost
-                            access to its views there, and were told how to ask to join.
+                            access to its views there, and were told how to get back in.
                         </span>
                     )}
                     {moved.canUndo ? (

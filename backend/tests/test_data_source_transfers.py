@@ -11,7 +11,7 @@ What a move must get right, roughly in the order it would hurt to get wrong:
 * **Access follows a rule people can read.** Owners and people a view is shared with keep it;
   a workspace-shared view's audience becomes the new workspace's, and nothing is copied to
   stretch the old one across. Who loses access is said before the move (it takes the preview's
-  token) and after (they're told how to ask to join), and recorded.
+  token) and after (they're told how to get back in), and recorded.
 * **Authority is checked in both workspaces.** Moving a source with views re-homes other
   people's work, so it takes administering both; an admin of only the source asks instead,
   and the destination's admins answer, reading a preview that can't go stale under them.
@@ -429,6 +429,58 @@ async def test_who_loses_access_is_told_how_to_get_it_back(test_client, db_sessi
         ("group", TEAM, "group"), ("user", PEOPLE["ada"], "app"), ("user", PEOPLE["val"], "app")}
     assert {e["details"]["lostAccess"]["people"] for e in await _events(
         db_session, "workspace.data_source.moved")} == {2}
+
+
+@pytest.mark.parametrize("policy, way_in", [
+    ("approval", "Ask to join Risk if you need them."),
+    ("open", "Risk is open to everyone: join it if you need them."),
+    ("closed", "Risk isn't taking requests: ask its admins to add you if you need them."),
+])
+async def test_the_way_back_in_follows_how_the_destination_takes_people(
+        test_client, db_session, world, policy, way_in):
+    """What the people who lose access are told is what Risk's own page offers them: asking to
+    join, joining one that's open to everyone, or asking its admins where it takes no requests."""
+    await db_session.execute(update(WorkspaceORM).where(WorkspaceORM.id == B).values(request_policy=policy))
+    async with acting_as(db_session, "cy"):
+        preview = await _preview(test_client)
+        moved = await _move(test_client)
+
+    assert preview["access"]["requestPolicy"] == policy
+    assert moved.status_code == 200, moved.text
+    assert (await _told(db_session, "data_source.access_lost"))[PEOPLE["val"]].endswith(way_in)
+
+
+async def test_a_restricted_source_going_somewhere_open_is_flagged(test_client, db_session, world):
+    """Every role reads every source in its workspace, restricted ones included, so a restricted
+    source going where anyone may join is said — and not refused, as choosing Open to everyone
+    isn't. The token covers it: Risk opening up after the preview sends the mover back to it."""
+    async def flagged() -> list[dict]:
+        async with acting_as(db_session, "cy"):
+            return [n for n in (await _preview(test_client))["notes"] if n["code"] == "restricted_open"]
+
+    async def restricted(on: bool) -> None:
+        await db_session.execute(update(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id == DS)
+                                 .values(is_restricted=on))
+
+    await db_session.execute(update(WorkspaceORM).where(WorkspaceORM.id == B).values(request_policy="open"))
+    assert await flagged() == []                                   # open, but nothing restricted
+    await db_session.execute(update(WorkspaceORM).where(WorkspaceORM.id == B).values(request_policy="approval"))
+    await restricted(True)
+    assert await flagged() == []                                   # restricted, but Risk decides
+    async with acting_as(db_session, "cy"):
+        token = (await _preview(test_client))["token"]
+    await db_session.execute(update(WorkspaceORM).where(WorkspaceORM.id == B).values(request_policy="open"))
+    [note] = await flagged()
+    async with acting_as(db_session, "cy"):
+        stale = await test_client.post(f"{_src()}/move", headers=REASON,
+                                       json={"targetWorkspaceId": B, "previewToken": token})
+        moved = await _move(test_client)
+
+    assert note["severity"] == "warning"
+    assert note["message"] == ("Risk is open to everyone, so anyone who joins it reads every data "
+                               "source there — this restricted one included.")
+    assert stale.status_code == 409 and stale.json()["detail"]["error"] == "preview_stale"
+    assert moved.status_code == 200, moved.text                   # warned, not refused
 
 
 async def test_taking_anyones_access_takes_reading_the_preview(test_client, db_session, world):

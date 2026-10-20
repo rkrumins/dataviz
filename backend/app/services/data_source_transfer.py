@@ -21,8 +21,8 @@ workspace: its own membership — people, groups, identity-provider mappings —
 them. Nothing is copied to stretch the old workspace's audience across: a per-person copy would
 grow with people × views, and would outlive an identity provider removing someone. Instead the
 move says who loses access, before (the preview lists them, and a move that takes anyone's
-access needs the preview's token) and after (they are told how to ask to join; both sides'
-admins are told who), and records it.
+access needs the preview's token) and after (they are told how to get back in, the way the new
+workspace takes people; both sides' admins are told who), and records it.
 
 Two ways to move. Someone who administers both workspaces moves it directly. Someone who
 administers only the source asks, and the destination's admins accept (which runs the same
@@ -619,7 +619,8 @@ async def _destination_blockers(
 
 
 def _token(target_id: str, views: list[_View], losers: dict, was_default: bool,
-           becomes_primary: bool, pin_dest: Optional[str], identity_pin: dict) -> str:
+           becomes_primary: bool, pin_dest: Optional[str], identity_pin: dict,
+           restricted_open: bool) -> str:
     """A fingerprint of everything a reviewer must re-read if it changes. Who loses access is
     taken by how many views each loses, so it costs people + views to build, never their product."""
     material = json.dumps({
@@ -628,6 +629,7 @@ def _token(target_id: str, views: list[_View], losers: dict, was_default: bool,
         "losers": sorted([t, i, loser.views] for (t, i), loser in losers.items()),
         "primary": [was_default, becomes_primary, pin_dest],
         "identity": sorted(identity_pin.items()),
+        "restricted_open": restricted_open,
     }, sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()[:16]
 
@@ -814,6 +816,16 @@ async def preflight(
                f"{'it was' if len(published) == 1 else 'they were'} published under "
                f"{source.name}'s rules." if strict else ""),
             "warning" if strict else "info"))
+    # Every role reads every source in its workspace, restricted ones included, so a restricted
+    # source going where anyone may join can be read by anyone. Warned, not refused — as opening
+    # a workspace that holds one is.
+    restricted_open = bool(ds.is_restricted) and (target.request_policy or "approval") == "open"
+    if restricted_open:
+        notes.append(_issue(
+            "restricted_open",
+            f"{target.name} is open to everyone, so anyone who joins it reads every data source "
+            "there — this restricted one included.",
+            "warning"))
     template_ids = sorted({v.context_model_id for v in live if v.context_model_id})
     if template_ids:
         local = (await session.execute(
@@ -866,7 +878,8 @@ async def preflight(
         pin_destination_default=pin_dest, pin_destination_label=pin_label,
         identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected,
     )
-    pre.token = _token(target.id, views, losers, was_default, becomes_primary, pin_dest, identity_pin)
+    pre.token = _token(target.id, views, losers, was_default, becomes_primary, pin_dest, identity_pin,
+                       restricted_open)
     return pre
 
 
@@ -913,6 +926,7 @@ def _preview(pre: Preflight, *, mode: Optional[str] = None,
         ),
         access=TransferAccess(
             **pre.counts,
+            requestPolicy=pre.target.request_policy or "approval",
             loses=[
                 TransferSubject(type=loser.type, id=loser.id, name=loser.name, email=loser.email,
                                 memberCount=loser.member_count, role=loser.role,
@@ -1666,13 +1680,23 @@ async def _creators(session: AsyncSession, view_ids: list[str]) -> dict[str, int
     return out
 
 
+def _way_in(ws: WorkspaceORM) -> str:
+    """How someone who lost access gets into ``ws`` — what its own page offers them, by how it
+    takes people (``request_policy``)."""
+    policy = ws.request_policy or "approval"
+    if policy == "open":
+        return f"{ws.name} is open to everyone: join it if you need them."
+    if policy == "closed":
+        return f"{ws.name} isn't taking requests: ask its admins to add you if you need them."
+    return f"Ask to join {ws.name} if you need them."
+
+
 async def _notify_moved(session: AsyncSession, row: DataSourceTransferORM,
                         ds: WorkspaceDataSourceORM, source: WorkspaceORM, target: WorkspaceORM,
                         *, actor: str, view_ids: list[str], lost: dict, affected: set) -> None:
     label = _label(ds)
     impact = (f" {_who(lost)} from {source.name} lost access to its views shared there, and "
-              f"were told how to ask to join {target.name}." if lost["people"] or lost["groups"]
-              else "")
+              "were told how to get back in." if lost["people"] or lost["groups"] else "")
     admins = (await notification_repo.users_who_can(session, workspace_id=source.id, permission=_ADMIN)
               | await notification_repo.users_who_can(session, workspace_id=target.id, permission=_ADMIN))
     if row.kind == "request" and row.created_by:
@@ -1700,12 +1724,12 @@ async def _notify_moved(session: AsyncSession, row: DataSourceTransferORM,
             link=f"/workspaces/{target.id}?tab=views", actor_id=actor,
             resource_type="data_source_transfer", resource_id=row.id)
     # The people who can no longer open what they could: where it went, and the way back in —
-    # the destination's own page offers to ask to join.
+    # the one the destination's own page offers them.
     await notification_repo.notify(
         session, user_ids=affected - admins, kind="data_source.access_lost",
         title=f'"{label}" moved to {target.name}',
         body=f"Its views that were shared with {source.name} are now {target.name}'s, and you "
-             f"can no longer open them. Ask to join {target.name} if you need them.",
+             f"can no longer open them. {_way_in(target)}",
         link=f"/workspaces/{target.id}", actor_id=actor,
         resource_type="data_source_transfer", resource_id=row.id)
 

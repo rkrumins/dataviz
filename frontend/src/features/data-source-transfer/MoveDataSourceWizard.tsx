@@ -40,7 +40,7 @@ import { AccessPlanList } from './AccessPlanList'
 import { DestinationStep } from './DestinationStep'
 import { TransferPreviewSummary } from './TransferPreviewSummary'
 import { UndoMoveDialog } from './UndoMoveDialog'
-import { plural, whoLoses, workspaceLabel } from './transferCopy'
+import { plural, toldHowBackIn, whoLoses, workspaceLabel } from './transferCopy'
 import {
     useMoveDestinations, useMovePreview, useTransferActions, useTransferHistory,
 } from './useDataSourceTransfers'
@@ -335,7 +335,7 @@ function MoveWizardBody({ sourceWorkspace, dataSource, presetDestinationId, onCl
                                     <span className="block text-xs text-ink-muted mt-0.5">
                                         {mode === 'request'
                                             ? `${toName}’s admins see who before they accept.`
-                                            : `They’re told how to ask to join ${toName}, and both workspaces’ admins are told who.`}
+                                            : `${toldHowBackIn(pv.access.requestPolicy, toName)}, and both workspaces’ admins are told who.`}
                                     </span>
                                 </span>
                             </label>
@@ -527,7 +527,7 @@ function Terminal({ result, undone, label, fromName, toName }: {
                     </span>
                     {result.lostAccess.people + result.lostAccess.groups > 0 && (
                         <span className="rounded-full border border-black/[0.08] dark:border-white/[0.10] px-3 py-1 text-xs text-ink-secondary tabular-nums">
-                            {whoLoses(result.lostAccess.people, result.lostAccess.groups)} told how to ask to join
+                            {whoLoses(result.lostAccess.people, result.lostAccess.groups)} told how to get back in
                         </span>
                     )}
                 </div>
