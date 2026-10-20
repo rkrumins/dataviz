@@ -90,8 +90,11 @@ Every switch and its default is in the [Feature Switches API](/docs/api-features
 
 Every `{gid}` route depends on `graph_in_workspace`, which resolves the graph and asserts that its
 `workspace_id` is `{ws_id}`, raising **404** on a mismatch so existence never leaks across
-workspaces. `pr_in_workspace` does the same for a request's **base** graph and also requires you to
+workspaces. A graph in the trash — its data source deleted, or its purge running — answers **404**
+too. `pr_in_workspace` does the same for a request's **base** graph and also requires you to
 take part in the request — its author, an assigned reviewer, or a holder of `_MANAGE` — else **404**.
+Moving a data source to another workspace moves its graph with it, so the graph answers there and
+no longer here.
 `view_in_workspace` resolves a view from the **management** database (a separate store from
 `graphver`) with the same rule. On the graph router, the enablement routes check the data source
 with `_data_source_in_workspace`, and `/changes` and `/nodes/{urn}/delete-impact` check the graph
@@ -148,7 +151,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 |---|---|---|
 | `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, falkorGraphName?, falkorProvider?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. `workspaceId` must equal the path (else **400**); `falkorProvider` defaults to the data source's provider. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
 | `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `kind`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`) |
-| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running or failed. **404** when no versioned graph backs the data source |
+| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running or failed. **404** when no versioned graph backs the data source. For every data source of a workspace at once, `GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` gives each one's `graphId`, `kind` and the head of `main` — see [Graph Metadata & History API](/docs/graph-metadata-api) |
 | `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`) |
 
 > **Note.** "Enable version control" (**bootstrap**) and the authoritative **re-sync** from the
@@ -218,8 +221,8 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `GET …/commits` | `_READ` | `?branchId&originatingViewId&publishedOnly&limit(100, max 500)&offset` → `CommitLogResponse{commits, userNames}`; the branch defaults to `main`. With `originatingViewId`, `publishedOnly=true` gives the view's published timeline (its squash-publishes and the graph-wide commits it shares); without it, every raw draft commit attributed to the view. Each commit is a stored row in snake_case (`commit_id`, `commit_seq`, `kind`, `message`, …) |
-| `GET …/commits/{cid}/squashed` | `_READ` | The raw draft commits folded into a squash — the "merged N commits" drill-down. Empty for any other commit |
+| `GET …/commits` | `_READ` | `?branchId&originatingViewId&publishedOnly&limit(100, max 500)&before&after&offset` → `CommitLogResponse{commits, userNames, hasMore, nextBefore}`, newest first; the branch defaults to `main`. `before` and `after` are exclusive bounds on `commit_seq`: send `nextBefore` back as `before` for the next page, and `after` the newest commit you hold to get only what is new — a walk never skips or repeats while commits land. `main`'s log stops at its head, so it shows only commits that have landed. With `originatingViewId`, `publishedOnly=true` gives the view's published timeline (its squash-publishes and the graph-wide commits it shares); without it, every raw draft commit attributed to the view — which spans branches, so it pages by `offset` alone. **400** for `before`/`after` with `offset`, or on that raw view history. Each commit is a stored row in snake_case (`CommitLogEntry`: `commit_id`, `commit_seq`, `kind`, `message`, …) — every field is explained in [Graph Metadata & History API](/docs/graph-metadata-api#each-commit) |
+| `GET …/commits/{cid}/squashed` | `_READ` | The raw draft commits folded into a squash — the "merged N commits" drill-down, with `hasMore`. Empty for any other commit |
 
 ### 2.8 Versioned graph read (canvas neighbors)
 
