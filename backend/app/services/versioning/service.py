@@ -3723,6 +3723,7 @@ class GraphVersioningService:
 
     @staticmethod
     def _commit_meta(c: "CommitORM") -> dict:
+        # The commit log's wire shape: keep ``CommitLogEntry`` (endpoints/versioning.py) in step.
         return {
             "commit_id": c.id, "commit_seq": c.commit_seq,
             "parent_commit_id": c.parent_commit_id, "kind": c.kind,
@@ -3736,10 +3737,17 @@ class GraphVersioningService:
     async def commit_log(
         self, *, graph_id: str, branch_id: Optional[str] = None,
         originating_view_id: Optional[str] = None, published_only: bool = False,
-        limit: int = 100, offset: int = 0, viewer: Optional[Viewer] = None,
+        limit: int = 100, offset: int = 0, before: Optional[int] = None,
+        after: Optional[int] = None, viewer: Optional[Viewer] = None,
     ) -> List[dict]:
         """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
         unset). When ``originating_view_id`` is given, scope to that view's history.
+
+        ``before`` / ``after`` are exclusive bounds on ``commit_seq`` — exact keyset paging on
+        one branch, where seqs are unique and only ever grow. ``main``'s log stops at its head:
+        enabling version control writes the import commit before the head moves to it, and
+        every other read path already stops there, so a commit the log shows has landed and
+        will never change its place.
 
         Two view-scoped modes:
         - ``published_only=False`` (raw): every commit attributed to the view across ALL
@@ -3757,8 +3765,24 @@ class GraphVersioningService:
         With a ``viewer``, a draft branch is gated (owner/manager/member/PR-reviewer) and the
         raw view-scoped log drops non-viewable drafts (published_only rows are all on the
         readable ``main``)."""
+        commits, _more = await self.commit_log_page(
+            graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
+            published_only=published_only, limit=limit, offset=offset, before=before,
+            after=after, viewer=viewer)
+        return commits
+
+    async def commit_log_page(
+        self, *, graph_id: str, branch_id: Optional[str] = None,
+        originating_view_id: Optional[str] = None, published_only: bool = False,
+        limit: int = 100, offset: int = 0, before: Optional[int] = None,
+        after: Optional[int] = None, viewer: Optional[Viewer] = None,
+    ) -> Tuple[List[dict], bool]:
+        """:meth:`commit_log`, and whether more commits lie past this page — counted before the
+        raw view-scoped log drops drafts the viewer can't read, so a short page there is never
+        mistaken for the end."""
         async with self._session() as s:
             stmt = select(CommitORM).where(CommitORM.graph_id == graph_id)
+            main_id = None
             if originating_view_id is not None and published_only:
                 main_id = await self._main_branch_id(s, graph_id)
                 stmt = stmt.where(
@@ -3771,16 +3795,28 @@ class GraphVersioningService:
             else:
                 if branch_id is None:
                     branch_id = await self._main_branch_id(s, graph_id)
-                await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+                branch = await self._get_branch(s, graph_id, branch_id)
+                await self._assert_branch_readable(s, branch, viewer)
                 stmt = stmt.where(CommitORM.branch_id == branch_id)
+                if branch.kind == "main":
+                    main_id = branch_id
+            if main_id is not None:
+                head = (await s.get(GraphORM, graph_id)).main_head_commit_seq
+                stmt = stmt.where(CommitORM.commit_seq <= head)
+            if before is not None:
+                stmt = stmt.where(CommitORM.commit_seq < before)
+            if after is not None:
+                stmt = stmt.where(CommitORM.commit_seq > after)
             rows = (await s.execute(
-                stmt.order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
+                stmt.order_by(CommitORM.commit_seq.desc()).limit(limit + 1).offset(offset)
             )).scalars().all()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
             if (viewer is not None and not viewer.can_manage
                     and originating_view_id is not None and not published_only):
                 ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
                 rows = [r for r in rows if r.branch_id in ok]
-            return [self._commit_meta(r) for r in rows]
+            return [self._commit_meta(r) for r in rows], has_more
 
     async def squashed_commits(
         self, *, graph_id: str, commit_id: str, limit: int = 100, offset: int = 0,
