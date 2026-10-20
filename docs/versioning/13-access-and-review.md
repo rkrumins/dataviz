@@ -857,7 +857,7 @@ The rollout follows the shared §17 order.
    - open private drafts with non-owner contributors;
    - PRs whose approvals were reset.
 
-> **Deviation (Stage 1, as shipped).** R0 shipped as `20261017_1000_datasource_publish` (down_revision `20261019_1000_ws_access` once main's layout-template and workspace-access revisions landed ahead of it), with `rbac_seed`, `SYSTEM_ROLE_DEFAULTS`, `RoleName.WORKSPACE_PUBLISHER` and the `_SEED_LEAVES` / `_WORKSPACE_CATEGORY_LEAVES` change. At R0 nothing checked publish (the migration's docstring still says so), so:
+> **Deviation (Stage 1, as shipped).** R0 shipped as `20261017_1000_datasource_publish` (down_revision `20261019_1600_access_life` once main's layout-template and workspace-access revisions landed ahead of it), with `rbac_seed`, `SYSTEM_ROLE_DEFAULTS`, `RoleName.WORKSPACE_PUBLISHER` and the `_SEED_LEAVES` / `_WORKSPACE_CATEGORY_LEAVES` change. At R0 nothing checked publish (the migration's docstring still says so), so:
 > - step 2, the forced claims refresh, moved to the R3 preconditions. It has not run: a session minted before R0 holds `workspace:datasource:*` until its next refresh;
 > - step 5, the R0 report, moves to R2, where admins use it. Its activity inputs (M2, M10, possibly a separate `GRAPHVER_DB_URL`) are not readable from a management-DB migration. `docs/RBAC.md` lists who holds publish.
 >

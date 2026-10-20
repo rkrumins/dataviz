@@ -81,6 +81,8 @@ export function provenanceSentence(p: AccessProvenance, nameOf: (id: string) => 
             return `Approved${by}${when}, answering their request.`
         case 'exception':
             return `Granted here${by}${when} as an exception: this workspace’s access is otherwise decided by its identity provider.`
+        case 'joined':
+            return `Joined${when} — the workspace is open to everyone.`
         case 'idp':
             return `Through ${groups}${p.idpProvider ? ` in ${p.idpProvider}` : ''} — their identity provider adds and removes it.`
         case 'team':

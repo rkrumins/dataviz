@@ -428,7 +428,10 @@ async def update_workspace(
         getattr(old_ws, "identity_property", None),
         getattr(old_ws, "name_property", None),
     )
-    ws = await workspace_repo.update_workspace(session, workspace_id, req)
+    try:
+        ws = await workspace_repo.update_workspace(session, workspace_id, req)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
 
@@ -796,12 +799,26 @@ async def update_data_source(
     ds_id: str = Path(...),
     req: DataSourceUpdateRequest = Body(...),
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Update a data source. Evicts cached provider if provider/graph changed."""
+    """Update a data source. Evicts cached provider if provider/graph changed.
+
+    Whether the source is restricted is the workspace admins' to change: the
+    mark is what stops its members publishing views over it to everyone, so
+    a member who could lift it could step around it."""
     old_ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    if (
+        req.is_restricted is not None
+        and req.is_restricted != bool(old_ds.is_restricted)
+        and not has_permission(claims, "workspace:admin", workspace_id=workspace_id)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the workspace's admins can change whether a source is restricted",
+        )
 
     # Validate new ontology if changing
     if req.ontology_id and not await ontology_definition_repo.get_ontology(session, req.ontology_id):

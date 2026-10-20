@@ -970,6 +970,9 @@ class WorkspaceUpdateRequest(BaseModel):
     directory_listed: Optional[bool] = Field(None, alias="directoryListed")
     access_mode: Optional[Literal["app", "idp"]] = Field(None, alias="accessMode")
     access_note: Optional[str] = Field(None, alias="accessNote", max_length=500)
+    # How it takes requests: 'approval', 'open' (anyone joins as a Viewer at
+    # once — app-decided workspaces only) or 'closed'. None = untouched.
+    request_policy: Optional[Literal["approval", "open", "closed"]] = Field(None, alias="requestPolicy")
 
     class Config:
         populate_by_name = True
@@ -1003,6 +1006,7 @@ class WorkspaceResponse(BaseModel):
     directory_listed: bool = Field(True, alias="directoryListed")
     access_mode: str = Field("app", alias="accessMode")
     access_note: Optional[str] = Field(None, alias="accessNote")
+    request_policy: str = Field("approval", alias="requestPolicy")
 
     class Config:
         populate_by_name = True

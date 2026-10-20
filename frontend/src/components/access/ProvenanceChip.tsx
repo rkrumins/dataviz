@@ -1,15 +1,15 @@
 /**
  * ProvenanceChip — how a grant came about, at a glance.
  *
- * Added directly · Approved request · Exception · Identity provider ·
- * Team · Organization-wide, each in its own colour, with the detail on
+ * Added directly · Approved request · Exception · Joined · Identity
+ * provider · Team · Organization-wide, each in its own colour, with the detail on
  * hover: who did it and when, the request it answered, the identity
  * provider's groups and the provider, the team, the organization role.
  * "Why can this person get in?" reads off the chip without leaving the
  * page.
  */
 import {
-    AlertTriangle, Building2, CheckCircle2, KeyRound, UserPlus, Users2, type LucideIcon,
+    AlertTriangle, Building2, CheckCircle2, DoorOpen, KeyRound, UserPlus, Users2, type LucideIcon,
 } from 'lucide-react'
 
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -33,6 +33,11 @@ const ORIGINS: Record<AccessOrigin, { label: string; icon: LucideIcon; pill: str
         label: 'Exception',
         icon: AlertTriangle,
         pill: 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/25',
+    },
+    joined: {
+        label: 'Joined',
+        icon: DoorOpen,
+        pill: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
     },
     idp: {
         label: 'Identity provider',

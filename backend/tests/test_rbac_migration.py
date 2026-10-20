@@ -225,7 +225,7 @@ def test_datasource_publish_seed_convergence():
         _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
     )
     assert (mod.revision, mod.down_revision) == (
-        "20261017_1000_datasource_publish", "20261019_1000_ws_access",
+        "20261017_1000_datasource_publish", "20261019_1600_access_life",
     )
 
     # Permission row: the same text in both paths.
@@ -264,6 +264,15 @@ def test_datasource_publish_seed_convergence():
 
     assert perm in _SEED_LEAVES["workspace:datasource"]
     assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_every_workspace_template_role_reads_as_a_word():
+    """Inbox messages name a workspace role through ``role_label``
+    ("Your Publisher access ends…"), never its raw name."""
+    from backend.common.roles import WORKSPACE_TEMPLATE_ROLES, role_label
+
+    assert {r for r in WORKSPACE_TEMPLATE_ROLES if role_label(r) == r} == set()
+    assert role_label("workspace_publisher") == "Publisher"
 
 
 def test_datasource_publish_migration_runs_and_reverts():

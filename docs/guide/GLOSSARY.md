@@ -13,7 +13,8 @@ screen.
 
 | Term | What it means | Read more |
 |---|---|---|
-| **Access request** | A request to join a workspace at a level you choose, sent with **Request access**. The workspace's admins and stewards approve it, point it to an identity-provider group, or decline it; you follow it — and can withdraw it — under **My access requests**. | [Requesting Access](/guide/requesting-access) |
+| **Access request** | A request to join a workspace at a level you choose, sent with **Request access** — or to keep access that's about to end, sent with **Ask to keep it**. The workspace's admins and stewards approve it, point it to an identity-provider group, or decline it; you follow it — and can withdraw it — under **My access requests**. | [Requesting Access](/guide/requesting-access) |
+| **Access review** | A workspace admin's pass over the grants made in a workspace, keeping or removing each; removing takes the access away at once. Nothing is removed automatically. | [Workspace Admin](/guide/workspace-admin#reviewing-who-has-access) |
 | **Activity** | The record of who did what across the platform — sign-ins, access changes, operations on data sources and settings — and why, under **Administration → Activity**; each workspace has its own **Activity** tab. | [The Admin Console](/guide/governance-ops#activity) |
 | **Aggregation** | The background job that builds a data source's lineage summaries (rollups), so lines can be drawn between collapsed items. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Analytics** | The sidebar page with growth, engagement and adoption figures for the platform. | [Analytics](/guide/analytics) |
@@ -41,7 +42,7 @@ screen.
 | **Editor** / **Viewer** (on a view) | The two roles you can give someone on one view in **Share**: editors can edit it, viewers can read it. | [Managing & Sharing Views](/guide/managing-views) |
 | **Entity** / **entity type** | An item in the graph — a table, a column, a dashboard. Its entity type says what kind of thing it is. | [Key Concepts](/guide/key-concepts) |
 | **Entity drawer** | The panel on the right with an entity's details, opened with **View & Edit** on its right-click menu. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
-| **Exception** | Access granted in the app to a workspace whose identity provider decides who is in. It's labelled **Exception** wherever access is listed, and doesn't follow the person's groups. | [Workspace Admin](/guide/workspace-admin#when-the-identity-provider-decides) |
+| **Exception** | Access granted in the app to a workspace whose identity provider decides who is in. It's granted by the workspace's admins only, for 90 days at most, is labelled **Exception** wherever access is listed, doesn't follow the person's groups, and ends on its own once their groups grant the same access. | [Workspace Admin](/guide/workspace-admin#when-the-identity-provider-decides) |
 | **Explorer** | The catalogue of saved views across all your workspaces. Open it with **Explore** in the sidebar. | [Finding Views](/guide/browsing-views) |
 | **Favorites** | Views you've marked with the heart. Find them in the **Favorites** popover in the top bar, or the Explorer's **Favorites** filter. | [Finding Views](/guide/browsing-views) |
 | **Feature switch** | An on/off setting under **Administration → Features** that turns a capability on or off for everyone in the deployment (also called a feature flag). | [Feature Switches](/guide/feature-switches) |

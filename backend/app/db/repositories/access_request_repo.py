@@ -61,8 +61,10 @@ async def create(
     target_id: str,
     requested_role: str,
     justification: Optional[str] = None,
+    binding_id: Optional[str] = None,
 ) -> tuple[AccessRequestORM, bool]:
     """Open a request, or return the person's open one for this target.
+    ``binding_id`` makes it a request to keep that grant beyond its end.
 
     Returns ``(row, created)``. One open request per person per target is a
     unique index, so two submits racing each other end with one row: the
@@ -87,6 +89,7 @@ async def create(
         requested_role=requested_role,
         justification=(justification.strip() if justification else None) or None,
         status="pending",
+        binding_id=binding_id,
     )
     try:
         async with session.begin_nested():
@@ -100,6 +103,30 @@ async def create(
             raise
         return winner, False
     return row, True
+
+
+async def record_join(
+    session: AsyncSession, *, requester_id: str, target_id: str, role: str, note: str,
+) -> AccessRequestORM:
+    """Record someone joining a workspace open to everyone: a request
+    answered as it was made, by its asker — the one approval nobody else
+    gives."""
+    now = _now()
+    row = AccessRequestORM(
+        requester_id=requester_id,
+        target_type="workspace",
+        target_id=target_id,
+        requested_role=role,
+        status="approved",
+        created_at=now,
+        resolved_at=now,
+        resolved_by=requester_id,
+        resolution_note=note,
+        granted_role=role,
+    )
+    session.add(row)
+    await session.flush()
+    return row
 
 
 async def get(

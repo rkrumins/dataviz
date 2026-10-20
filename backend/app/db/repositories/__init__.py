@@ -41,6 +41,7 @@ __all__ = [
     "role_repo",
     "invite_repo",
     "access_request_repo",
+    "access_review_repo",
     "idp_group_mapping_repo",
     "idp_provider_repo",
     "user_identity_repo",
@@ -73,6 +74,7 @@ def __dir__() -> list[str]:
 if TYPE_CHECKING:  # pragma: no cover - for type checkers and IDEs only
     from . import (  # noqa: F401
         access_request_repo,
+        access_review_repo,
         app_auth_config_repo,
         binding_repo,
         branding_repo,

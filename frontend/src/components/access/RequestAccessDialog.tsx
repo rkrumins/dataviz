@@ -10,6 +10,9 @@
  *    Where the identity provider decides who is in, that is said up front:
  *    the answer may be a group for IT to add you to.
  *
+ * A workspace open to everyone is joined as a Viewer at once — more is
+ * still asked for — and one closed to requests says so, and who to ask.
+ *
  * Opened from Find a workspace, the access-denied card, and a workspace
  * page you can't open — where the workspace may have no name to show, so
  * the dialog never needs one.
@@ -17,7 +20,8 @@
 import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
-    ArrowRight, Check, CheckCircle2, Inbox, KeyRound, Loader2, MessageSquareQuote, Send, ShieldCheck, Users, X,
+    ArrowRight, Check, CheckCircle2, DoorOpen, Inbox, KeyRound, Loader2, Lock, MessageSquareQuote, Send,
+    ShieldCheck, Users, X,
 } from 'lucide-react'
 
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -46,13 +50,19 @@ export function RequestAccessDialog({
     workspaceId, workspaceName, accessMode, accessNote, heldRoles = [], defaultRole, onClose, onSent,
 }: RequestAccessDialogProps) {
     const ref = useModalA11y(true, onClose)
-    const { roles, isLoading, error: rolesError } = useRequestableRoles(workspaceId)
-    const { submit } = useAccessRequestActions()
+    const { roles, requestPolicy, joinRole, isLoading, error: rolesError } = useRequestableRoles(workspaceId)
+    const { submit, join } = useAccessRequestActions()
     const [picked, setPicked] = useState<string | null>(null)
     const [why, setWhy] = useState('')
     const [sent, setSent] = useState<AccessRequestResponse | null>(null)
+    const [joined, setJoined] = useState<AccessRequestResponse | null>(null)
 
-    const offered = roles ?? []
+    // Open to everyone: Viewer is joined, not asked for.
+    const canJoin = !!joinRole && !heldRoles.includes(joinRole)
+    const offered = (roles ?? []).filter(r => r.name !== joinRole)
+    const closed = requestPolicy === 'closed'
+    // Nothing left to ask for once Viewer is joined instead.
+    const askable = isLoading || !!rolesError || offered.length > 0
     const choice = picked
         ?? (defaultRole && offered.some(r => r.name === defaultRole && !heldRoles.includes(r.name)) ? defaultRole : null)
         ?? offered.find(r => !heldRoles.includes(r.name))?.name
@@ -76,6 +86,16 @@ export function RequestAccessDialog({
         }
     }
 
+    const joinNow = async () => {
+        try {
+            const request = await join.mutateAsync(workspaceId)
+            setJoined(request)
+            onSent?.(request)
+        } catch {
+            // Shown below from the mutation's own error.
+        }
+    }
+
     return (
         <>
             <Backdrop open onClick={onClose} zClassName="z-[80]" className="bg-black/50" />
@@ -91,16 +111,20 @@ export function RequestAccessDialog({
                     <div className="h-1 rounded-t-2xl bg-gradient-to-r from-emerald-500 via-teal-500 to-sky-500" />
                     <header className="flex items-start gap-3 px-6 pt-5 pb-3">
                         <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-                            {sent ? <CheckCircle2 className="w-5 h-5" aria-hidden /> : <Users className="w-5 h-5" aria-hidden />}
+                            {sent || joined ? <CheckCircle2 className="w-5 h-5" aria-hidden /> : <Users className="w-5 h-5" aria-hidden />}
                         </div>
                         <div className="flex-1 min-w-0">
                             <h2 className="text-lg font-bold text-ink">
-                                {sent ? 'Request sent' : `Ask to join ${where}`}
+                                {joined ? 'You’re in' : sent ? 'Request sent' : `Ask to join ${where}`}
                             </h2>
                             <p className="text-xs text-ink-muted mt-0.5">
-                                {sent
-                                    ? 'The people who look after it have it now.'
-                                    : 'Choose what you need and say why. The people who look after it decide.'}
+                                {joined
+                                    ? 'It’s open to everyone, so nobody needed to approve it.'
+                                    : sent
+                                        ? 'The people who look after it have it now.'
+                                        : closed
+                                            ? 'Its admins add people themselves.'
+                                            : 'Choose what you need and say why. The people who look after it decide.'}
                             </p>
                         </div>
                         <button type="button" onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5">
@@ -108,13 +132,53 @@ export function RequestAccessDialog({
                         </button>
                     </header>
 
-                    {sent ? (
+                    {joined ? (
+                        <JoinedState request={joined} where={where} workspaceId={workspaceId} onClose={onClose} />
+                    ) : sent ? (
                         <SentState request={sent} where={where} idp={idp} onClose={onClose} />
+                    ) : closed && !isLoading ? (
+                        <div className="px-6 pb-5">
+                            <div className="flex items-start gap-3 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-4 py-3">
+                                <Lock className="w-4 h-4 mt-0.5 text-ink-muted shrink-0" aria-hidden />
+                                <div>
+                                    <p className="text-sm font-semibold text-ink">{workspaceName ? `“${workspaceName}” isn’t` : 'This workspace isn’t'} taking requests</p>
+                                    <p className="text-xs text-ink-muted mt-0.5">Ask its admins to add you — they can still let anyone in.</p>
+                                    {accessNote && <p className="text-xs text-ink-secondary mt-2"><span className="font-semibold text-ink">From the workspace: </span>{accessNote}</p>}
+                                </div>
+                            </div>
+                            <div className="mt-4 flex justify-end">
+                                <button type="button" onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-semibold bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/15">
+                                    Close
+                                </button>
+                            </div>
+                        </div>
                     ) : (
                         <>
                             <div className="px-6 pb-2 space-y-5">
+                                {canJoin && joinRole && (
+                                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-teal-500/25 bg-teal-500/[0.06] px-4 py-3">
+                                        <DoorOpen className="w-5 h-5 text-teal-600 dark:text-teal-400 shrink-0" aria-hidden />
+                                        <div className="min-w-0 flex-1">
+                                            <p className="text-sm font-semibold text-ink">Open to everyone</p>
+                                            <p className="text-xs text-ink-muted">Join as {roleLabel(joinRole)} now — no approval needed.{offered.length > 0 && ' Need more? Ask for it below.'}</p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => void joinNow()}
+                                            disabled={join.isPending}
+                                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-50"
+                                        >
+                                            {join.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <DoorOpen className="w-4 h-4" />}
+                                            Join now
+                                        </button>
+                                        {join.error && (
+                                            <p role="alert" className="basis-full text-xs text-rose-600 dark:text-rose-400">{(join.error as Error).message}</p>
+                                        )}
+                                    </div>
+                                )}
+                                {askable && (<>
                                 <section aria-labelledby="request-level">
-                                    <StepTitle n={1} id="request-level">What do you need?</StepTitle>
+                                    <StepTitle n={1} id="request-level">{canJoin ? 'Need more than that?' : 'What do you need?'}</StepTitle>
                                     {isLoading ? (
                                         <div className="grid gap-2 mt-2">
                                             {[0, 1, 2].map(i => <div key={i} className="h-14 rounded-xl bg-black/5 dark:bg-white/5 animate-pulse" />)}
@@ -216,12 +280,13 @@ export function RequestAccessDialog({
                                         {(submit.error as Error).message}
                                     </p>
                                 )}
+                                </>)}
                             </div>
                             <footer className="flex items-center justify-end gap-3 px-6 py-4">
                                 <button type="button" onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5">
                                     Cancel
                                 </button>
-                                <button
+                                {askable && <button
                                     type="button"
                                     disabled={!choice || submit.isPending}
                                     onClick={() => void send()}
@@ -229,7 +294,7 @@ export function RequestAccessDialog({
                                 >
                                     {submit.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                                     Send request
-                                </button>
+                                </button>}
                             </footer>
                         </>
                     )}
@@ -295,6 +360,36 @@ function SentState({ request, where, idp, onClose }: {
                     className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
                 >
                     Follow it on My access <ArrowRight className="w-3.5 h-3.5" />
+                </Link>
+                <button type="button" onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-semibold bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/15">
+                    Done
+                </button>
+            </div>
+        </div>
+    )
+}
+
+function JoinedState({ request, where, workspaceId, onClose }: {
+    request: AccessRequestResponse
+    where: string
+    workspaceId: string
+    onClose: () => void
+}) {
+    return (
+        <div className="px-6 pb-5">
+            <div className="rounded-xl border border-teal-500/20 bg-teal-500/[0.05] px-4 py-3">
+                <p className="text-sm text-ink">
+                    You joined {where} as <span className="font-semibold">{roleLabel(request.grantedRole ?? request.requestedRole)}</span>.
+                </p>
+                <p className="text-xs text-ink-muted mt-1">It’s in your workspaces now. Need more? Ask for it from the workspace.</p>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-3">
+                <Link
+                    to={`/workspaces/${workspaceId}`}
+                    onClick={onClose}
+                    className="inline-flex items-center gap-1.5 text-sm font-semibold text-teal-600 dark:text-teal-400 hover:underline"
+                >
+                    Open it <ArrowRight className="w-3.5 h-3.5" />
                 </Link>
                 <button type="button" onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-semibold bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/15">
                     Done

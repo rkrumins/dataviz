@@ -2,10 +2,12 @@
  * Access-requests Service — asking to join a workspace, and answering.
  *
  * Drives Request access (``RequestAccessDialog``, from Find a workspace,
- * the access-denied card and a workspace you can't open), the requests
- * on ``MyAccessPage``, and — for the people who let others in — the
- * Requests tab: one list across every workspace they answer, approved
- * with a role or a team, pointed to the identity provider, or denied.
+ * the access-denied card and a workspace you can't open), joining a
+ * workspace open to everyone, asking to keep access that is about to end,
+ * the requests on ``MyAccessPage``, and — for the people who let others
+ * in — the Requests tab: one list across every workspace they answer,
+ * approved with a role or a team, pointed to the identity provider, or
+ * denied.
  */
 import { authFetch } from './apiClient'
 
@@ -65,6 +67,14 @@ export interface AccessRequestResponse {
     accessExpiresAt?: string | null
     /** When access through the identity provider arrived. */
     fulfilledAt?: string | null
+    /** Set on a request to keep access: the grant it would extend, and
+     *  when that grant ends now. */
+    bindingId?: string | null
+    currentExpiresAt?: string | null
+    /** When the approvers were reminded of it, and when it went to the
+     *  Org Admins for want of an answer. */
+    remindedAt?: string | null
+    escalatedAt?: string | null
 }
 
 export interface AccessRequestCreateRequest {
@@ -103,6 +113,18 @@ export interface RequestableRole {
     isSystem: boolean
 }
 
+/** How a workspace takes requests: its approvers decide, anyone may join
+ *  (as a Viewer, at once), or it takes none. */
+export type RequestPolicy = 'approval' | 'open' | 'closed'
+
+/** What may be asked for in a workspace, and how. ``joinRole`` is what
+ *  joining an open workspace grants; null when it can't be joined. */
+export interface RequestOptions {
+    roles: RequestableRole[]
+    requestPolicy: RequestPolicy
+    joinRole: string | null
+}
+
 
 // ── Service ──────────────────────────────────────────────────────────
 
@@ -110,11 +132,29 @@ const filterQuery = (status?: AccessRequestFilter) =>
     status ? `status=${encodeURIComponent(status)}` : ''
 
 export const accessRequestsService = {
-    /** The roles anyone may ask for in a workspace — never its name. */
-    requestableRoles(workspaceId: string): Promise<RequestableRole[]> {
-        return authFetch<RequestableRole[]>(
+    /** The roles anyone may ask for in a workspace, and how it takes
+     *  requests — never its name. */
+    requestableRoles(workspaceId: string): Promise<RequestOptions> {
+        return authFetch<RequestOptions>(
             `/api/v1/access-requests/requestable-roles?workspaceId=${encodeURIComponent(workspaceId)}`,
         )
+    },
+
+    /** Join a workspace open to everyone, as a Viewer, at once. */
+    join(workspaceId: string): Promise<AccessRequestResponse> {
+        return authFetch<AccessRequestResponse>('/api/v1/access-requests/join', {
+            method: 'POST',
+            body: JSON.stringify({ workspaceId }),
+        })
+    },
+
+    /** Ask to keep time-limited access before it ends. Asking again
+     *  returns the open request. */
+    extend(req: { bindingId: string; justification?: string | null }): Promise<AccessRequestResponse> {
+        return authFetch<AccessRequestResponse>('/api/v1/access-requests/extend', {
+            method: 'POST',
+            body: JSON.stringify(req),
+        })
     },
 
     /** Ask to join. Asking again returns the open request. */

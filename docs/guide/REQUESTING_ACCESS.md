@@ -3,8 +3,9 @@
 *For everyone — and for the workspace admins and stewards who answer requests.*
 Sooner or later {brand} will tell you that you can't open or change something,
 or you'll need a workspace you aren't in yet. This page explains what each
-message means, how to find a workspace and ask to join it, how to follow your
-request, and how requests are answered.
+message means, how to find a workspace and ask to join it — or join one that's
+open to everyone — how to follow your request, how to keep access that's about
+to end, and how requests are answered.
 
 > **Before you start:** Access is granted **per workspace**: you ask to join a
 > workspace at a level — view, contribute, and so on — and the people who look
@@ -68,16 +69,20 @@ colleague for a link to their workspace and request access from there.
 3. Read a workspace's card: what it's for, how many people and data sources it
    has, who answers its requests (**Answered by**), how people get in, and any
    note from its admins — "Say which team you're on", for example.
-4. Click **Request access** on the card ([the dialog](#the-request-access-dialog)).
+4. Click **Request access** on the card ([the dialog](#the-request-access-dialog)) —
+   or, on a card marked **Open to everyone**, click **Join** to become a Viewer
+   at once (**Ask for more** asks for a higher level).
 
-**You should now see** the card change to **Waiting for approval**. A workspace
-you can already open shows **Open** instead, and one you've asked to join shows
-where your request is.
+**You should now see** the card change to **Waiting for approval** — or, once
+you've joined, to **Open**. A workspace you can already open shows **Open**,
+one you've asked to join shows where your request is, and one that isn't
+taking requests says **Not taking requests — ask its admins to add you.**
 
 | How people get in | What it means for you |
 | --- | --- |
 | **Approved in the app** | Its admins and stewards approve requests in {brand}. |
 | **Through your identity provider** | Membership follows your organization's sign-in groups. The answer to your request may be a group for IT to add you to. |
+| **Open to everyone** | Anyone can join as a **Viewer** straight away, without waiting for approval. A higher level is still asked for. |
 
 > **Note:** A workspace's admins can hide it from this list. If you know a
 > workspace exists but can't find it, ask a colleague for a link.
@@ -100,6 +105,11 @@ Every way of asking opens the same dialog, in three steps:
 3. **What happens next** explains who answers and how you'll hear.
 
 Click **Send request**.
+
+If the workspace is **open to everyone**, the dialog starts with **Join now**:
+click it to become a Viewer at once — **You're in** — or ask for a higher level
+below it. If the workspace **isn't taking requests**, the dialog says so; ask
+its admins to add you.
 
 **You should now see** **Request sent**, with **Follow it on My access**. If you
 had already asked to join, the dialog says so and shows your open request —
@@ -175,7 +185,9 @@ viewers or members; admins can grant any level.
 | **Withdrawn** | You took it back. |
 
 Answers also arrive in your **Inbox** — the bell in the top bar — and a workspace
-you can't see keeps its name hidden there too.
+you can't see keeps its name hidden there too. Your Inbox also tells you when
+someone adds you to a workspace or removes you, and when your access's end date
+changes.
 
 Once a request is approved, the workspace is yours straight away: {brand} signs
 your sessions back in with the new access, and the workspace appears under
@@ -193,8 +205,9 @@ your sessions back in with the new access, and the workspace appears under
 - **Effective access** — everything you can actually do, platform-wide and per
   workspace, after combining all your roles;
 - **Direct bindings** — roles given to you personally, each with how it came
-  about (**Added directly**, **Approved request**, **Exception** or **Identity
-  provider**) and when it ends, if it does;
+  about (**Added directly**, **Approved request**, **Exception**, **Joined** or
+  **Identity provider**) and when it ends, if it does — with **Ask to keep it**
+  when it does ([below](#keep-access-thats-about-to-end));
 - **Inherited via groups** — roles you have because you belong to a group, with
   **Team** or **Identity provider**;
 - **Group memberships** — every group you're in.
@@ -219,7 +232,33 @@ usual answer is a group, not a grant:
 
 Rarely, an approver lets you in directly as an **exception**. It works the same
 day-to-day, but it doesn't follow your groups, and it's labelled as an exception
-wherever your access is listed.
+wherever your access is listed. Once your identity provider's groups grant you
+the same access, the exception ends by itself at your next sign-in — "Your
+access to … now comes from your identity provider" — with no gap in between.
+
+---
+
+## Keep access that's about to end
+
+Access can be granted for a while — 7, 30 or 90 days, say. {brand} tells you
+before it ends: a week ahead for access granted for more than two weeks, two
+days ahead for shorter access, in your **Inbox** ("Your access to Finance ends
+in 5 days"). A day or two of cover isn't announced.
+
+1. Click your avatar at the right of the top bar and choose **My access**.
+2. Under **Direct bindings**, find the workspace and click **Ask to keep it**.
+3. Say why you still need it, if you like, and click **Ask to keep it**.
+
+**You should now see** **Asked to keep it** beside the grant, and the request
+under **My access requests** as **Keep your access to …**. The workspace's
+admins and stewards choose how much longer; when they answer, the request says
+when your access now ends. A workspace admin may also change the end date
+directly — you hear about that too.
+
+> **Note:** Access you have through your identity provider's groups doesn't end
+> this way, so it never offers **Ask to keep it**. And you can have one open
+> request per workspace: if you've already asked that workspace for more,
+> withdraw that request or wait for its answer first.
 
 ---
 
@@ -253,21 +292,31 @@ a view are in [Who can see a View](/guide/managing-views#who-can-see-a-view).
 
 1. Click **Workspaces** in the sidebar, then the **Requests** tab. It lists the
    open requests across every workspace you answer — who's asking, the level,
-   the workspace, their reason and when. (A workspace's **Members** tab shows
-   its own requests above its members while any are waiting.)
+   the workspace, their reason and when. A request that has waited a day or
+   more says **Waiting N days**, and one sent on to the Org Admins says so.
+   (A workspace's **Members** tab shows its own requests above its members
+   while any are waiting.)
 2. Click **Review** on a request. What you can do depends on how people get into
    that workspace:
 
    | The workspace | Your choices |
    | --- | --- |
    | **Approved in the app** | **Grant a role** — what they asked for, or another level you may grant, with no end date or for **7**, **30** or **90 days**. Or **Add to a team** — a team bound here whose every role you could grant, so they get what their colleagues have. |
-   | **Through your identity provider** | **Point to a group** — the identity-provider group that grants it; the request waits and closes itself when their access arrives. Or **Grant an exception** — access here that doesn't follow their groups, for 30 days unless you choose otherwise. |
+   | **Through your identity provider** | **Point to a group** — the identity-provider group that grants it; the request waits and closes itself when their access arrives. Or, for admins only, **Grant an exception** — access here that doesn't follow their groups, for **7**, **30** or **90 days** (30 unless you choose otherwise); an exception always ends. |
 
 3. Add a note if you like — they see it — and click **Approve**, **Add to
-   team**, **Point to group** or **Grant exception**.
+   team**, **Point to group** or **Grant exception**. Before you do, read the
+   list of the workspace's data sources the dialog shows: any role reads all
+   of them, restricted ones included.
 
 **You should now see** the request leave the open list. **All** shows every
 request with how it was answered.
+
+A request **to keep access** reads "asks to keep **Member** — ends …". Click
+**Review**, choose how much longer — **30 days** unless you pick **7 days**,
+**90 days** or **No end date** — and click **Let them keep it**. The level stays
+what it is; within what you may grant. Keeping an **exception** going is for
+admins only: it stays an exception, and **No end date** isn't offered.
 
 To decline, click **Deny** on the request, write a reason (the requester sees
 it), and click **Decline**.
@@ -284,6 +333,9 @@ it), and click **Decline**.
 ## If nobody responds
 
 - **Check My access first** — your request may already have an answer.
+- **It's brought up for you.** After three days without an answer, {brand}
+  reminds the workspace's admins and stewards; after a week, it tells the Org
+  Admins too.
 - **Nudge someone.** The card in Find a workspace shows who answers its
   requests — a quick word helps.
 - **Find the right person.** Ask the person who invited you, your team lead, or

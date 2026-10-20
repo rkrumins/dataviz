@@ -69,6 +69,19 @@ def _summary_ws_expiry(p: dict) -> str:
     return f"Expiry updated → {new[:10]} ({p.get('role') or '?'} in {p.get('workspace_id') or '?'})"
 
 
+def _summary_ws_access(p: dict, what: str) -> str:
+    return f"{what} {p.get('role') or '?'} in {p.get('workspace_id') or '?'}"
+
+
+def _summary_access_review(verb: str):
+    def _build(p: dict) -> str:
+        ws = p.get("workspace_id") or "?"
+        if "kept" in p or "removed" in p:
+            return f"Access review of {ws} {verb}: {p.get('kept', 0)} kept, {p.get('removed', 0)} removed"
+        return f"Access review of {ws} {verb}"
+    return _build
+
+
 def _summary_role_lifecycle(verb: str):
     def _build(p: dict) -> str:
         return f"Role '{p.get('name') or '?'}' {verb}"
@@ -449,6 +462,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "idp.provider.deleted": ("warning", _summary_idp_provider("deleted")),
     "sso.backchannel_host_withdrawn": ("warning", _summary_backchannel_host("withdrawn")),
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
+    "rbac.access_request.escalated": (
+        "warning", _summary_access_request("still unanswered — sent to the Org Admins"),
+    ),
+    "rbac.workspace.access_review_cancelled": ("warning", _summary_access_review("cancelled")),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
     "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
@@ -457,6 +474,15 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── info: binds / creates / updates
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
     "rbac.workspace.member_expiry_updated": ("info", _summary_ws_expiry),
+    "rbac.workspace.member_joined": ("info", lambda p: _summary_ws_access(p, "Joined as")),
+    "rbac.workspace.access_expiring": (
+        "info", lambda p: _summary_ws_access(p, "Told the person their access ends soon:"),
+    ),
+    "rbac.workspace.exception_retired": (
+        "info", lambda p: _summary_ws_access(p, "Exception ended — the identity provider grants"),
+    ),
+    "rbac.workspace.access_review_started": ("info", _summary_access_review("started")),
+    "rbac.workspace.access_review_completed": ("info", _summary_access_review("completed")),
     "rbac.view.grant_added": ("info", _summary_view_grant("added")),
     "rbac.role.created": ("info", _summary_role_lifecycle("created")),
     "rbac.role.updated": ("info", _summary_role_lifecycle("permissions updated")),
@@ -753,6 +779,12 @@ LABELS: dict[str, str] = {
     "rbac.workspace.member_bound": "Granted workspace access",
     "rbac.workspace.member_revoked": "Revoked workspace access",
     "rbac.workspace.member_expiry_updated": "Changed access expiry",
+    "rbac.workspace.member_joined": "Joined an open workspace",
+    "rbac.workspace.access_expiring": "Told someone their access ends soon",
+    "rbac.workspace.exception_retired": "Ended an exception the identity provider covers",
+    "rbac.workspace.access_review_started": "Started an access review",
+    "rbac.workspace.access_review_completed": "Completed an access review",
+    "rbac.workspace.access_review_cancelled": "Cancelled an access review",
     "rbac.workspace.created": "Created a workspace",
     "rbac.workspace.updated": "Updated a workspace",
     "rbac.workspace.deleted": "Deleted a workspace",
@@ -765,6 +797,7 @@ LABELS: dict[str, str] = {
     "rbac.access_request.withdrawn": "Withdrew an access request",
     "rbac.access_request.routed": "Pointed a request to the identity provider",
     "rbac.access_request.fulfilled": "Access arrived through the identity provider",
+    "rbac.access_request.escalated": "Sent a waiting request to the Org Admins",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -868,6 +901,10 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "rbac.workspace.member_bound",
     "rbac.workspace.member_revoked",
     "rbac.workspace.member_expiry_updated",
+    "rbac.workspace.member_joined",
+    "rbac.workspace.exception_retired",
+    "rbac.workspace.access_expiring",
+    "rbac.workspace.access_review_",
     "rbac.workspace.updated",
     "rbac.workspace.roles_cascaded",
     # Safe: a workspace admin already reaches every view in their workspace.
