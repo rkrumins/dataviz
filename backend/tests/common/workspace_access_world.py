@@ -121,3 +121,32 @@ def directory(on: bool = True) -> None:
 
 def days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def in_days(days: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
+async def notes(session: AsyncSession, kind: str) -> list:
+    """The Inbox rows of one kind, by recipient."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import NotificationORM
+
+    return list((await session.execute(
+        select(NotificationORM).where(NotificationORM.kind == kind).order_by(NotificationORM.user_id)
+    )).scalars().all())
+
+
+async def events(session: AsyncSession, event_type: str) -> list[dict]:
+    """The outbox payloads of one event type."""
+    import json
+
+    from sqlalchemy import select
+
+    from backend.app.db.models import OutboxEventORM
+
+    rows = (await session.execute(
+        select(OutboxEventORM).where(OutboxEventORM.event_type == event_type)
+    )).scalars().all()
+    return [json.loads(r.payload) if isinstance(r.payload, str) else r.payload for r in rows]

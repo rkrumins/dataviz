@@ -161,6 +161,9 @@ class WorkspaceMemberResponse(BaseModel):
     # ISO-8601 UTC for an expiry. The FE renders a countdown badge.
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     subject: WorkspaceMemberSubject
+    # Granted around the identity provider: its end is moved only when
+    # confirmed as an exception again, and never cleared.
+    idp_exception: bool = Field(default=False, alias="idpException")
 
 
 class AccessProvenance(BaseModel):
@@ -177,6 +180,8 @@ class AccessProvenance(BaseModel):
       ``idpProvider`` when one provider maps them);
     * ``team`` — an app-managed group someone added them to (``source``
       names it; ``by``, ``at`` and ``requestId`` as for a grant);
+    * ``joined`` — they joined a workspace open to everyone (``at``,
+      ``requestId``);
     * ``org_role`` — an organization-wide role (``source`` names it).
     """
     model_config = ConfigDict(populate_by_name=True)
@@ -293,11 +298,14 @@ class WorkspaceMemberExpiryUpdateRequest(BaseModel):
 
     ``expires_at=null`` or ``expires_in=null`` (both omitted) clears
     the expiry → the binding becomes permanent. Used to extend a
-    contractor's access without re-creating the binding.
+    contractor's access without re-creating the binding. ``exception``
+    confirms that a grant made as an exception to the identity provider
+    stays one — it then needs an end.
     """
     model_config = ConfigDict(populate_by_name=True)
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+    exception: bool = False
 
     @model_validator(mode="after")
     def _normalise_expiry(self) -> "WorkspaceMemberExpiryUpdateRequest":
@@ -592,6 +600,14 @@ class AccessRequestResponse(BaseModel):
     idp_exception: bool = Field(default=False, alias="idpException")
     access_expires_at: Optional[str] = Field(default=None, alias="accessExpiresAt")
     fulfilled_at: Optional[str] = Field(default=None, alias="fulfilledAt")
+    # A request to keep access that is about to end: the grant it extends,
+    # and when that grant ends now.
+    binding_id: Optional[str] = Field(default=None, alias="bindingId")
+    current_expires_at: Optional[str] = Field(default=None, alias="currentExpiresAt")
+    # When the approvers were reminded of it still waiting, and when it went
+    # on to the Org Admins.
+    reminded_at: Optional[str] = Field(default=None, alias="remindedAt")
+    escalated_at: Optional[str] = Field(default=None, alias="escalatedAt")
 
 
 class AccessRequestCreate(BaseModel):
@@ -601,6 +617,21 @@ class AccessRequestCreate(BaseModel):
     target_id: str = Field(alias="targetId")
     requested_role: str = Field(alias="requestedRole")
     justification: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AccessExtensionCreate(BaseModel):
+    """Body for ``POST /api/v1/access-requests/extend`` — ask to keep
+    time-limited access before it ends."""
+    model_config = ConfigDict(populate_by_name=True)
+    binding_id: str = Field(alias="bindingId")
+    justification: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AccessJoinCreate(BaseModel):
+    """Body for ``POST /api/v1/access-requests/join`` — join a workspace
+    open to everyone."""
+    model_config = ConfigDict(populate_by_name=True)
+    workspace_id: str = Field(alias="workspaceId")
 
 
 class AccessRequestResolve(BaseModel):
@@ -652,6 +683,17 @@ class RequestableRole(BaseModel):
     is_system: bool = Field(default=False, alias="isSystem")
 
 
+class RequestOptions(BaseModel):
+    """What someone may ask for in a workspace, and how it takes requests:
+    ``'approval'`` — its approvers decide; ``'open'`` — Viewer is theirs at
+    once (``joinRole``), anything more needs approval; ``'closed'`` — no
+    requests."""
+    model_config = ConfigDict(populate_by_name=True)
+    roles: list[RequestableRole] = Field(default_factory=list)
+    request_policy: str = Field(default="approval", alias="requestPolicy")
+    join_role: Optional[str] = Field(default=None, alias="joinRole")
+
+
 class WorkspaceGrantGroup(BaseModel):
     """An app-managed team bound in the workspace that an approver may add
     someone to — every role it carries is one they could grant."""
@@ -673,16 +715,27 @@ class WorkspaceIdpRoute(BaseModel):
     via_group_name: Optional[str] = Field(default=None, alias="viaGroupName")
 
 
+class WorkspaceGrantSource(BaseModel):
+    """A data source in the workspace — every role here reads it."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    label: Optional[str] = None
+    restricted: bool = False
+
+
 class WorkspaceGrantOptions(BaseModel):
     """What the caller may hand out in this workspace: ``tier`` is
     ``'admin'`` or ``'steward'``; roles, teams and IdP routes are already
-    narrowed to what they could grant themselves."""
+    narrowed to what they could grant themselves. ``dataSources`` is what
+    any of them reaches: there are no per-source grants inside a
+    workspace."""
     model_config = ConfigDict(populate_by_name=True)
     tier: str
     access_mode: str = Field(alias="accessMode")
     roles: list[RequestableRole] = Field(default_factory=list)
     groups: list[WorkspaceGrantGroup] = Field(default_factory=list)
     idp_routes: list[WorkspaceIdpRoute] = Field(default_factory=list, alias="idpRoutes")
+    data_sources: list[WorkspaceGrantSource] = Field(default_factory=list, alias="dataSources")
 
 
 class WorkspaceDirectoryRequest(BaseModel):
@@ -710,6 +763,7 @@ class WorkspaceDirectoryEntry(BaseModel):
     access_mode: str = Field(default="app", alias="accessMode")
     access_note: Optional[str] = Field(default=None, alias="accessNote")
     directory_listed: bool = Field(default=True, alias="directoryListed")
+    request_policy: str = Field(default="approval", alias="requestPolicy")
     can_open: bool = Field(default=False, alias="canOpen")
     your_roles: list[str] = Field(default_factory=list, alias="yourRoles")
     open_request: Optional[WorkspaceDirectoryRequest] = Field(default=None, alias="openRequest")
@@ -718,6 +772,64 @@ class WorkspaceDirectoryEntry(BaseModel):
 class WorkspaceDirectoryResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     entries: list[WorkspaceDirectoryEntry] = Field(default_factory=list)
+
+
+# ── Access reviews ───────────────────────────────────────────────────
+
+class AccessReviewCounts(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    total: int = 0
+    kept: int = 0
+    removed: int = 0
+    undecided: int = 0
+
+
+class AccessReviewItemResponse(BaseModel):
+    """One grant under review, as it stood when the review began, and what
+    the reviewer decided. ``current`` is whether the grant still exists."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    subject: WorkspaceMemberSubject
+    role: str
+    binding_id: Optional[str] = Field(default=None, alias="bindingId")
+    origin: Optional[str] = None
+    granted_at: Optional[str] = Field(default=None, alias="grantedAt")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+    current: bool = True
+    decision: Optional[str] = None
+    decided_by: Optional[str] = Field(default=None, alias="decidedBy")
+    decided_at: Optional[str] = Field(default=None, alias="decidedAt")
+    note: Optional[str] = None
+
+
+class AccessReviewResponse(BaseModel):
+    """An access review of one workspace. ``items`` only when one review is
+    read; ``notReviewed`` counts the people it can't cover — their identity
+    provider or an organization-wide role gives them access."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    status: str
+    started_by: Optional[str] = Field(default=None, alias="startedBy")
+    started_at: str = Field(alias="startedAt")
+    due_at: str = Field(alias="dueAt")
+    completed_at: Optional[str] = Field(default=None, alias="completedAt")
+    completed_by: Optional[str] = Field(default=None, alias="completedBy")
+    counts: AccessReviewCounts = Field(default_factory=AccessReviewCounts)
+    items: Optional[list[AccessReviewItemResponse]] = None
+    not_reviewed: dict[str, int] = Field(default_factory=dict, alias="notReviewed")
+
+
+class AccessReviewStart(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    due_in_days: Literal[7, 14, 30] = Field(default=14, alias="dueInDays")
+
+
+class AccessReviewDecision(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    decision: Literal["keep", "remove"]
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 # ── Impact preview (Phase 4.4) ──────────────────────────────────────

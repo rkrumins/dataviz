@@ -20,8 +20,10 @@ import { useState } from 'react'
 import {
     Bell,
     Building2,
+    CalendarClock,
     CheckCheck,
     CheckCircle2,
+    ClipboardCheck,
     Clock,
     KeyRound,
     KeySquare,
@@ -30,6 +32,7 @@ import {
     Share2,
     ShieldAlert,
     Sparkles,
+    UserMinus,
     UserPlus,
     XCircle,
     type LucideIcon,
@@ -123,6 +126,49 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: CheckCircle2,
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
+    },
+    // A request nobody has answered, brought up again — then to the Org Admins.
+    'access_request.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'access_request.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    // Access once granted: added, removed, its end moved or near, an
+    // exception the identity provider took over, a review running late.
+    'workspace.member_added': {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'workspace.member_removed': {
+        Icon: UserMinus,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'workspace.access_end_changed': {
+        Icon: CalendarClock,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access.expiring': {
+        Icon: CalendarClock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'access.exception_retired': {
+        Icon: KeyRound,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access_review.overdue': {
+        Icon: ClipboardCheck,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,
