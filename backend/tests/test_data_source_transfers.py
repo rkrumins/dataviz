@@ -722,7 +722,8 @@ async def test_deleting_the_source_closes_its_request(test_client, db_session, w
     monkeypatch.setattr(purge_worker, "tombstone_graphs_for_data_source", tombstoned)
     async with acting_as(db_session, "ada"):
         asked = (await _propose(test_client)).json()
-        assert (await test_client.delete(_src())).status_code == 204
+        deleted = await test_client.delete(_src())
+    assert deleted.status_code == 204
     row = await _fresh(db_session, DataSourceTransferORM, asked["id"])
     assert (row.status, row.resolution_note) == ("cancelled", "The data source was deleted.")
 
