@@ -60,6 +60,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-deep-dives': 'reference',
   changelog: 'reference',
   'feature-search-and-rules-reference': 'reference',
+  'graph-metadata-api': 'reference',
   'versioning-data-model': 'reference',
   'versioning-import-export': 'reference',
   'versioning-guide': 'reference',

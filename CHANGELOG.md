@@ -9,6 +9,71 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Follow a workspace's graphs and their history from a script
+
+### Added
+
+**For integrators: a workspace's graphs, and which are versioned.**
+`GET /api/v1/admin/workspaces/{ws}/data-sources` takes `providerId` to list one provider's graphs,
+and `include=versioning` to add each one's version control:
+`{enabled, graphId, kind, mainHeadCommitSeq, mainHeadCommitId, mainHeadCommittedAt}`.
+`mainHeadCommitSeq` is a change watermark — a graph's history has something new only when it
+moved — so one call per workspace tells a script which histories to read. `enabled` stays `false`
+while version control is still being turned on, so a `graphId` it hands out never vanishes.
+
+**For integrators: a commit log you can walk end to end.**
+`GET /api/v1/{ws}/versioning/graphs/{graph_id}/commits` takes `before` and `after`, exclusive bounds
+on `commit_seq`, and answers `hasMore` and `nextBefore`. A walk never skips or repeats a commit
+while new ones land, and `after` fetches only what is new. Every field of a commit is now described
+in the API explorer.
+
+**Graph Metadata & History API**, a new page on the integrators' reading path: every field of both
+answers, every kind of commit, what a script can rely on, and a polling loop that keeps a copy in
+step.
+
+### Changed
+
+- The log of `main` stops at `main`'s head. It no longer shows the import commit of a "turn on
+  version control" that hasn't finished — or failed.
+- On the commit log, `before`/`after` with `offset`, or on a view's history across drafts, answer
+  `400`.
+- Data-source answers carry `versioning`, `null` unless asked for.
+- The `workspace.datasource.moved` event names the versioned graph that moved with the source
+  (`graph_id`).
+
+### Fixed
+
+- A graph in the trash still answered its routes by id — history, state, drafts and reviews, even
+  while its purge ran. It now answers `404` until its data source is restored.
+- Moving a versioned data source left its version history behind: the source read as external in
+  its new workspace, and deleting it later left its graph standing for good. The history now moves
+  with it. A move waits (`409`, with the reason) while version control is busy with the source,
+  while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
+  drafts or review requests.
+
+### Security
+
+- After a move, a versioned data source's history, state, drafts and reviews stayed readable by
+  the members of its **old** workspace, through the versioning routes. They now answer only in the
+  workspace the source lives in.
+
+### Upgrading
+
+- Nothing to run. When the versioning worker's bootstrap lane starts, and every 15 minutes after
+  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind under
+  its data source's workspace — and puts it in the trash if its source is there.
+
+### Known limitations
+
+- No push notification of new commits yet: poll the data-source list and compare
+  `mainHeadCommitSeq`.
+- The list answers for one workspace at a time, and a key limited to particular data sources
+  can't call it; `GET /api/v1/{ws}/versioning/resolve?dataSourceId=` finds each source's graph.
+- The data-source list doesn't fill in its aggregation fields; a source's readiness
+  (`GET /api/v1/admin/data-sources/{id}/readiness`) has them.
+
+---
+
 ## [Unreleased] — Access that looks after itself once it's granted
 
 ### Added

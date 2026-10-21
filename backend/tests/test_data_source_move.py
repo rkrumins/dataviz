@@ -14,12 +14,44 @@ The zero-views rule is not caution, it is correctness:
     data through a workspace-scoped RBAC check that no longer describes reality.
 
 Soft-deleted views count, because restoring one would recreate exactly that.
-"""
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
+A versioned source's graph moves with it, last, so a refusal from version control — or a
+version store that can't be reached — fails the request and nothing moves.
+"""
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from fastapi import HTTPException
+from httpx import AsyncClient
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from backend.app.db.models import (
+    Base, OutboxEventORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
+)
 from backend.app.db.repositories import view_repo
-from backend.common.models.management import ViewCreateRequest
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.versioning import purge_worker
+from backend.common.models.management import DataSourceMoveRequest, ViewCreateRequest
+
+
+@pytest.fixture(autouse=True)
+def version_store(monkeypatch):
+    """The version store's side of a move, faked: records each call; answers ``graph`` (None:
+    the source isn't versioned) or raises ``fail``."""
+    state = {"calls": [], "graph": None, "fail": None}
+
+    async def rehome(*, data_source_id, to_workspace_id, **_kw):
+        state["calls"].append((data_source_id, to_workspace_id))
+        if state["fail"] is not None:
+            raise state["fail"]
+        return state["graph"]
+
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", rehome)
+    return state
 
 
 async def _workspace(client: AsyncClient, name: str) -> str:
@@ -88,7 +120,7 @@ async def test_moves_a_clean_data_source(test_client: AsyncClient):
 
 
 async def test_refuses_to_move_a_source_with_a_view(
-    test_client: AsyncClient, db_session: AsyncSession,
+    test_client: AsyncClient, db_session: AsyncSession, version_store,
 ):
     """The whole point of the restriction."""
     src = await _workspace(test_client, "Has A View")
@@ -105,9 +137,126 @@ async def test_refuses_to_move_a_source_with_a_view(
     assert resp.status_code == 409
     assert "1 view is built on this data source" in resp.json()["detail"]
 
-    # And it did NOT move.
+    # And it did NOT move — nor did anything ask the version store to.
     still = await test_client.get(f"/api/v1/admin/workspaces/{src}")
     assert any(d["id"] == ds for d in still.json()["dataSources"])
+    assert version_store["calls"] == []
+
+
+async def test_a_versioned_source_takes_its_history_with_it(
+    test_client: AsyncClient, db_session: AsyncSession, version_store,
+):
+    src = await _workspace(test_client, "Old Home")
+    dst = await _workspace(test_client, "New Home")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Versioned"))
+    version_store["graph"] = "graph_a"
+
+    resp = await test_client.post(
+        f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
+        json={"targetWorkspaceId": dst},
+    )
+    assert resp.status_code == 200, resp.text
+    assert version_store["calls"] == [(ds, dst)]
+
+    events = (await db_session.execute(select(OutboxEventORM).where(
+        OutboxEventORM.event_type == "workspace.datasource.moved"))).scalars().all()
+    assert [json.loads(e.payload)["graph_id"] for e in events] == ["graph_a"]
+
+
+@pytest.mark.parametrize("fail, status", [
+    (purge_worker.MoveBlocked("2 open drafts are on this data source's version history."), 409),
+    (OSError("connection refused"), 503),
+])
+async def test_when_its_history_cant_move_the_move_is_refused(
+    test_client: AsyncClient, version_store, fail, status,
+):
+    """What the request answers. That it leaves nothing behind is a property of the request's
+    transaction, which this fixture's one shared session can't show (see conftest's
+    ``test_client``) — the next test checks it with real transactions."""
+    src = await _workspace(test_client, "Stays Put")
+    dst = await _workspace(test_client, "Never Reached")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, f"Pinned {status}"))
+    version_store["fail"] = fail
+
+    resp = await test_client.post(
+        f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
+        json={"targetWorkspaceId": dst},
+    )
+    assert resp.status_code == status, resp.text
+    assert version_store["calls"] == [(ds, dst)]
+    if status == 409:
+        assert resp.json()["detail"] == str(fail)       # the reason, as a sentence to act on
+
+
+@pytest_asyncio.fixture()
+async def scoped_sessions(tmp_path):
+    """Sessions with production's transaction scope (``engine._session_scope``: commit on
+    success, roll back on error) over a file-backed SQLite, where a rollback is real — set up as
+    ``test_auth_revocation_durability.py`` explains."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'move.db'}")
+    aggregation = tmp_path / "aggregation.db"
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _connect(dbapi_conn, _record):
+        dbapi_conn.execute(f"ATTACH DATABASE '{aggregation}' AS aggregation")
+        dbapi_conn.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def scope():
+        session = maker()
+        try:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        finally:
+            await session.close()
+
+    yield scope
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("fail", [
+    purge_worker.MoveBlocked("1 open draft is on this data source's version history."),
+    OSError("connection refused"),
+])
+async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, version_store, fail):
+    from backend.app.api.v1.endpoints.workspaces import move_data_source
+
+    async with scoped_sessions() as s:
+        s.add_all([
+            WorkspaceORM(id="ws_from", name="From"), WorkspaceORM(id="ws_to", name="To"),
+            ProviderORM(id="prov_a", name="Store", provider_type="falkordb"),
+            WorkspaceDataSourceORM(id="ds_a", workspace_id="ws_from", provider_id="prov_a",
+                                   graph_name="orders", is_primary=True),
+        ])
+    version_store["fail"] = fail
+
+    with pytest.raises(HTTPException) as refused:
+        async with scoped_sessions() as s:
+            await move_data_source(
+                workspace_id="ws_from", ds_id="ds_a",
+                req=DataSourceMoveRequest(target_workspace_id="ws_to"),
+                user=SimpleNamespace(id="usr_a"),
+                claims=PermissionClaims(sid="", global_perms=("system:admin",)),
+                session=s,
+            )
+    assert refused.value.status_code in (409, 503)
+
+    async with scoped_sessions() as s:
+        row = await s.get(WorkspaceDataSourceORM, "ds_a")
+        assert (row.workspace_id, row.is_primary) == ("ws_from", True)
+        assert (await s.execute(select(OutboxEventORM))).scalars().all() == []
 
 
 async def test_a_TRASHED_view_also_blocks_the_move(

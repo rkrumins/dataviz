@@ -388,6 +388,11 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
 
+# An "enable version control" job in one of these states means its graph isn't a graph yet: the
+# head is parked at genesis and the import is half-written. A failed job counts — it must be
+# resumed or cancelled, never written around (_assert_not_bootstrapping).
+_UNFINISHED_ENABLEMENT = ("pending", "running", "failed")
+
 # The "nothing came in" answer for a pull that was already up to date (see _incoming_from_main).
 # Same shape as a real one, so a client never has to special-case the no-op.
 _EMPTY_INCOMING: Dict[str, object] = {
@@ -575,7 +580,7 @@ class GraphVersioningService:
         (``ix_jobs_graph_status``)."""
         unfinished = await s.scalar(select(JobORM.status).where(
             JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
-            JobORM.status.in_(("pending", "running", "failed")),
+            JobORM.status.in_(_UNFINISHED_ENABLEMENT),
         ).limit(1))
         if unfinished == "failed":
             raise ConcurrencyError(
@@ -3723,6 +3728,7 @@ class GraphVersioningService:
 
     @staticmethod
     def _commit_meta(c: "CommitORM") -> dict:
+        # The commit log's wire shape: keep ``CommitLogEntry`` (endpoints/versioning.py) in step.
         return {
             "commit_id": c.id, "commit_seq": c.commit_seq,
             "parent_commit_id": c.parent_commit_id, "kind": c.kind,
@@ -3736,10 +3742,17 @@ class GraphVersioningService:
     async def commit_log(
         self, *, graph_id: str, branch_id: Optional[str] = None,
         originating_view_id: Optional[str] = None, published_only: bool = False,
-        limit: int = 100, offset: int = 0, viewer: Optional[Viewer] = None,
+        limit: int = 100, offset: int = 0, before: Optional[int] = None,
+        after: Optional[int] = None, viewer: Optional[Viewer] = None,
     ) -> List[dict]:
         """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
         unset). When ``originating_view_id`` is given, scope to that view's history.
+
+        ``before`` / ``after`` are exclusive bounds on ``commit_seq`` — exact keyset paging on
+        one branch, where seqs are unique and only ever grow. ``main``'s log stops at its head:
+        enabling version control writes the import commit before the head moves to it, and
+        every other read path already stops there, so a commit the log shows has landed and
+        will never change its place.
 
         Two view-scoped modes:
         - ``published_only=False`` (raw): every commit attributed to the view across ALL
@@ -3757,8 +3770,24 @@ class GraphVersioningService:
         With a ``viewer``, a draft branch is gated (owner/manager/member/PR-reviewer) and the
         raw view-scoped log drops non-viewable drafts (published_only rows are all on the
         readable ``main``)."""
+        commits, _more = await self.commit_log_page(
+            graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
+            published_only=published_only, limit=limit, offset=offset, before=before,
+            after=after, viewer=viewer)
+        return commits
+
+    async def commit_log_page(
+        self, *, graph_id: str, branch_id: Optional[str] = None,
+        originating_view_id: Optional[str] = None, published_only: bool = False,
+        limit: int = 100, offset: int = 0, before: Optional[int] = None,
+        after: Optional[int] = None, viewer: Optional[Viewer] = None,
+    ) -> Tuple[List[dict], bool]:
+        """:meth:`commit_log`, and whether more commits lie past this page — counted before the
+        raw view-scoped log drops drafts the viewer can't read, so a short page there is never
+        mistaken for the end."""
         async with self._session() as s:
             stmt = select(CommitORM).where(CommitORM.graph_id == graph_id)
+            main_id = None
             if originating_view_id is not None and published_only:
                 main_id = await self._main_branch_id(s, graph_id)
                 stmt = stmt.where(
@@ -3771,16 +3800,28 @@ class GraphVersioningService:
             else:
                 if branch_id is None:
                     branch_id = await self._main_branch_id(s, graph_id)
-                await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+                branch = await self._get_branch(s, graph_id, branch_id)
+                await self._assert_branch_readable(s, branch, viewer)
                 stmt = stmt.where(CommitORM.branch_id == branch_id)
+                if branch.kind == "main":
+                    main_id = branch_id
+            if main_id is not None:
+                head = (await s.get(GraphORM, graph_id)).main_head_commit_seq
+                stmt = stmt.where(CommitORM.commit_seq <= head)
+            if before is not None:
+                stmt = stmt.where(CommitORM.commit_seq < before)
+            if after is not None:
+                stmt = stmt.where(CommitORM.commit_seq > after)
             rows = (await s.execute(
-                stmt.order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
+                stmt.order_by(CommitORM.commit_seq.desc()).limit(limit + 1).offset(offset)
             )).scalars().all()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
             if (viewer is not None and not viewer.can_manage
                     and originating_view_id is not None and not published_only):
                 ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
                 rows = [r for r in rows if r.branch_id in ok]
-            return [self._commit_meta(r) for r in rows]
+            return [self._commit_meta(r) for r in rows], has_more
 
     async def squashed_commits(
         self, *, graph_id: str, commit_id: str, limit: int = 100, offset: int = 0,
@@ -4406,6 +4447,60 @@ class GraphVersioningService:
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
 
+    async def main_heads(
+        self, *, workspace_id: str, data_source_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, object]]:
+        """``{data_source_id: {graph_id, kind, main_head_commit_seq, main_head_commit_id,
+        main_head_committed_at}}`` for each of ``data_source_ids`` whose version control is on in
+        ``workspace_id``: a live graph there (the tenancy rule :meth:`resolve_graph` applies) whose
+        "enable version control" job, if it had one, finished. A source that is absent is not
+        versioned here.
+
+        While version control is still being turned on the graph is left out: until the job
+        finishes the graph isn't one yet, and a cancelled enable deletes it — the next enable
+        makes a new graph id — so nothing that might vanish is handed out. Three indexed reads
+        per ``_HEADS_PER_READ`` sources: the graphs with their ``main``, any unfinished enable
+        among them, and the head commits."""
+        ids = list(data_source_ids)
+        if not ids:
+            return {}
+        out: Dict[str, Dict[str, object]] = {}
+        async with self._session() as s:
+            for chunk in _chunks(ids, _HEADS_PER_READ):
+                out.update(await self._main_heads(s, workspace_id, chunk))
+        return out
+
+    async def _main_heads(self, s, workspace_id: str, ids: List[str]) -> Dict[str, Dict[str, object]]:
+        graphs = (await s.execute(
+            select(GraphORM.id, GraphORM.data_source_id, GraphORM.kind,
+                   GraphORM.main_head_commit_seq, BranchORM.id)
+            .join(BranchORM, (BranchORM.graph_id == GraphORM.id) & (BranchORM.kind == "main"))
+            .where(GraphORM.data_source_id.in_(ids), GraphORM.workspace_id == workspace_id,
+                   GraphORM.deleted_at.is_(None))
+        )).all()
+        if not graphs:
+            return {}
+        enabling = set((await s.execute(
+            select(JobORM.graph_id).where(
+                JobORM.job_type == "bootstrap", JobORM.graph_id.in_([g[0] for g in graphs]),
+                JobORM.status.in_(_UNFINISHED_ENABLEMENT))
+        )).scalars())
+        live = [g for g in graphs if g[0] not in enabling]
+        heads: Dict[str, Tuple[str, str]] = {}
+        if live:
+            heads = {gid: (cid, at) for gid, cid, at in (await s.execute(
+                select(CommitORM.graph_id, CommitORM.id, CommitORM.created_at).where(
+                    CommitORM.graph_id.in_([g[0] for g in live]),      # partition pruning
+                    tuple_(CommitORM.graph_id, CommitORM.branch_id, CommitORM.commit_seq).in_(
+                        [(gid, main, seq) for gid, _ds, _kind, seq, main in live]))
+            )).all()}
+        return {
+            ds: {"graph_id": gid, "kind": kind, "main_head_commit_seq": int(seq),
+                 "main_head_commit_id": heads.get(gid, (None, None))[0],
+                 "main_head_committed_at": heads.get(gid, (None, None))[1]}
+            for gid, ds, kind, seq, _main in live
+        }
+
     @staticmethod
     def _draft_ref(b: BranchORM) -> dict:
         return {"branch_id": b.id, "head_commit_id": b.head_commit_id,
@@ -4582,6 +4677,7 @@ class GraphVersioningService:
             "fork_base_commit_seq": g.fork_base_commit_seq,
             "main_head_commit_seq": g.main_head_commit_seq,
             "created_by": g.created_by, "created_at": g.created_at,
+            "deleted_at": g.deleted_at,
         }
 
     @staticmethod
@@ -7085,6 +7181,9 @@ _PG_MAX_BIND_PARAMS = 32000
 # Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
 # a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
 _IN_LIST_MAX = 20000
+
+# Data sources per round of ``main_heads``: its head-commit read binds four parameters per graph.
+_HEADS_PER_READ = _PG_MAX_BIND_PARAMS // 5
 
 # Rows per statement where a draft's first read builds its overlay (``_head_index``): the read runs
 # on the web process's event loop, and each statement's rows are turned into Python objects there
