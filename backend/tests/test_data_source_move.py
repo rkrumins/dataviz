@@ -10,21 +10,38 @@ while its source now lives in B, and members of A would read B's data through a
 workspace-scoped check that no longer describes reality. Now the views go with the
 source — trashed ones too, because restoring one later would recreate exactly that.
 The full behaviour (access, requests, undo) is in test_data_source_transfers.py.
-"""
-import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ViewORM
+A versioned source's graph moves with it, first, so a refusal from version control — or a
+version store that can't be reached — fails the request before anything else has moved.
+"""
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from fastapi import HTTPException
+from httpx import AsyncClient
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from backend.app.db.models import (
+    Base, OutboxEventORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM,
+)
 from backend.app.db.repositories import view_repo
-from backend.common.models.management import ViewCreateRequest
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.versioning import purge_worker
+from backend.common.models.management import DataSourceMoveRequest, ViewCreateRequest
 from tests.common.transfer_world import fake_version_store
+
+VERSIONED = {"graphId": "graph_a", "activeJobs": [], "commits": 3, "openDrafts": [],
+             "openReviews": 0, "forks": 0}
 
 
 @pytest.fixture(autouse=True)
-def _version_store(monkeypatch):
-    """The version store runs on Postgres only; these sources aren't versioned."""
+def version_store(monkeypatch):
+    """The version store runs on Postgres only: faked, answering ``facts`` (None: the source
+    isn't versioned) and recording each relocation."""
     return fake_version_store(monkeypatch)
 
 
@@ -118,6 +135,133 @@ async def test_a_source_with_a_view_takes_the_view_with_it(
     assert resp.status_code == 200, resp.text
     assert resp.json()["viewCount"] == 1
     assert await _workspace_of(db_session, view.id) == dst
+
+
+async def test_a_versioned_source_takes_its_history_with_it(
+    test_client: AsyncClient, db_session: AsyncSession, version_store,
+):
+    src = await _workspace(test_client, "Old Home")
+    dst = await _workspace(test_client, "New Home")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Versioned"))
+    version_store.facts = VERSIONED
+
+    resp = await test_client.post(
+        f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
+        json={"targetWorkspaceId": dst},
+    )
+    assert resp.status_code == 200, resp.text
+    assert version_store.relocations == [(ds, dst, True)]
+
+    # Both workspaces' record of the move names the graph that went with it.
+    events = (await db_session.execute(select(OutboxEventORM).where(
+        OutboxEventORM.event_type == "workspace.data_source.moved"))).scalars().all()
+    assert {json.loads(e.payload)["details"]["graphId"] for e in events} == {"graph_a"}
+
+
+@pytest.mark.parametrize("fail, status, error", [
+    (purge_worker.MoveBlocked("Version control is busy with this data source."), 409, "graph_busy"),
+    (OSError("connection refused"), 503, "version_store_unavailable"),
+])
+async def test_when_its_history_cant_move_the_move_is_refused(
+    test_client: AsyncClient, monkeypatch, version_store, fail, status, error,
+):
+    """What the request answers when version control turns the graph down after the preview
+    passed — or can't be reached. That it leaves nothing behind is a property of the request's
+    transaction, which this fixture's one shared session can't show (see conftest's
+    ``test_client``) — the next test checks it with real transactions."""
+    src = await _workspace(test_client, "Stays Put")
+    dst = await _workspace(test_client, "Never Reached")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, f"Pinned {status}"))
+    version_store.facts = VERSIONED
+
+    async def refuse(**_kw):
+        raise fail
+
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", refuse)
+    resp = await test_client.post(
+        f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
+        json={"targetWorkspaceId": dst},
+    )
+    assert resp.status_code == status, resp.text
+    assert resp.json()["detail"]["error"] == error
+    if status == 409:                                   # the reason, as a sentence to act on
+        assert resp.json()["detail"]["message"].startswith(str(fail))
+
+
+@pytest_asyncio.fixture()
+async def scoped_sessions(tmp_path):
+    """Sessions with production's transaction scope (``engine._session_scope``: commit on
+    success, roll back on error) over a file-backed SQLite, where a rollback is real — set up as
+    ``test_auth_revocation_durability.py`` explains."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'move.db'}")
+    aggregation = tmp_path / "aggregation.db"
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _connect(dbapi_conn, _record):
+        dbapi_conn.execute(f"ATTACH DATABASE '{aggregation}' AS aggregation")
+        dbapi_conn.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def scope():
+        session = maker()
+        try:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+        finally:
+            await session.close()
+
+    yield scope
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("fail", [
+    purge_worker.MoveBlocked("Version control is busy with this data source."),
+    OSError("connection refused"),
+])
+async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, monkeypatch, version_store,
+                                                        fail):
+    from backend.app.api.v1.endpoints.workspaces import move_data_source
+
+    async with scoped_sessions() as s:
+        s.add_all([
+            WorkspaceORM(id="ws_from", name="From"), WorkspaceORM(id="ws_to", name="To"),
+            ProviderORM(id="prov_a", name="Store", provider_type="falkordb"),
+            WorkspaceDataSourceORM(id="ds_a", workspace_id="ws_from", provider_id="prov_a",
+                                   graph_name="orders", is_primary=True),
+        ])
+    version_store.facts = VERSIONED
+
+    async def refuse(**_kw):
+        raise fail
+
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", refuse)
+    with pytest.raises(HTTPException) as refused:
+        async with scoped_sessions() as s:
+            await move_data_source(
+                workspace_id="ws_from", ds_id="ds_a",
+                req=DataSourceMoveRequest(target_workspace_id="ws_to"),
+                user=SimpleNamespace(id="usr_a"),
+                claims=PermissionClaims(sid="", global_perms=("system:admin",)),
+                session=s,
+            )
+    assert refused.value.status_code in (409, 503)
+
+    async with scoped_sessions() as s:
+        row = await s.get(WorkspaceDataSourceORM, "ds_a")
+        assert (row.workspace_id, row.is_primary) == ("ws_from", True)
+        assert (await s.execute(select(OutboxEventORM))).scalars().all() == []
 
 
 async def test_a_TRASHED_view_moves_too(

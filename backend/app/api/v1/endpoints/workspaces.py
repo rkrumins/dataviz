@@ -16,11 +16,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ContextModelORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
+from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.api.v1.view_read_scope import readable_clause
 from backend.app.auth.dependencies import (
     get_current_user,
@@ -67,6 +69,7 @@ from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
+    DataSourceVersioning,
     DeletedDataSource,
     WorkspaceDataSourceImpactResponse,
     WorkspaceImpactResponse,
@@ -76,6 +79,7 @@ from backend.common.models.management import (
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 from backend.app.services.versioning import config as gv_config
+from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
 
@@ -593,14 +597,48 @@ async def set_default_workspace(
 @router.get("/{workspace_id}/data-sources", response_model=List[DataSourceResponse])
 async def list_data_sources(
     workspace_id: str = Path(...),
+    provider_id: Optional[str] = Query(None, alias="providerId",
+                                       description="Only the data sources on this provider"),
+    include: Optional[str] = Query(None, pattern="^versioning$",
+                                   description="`versioning`: each data source's version control — "
+                                               "whether it is on, its graph, and the head of `main`"),
     _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """List all data sources for a workspace."""
+    """List all data sources for a workspace, or one provider's with ``providerId``.
+
+    ``include=versioning`` adds each one's version control from the version store. Its
+    ``mainHeadCommitSeq`` is a change watermark: the graph's commit log has something new only
+    when it moved. While the store can't be read the answer is a 503 to retry — never a list
+    with those facts left out."""
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    return await data_source_repo.list_data_sources(session, workspace_id)
+    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id)
+    if include != "versioning" or not sources:
+        return sources
+    try:
+        heads = await svc.main_heads(workspace_id=workspace_id, data_source_ids=[d.id for d in sources])
+    except (SQLAlchemyError, OSError) as exc:
+        logger.warning("data-source list for %s: version store unreadable: %s", workspace_id, exc)
+        raise HTTPException(status_code=503, headers={"Retry-After": "5"}, detail={
+            "code": "DB_UNAVAILABLE",
+            "message": "Version control can't be read right now. Try again shortly, "
+                       "or ask without include=versioning."})
+    return [d.model_copy(update={"versioning": _versioning_of(heads.get(d.id))}) for d in sources]
+
+
+def _versioning_of(head: Optional[dict]) -> DataSourceVersioning:
+    """One source's version control, from :meth:`GraphVersioningService.main_heads`."""
+    if head is None:
+        return DataSourceVersioning(enabled=False)
+    return DataSourceVersioning(
+        enabled=True, graph_id=head["graph_id"], kind=head["kind"],
+        main_head_commit_seq=head["main_head_commit_seq"],
+        main_head_commit_id=head["main_head_commit_id"],
+        main_head_committed_at=head["main_head_committed_at"],
+    )
 
 
 # Declared here, beside the list route and BEFORE every "/{ds_id}" route, so that a later

@@ -335,6 +335,19 @@ async def test_the_version_store_must_be_free_and_reachable(test_client, db_sess
     assert r.status_code == 409 and world.relocations == []
 
 
+async def test_an_unfinished_enable_holds_the_move(test_client, db_session, world):
+    """A failed attempt to turn on version control waits to be resumed or cancelled, and the move
+    waits with it — named in the preview, not discovered at the last step. Open drafts and reviews
+    don't hold it back: they go with it."""
+    world.facts = {**VERSIONED, "unfinishedBootstrap": True, "openReviews": 1,
+                   "openDrafts": [{"id": "br_1", "name": "Q3 fixes", "owner": PEOPLE["max"]}]}
+    async with acting_as(db_session, "cy"):
+        p = await _preview(test_client)
+        r = await _move(test_client, token=False)
+    assert [(b["code"], b["transient"]) for b in p["blockers"]] == [("version_control_unfinished", False)]
+    assert r.status_code == 409 and world.relocations == []
+
+
 # ── who may ──────────────────────────────────────────────────────────
 
 
@@ -387,6 +400,8 @@ async def test_a_move_takes_everything_with_it(test_client, db_session, world):
     assert after[LOOSE][1] == DS                                   # pinned to the source it read
     assert all(after[v][2] == before[v][2] for v in before)        # a move is not an edit
     assert world.relocations == [(DS, B, True)]
+    assert {e["details"]["graphId"] for e in await _events(
+        db_session, "workspace.data_source.moved")} == {"graph_orders"}   # its history went too
 
     log = set((await db_session.execute(select(
         ViewActivityLogORM.view_id, ViewActivityLogORM.workspace_id, ViewActivityLogORM.action))).all())
@@ -919,35 +934,6 @@ async def test_lists_are_a_page_not_the_table(test_client, db_session, world):
                                            params={"status": "all"})).json()
     assert len(incoming) == len(both_ways) == data_source_transfer_repo.LIST_LIMIT
     assert incoming[0]["id"] == f"xfer_{over - 1:04d}"     # newest first
-
-
-async def test_the_reaper_refiles_a_graph_left_behind(db_session, world):
-    """A move that failed, and then failed to put its graph back, leaves the graph filed under a
-    workspace its source isn't in — as did moves made before graphs moved with their sources.
-    The reaper files it where the source is, and leaves alone what it can't touch yet."""
-    from contextlib import asynccontextmanager
-    from types import SimpleNamespace
-
-    from backend.app.services.versioning import purge_worker
-
-    @asynccontextmanager
-    async def app_sessions():
-        yield db_session
-
-    class _Graphs:
-        async def execute(self, _stmt):
-            return SimpleNamespace(all=lambda: [(DS, B), (DS2, A), ("ds_gone", C)])
-
-    @asynccontextmanager
-    async def graphver():
-        yield _Graphs()
-
-    reaper = purge_worker.Reaper(app_session_factory=lambda: app_sessions(),
-                                 graphver_session_factory=graphver)
-    assert await reaper._realign_moved_graphs() == 1
-    assert world.relocations == [(DS, A, True)]             # Ledger is home; the gone one isn't ours
-    world.busy = "export"                                   # a job writing it: next pass
-    assert await reaper._realign_moved_graphs() == 0
 
 
 # ── history ──────────────────────────────────────────────────────────

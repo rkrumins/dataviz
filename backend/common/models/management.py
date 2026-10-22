@@ -887,6 +887,25 @@ class DataSourceUpdateRequest(BaseModel):
         return self
 
 
+class DataSourceVersioning(BaseModel):
+    """Version control on a data source, as the data-source list reports it when asked
+    (``include=versioning``)."""
+    #: A live versioned graph backs the source in this workspace, and turning version control
+    #: on has finished. False for an external graph (mastered elsewhere, so it has no history
+    #: here) and while version control is still being turned on.
+    enabled: bool
+    graph_id: Optional[str] = Field(None, alias="graphId")
+    kind: Optional[str] = None  # manual | authoritative | hybrid | blank
+    #: The head of ``main`` — the newest published revision. A change watermark: the commit log
+    #: has something new only when it moved.
+    main_head_commit_seq: Optional[int] = Field(None, alias="mainHeadCommitSeq")
+    main_head_commit_id: Optional[str] = Field(None, alias="mainHeadCommitId")
+    main_head_committed_at: Optional[str] = Field(None, alias="mainHeadCommittedAt")
+
+    class Config:
+        populate_by_name = True
+
+
 class DataSourceResponse(BaseModel):
     id: str
     workspace_id: str = Field(alias="workspaceId")
@@ -924,6 +943,9 @@ class DataSourceResponse(BaseModel):
     # derive from shape (no catalog item → managed), mirroring the ORM comment.
     source_mode: Optional[str] = Field(None, alias="sourceMode")  # "managed" | "federated"
     write_back_enabled: bool = Field(False, alias="writeBackEnabled")
+    #: Version control — set by the data-source list when asked (``include=versioning``), null
+    #: wherever it wasn't asked for. Null says nothing about whether the source is versioned.
+    versioning: Optional[DataSourceVersioning] = None
     # Aggregation state
     aggregation_status: str = Field("none", alias="aggregationStatus")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")

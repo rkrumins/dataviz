@@ -310,8 +310,8 @@ it from the **Aggregation** tab when you're ready (see below).
 
 Teams reorganize, and data sources sometimes need to move with them. A data source
 moves to another workspace **with everything built on it**: its views (including any
-in the trash), their history, its version history and open drafts, and its
-aggregation state and stats. The new workspace gets a fully working source, not a
+in the trash), their history, its version history with open drafts and review
+requests, and its aggregation state and stats. The new workspace gets a fully working source, not a
 blank slate, and nothing is rebuilt.
 
 How you move it depends on what you run:
@@ -336,9 +336,12 @@ How you move it depends on what you run:
 3. **What moves** — check how many views move (and how many are in the trash or
    follow the workspace's default source), its version history, and what you should
    know — such as a restricted source going to a workspace that's open to everyone,
-   where anyone who joins can read it. Anything under **Resolve before moving** — an aggregation run or a
-   version-history job in progress, say — has to finish before you can continue. A
-   source with more than 50,000 views can't be moved in one go.
+   where anyone who joins can read it. Open drafts and review requests go with it; a
+   draft whose owner can't open the new workspace is named, so you can add them there.
+   Anything under **Resolve before moving** has to be dealt with first: an aggregation
+   run or a version-history job in progress has to finish, and a failed attempt to
+   turn on version control has to be resumed or cancelled. A source with more than
+   50,000 views can't be moved in one go.
 4. **Access** — see who **keeps access**, who **gains access** and who **loses
    access**. After the move, the new workspace's own members, groups and
    identity-provider mappings decide who reads the views. Owners and anyone a view is
@@ -356,10 +359,10 @@ How you move it depends on what you run:
 Everyone who lost access gets an Inbox notice saying where the views went and how to
 get back in, the way the new workspace takes people: **Ask to join** where approvers
 decide, **Join** where it's open to everyone, or asking its admins where it's closed to
-requests. Both workspaces' admins are told who lost access, and the source's panel says how many. To give someone access
-again, add them or their group to the new workspace — or, where your identity
-provider decides, map their identity-provider group to it, so the provider keeps
-deciding.
+requests. Both workspaces' admins are told who lost access, and the source's panel
+says how many. To give someone access again, add them or their group to the new
+workspace — or, where your identity provider decides, map their identity-provider
+group to it, so the provider keeps deciding.
 
 [screenshot-pending]: # "workspace-admin-move-access — the Access step of moving a data source, listing who loses access"
 

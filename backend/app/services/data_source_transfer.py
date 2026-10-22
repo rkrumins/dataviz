@@ -88,7 +88,7 @@ from backend.app.services.aggregation.models import (
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.node_identity import load_node_identity
 from backend.app.services.permission_service import PermissionClaims, has_permission, resolve
-from backend.app.services.versioning import lifecycle
+from backend.app.services.versioning import lifecycle, purge_worker
 from backend.common.models.management import (
     DataSourceMoveRequest,
     DataSourceTransferDetail,
@@ -615,6 +615,12 @@ async def _destination_blockers(
                 f"Version history is being written right now ({_job_words(facts['activeJobs'])}). "
                 "Move it once that finishes.",
                 "blocker", transient=True))
+        if facts and facts.get("unfinishedBootstrap"):
+            blockers.append(_issue(
+                "version_control_unfinished",
+                "Turning on version control for this data source didn't finish. Resume or cancel "
+                "it first.",
+                "blocker"))
     return blockers, facts
 
 
@@ -1079,7 +1085,8 @@ async def _ask_new_publishers(session: AsyncSession, pre: Preflight, actor: str)
 async def _compensate(ds_id: str, ws_id: str) -> None:
     """Put the versioned graph back where the source still is after a failed move."""
     try:
-        await lifecycle.relocate_graph(ds_id, ws_id, check_busy=False)
+        await purge_worker.rehome_graph_for_data_source(
+            data_source_id=ds_id, to_workspace_id=ws_id, refuse_busy=False)
     except Exception:
         # The next move or undo of this source sets it right: relocation sets, never swaps.
         logger.error("could not put the versioned graph of %s back in %s after a failed move",
@@ -1096,12 +1103,10 @@ def _is_clash(exc: IntegrityError) -> bool:
 
 async def _relocate_graph_first(ds_id: str, ws_id: str) -> Optional[str]:
     try:
-        return await lifecycle.relocate_graph(ds_id, ws_id)
-    except lifecycle.GraphBusy as exc:
-        raise _conflict(
-            "graph_busy",
-            f"Version history is being written right now ({_job_words([exc.job_type])}). "
-            "Nothing was changed; try again once it finishes.")
+        return await purge_worker.rehome_graph_for_data_source(
+            data_source_id=ds_id, to_workspace_id=ws_id)
+    except purge_worker.MoveBlocked as exc:
+        raise _conflict("graph_busy", f"{exc} Nothing was changed.")
     except DBAPIError as exc:
         if "lock" in str(exc).lower():
             raise _conflict(
@@ -1157,6 +1162,8 @@ async def _execute(
             await session.flush()
         details = _details(row, source, target, views=len(manifest["viewIds"]),
                            lost=manifest["lostAccess"])
+        if graph_id is not None:
+            details["graphId"] = graph_id           # its version history, moved with it
         await _record_both(session, "workspace.data_source.moved", ds, source, target, details)
         await _notify_moved(session, row, ds, source, target, actor=actor,
                             view_ids=manifest["viewIds"], lost=manifest["lostAccess"],

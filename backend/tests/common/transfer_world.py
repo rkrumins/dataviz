@@ -33,7 +33,7 @@ from backend.app.db.models import (
     WorkspaceORM,
 )
 from backend.app.services.permission_service import resolve
-from backend.app.services.versioning import lifecycle
+from backend.app.services.versioning import lifecycle, purge_worker
 from backend.auth_service.interface import User
 
 A, B, C = "ws_fin", "ws_risk", "ws_ops"
@@ -181,14 +181,15 @@ def fake_version_store(monkeypatch) -> FakeVersionStore:
             raise RuntimeError("version store down")
         return store.facts
 
-    async def relocate_graph(ds_id, ws_id, *, check_busy=True):
+    async def rehome(*, data_source_id, to_workspace_id, refuse_busy=True, **_kw):
         if store.down:
             raise RuntimeError("version store down")
-        if check_busy and store.busy:
-            raise lifecycle.GraphBusy(store.busy)
-        store.relocations.append((ds_id, ws_id, check_busy))
+        if refuse_busy and store.busy:
+            raise purge_worker.MoveBlocked(
+                f"Version control is busy with this data source ({store.busy}).")
+        store.relocations.append((data_source_id, to_workspace_id, refuse_busy))
         return (store.facts or {}).get("graphId")
 
     monkeypatch.setattr(lifecycle, "relocation_facts", relocation_facts)
-    monkeypatch.setattr(lifecycle, "relocate_graph", relocate_graph)
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", rehome)
     return store

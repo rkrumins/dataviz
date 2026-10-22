@@ -49,6 +49,7 @@ export const filenameMap: Record<string, string> = {
   'SECURITY_OVERVIEW.md': 'security-overview',
   'SSO_BACKCHANNEL_CONTRACT.md': 'sso-backchannel-contract',
   'API_GUIDE.md': 'api-guide',
+  'GRAPH_METADATA_API.md': 'graph-metadata-api',
   'ONBOARDING_A_SOURCE.md': 'onboarding-a-source',
   'KUBERNETES.md': 'kubernetes',
   'OBSERVABILITY.md': 'observability',

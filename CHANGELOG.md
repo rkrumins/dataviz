@@ -22,10 +22,11 @@ is rebuilt. The steps:
 - **Destination** says, for each workspace you can see, whether you can move the source there now,
   ask its admins, or why not.
 - **What moves** counts the views by visibility and shows the version history, then lists what to
-  resolve first (an aggregation run or a version-history job in progress) and what to know (the
-  workspace's last source leaving, its primary source, views published to everyone, requests to
-  publish, layout templates that stay behind, open drafts whose owners can't reach the new
-  workspace, a restricted source going to a workspace open to everyone).
+  resolve first (an aggregation run or a version-history job in progress, or a failed attempt to
+  turn on version control) and what to know (the workspace's last source leaving, its primary
+  source, views published to everyone, requests to publish, layout templates that stay behind,
+  open drafts whose owners can't reach the new workspace, a restricted source going to a
+  workspace open to everyone).
 - **Access** shows who keeps access, who gains it and who loses it. The new workspace's own
   members, groups and identity-provider mappings decide who reads the moved views, so the people
   and groups who read them only through the old workspace lose them — each listed with where their
@@ -62,11 +63,16 @@ where it went.
   takes `previewToken` — required, with a 422 `preview_required`, when anyone would lose access —
   and returns the move's record rather than the data source.
 - **A move re-files everything that named the old workspace**, including for a source with no
-  views. The versioned graph and its jobs, the aggregation state and each moved view's activity
-  used to stay behind, so a moved versioned source stayed writable through the old workspace's
-  versioning routes and couldn't be deleted cleanly.
+  views: each moved view's activity and the aggregation state now go with the versioned graph,
+  which moves with its source since the release below. The graph moves first, so a refusal from
+  version control changes nothing.
+- **Open drafts and review requests no longer hold a move back**, as they did since the release
+  below: they go with the source, and the preview names any draft whose owner can't open the new
+  workspace. A move still waits while version control is busy with the source, or while a failed
+  attempt to turn it on waits to be resumed or cancelled — which the preview now says up front.
 - **Both workspaces' activity records a move**, as `workspace.data_source.moved`; it was filed
-  only under the destination. The old `workspace.datasource.moved` events still show in history.
+  only under the destination. It names the versioned graph that moved (`graphId`), as
+  `workspace.datasource.moved` did (`graph_id`); those older events still show in history.
 - **`POST /api/v1/views/` checks the data source belongs to the view's workspace**, as the import
   already did: a view naming a source in another workspace is refused with a 422.
 
@@ -123,6 +129,71 @@ where it went.
   but people in the new workspace can't open the template.
 - The picker on **Add Source** doesn't count views that read a source as the workspace's default,
   so it may offer a move the server then refuses, saying why.
+
+---
+
+## [Unreleased] — Follow a workspace's graphs and their history from a script
+
+### Added
+
+**For integrators: a workspace's graphs, and which are versioned.**
+`GET /api/v1/admin/workspaces/{ws}/data-sources` takes `providerId` to list one provider's graphs,
+and `include=versioning` to add each one's version control:
+`{enabled, graphId, kind, mainHeadCommitSeq, mainHeadCommitId, mainHeadCommittedAt}`.
+`mainHeadCommitSeq` is a change watermark — a graph's history has something new only when it
+moved — so one call per workspace tells a script which histories to read. `enabled` stays `false`
+while version control is still being turned on, so a `graphId` it hands out never vanishes.
+
+**For integrators: a commit log you can walk end to end.**
+`GET /api/v1/{ws}/versioning/graphs/{graph_id}/commits` takes `before` and `after`, exclusive bounds
+on `commit_seq`, and answers `hasMore` and `nextBefore`. A walk never skips or repeats a commit
+while new ones land, and `after` fetches only what is new. Every field of a commit is now described
+in the API explorer.
+
+**Graph Metadata & History API**, a new page on the integrators' reading path: every field of both
+answers, every kind of commit, what a script can rely on, and a polling loop that keeps a copy in
+step.
+
+### Changed
+
+- The log of `main` stops at `main`'s head. It no longer shows the import commit of a "turn on
+  version control" that hasn't finished — or failed.
+- On the commit log, `before`/`after` with `offset`, or on a view's history across drafts, answer
+  `400`.
+- Data-source answers carry `versioning`, `null` unless asked for.
+- The `workspace.datasource.moved` event names the versioned graph that moved with the source
+  (`graph_id`).
+
+### Fixed
+
+- A graph in the trash still answered its routes by id — history, state, drafts and reviews, even
+  while its purge ran. It now answers `404` until its data source is restored.
+- Moving a versioned data source left its version history behind: the source read as external in
+  its new workspace, and deleting it later left its graph standing for good. The history now moves
+  with it. A move waits (`409`, with the reason) while version control is busy with the source,
+  while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
+  drafts or review requests.
+
+### Security
+
+- After a move, a versioned data source's history, state, drafts and reviews stayed readable by
+  the members of its **old** workspace, through the versioning routes. They now answer only in the
+  workspace the source lives in.
+
+### Upgrading
+
+- Nothing to run. When the versioning worker's bootstrap lane starts, and every 15 minutes after
+  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind under
+  its data source's workspace — and puts it in the trash if its source is there.
+
+### Known limitations
+
+- No push notification of new commits yet: poll the data-source list and compare
+  `mainHeadCommitSeq`.
+- The list answers for one workspace at a time, and a key limited to particular data sources
+  can't call it; `GET /api/v1/{ws}/versioning/resolve?dataSourceId=` finds each source's graph.
+- The data-source list doesn't fill in its aggregation fields; a source's readiness
+  (`GET /api/v1/admin/data-sources/{id}/readiness`) has them.
 
 ---
 

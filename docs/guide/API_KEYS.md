@@ -146,9 +146,10 @@ reference marks every operation a key may call.
 | Read a view and its layout | `GET /api/v1/views/{id}` |
 | Read the data behind a view you can read | `/api/v1/{workspace}/graph/…?viewId={id}` |
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |
+| List a workspace's graphs, and which are versioned | `GET /api/v1/admin/workspaces/{workspace}/data-sources?include=versioning` — a key covering the whole workspace |
 | Propose a change | open a draft, stage the change, open a merge request (`/versioning/…`) |
 | Publish a change | merge a request you may merge, or publish your draft |
-| Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark`), a data source's jobs and their event stream |
+| Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark` — see [Graph Metadata & History API](/docs/graph-metadata-api)), a data source's jobs and their event stream |
 
 A key limited to particular data sources must **name** one with
 `dataSourceId`; it cannot rely on a workspace's default data source. A key
