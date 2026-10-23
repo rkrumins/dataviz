@@ -273,7 +273,7 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             const scope = d.uiScope ?? (d.refs?.length && !d.urns?.length ? 'name' : 'roots')
             if (scope === 'name') {
                 return (
-                    <Field label="Containers, by name">
+                    <Field label="Containers, by name" group>
                         <NodeRefList value={d.refs ?? []} autoFocus={ctx.autoFocus}
                                      disabled={ctx.isRunning}
                                      onChange={(refs) => ctx.onChange({ ...d, refs })} />
@@ -289,7 +289,7 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'is': {
             const p = value as IsPredicate
             return (
-                <Field label="Entities">
+                <Field label="Entities" group>
                     <NodeRefList value={p.refs} autoFocus={ctx.autoFocus} disabled={ctx.isRunning}
                                  onChange={(refs) => ctx.onChange({ ...p, refs })} />
                 </Field>
@@ -1034,14 +1034,18 @@ function WildcardHelp({
 // Atoms — Field wrapper + shared input className
 // ---------------------------------------------------------------------------
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+/** ``group``: it holds several controls (a list of names), so it is a
+ *  group, not a <label> — a label hands a click anywhere inside it to its
+ *  first control, which there could be "Use its name". */
+function Field({ label, children, group }: { label: string; children: ReactNode; group?: boolean }) {
+    const Tag = group ? 'div' : 'label'
     return (
-        <label className="flex flex-col gap-1.5 min-w-0">
+        <Tag className="flex flex-col gap-1.5 min-w-0" {...(group ? { role: 'group', 'aria-label': label } : {})}>
             <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
                 {label}
             </span>
             {children}
-        </label>
+        </Tag>
     )
 }
 
