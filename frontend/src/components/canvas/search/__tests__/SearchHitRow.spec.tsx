@@ -9,6 +9,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { urnDisplayName } from '@/lib/urnLabels'
 import { useSearchStore } from '@/store/searchStore'
 import type { Predicate, SearchHit } from '@/types/search'
 
@@ -158,6 +159,8 @@ describe('SearchHitRow — how it matches', () => {
             kind: 'path', sourceUrns: ['a'], direction: 'outgoing',
             targetWhere: { kind: 'entityType', values: ['dashboard'] },
         })
+        // So the routes' sentence and chips name it, not its URN.
+        expect(urnDisplayName('a')).toBe('orders')
     })
 
     it('offers nothing for a query matched without lineage', () => {

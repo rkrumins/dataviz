@@ -48,7 +48,7 @@ export const QuerySentence: FC<{ draftPredicate: Predicate | null }> = ({
         ? [...scope.urns.map((u) => formatUrnLabel(u)), ...(scope.refs ?? []).map(refLabel)]
         : []
     const sentence = useMemo(
-        () => formatPredicateAsSentence(withoutScope(draftPredicate), { leadIn: 'Anything' }),
+        () => formatPredicateAsSentence(withoutScope(draftPredicate), { leadIn: 'Anything', singular: true }),
         [draftPredicate],
     )
 

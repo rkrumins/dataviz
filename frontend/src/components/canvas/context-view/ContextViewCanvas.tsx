@@ -80,6 +80,7 @@ import {
 } from '@/lib/placement/placement'
 import { buildWizardPlacement } from '@/components/views/ViewWizard/effectivePlacement'
 import { primeRevealSpine } from '@/lib/primeRevealSpine'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { buildPlacements, type PlacementInfo } from './placement'
 import type { PlacedReason } from './FlatTreeItem'
 import {
@@ -3467,6 +3468,10 @@ export function ContextViewCanvas({
     return questionsFromHere(urns, { readOnly }).map((q) => ({
       id: `query-${q.id}`, label: q.label, icon: q.icon as ContextMenuAction['icon'],
       onClick: () => {
+        // Named before the query is committed, so its sentence and chips
+        // say what each entity is called rather than its URN.
+        rememberUrnLabels(urns.map((urn) => ({ urn, displayName: canvasDisplayName(urn) }))
+          .filter((e) => e.displayName !== e.urn))
         const store = useSearchStore.getState()
         if (q.refine) {
           store.commitDraft(q.predicate)

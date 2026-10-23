@@ -24,6 +24,7 @@ import * as LucideIcons from 'lucide-react'
 import { type FC, useContext, useMemo } from 'react'
 
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import { useIsFocusedMatch, useSearchStore } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
@@ -420,6 +421,7 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation()
+                                    rememberUrnLabels([hit.node])
                                     useSearchStore.getState().requestSearchRun(routes)
                                 }}
                                 className={cn(
