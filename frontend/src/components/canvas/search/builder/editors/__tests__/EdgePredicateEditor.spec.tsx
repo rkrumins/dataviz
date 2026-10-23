@@ -18,7 +18,8 @@ const ctx: EditorContext = {
     getEdgeValueSamples: () => [], edgeKeyStoredAs: { confidence: 'native', mode: 'json' },
 }
 
-const operators = () => [...screen.getByDisplayValue(/=|≥|>/).querySelectorAll('option')].map((o) => o.value)
+// The operator menu, which reads in words as on a property row.
+const operators = () => [...screen.getByDisplayValue(/^is( at least)?$/).querySelectorAll('option')].map((o) => o.value)
 
 
 describe('EdgePredicateEditor — where an edge keeps a property', () => {
@@ -26,6 +27,8 @@ describe('EdgePredicateEditor — where an edge keeps a property', () => {
         render(<EdgePredicateEditor ctx={ctx} onChange={vi.fn()}
             value={{ kind: 'edgeProperty', key: 'confidence', op: 'gte', value: 0.8 }} />)
         expect(operators()).toContain('between')
+        expect(screen.getByDisplayValue('is at least')).toBeInTheDocument()
+        expect(screen.getByDisplayValue('Compare an edge property')).toBeInTheDocument()
     })
 
     it('offers equality only for a key kept in the JSON, and says why', () => {
