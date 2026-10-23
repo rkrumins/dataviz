@@ -1,0 +1,18 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      {
+        "kind": "related",
+        "axis": "downstream",
+        "maxHops": 3,
+        "where": { "kind": "entityType", "op": "in", "values": ["dashboard"] },
+        "edge": { "kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8 }
+      }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 200, "includeAncestorPath": true }
+}

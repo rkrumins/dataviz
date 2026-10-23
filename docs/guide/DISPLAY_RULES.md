@@ -42,7 +42,7 @@ order, and share them with other Views.
 | **Tag label** | The chip's text. Unique in the View (ignoring case), up to 120 characters |
 | **Colour** | The chip's colour, from eight swatches |
 | **Icon** | Optional: one of twelve icons (Tag, ShieldCheck, AlertTriangle, Star, Flag, Lock, Eye, Database, Users, Sparkles, CircleDot, Bookmark) |
-| **Criteria** | The same filters as [Advanced Search](/guide/advanced-search) — types, tags, properties, text, lineage shape, groups |
+| **Criteria** | The same filters as [Advanced Search](/guide/advanced-search) — types, tags, properties, text, lineage shape, relationships, entities by name, groups |
 | **On / off** | A rule that's off is kept, but tags nothing |
 
 **Every rule that matches adds its chip** — there's no winner and no priority.
@@ -239,6 +239,31 @@ Number).
 {"kind": "property", "key": "rowCount", "op": "eq", "value": 0, "valueType": "number"}
 ```
 
+**Holds PII.** Red, **Lock**. **Add filter → Relationships → Contains…**, with
+**Tag is…** `PII` as what the child must match: tables with a PII column.
+
+```json
+{"kind": "related", "axis": "child", "where": {"kind": "tag", "op": "hasAny", "values": ["PII"]}}
+```
+
+**In the UK estate.** Indigo, **Flag**. **Inside a container named…**
+`Country / United Kingdom` — by name, so the rule works in every environment
+the library is imported into.
+
+```json
+{"kind": "descendantOf", "urns": [], "refs": [{"path": ["Country", "United Kingdom"]}]}
+```
+
+**Fed by an uncertified source.** Amber, **AlertTriangle**. **Fed by…** with a
+**NOT group** around **Tag is…** `Certified` as the source's condition. A rule
+follows lineage one hop.
+
+```json
+{"kind": "related", "axis": "upstream", "where": {"kind": "group", "op": "not", "children": [
+  {"kind": "tag", "op": "has", "values": ["Certified"]}
+]}}
+```
+
 ---
 
 ## Limits
@@ -248,7 +273,7 @@ Number).
 | Rules per View | 200 |
 | Tag label | 120 characters, unique in the View |
 | Criteria | 64 filters, 6 levels of groups, 24 filters in one OR group |
-| Not allowed in a rule | *Within N hops*, *Path*, *Inside Subtree* inside an OR or NOT group |
+| Not allowed in a rule | *Within N hops*, *Path*, a lineage relationship of more than one hop, *Inside Subtree* inside an OR or NOT group |
 | Chips shown per entity | 3, then **+N** |
 | A library file | 200 rules and 500 saved searches |
 
@@ -261,6 +286,8 @@ Number).
 | "Couldn't save the rule — A rule named '…' already exists in this view." | Labels are unique in a View, ignoring case | Choose another label, or edit the existing rule |
 | "A rule can't use 'within hops' or a path…" | Those describe a route through the graph; a rule asks about one entity at a time | Use a lineage-shape filter (No upstream lineage…) or keep it as a saved search |
 | "…only allowed in the top-level AND group" | *Inside Subtree* sits inside an OR or NOT group | Move it to the top level |
+| "…a rule follows lineage one hop…" | A **Fed by…** or **Feeds…** filter reaches further than one hop; a rule is asked of every entity on the canvas | Set it to one hop, or keep the search as a saved search |
+| A rule shows **Can't be counted** on a shared link | Rules that follow relationships aren't evaluated for a share link, which may only search inside its View | Open the View as a member of the workspace |
 | **Can't be counted** on a card | The rule arrived with a View file or a restored version and its criteria can't run as a rule | Hover for the reason, then **Edit rule** and save it again |
 | No **New rule**, **Edit** or **Import…** | You can't edit this View | Ask someone who can, or for the **Editor** role on it |
 | "Missing permission: workspace:view:edit" | The same, from an import or a script | As above |

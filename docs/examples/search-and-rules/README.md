@@ -22,12 +22,17 @@ change.
 | `queries/paths-between-two-tables.search.json` | Lineage paths from one table to another, up to five hops |
 | `queries/under-a-domain-by-name.search.json` | PII datasets inside the domain named *Sales* — by name, so it runs in any environment |
 | `queries/downstream-of-a-table-by-name.search.json` | The downstream example again, naming the table by its path (`Sales / ** / orders`) instead of a URN |
-| `packs/governance.library.json` | Rules **PII**, **Needs owner**, **Certified**, **Classified, not tagged** (off) and three saved searches |
+| `queries/datasets-with-a-pii-column.search.json` | Datasets with at least one child tagged PII or GDPR — a relationship on what they contain |
+| `queries/wide-datasets.search.json` | Datasets with more than 100 columns — a relationship that counts |
+| `queries/feeds-a-dashboard-through-trusted-edges.search.json` | Datasets that feed a dashboard within three hops, through edges of `confidence` at least 0.8 |
+| `queries/routes-from-topics-to-datasets.search.json` | Every route from a topic to a dataset through edges in stream mode (a path between two conditions) |
+| `packs/governance.library.json` | Rules **PII**, **Holds PII** (contains something tagged PII), **Needs owner**, **Certified**, **Classified, not tagged** (off) and three saved searches |
 | `packs/data-quality.library.json` | Rules **Orphan**, **Empty table**, **Stale**, **Dead end** and four saved searches |
 
-Property names (`rowCount`, `owner`, `updatedAt`, `certified`, `pii_class`),
-tags (`PII`, `GDPR-Sensitive`, `Certified`) and entity types (`dataset`,
-`dashboard`, `domain`) are examples: change them to what your data uses. The
+Property names (`rowCount`, `owner`, `updatedAt`, `certified`, `pii_class`,
+the edge properties `confidence` and `mode`), tags (`PII`, `GDPR-Sensitive`,
+`Certified`) and entity types (`dataset`, `dashboard`, `domain`, `column`,
+`topic`) are examples: change them to what your data uses. The
 Property Manager's **Properties** tab lists every property a View's entities
 carry.
 

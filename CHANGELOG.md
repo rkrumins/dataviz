@@ -9,6 +9,97 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Ask the graph: relationships, names and routes in Advanced Search
+
+### Added
+
+**Search by relationships.** Advanced Search finds entities by the entities related to them: up
+the containment tree (a parent, any ancestor, the top-level container), down it (children, any
+descendant), or along lineage (what feeds it, what it feeds, either way). "Datasets whose parent is
+a domain", "tables with a PII column", "tables where every column is described", "more than 100
+columns", "feeds a dashboard within three hops whose parent is *Finance*". A relationship's
+condition is any filter — other relationships included, three deep — and a lineage relationship
+can require every edge it walks to meet a filter. **Add filter → Relationships** in the panel and in
+the rule editor; `parent(…)`, `every child(…)`, `count(child(…)) > 100` and
+`downstream*..3(…).via(…)` in Code mode; `"kind": "related"` in the API. Every match is found and
+counted exactly, and display rules, counts and exports take relationships too.
+
+**Name entities instead of pasting URNs.** Every filter that names entities — inside a container,
+within N hops, the ends of a path, and the new **Is a named entity** — takes a path of display names
+from the top: `Country / United Kingdom`, `Country / ** / London`, `** / orders`. The picker says
+as you type how many entities a path names, and where they sit. A name means the same in every
+environment, so saved searches, rules and library packs that use names keep working after they
+move. `POST /search/resolve` answers what a path names; every search reports it in
+`scopeDiagnostics.resolvedRefs`.
+
+**Routes between conditions.** Either end of a path can be a condition: "every route from a topic
+to a dataset through edges in stream mode". Paths have a visual editor now (**Add filter →
+Advanced → Paths from A to B**).
+
+**The properties you put on edges.** Edge filters — on paths, within N hops and relationships —
+read the properties users add to edges, not only the platform's own fields: is set, is not set,
+is, is not, is one of, is none of. Discovery says where each edge key is kept
+(`edges[].storedAs`).
+
+**Questions from the canvas.** Right-click an entity for **Everything inside this**, **Its
+children**, **What feeds this**, **What this feeds** or **Routes from this to…**; with several
+selected, **What all N feed** and **What feeds all N**. A match found through lineage offers **How it
+matches**: its routes to the relatives it was matched by.
+
+**Templates and examples.** Four templates (*Everything inside a named container*, *What feeds a
+kind of entity*, *Everything that feeds a named entity*, *Entities holding something tagged*),
+four example queries in `docs/examples/search-and-rules/queries/`, and a **Holds PII** rule in the
+governance pack.
+
+### Changed
+
+- In Code mode, `parent(`, `child(`, `ancestor(`, `descendant(`, `root(`, `upstream(`,
+  `downstream(`, `neighbor(` and `count(` start a relationship, and `@"…"` names an entity — only
+  when `(` or the quote follows directly: `root cause` and `parent (x)` are still a search for the
+  words.
+- A path in a saved search opens in the visual editor instead of as JSON.
+- New settings: `DEEP_SEARCH_MAX_RELATION_DEPTH` (3) and `DEEP_SEARCH_RELATION_MAX_HOPS` (3).
+
+### Fixed
+
+- A path with an edge filter on a value (`confidence >= 0.8`) failed: the filter's parameters were
+  never sent with it.
+- On the capped engine (aggregate-only searches, facets), *Within N hops* was applied after the
+  candidate cap, so it missed matches past the cap and counted candidates it then dropped.
+- A display rule using a lineage shape (*No lineage edges*, *No upstream lineage*, …) failed in rule
+  membership with a type mismatch, so its chips never showed.
+- An edge filter on a property a user added to edges matched nothing.
+- Edge filters had no size limit; they now nest at most three groups deep and hold at most 16
+  conditions.
+
+### Security
+
+- A share link could follow lineage out of its View: a path returned the entities on it, and a
+  hop test answered yes or no about entities the link can't see. Searches, explains and exports
+  that follow lineage or relationships now answer `403` for share links; in rule membership and
+  counts only the rule that does is refused, so the other rules still colour the shared View.
+- A share link's name references are resolved inside its View only.
+
+### Upgrading
+
+- Nothing to run. The two new settings default to what the panel offers.
+
+### Known limitations
+
+- A relationship whose far end is a condition follows lineage at most 3 hops (10 when the far end
+  is an entity you name). Complete end-to-end lineage stays the Trace feature's job.
+- An edge property users added takes presence and equality only, and a key of a nested object
+  reads as present when it is only nested.
+- A relationship's condition tests a relative's native properties; a value kept as raw JSON
+  (`propertiesRaw`) doesn't match there.
+- The first run of a new relationship shape can take up to about half a second longer while
+  FalkorDB plans it (a number comparison in a relationship's edge filter); later runs reuse the
+  plan.
+- **How it matches** draws routes up to 4 hops, and routes a path lists stop at 128.
+- Share links can't use relationships, paths or *Within N hops*.
+
+---
+
 ## [Unreleased] — Follow a workspace's graphs and their history from a script
 
 ### Added
