@@ -823,10 +823,10 @@ def _build_candidate_cypher(
       * ``RETURN count(n) AS c``           (count-only)
       * ``MATCH (anc)-[...]->(n) ...``     (aggregation pivot)
 
-    ``within_hops_continuation`` is appended after the scope continuation
-    (so candidates are first scope-clamped, then narrowed to those
-    within N hops of the anchor URN-set). Both continuations end with
-    ``WITH DISTINCT n`` so multiple stack cleanly.
+    ``within_hops_continuation`` follows the predicate and comes before
+    the cap, so the cap counts only candidates within N hops of the
+    anchor URN-set. Both continuations end with ``WITH DISTINCT n`` so
+    multiple stack cleanly.
 
     ``scope_pre_filter`` replaces the ``MATCH (n)`` prefix with a
     root-anchored MATCH chain, so the predicate WHERE and the
@@ -870,13 +870,16 @@ def _build_candidate_cypher(
         where_parts.append(where_fragment)
     if where_parts:
         parts.append("WHERE " + " AND ".join(where_parts))
+    # The hop check narrows the candidates BEFORE the cap: after it, the
+    # cap would count candidates the check then drops, and matches past
+    # the cap would never be seen.
+    if within_hops_continuation:
+        parts.append(within_hops_continuation)
     parts.append(
         "WITH n" if candidate_cap is None else f"WITH n LIMIT {candidate_cap}"
     )
     if scope_continuation:
         parts.append(scope_continuation)
-    if within_hops_continuation:
-        parts.append(within_hops_continuation)
     return " ".join(parts)
 
 
@@ -2168,8 +2171,12 @@ def _build_path_cypher(
 
 async def _run_path_query(
     provider, hoisted: Dict[str, Any], *, timeout_s: float,
+    compiled_params: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[PathHit], bool]:
-    """Execute the hoisted PathPredicate. Returns (paths, truncated)."""
+    """Execute the hoisted PathPredicate. Returns (paths, truncated).
+
+    ``compiled_params`` are the compiler's: an edge filter that compares
+    a value refers to them as ``$pN``."""
     edge_types = hoisted.get("edge_types") or []
     if not edge_types:
         # No lineage / containment edge types resolved → no paths can
@@ -2183,6 +2190,7 @@ async def _run_path_query(
         edge_where=hoisted.get("edge_where") or "",
     )
     params = {
+        **(compiled_params or {}),
         "_pathSrc": hoisted["source_urns"],
         "_pathTgt": hoisted["target_urns"],
         "_pathEdgeTypes": edge_types,
@@ -2357,6 +2365,7 @@ async def execute_deep_search(
         try:
             paths, truncated = await _run_path_query(
                 provider, compiler.hoisted_path, timeout_s=timeout_s,
+                compiled_params=base_params,
             )
             return SearchResultPage(
                 paths=paths,

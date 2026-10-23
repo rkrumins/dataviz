@@ -44,6 +44,10 @@ from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.services.advanced_search_service import (
+    SHARED_LINK_RELATIONSHIPS,
+    follows_relationships,
+)
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
     CompileError,
@@ -1946,6 +1950,9 @@ def _guard_capability_scope(
     against the view's own authorised roots, so that alone stays open.
     Membership callers are unaffected.
 
+    A condition that follows lineage (``path``, ``withinHops``) is refused
+    too: it reaches entities outside the view.
+
     ``query=None`` is ``/search/discover``, which takes no query at all:
     it reports the whole graph's labels, property keys and tag values,
     and nothing narrows that to the granted view — so every capability
@@ -1961,6 +1968,13 @@ def _guard_capability_scope(
             status_code=403,
             detail="This link can only search inside its view.",
         )
+    # Lineage leads out of the view: a path returns the entities on it, and
+    # a hop test answers yes or no about entities the link can't see. A
+    # rules request is answered rule by rule instead (the service refuses
+    # each such rule in ``errors``).
+    predicate = getattr(query, "predicate", None)
+    if predicate is not None and follows_relationships(predicate):
+        raise HTTPException(status_code=403, detail=SHARED_LINK_RELATIONSHIPS)
 
 
 @router.post(
@@ -2457,6 +2471,7 @@ def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
         data_source_id=data_source_id,
         branch_id=branch_id,
         can_read_view=can_read_view,
+        confined=bool(getattr(request.state, "view_capability", None)),
     )
 
 

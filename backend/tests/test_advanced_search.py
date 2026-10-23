@@ -299,6 +299,39 @@ class TestSafePropertyName:
 # ---------------------------------------------------------------------------
 
 class TestServiceValidator:
+    @staticmethod
+    def _hops_with_edge_filter(edge):
+        return SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                WithinHopsPredicate.model_validate(
+                    {"urns": ["urn:a"], "hops": 2, "edgePredicate": edge}),
+            ]),
+            scope=_TEST_SCOPE,
+        )
+
+    def test_edge_filters_nest_three_groups_deep(self):
+        leaf = {"kind": "edgeHasProperty", "key": "k"}
+        three = {"kind": "edgeGroup", "children": [
+            {"kind": "edgeGroup", "children": [
+                {"kind": "edgeGroup", "children": [leaf]}]}]}
+        _count_and_validate(self._hops_with_edge_filter(three))
+        four = {"kind": "edgeGroup", "children": [three]}
+        with pytest.raises(ValidationError, match=r"edgePredicate.*nests edge groups"):
+            _count_and_validate(self._hops_with_edge_filter(four))
+
+    def test_edge_filters_hold_at_most_sixteen_conditions(self):
+        leaves = [{"kind": "edgeHasProperty", "key": f"k{i}"} for i in range(17)]
+        with pytest.raises(ValidationError, match=r"17 conditions \(max 16\)"):
+            _count_and_validate(self._hops_with_edge_filter(
+                {"kind": "edgeGroup", "op": "or", "children": leaves}))
+
+    def test_a_not_edge_group_takes_one_condition(self):
+        with pytest.raises(ValidationError, match="exactly one"):
+            _count_and_validate(self._hops_with_edge_filter(
+                {"kind": "edgeGroup", "op": "not", "children": [
+                    {"kind": "edgeHasProperty", "key": "a"},
+                    {"kind": "edgeHasProperty", "key": "b"}]}))
+
     def test_leaf_only_passes(self):
         q = SearchQuery(
             predicate=TextPredicate(value="x", target="name"),
@@ -1279,6 +1312,40 @@ class TestCompilerPath:
         # Undirected variable-length pattern
         assert "(s)-[*1..2]-(t)" in cy
 
+    def test_edge_filter_values_reach_the_path_query(self):
+        """A value edge filter compiles to ``$pN``: the path statement must
+        bind it, or FalkorDB refuses the query for a missing parameter."""
+        import re
+
+        from backend.app.providers.falkordb_deep_search import execute_deep_search
+        from backend.common.models.search import EdgePropertyPredicate
+
+        sent = []
+
+        class _Provider:
+            def _get_lineage_edge_types(self):
+                return ["LINEAGE"]
+
+            def _get_containment_edge_types(self):
+                return ["CONTAINS"]
+
+            async def _ro_query(self, cypher, *, params=None, timeout=None):
+                sent.append((cypher, params or {}))
+                return type("R", (), {"result_set": []})()
+
+        query = SearchQuery(
+            predicate=PathPredicate(
+                source_urns=["urn:a"], target_urns=["urn:b"],
+                edgePredicate=EdgePropertyPredicate(
+                    key="confidence", op="gte", value=0.9, valueType="number"),
+            ),
+            scope=_TEST_SCOPE, options=SearchOptions(results="paths"),
+        )
+        asyncio.run(execute_deep_search(_Provider(), query))
+        cypher, params = sent[-1]
+        wanted = set(re.findall(r"\$(p\d+)", cypher))
+        assert wanted and wanted <= set(params)
+
 
 class TestCompilerGroups:
     def test_and(self):
@@ -1858,6 +1925,20 @@ class TestCandidateCypher:
         assert "MATCH (n) WHERE" not in cypher
         assert "n.tags CONTAINS" in cypher
         assert f"WITH n LIMIT {CANDIDATE_CAP}" in cypher
+
+    def test_within_hops_narrows_before_the_cap(self):
+        """After the cap, the hop check would drop capped candidates and
+        never see the matches past the cap."""
+        hops = ("MATCH _whP0 = (anchor)-[:LINEAGE*1..2]->(n) "
+                "WHERE anchor.urn IN $_whUrns0 WITH DISTINCT n")
+        cypher = _build_candidate_cypher(
+            where_fragment="n.x = $p0",
+            entity_types_param=False,
+            candidate_cap=CANDIDATE_CAP,
+            within_hops_continuation=hops,
+        )
+        assert cypher == (f"MATCH (n) WHERE n.x = $p0 {hops} "
+                          f"WITH n LIMIT {CANDIDATE_CAP}")
 
 
 # ---------------------------------------------------------------------------

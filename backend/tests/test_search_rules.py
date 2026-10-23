@@ -412,6 +412,70 @@ class TestRoutes:
                 engine=SimpleNamespace(provider=None), session=None)
         assert exc.value.status_code == 403
 
+    async def test_a_share_link_answers_rules_that_stay_in_the_view(self, monkeypatch):
+        """A rule that follows lineage is refused on its own, in ``errors``;
+        the other rules still colour the shared view."""
+        sent = {}
+
+        async def membership(self, scope, items, urns, *, context):
+            sent["items"] = [i for i, _ in items]
+            return {"matches": {i: [] for i, _ in items}, "errors": {}, "elapsedMs": 1}
+
+        provider = SimpleNamespace(deep_search_membership=None)
+        monkeypatch.setattr(graph_mod, "_statement_admission", lambda engine: None)
+
+        async def version(engine):
+            return "1"
+
+        monkeypatch.setattr(graph_mod, "_search_data_version", version)
+
+        async def rule_scope(self, requested):
+            return requested, SimpleNamespace(scope_hash="h")
+
+        monkeypatch.setattr(AdvancedSearchService, "_rule_scope", rule_scope)
+        monkeypatch.setattr(AdvancedSearchService, "_provider_op",
+                            lambda self, name: membership.__get__(self))
+        body = SearchMembershipRequest.model_validate({
+            "scope": {"viewId": "view-1"}, "urns": ["u"],
+            "items": [{"id": "plain", "predicate": {"kind": "all"}},
+                      {"id": "hops", "predicate": {"kind": "group", "children": [
+                          {"kind": "withinHops", "urns": ["urn:a"], "hops": 1}]}}]})
+        out = await graph_mod.search_membership(
+            body=body, request=_request("view-1"), ws_id="ws",
+            engine=SimpleNamespace(provider=provider), session=None)
+        assert sent["items"] == ["plain"]
+        assert out.errors == {"hops": graph_mod.SHARED_LINK_RELATIONSHIPS}
+
+    async def test_a_share_link_counts_only_rules_that_stay_in_the_view(self, monkeypatch):
+        counted = []
+
+        async def count(self, query, *, context, advance=True):
+            counted.append(query.predicate.kind)
+            return {"count": 3, "status": "complete", "sessionId": None, "progress": None}
+
+        async def rule_scope(self, requested):
+            return requested, SimpleNamespace(scope_hash="h")
+
+        async def version(engine):
+            return "1"
+
+        monkeypatch.setattr(AdvancedSearchService, "_rule_scope", rule_scope)
+        monkeypatch.setattr(AdvancedSearchService, "_provider_op",
+                            lambda self, name: count.__get__(self))
+        monkeypatch.setattr(graph_mod, "_statement_admission", lambda engine: None)
+        monkeypatch.setattr(graph_mod, "_search_data_version", version)
+        body = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "view-1"},
+            "items": [{"id": "plain", "predicate": {"kind": "all"}},
+                      {"id": "hops", "predicate": {"kind": "group", "children": [
+                          {"kind": "withinHops", "urns": ["urn:a"], "hops": 1}]}}]})
+        out = await graph_mod.search_counts(
+            body=body, request=_request("view-1"), ws_id="ws",
+            engine=SimpleNamespace(provider=None), session=None)
+        assert counted and set(counted) == {"all"}
+        assert out.counts["plain"].count == 3
+        assert out.counts["hops"].error == graph_mod.SHARED_LINK_RELATIONSHIPS
+
     async def test_rules_are_admitted_per_statement(self, monkeypatch):
         seen = {}
 

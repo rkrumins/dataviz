@@ -139,6 +139,12 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
     return 1  # leaf
 
 
+#: An edge filter tests one edge's properties: groups nest at most this
+#: deep (the editor's own limit) and hold at most this many conditions.
+EDGE_FILTER_MAX_GROUP_DEPTH = 3
+EDGE_FILTER_MAX_CONDITIONS = 16
+
+
 def _validate_comparisons(predicate, path: str) -> None:
     """Resolve every typed comparison up front (``search_semantics``), so
     a value that cannot be compared the way it asks — "abc" as a number,
@@ -148,15 +154,38 @@ def _validate_comparisons(predicate, path: str) -> None:
         _resolve_or_raise(predicate, path)
     elif (isinstance(predicate, (WithinHopsPredicate, PathPredicate))
             and predicate.edge_predicate is not None):
-        _validate_edge_comparisons(predicate.edge_predicate, f"{path}.edgePredicate")
+        _validate_edge_filter(predicate.edge_predicate, f"{path}.edgePredicate")
 
 
-def _validate_edge_comparisons(predicate, path: str) -> None:
+def _validate_edge_filter(predicate, path: str) -> None:
+    conditions = _validate_edge_comparisons(predicate, path, groups=0)
+    if conditions > EDGE_FILTER_MAX_CONDITIONS:
+        raise ValidationError(
+            f"edge filter at {path} has {conditions} conditions "
+            f"(max {EDGE_FILTER_MAX_CONDITIONS})"
+        )
+
+
+def _validate_edge_comparisons(predicate, path: str, *, groups: int) -> int:
+    """The edge filter's condition count, after checking its shape and
+    resolving its comparisons."""
     if isinstance(predicate, EdgeGroupPredicate):
-        for i, child in enumerate(predicate.children):
-            _validate_edge_comparisons(child, f"{path}.children[{i}]")
-    elif isinstance(predicate, EdgePropertyPredicate):
+        if groups + 1 > EDGE_FILTER_MAX_GROUP_DEPTH:
+            raise ValidationError(
+                f"edge filter at {path} nests edge groups more than "
+                f"{EDGE_FILTER_MAX_GROUP_DEPTH} deep"
+            )
+        if predicate.op == "not" and len(predicate.children) != 1:
+            raise ValidationError(
+                f"NOT edge group at {path} must have exactly one condition"
+            )
+        return sum(
+            _validate_edge_comparisons(child, f"{path}.children[{i}]", groups=groups + 1)
+            for i, child in enumerate(predicate.children)
+        )
+    if isinstance(predicate, EdgePropertyPredicate):
         _resolve_or_raise(predicate, path)
+    return 1
 
 
 def _resolve_or_raise(predicate, path: str) -> None:
@@ -295,6 +324,23 @@ def _reject_unbounded_text_any(
     )
 
 
+#: Why a share link can't use a condition that follows lineage or
+#: relationships: they reach entities outside its view, and a match, or a
+#: path, would tell the caller something about them.
+SHARED_LINK_RELATIONSHIPS = (
+    "This link can't follow lineage or relationships: they lead outside its view."
+)
+_ROUTE_KINDS = frozenset({"path", "withinHops"})
+
+
+def follows_relationships(predicate) -> bool:
+    """Whether any condition in the tree walks the graph's edges."""
+    if predicate.kind in _ROUTE_KINDS:
+        return True
+    return isinstance(predicate, GroupPredicate) and any(
+        follows_relationships(child) for child in predicate.children)
+
+
 def _validate_items(items) -> None:
     """Each rule's predicate, held to the same caps and typed checks as a
     search's — with the path naming the rule."""
@@ -431,6 +477,7 @@ class AdvancedSearchService:
         data_source_id: Optional[str] = None,
         branch_id: Optional[str] = None,
         can_read_view: Optional[Callable[[Any], Awaitable[bool]]] = None,
+        confined: bool = False,
     ) -> None:
         self._engine = engine
         self._session = session
@@ -440,6 +487,9 @@ class AdvancedSearchService:
         #: Whether the caller can read a view: what every scope is held to
         #: (``ViewScopeResolver.resolve``). The HTTP routes always pass it.
         self._can_read_view = can_read_view
+        #: The caller came through a share link, so the view is its whole
+        #: world: a rule that leads outside it is refused on its own.
+        self._confined = confined
 
     @classmethod
     def for_diagnostics(cls, engine: ContextEngine) -> "AdvancedSearchService":
@@ -565,17 +615,28 @@ class AdvancedSearchService:
         inside the view's scope — resolved here, never taken from the
         client."""
         _validate_items(request.items)
+        refused = self._refused_on_a_shared_link(request.items)
         scope, _eff = await self._rule_scope(request.scope)
         if scope is None:
-            return SearchMembershipResult(matches={item.id: [] for item in request.items})
+            return SearchMembershipResult(matches={item.id: [] for item in request.items},
+                                          errors=refused)
         op = self._provider_op("deep_search_membership")
         context = run_context or SearchRunContext()
-        out = await op(scope, [(item.id, item.predicate) for item in request.items],
+        out = await op(scope, [(item.id, item.predicate) for item in request.items
+                               if item.id not in refused],
                        request.urns, context=context)
         return SearchMembershipResult(
-            matches=out["matches"], errors=out["errors"],
+            matches={**{item_id: [] for item_id in refused}, **out["matches"]},
+            errors={**out["errors"], **refused},
             data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
         )
+
+    def _refused_on_a_shared_link(self, items) -> dict:
+        """The rules a share link may not run, each with why."""
+        if not self._confined:
+            return {}
+        return {item.id: SHARED_LINK_RELATIONSHIPS for item in items
+                if follows_relationships(item.predicate)}
 
     async def counts(
         self,
@@ -603,8 +664,10 @@ class AdvancedSearchService:
                                                      session_id=session))
 
         answers: dict = {}
-        errors: dict = {}
+        errors: dict = self._refused_on_a_shared_link(request.items)
         for item in request.items:
+            if item.id in errors:
+                continue
             try:
                 answers[item.id] = await op(
                     query_of(item, 0, request.sessions.get(item.id)),
