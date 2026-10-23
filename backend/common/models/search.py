@@ -469,6 +469,14 @@ class HasOutgoingPredicate(_Base):
 PathDirection = Literal["outgoing", "incoming", "any"]
 
 
+PATH_CONDITION_HOPS_MAX = 4
+"""How far a path goes when one of its ends is a condition."""
+
+PATH_CONDITIONS_HOPS_MAX = 3
+"""How far a path goes when both its ends are conditions: its sources are
+then every entity in the search's scope meeting one."""
+
+
 class PathPredicate(_Base):
     """Find paths between source and target nodes.
 
@@ -478,7 +486,9 @@ class PathPredicate(_Base):
     sequences instead of (or in addition to) flat hits / aggregates.
 
     Powers UC3: "find all paths from dataset:orders to dataset:reporting
-    going through ≤4 lineage hops".
+    going through ≤4 lineage hops". Either end may be a condition instead
+    (``sourceWhere``, ``targetWhere``) — "every route from a topic to a
+    dataset through edges in stream mode". A route passes no entity twice.
     """
     kind: Literal["path"] = "path"
     source_urns: List[str] = Field(
@@ -525,11 +535,33 @@ class PathPredicate(_Base):
                     "``edge_class``. Compiles to "
                     "``ALL(rel IN relationships(p) WHERE …)``.",
     )
+    source_where: Optional["Predicate"] = Field(
+        None, alias="sourceWhere",
+        description="The starting nodes as a condition instead of named: "
+                    "any entity meeting it — or, when the targets are a "
+                    "condition too, any in the search's scope.",
+    )
+    target_where: Optional["Predicate"] = Field(
+        None, alias="targetWhere",
+        description="The endpoint nodes as a condition instead of named.",
+    )
 
     @model_validator(mode="after")
     def _has_ends(self) -> "PathPredicate":
-        _anchored(self.source_urns, self.source_refs, "a path's sources")
-        _anchored(self.target_urns, self.target_refs, "a path's targets")
+        for urns, refs, where, what in (
+                (self.source_urns, self.source_refs, self.source_where, "a path's sources"),
+                (self.target_urns, self.target_refs, self.target_where, "a path's targets")):
+            if where is None:
+                _anchored(urns, refs, what)
+            elif urns or refs:
+                raise ValueError(f"{what} are named or a condition, not both")
+        conditions = (self.source_where is not None) + (self.target_where is not None)
+        cap = {1: PATH_CONDITION_HOPS_MAX, 2: PATH_CONDITIONS_HOPS_MAX}.get(conditions)
+        if cap and self.max_hops > cap:
+            if "max_hops" in self.model_fields_set:
+                raise ValueError(f"a path with {'both ends' if conditions == 2 else 'an end'} "
+                                 f"a condition goes at most {cap} hops")
+            self.max_hops = cap     # the default, where it may go
         return self
 
 
@@ -666,6 +698,7 @@ Predicate = Annotated[
 
 GroupPredicate.model_rebuild()
 RelatedPredicate.model_rebuild()
+PathPredicate.model_rebuild()
 
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1337,16 @@ class SearchDiscoverEdgeInfo(_Base):
         description=(
             "Distinct values per edge property key. Powers the edge-"
             "predicate editor's value autocomplete in W2."
+        ),
+    )
+    stored_as: Optional[Dict[str, Literal["native", "json"]]] = Field(
+        None,
+        alias="storedAs",
+        description=(
+            "Where the edge keeps each key: ``native`` — the platform's own "
+            "fields, every operator applies — or ``json``, a user's property "
+            "kept in the edge's JSON, which a condition can test with is set, "
+            "is, is not and is one of."
         ),
     )
 

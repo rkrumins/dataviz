@@ -43,6 +43,7 @@ from backend.app.services.view_scope import (
     ViewScopeResolver,
 )
 from backend.common.derived_artifacts import is_derived_edge_type
+from backend.common.edge_properties import EDGE_NATIVE_KEYS, JSON_OPS
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
     LINEAGE_AXES,
@@ -158,11 +159,22 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: boo
                                   relations=relations, top=top)
     if relations and predicate.kind in ("descendantOf", "withinHops", "path"):
         raise ValidationError(
-            f"{predicate.kind} at {path} can't sit inside a relationship's condition — "
-            "use an ancestor or lineage relationship there instead"
+            f"{predicate.kind} at {path} can't sit inside a relationship's or a path "
+            "end's condition — use an ancestor or lineage relationship there instead"
         )
     _validate_comparisons(predicate, path)
+    if isinstance(predicate, PathPredicate):
+        # An end given as a condition is tested on other entities than the
+        # matches, as a relationship's is.
+        return 1 + sum(
+            _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", rule=rule,
+                                relations=relations + 1, top=False)
+            for where, alias in _path_ends(predicate) if where is not None)
     return 1  # leaf
+
+
+def _path_ends(predicate: PathPredicate):
+    return ((predicate.source_where, "sourceWhere"), (predicate.target_where, "targetWhere"))
 
 
 def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool,
@@ -252,6 +264,12 @@ def _validate_edge_comparisons(predicate, path: str, *, groups: int) -> int:
         )
     if isinstance(predicate, EdgePropertyPredicate):
         _resolve_or_raise(predicate, path)
+        if predicate.key not in EDGE_NATIVE_KEYS and predicate.op not in JSON_OPS:
+            raise ValidationError(
+                f"{path} ({predicate.key}): an edge keeps its own properties as JSON "
+                "text, which a condition can test with is set, is, is not or is one "
+                f"of — not {predicate.op!r}"
+            )
     return 1
 
 
@@ -429,10 +447,14 @@ def _path_refs(predicate, path: str = "$") -> list:
                 for found in _path_refs(child, f"{path}.children[{i}]")]
     if isinstance(predicate, RelatedPredicate):
         return [] if predicate.where is None else _path_refs(predicate.where, f"{path}.where")
-    return [(f"{path}.{alias}[{i}]", ref)
-            for field, alias in _REF_FIELDS.get(predicate.kind, ())
-            for i, ref in enumerate(getattr(predicate, field) or ())
-            if ref.path is not None]
+    own = [(f"{path}.{alias}[{i}]", ref)
+           for field, alias in _REF_FIELDS.get(predicate.kind, ())
+           for i, ref in enumerate(getattr(predicate, field) or ())
+           if ref.path is not None]
+    if isinstance(predicate, PathPredicate):
+        own += [found for where, alias in _path_ends(predicate) if where is not None
+                for found in _path_refs(where, f"{path}.{alias}")]
+    return own
 
 
 def _with_resolved_refs(predicate, named: dict):
@@ -458,13 +480,19 @@ def _with_resolved_refs(predicate, named: dict):
     if predicate.kind in ("descendantOf", "withinHops") and predicate.refs:
         found = urns(predicate.urns, predicate.refs)
         return predicate.model_copy(update={"urns": found, "refs": None}) if found else _NOTHING
-    if predicate.kind == "path" and (predicate.source_refs or predicate.target_refs):
-        return predicate.model_copy(update={
-            "source_urns": urns(predicate.source_urns, predicate.source_refs),
-            "source_refs": None,
-            "target_urns": urns(predicate.target_urns, predicate.target_refs),
-            "target_refs": None,
-        })
+    if predicate.kind == "path":
+        update = {f"{side}_where": _with_resolved_refs(where, named)
+                  for side, where in (("source", predicate.source_where),
+                                      ("target", predicate.target_where))
+                  if where is not None}
+        if predicate.source_refs or predicate.target_refs:
+            update.update({
+                "source_urns": urns(predicate.source_urns, predicate.source_refs),
+                "source_refs": None,
+                "target_urns": urns(predicate.target_urns, predicate.target_refs),
+                "target_refs": None,
+            })
+        return predicate.model_copy(update=update) if update else predicate
     return predicate
 
 

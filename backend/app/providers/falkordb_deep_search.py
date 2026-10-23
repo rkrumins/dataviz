@@ -72,6 +72,13 @@ from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.edge_properties import (
+    EDGE_NATIVE_KEYS,
+    JSON_OPS,
+    folds,
+    key_needle,
+    value_texts,
+)
 from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
@@ -749,8 +756,34 @@ class _Compiler:
             # Empty string when no edge_predicate was supplied; injected
             # into the ALL(rel IN relationships(p) WHERE …) block.
             "edge_where": edge_where,
+            # An end given as a condition: the stages that filter it
+            # (``_path_end``); None for an end that is named.
+            "source_where": (None if p.source_where is None
+                             else self._path_end(p.source_where, "s")),
+            "target_where": (None if p.target_where is None
+                             else self._path_end(p.target_where, "t")),
         }
         return "true"
+
+    def _path_end(self, where, var: str) -> List[str]:
+        """A path end's condition on ``var``: the stages its statement
+        projects and filters by — every plain condition in one, then each
+        relationship, cheapest first — evaluated, as a relative's
+        conditions are, for native values only."""
+        saved = (self._var, self.raw_leaves, self.projected)
+        self._var, self.raw_leaves, self.projected = var, None, True
+        try:
+            members = _conjuncts(where)
+            plain = [self._visit(m, in_or=False, at_top_and=False)
+                     for m in members if not _has_relation(m)]
+            related = [self._visit(m, in_or=False, at_top_and=False)
+                       for m in sorted((m for m in members if _has_relation(m)),
+                                       key=_relation_cost)]
+        finally:
+            self._var, self.raw_leaves, self.projected = saved
+        plain = [c for c in plain if c != "true"]
+        stages = ["(" + " AND ".join(plain) + ")"] if plain else []
+        return stages + related
 
     def _visit_within_hops(self, w) -> str:
         """Hoist a WithinHops predicate to a post-candidate MATCH.
@@ -980,11 +1013,52 @@ class _Compiler:
         raise CompileError(f"unknown edge predicate kind: {kind!r}")
 
     def _visit_edge_property(self, ep) -> str:
-        return self._compile_comparison(f"{self._edge_var}.{_safe_property_name(ep.key)}", ep)
+        if ep.key in EDGE_NATIVE_KEYS:
+            return self._compile_comparison(
+                f"{self._edge_var}.{_safe_property_name(ep.key)}", ep)
+        try:
+            cmp = resolve_predicate(ep)
+        except SemanticsError as exc:
+            raise CompileError(f"edge property {ep.key!r}: {exc}") from exc
+        if cmp.op not in JSON_OPS:
+            raise CompileError(
+                f"edge property {ep.key!r} is kept in the edge's JSON: it can be "
+                f"tested with is set, is, is not or is one of — not {cmp.op!r}")
+        if cmp.op in ("isSet", "isNotSet"):
+            present = self._edge_key_present(ep.key)
+            return present if cmp.op == "isSet" else f"NOT ({present})"
+        # ``"key": <value>`` followed by a comma, or ending the object
+        # (``edge_properties``).
+        text = self._edge_json()
+        if folds(cmp):
+            text = f"toLower({text})"
+        hits = []
+        for value in value_texts(cmp):
+            needle = key_needle(ep.key) + value
+            if folds(cmp):
+                needle = fold_case(needle)
+            hits.append(f"{text} CONTAINS {self._bind(needle + ',')}")
+            hits.append(f"{text} ENDS WITH {self._bind(needle + '}')}")
+        equal = "(" + " OR ".join(hits) + ")"
+        if cmp.op in ("eq", "in"):
+            return equal
+        if cmp.include_missing:
+            return f"NOT {equal}"
+        return f"({self._edge_key_present(ep.key)} AND NOT {equal})"
 
     def _visit_edge_has_property(self, ep) -> str:
-        expr = f"EXISTS({self._edge_var}.{_safe_property_name(ep.key)})"
+        if ep.key in EDGE_NATIVE_KEYS:
+            expr = f"EXISTS({self._edge_var}.{_safe_property_name(ep.key)})"
+        else:
+            expr = self._edge_key_present(ep.key)
         return f"NOT ({expr})" if ep.negate else expr
+
+    def _edge_json(self) -> str:
+        return f"coalesce({self._edge_var}.properties, '')"
+
+    def _edge_key_present(self, key: str) -> str:
+        """A user property's key, in the edge's JSON."""
+        return f"{self._edge_json()} CONTAINS {self._bind(key_needle(key))}"
 
     def _visit_edge_group(self, ep) -> str:
         if ep.op == "not":
@@ -1067,14 +1141,15 @@ def _distinct_nodes(path: str, k) -> str:
             f"CASE WHEN _xm{k} IN _xs{k} THEN _xs{k} ELSE _xs{k} + [_xm{k}] END))")
 
 
-def tail_clauses(tail: List[str]) -> str:
+def tail_clauses(tail: List[str], carry: str = "n", alias: str = "_xt") -> str:
     """A statement's relationship stages, after its head and continuations:
     each projected on a WITH and filtered, so a row one rejects never pays
-    for the next (S0_FINDINGS §15)."""
+    for the next (S0_FINDINGS §15). ``carry``: what each WITH keeps."""
     if not tail:
         return ""
-    stages = " ".join(f"WITH n, {t} AS _xt{i} WHERE _xt{i}" for i, t in enumerate(tail))
-    return f"{stages} WITH n"
+    stages = " ".join(f"WITH {carry}, {t} AS {alias}{i} WHERE {alias}{i}"
+                      for i, t in enumerate(tail))
+    return f"{stages} WITH {carry}"
 
 
 def _ref_urns(refs, what: str) -> List[str]:
@@ -2413,10 +2488,13 @@ async def _discover_edge_metadata(
 ) -> Dict[str, Dict[str, Any]]:
     """Sample edges, return per-edge-type property keys + value samples.
 
-    Returns ``{edgeType: {keys, sampled, valueSamplesByKey}}`` for every
-    edge type seen in the sample. Used by the FE's edge-predicate
+    Returns ``{edgeType: {keys, sampled, valueSamplesByKey, storedAs}}``
+    for every edge type seen in the sample. Used by the FE's edge-predicate
     editor (W2) and by the property-value picker when the user
-    composes a path query against a specific edge type.
+    composes a path query against a specific edge type. A user's
+    properties come out of the edge's JSON (``storedAs`` ``json``: a
+    condition can test them for presence and equality); the platform's
+    fields are ``native``.
     """
     _s = get_deep_search_settings()
     try:
@@ -2443,10 +2521,16 @@ async def _discover_edge_metadata(
             "sampled": 0,
             "value_samples": {},
             "seen_per_key": {},
+            "stored_as": {},
         })
         entry["sampled"] += 1
-        props = getattr(rel, "properties", None) or {}
-        for k, v in props.items():
+        native = dict(getattr(rel, "properties", None) or {})
+        user = _edge_user_properties(native.pop("properties", None))
+        for k in user:
+            entry["stored_as"].setdefault(k, "json")
+        for k in native:
+            entry["stored_as"][k] = "native"
+        for k, v in [*user.items(), *native.items()]:
             entry["keys_set"].add(k)
             if v is None:
                 continue
@@ -2466,6 +2550,7 @@ async def _discover_edge_metadata(
         out[edge_type] = {
             "keys": keys,
             "sampled": entry["sampled"],
+            "storedAs": {k: entry["stored_as"][k] for k in keys},
         }
         if entry["value_samples"]:
             out[edge_type]["valueSamplesByKey"] = {
@@ -2475,47 +2560,71 @@ async def _discover_edge_metadata(
     return out
 
 
+def _edge_user_properties(raw: Any) -> Dict[str, Any]:
+    """A user's properties of an edge, from its JSON text (ADR-026)."""
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _edge_properties(native: Any) -> Dict[str, Any]:
+    """An edge's properties as a reader sees them: a user's, parsed from
+    its JSON, beside the platform's own fields."""
+    props = dict(native or {})
+    return {**_edge_user_properties(props.pop("properties", None)), **props}
+
+
 # ---------------------------------------------------------------------------
 # Main entry — wires everything together
 # ---------------------------------------------------------------------------
 
-def _build_path_cypher(
-    *,
-    direction: str,
-    max_hops: int,
-    edge_where: str = "",
-) -> str:
+def _build_path_cypher(hoisted: Dict[str, Any], *, anchor: str, scope_head: str = "") -> str:
     """Cypher for a PathPredicate query.
 
-    Direction-aware. Filters edge types via ``WHERE type(rel) IN $...``
-    rather than relationship-pattern alternation, so FalkorDB doesn't
-    hit the "Unable to resolve filtered alias" error.
+    ``anchor`` is the end the statement starts from: ``sources`` or
+    ``targets`` sought by ID (``$_pathSrcIds`` / ``$_pathTgtIds``), or
+    ``scope`` — every entity ``scope_head`` binds as ``s``, when both ends
+    are conditions. A condition on an end filters it in stages
+    (``tail_clauses``): the anchored end's before the walk, the other's
+    after it. The walk names its path and keeps routes that pass no entity
+    twice — FalkorDB's own walk lets one end on an entity it passed, and
+    which it finds depends on the end it starts from (S0_FINDINGS §15).
 
-    When ``edge_where`` is non-empty, an additional per-edge predicate
-    (compiled from ``PathPredicate.edge_predicate``) is AND-joined into
-    the ``ALL(rel IN relationships(p) WHERE …)`` block so paths whose
-    edges fail the filter are excluded server-side.
+    ``edge_where`` — compiled from ``PathPredicate.edge_predicate`` — is
+    required of every edge, in ``ALL(rel IN relationships(p) WHERE …)``.
     """
-    if direction == "incoming":
-        pattern = f"(s)<-[*1..{max_hops}]-(t)"
-    elif direction == "any":
-        pattern = f"(s)-[*1..{max_hops}]-(t)"
+    rel = "|".join(_sanitize_label(t) for t in hoisted["edge_types"])
+    hops = int(hoisted["max_hops"])
+    left, right = {"incoming": ("<-", "-"), "any": ("-", "-")}.get(
+        hoisted["direction"], ("-", "->"))
+    source, target = hoisted.get("source_where"), hoisted.get("target_where")
+    if anchor == "sources":
+        parts = ["UNWIND $_pathSrcIds AS _ps MATCH (s) WHERE ID(s) = _ps"]
+    elif anchor == "targets":
+        parts = ["UNWIND $_pathTgtIds AS _pt MATCH (t) WHERE ID(t) = _pt"]
     else:
-        # default outgoing
-        pattern = f"(s)-[*1..{max_hops}]->(t)"
-
-    edge_filter = "type(rel) IN $_pathEdgeTypes"
-    if edge_where:
-        edge_filter = f"{edge_filter} AND ({edge_where})"
-
+        parts = [scope_head]
+    first, carry = (target, "t") if anchor == "targets" else (source, "s")
+    if first:
+        parts.append(tail_clauses(first, carry=carry, alias="_xa"))
+    conds = [_distinct_nodes("p", "_p")]
+    if anchor != "targets" and target is None:
+        conds.append("ID(t) IN $_pathTgtIds")
+    if hoisted.get("edge_where"):
+        conds.append(f"ALL(rel IN relationships(p) WHERE {hoisted['edge_where']})")
+    parts.append(f"MATCH p = (s){left}[:{rel}*1..{hops}]{right}(t) WHERE {' AND '.join(conds)}")
+    second = source if anchor == "targets" else target
+    if second:
+        parts.append(tail_clauses(second, carry="p, s, t", alias="_xz"))
     # Each path: list of {urn, displayName, entityType} for nodes;
     # list of {sourceUrn, targetUrn, edgeType, properties} for edges.
-    return (
-        f"MATCH p = {pattern} "
-        "WHERE s.urn IN $_pathSrc AND t.urn IN $_pathTgt "
-        f"AND ALL(rel IN relationships(p) WHERE {edge_filter}) "
+    parts.append(
+        "WITH p LIMIT $_pathMaxPaths "
         "WITH p, nodes(p) AS ns, relationships(p) AS rs "
-        "LIMIT $_pathMaxPaths "
         "RETURN [n IN ns | { "
         "  urn: n.urn, "
         "  displayName: n.displayName, "
@@ -2529,16 +2638,19 @@ def _build_path_cypher(
         "}] AS edges, "
         "length(p) AS hopCount"
     )
+    return " ".join(parts)
 
 
 async def _run_path_query(
     provider, hoisted: Dict[str, Any], *, timeout_s: float,
-    compiled_params: Optional[Dict[str, Any]] = None,
+    compiled_params: Optional[Dict[str, Any]] = None, scope=None,
 ) -> Tuple[List[PathHit], bool]:
     """Execute the hoisted PathPredicate. Returns (paths, truncated).
 
     ``compiled_params`` are the compiler's: an edge filter that compares
-    a value refers to them as ``$pN``."""
+    a value refers to them as ``$pN``. ``scope``: where a path whose ends
+    are both conditions starts."""
+    from backend.app.providers.falkordb_search.plan import _containment, _ids_of, _rel
     edge_types = hoisted.get("edge_types") or []
     if not edge_types:
         # No lineage / containment edge types resolved → no paths can
@@ -2546,18 +2658,32 @@ async def _run_path_query(
         # an empty IN clause.
         return [], False
 
-    cypher = _build_path_cypher(
-        direction=hoisted["direction"],
-        max_hops=hoisted["max_hops"],
-        edge_where=hoisted.get("edge_where") or "",
-    )
-    params = {
-        **(compiled_params or {}),
-        "_pathSrc": hoisted["source_urns"],
-        "_pathTgt": hoisted["target_urns"],
-        "_pathEdgeTypes": edge_types,
-        "_pathMaxPaths": hoisted["max_paths"],
-    }
+    async def run(cypher: str, params: Dict[str, Any]):
+        return await provider._ro_query(cypher, params=params, timeout=timeout_s)
+
+    labels = await _searchable_labels(provider, timeout_s=timeout_s)
+    params: Dict[str, Any] = {**(compiled_params or {}),
+                              "_pathMaxPaths": hoisted["max_paths"]}
+    # The named ends, sought through the per-label urn indexes: an
+    # unlabelled ``s.urn IN $…`` reads every node.
+    for key, urns, where in (("_pathSrcIds", hoisted["source_urns"], hoisted.get("source_where")),
+                             ("_pathTgtIds", hoisted["target_urns"], hoisted.get("target_where"))):
+        if where is None:
+            params[key] = await _ids_of(run, labels, urns)
+            if not params[key]:
+                return [], False
+    scope_head = ""
+    if hoisted.get("source_where") is None:
+        anchor = "sources"
+    elif hoisted.get("target_where") is None:
+        anchor = "targets"
+    else:
+        anchor = "scope"
+        scope_head = await _path_scope_head(run, labels, scope, _rel(_containment(provider)),
+                                            params)
+        if not scope_head:
+            return [], False
+    cypher = _build_path_cypher(hoisted, anchor=anchor, scope_head=scope_head)
     result = await provider._ro_query(cypher, params=params, timeout=timeout_s)
     rows = result.result_set or []
 
@@ -2580,7 +2706,7 @@ async def _run_path_query(
                 source_urn=str(e.get("sourceUrn", "")),
                 target_urn=str(e.get("targetUrn", "")),
                 edge_type=str(e.get("edgeType", "")),
-                properties=e.get("properties") or {},
+                properties=_edge_properties(e.get("properties")),
             )
             for e in edge_dicts if isinstance(e, dict)
         ]
@@ -2592,6 +2718,28 @@ async def _run_path_query(
 
     truncated = len(paths) >= hoisted["max_paths"]
     return paths, truncated
+
+
+async def _path_scope_head(run, labels, scope, rel: str, params: Dict[str, Any]) -> str:
+    """Binds ``s`` to each entity in the search's scope — where a path whose
+    ends are both conditions starts: under the view's roots, among its
+    visible entities, of its entity types, or anywhere in the data source.
+    Empty when the scope holds nothing."""
+    from backend.app.providers.falkordb_search.plan import _ids_of
+    mode = getattr(scope, "scope_mode", "data_source")
+    if mode == "visible" and scope.visible_urns:
+        params["_pathScope"] = await _ids_of(run, labels, scope.visible_urns)
+        return ("UNWIND $_pathScope AS _pr MATCH (s) WHERE ID(s) = _pr"
+                if params["_pathScope"] else "")
+    if mode == "view" and scope.root_urns and rel:
+        params["_pathScope"] = await _ids_of(run, labels, scope.root_urns)
+        return ("UNWIND $_pathScope AS _pr MATCH (_r) WHERE ID(_r) = _pr "
+                f"MATCH (_r)-[:{rel}*0..{int(scope.max_depth or 12)}]->(s) WITH DISTINCT s"
+                if params["_pathScope"] else "")
+    if mode == "view" and scope.entity_types:
+        params["_pathScope"] = [t.lower() for t in scope.entity_types]
+        return "MATCH (s) WHERE s.urn IS NOT NULL AND toLower(labels(s)[0]) IN $_pathScope"
+    return "MATCH (s) WHERE s.urn IS NOT NULL"
 
 
 def _candidate_prefixes(
@@ -2729,7 +2877,7 @@ async def execute_deep_search(
         try:
             paths, truncated = await _run_path_query(
                 provider, compiler.hoisted_path, timeout_s=timeout_s,
-                compiled_params=base_params,
+                compiled_params=base_params, scope=query.scope,
             )
             return SearchResultPage(
                 paths=paths,

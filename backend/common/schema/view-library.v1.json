@@ -918,7 +918,7 @@
       "type": "object"
     },
     "PathPredicate": {
-      "description": "Find paths between source and target nodes.\n\nTop-level AND only — the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node→edge→node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through ≤4 lineage hops\".",
+      "description": "Find paths between source and target nodes.\n\nTop-level AND only — the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node→edge→node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through ≤4 lineage hops\". Either end may be a condition instead\n(``sourceWhere``, ``targetWhere``) — \"every route from a topic to a\ndataset through edges in stream mode\". A route passes no entity twice.",
       "properties": {
         "direction": {
           "default": "outgoing",
@@ -1039,6 +1039,101 @@
           "title": "Sourceurns",
           "type": "array"
         },
+        "sourceWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The starting nodes as a condition instead of named: any entity meeting it — or, when the targets are a condition too, any in the search's scope.",
+          "title": "Sourcewhere"
+        },
         "targetRefs": {
           "anyOf": [
             {
@@ -1065,6 +1160,101 @@
           "maxItems": 8,
           "title": "Targeturns",
           "type": "array"
+        },
+        "targetWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The endpoint nodes as a condition instead of named.",
+          "title": "Targetwhere"
         }
       },
       "title": "PathPredicate",

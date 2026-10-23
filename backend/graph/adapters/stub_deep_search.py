@@ -38,10 +38,13 @@ from backend.common.search_semantics import (
     value_slot,
 )
 from backend.common.derived_artifacts import DERIVED_EDGE_TYPES
+from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
 from backend.common.models.search import (
     NODE_REF_ANY_DEPTH,
     NODE_REF_MATCHES_MAX,
+    AncestorRef,
     DegreePredicate,
+    EdgeRef,
     EdgeGroupPredicate,
     EdgeHasPropertyPredicate,
     EdgePropertyPredicate,
@@ -56,6 +59,8 @@ from backend.common.models.search import (
     IsRootPredicate,
     LayerPredicate,
     MatchAllPredicate,
+    PathHit,
+    PathPredicate,
     PropertyPredicate,
     RelatedPredicate,
     SearchHit,
@@ -131,6 +136,13 @@ class StubDeepSearchProvider:
         deadline_ms: Optional[int] = None,
     ) -> SearchResultPage:
         start = time.monotonic()
+        path = _path_of(query.predicate)
+        if path is not None:
+            routes = self._routes(path, query.scope)
+            return SearchResultPage(
+                paths=routes[:path.max_paths], truncated=len(routes) > path.max_paths,
+                candidate_count=min(len(routes), path.max_paths), deadline_exceeded=False,
+                elapsed_ms=int((time.monotonic() - start) * 1000), cache_hit=False)
         matches = [n for n in self._nodes if _matches(n, query.predicate, self)]
 
         # Apply scope clamp if root_urns are set. Simple containment:
@@ -365,6 +377,80 @@ class StubDeepSearchProvider:
         found.discard(urn)
         return found
 
+    def _routes(self, p: PathPredicate, scope) -> List[PathHit]:
+        """Every route of 1..``maxHops`` edges from a source to a target,
+        passing no entity twice, every edge of the path's types and meeting
+        its edge filter — in a stable order (fewest hops, then by urn).
+
+        A named end is its entities; a condition, every entity meeting it
+        — for the sources, in the search's scope when the targets are a
+        condition too."""
+        if p.edge_types:
+            types = set(p.edge_types)
+        elif p.edge_class == "lineage":
+            types = set(self._lineage_types)
+        elif p.edge_class == "containment":
+            types = set(self._containment_types)
+        else:
+            types = set(self._lineage_types) | set(self._containment_types)
+
+        def named(urns, refs) -> set:
+            return {u for u in [*urns, *(r.urn for r in refs or ())] if u in self._by_urn}
+
+        if p.source_where is None:
+            sources = sorted(named(p.source_urns, p.source_refs))
+        else:
+            pool = self._in_scope(scope) if p.target_where is not None else self._nodes
+            sources = sorted(n["urn"] for n in pool if _matches(n, p.source_where, self))
+        targets = named(p.target_urns, p.target_refs) if p.target_where is None else None
+
+        def is_target(urn: str) -> bool:
+            return urn in targets if targets is not None else _matches(
+                self._by_urn[urn], p.target_where, self)
+
+        def steps(at: str):
+            if p.direction in ("outgoing", "any"):
+                for i in self._out.get(at, ()):
+                    yield i, self._edges[i]["target"]
+            if p.direction in ("incoming", "any"):
+                for i in self._in.get(at, ()):
+                    yield i, self._edges[i]["source"]
+
+        routes: List[PathHit] = []
+
+        def walk(nodes: List[str], edges: List[int]) -> None:
+            if edges and is_target(nodes[-1]):
+                routes.append(self._route(nodes, edges))
+            if len(edges) == p.max_hops:
+                return
+            for i, nxt in steps(nodes[-1]):
+                edge = self._edges[i]
+                if (nxt in nodes or nxt not in self._by_urn or edge.get("type") not in types
+                        or not _edge_passes(edge, p.edge_predicate)):
+                    continue
+                walk(nodes + [nxt], edges + [i])
+
+        for source in sources:
+            walk([source], [])
+        return sorted(routes, key=lambda r: (r.hop_count, [n.urn for n in r.nodes]))
+
+    def _route(self, nodes: List[str], edges: List[int]) -> PathHit:
+        def ref(urn: str) -> AncestorRef:
+            node = self._by_urn[urn]
+            return AncestorRef(urn=urn, display_name=str(node.get("displayName") or ""),
+                               entity_type=str(node.get("entityType") or ""))
+
+        def edge_ref(i: int) -> EdgeRef:
+            e = self._edges[i]
+            native = {k: v for k, v in e.items()
+                      if k not in ("source", "target", "type", "properties")}
+            return EdgeRef(source_urn=e["source"], target_urn=e["target"],
+                           edge_type=str(e.get("type")),
+                           properties={**(e.get("properties") or {}), **native})
+
+        return PathHit(nodes=[ref(u) for u in nodes], edges=[edge_ref(i) for i in edges],
+                       hop_count=len(edges))
+
     def _degree(self, urn: str, d: DegreePredicate) -> bool:
         if d.edge_types:
             types = set(d.edge_types)
@@ -587,13 +673,23 @@ _SUGAR = {
 }
 
 
+def _path_of(predicate) -> Optional[PathPredicate]:
+    """The path a query asks for: at its top, or in its top-level AND."""
+    if isinstance(predicate, PathPredicate):
+        return predicate
+    if isinstance(predicate, GroupPredicate) and predicate.op == "and":
+        return next((c for c in predicate.children if isinstance(c, PathPredicate)), None)
+    return None
+
+
 def _compare(count: int, op: str, value: int) -> bool:
     return {"eq": count == value, "neq": count != value, "gt": count > value,
             "gte": count >= value, "lt": count < value, "lte": count <= value}[op]
 
 
 def _edge_passes(edge: Dict[str, Any], ep) -> bool:
-    """An edge filter on a fixture edge, whose properties are its own keys."""
+    """An edge filter on a fixture edge: its native fields are its own keys,
+    a user's properties sit in its ``properties`` (``edge_properties``)."""
     if ep is None:
         return True
     if isinstance(ep, EdgeGroupPredicate):
@@ -602,10 +698,13 @@ def _edge_passes(edge: Dict[str, Any], ep) -> bool:
         tests = (_edge_passes(edge, c) for c in ep.children)
         return all(tests) if ep.op == "and" else any(tests)
     if isinstance(ep, EdgeHasPropertyPredicate):
-        present = edge.get(ep.key) is not None
+        present = (edge.get(ep.key) is not None if ep.key in EDGE_NATIVE_KEYS
+                   else ep.key in (edge.get("properties") or {}))
         return not present if ep.negate else present
     if isinstance(ep, EdgePropertyPredicate):
-        return evaluate(edge.get(ep.key), resolve_predicate(ep))
+        if ep.key in EDGE_NATIVE_KEYS:
+            return evaluate(edge.get(ep.key), resolve_predicate(ep))
+        return json_holds(edge.get("properties"), ep.key, resolve_predicate(ep))
     raise CompileError(f"stub: unsupported edge predicate {type(ep).__name__}")
 
 
