@@ -270,7 +270,7 @@ async def _manager_subject(session: AsyncSession, ref: ManagerRef) -> tuple[Opti
         return None, group.id, group.name
     if is_service_account(ref.id):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="A service account cannot manage a service account",
         )
     person = await user_repo.get_user_by_id(session, ref.id)
@@ -359,7 +359,7 @@ async def create_service_account(
     It holds no roles until it is given some."""
     name = body.name.strip()
     if not name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A service account needs a name")
+        raise HTTPException(status_code=422, detail="A service account needs a name")
     subjects = [await _manager_subject(session, ref) for ref in body.managers]
     account_id = await service_account_repo.create(
         session, name=name, description=(body.description or "").strip() or None,
@@ -388,10 +388,10 @@ async def hand_over(
     """Move the service accounts a person manages to a successor — before
     they leave. Each account keeps its keys; the successor is told."""
     if is_service_account(body.from_user_id):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Not a person")
+        raise HTTPException(status_code=422, detail="Not a person")
     if body.to.type == "user" and body.to.id == body.from_user_id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Hand over to someone else",
+            status_code=422, detail="Hand over to someone else",
         )
     to_user, to_group, to_name = await _manager_subject(session, body.to)
     leaving = await user_repo.get_identities_by_ids(session, [body.from_user_id])
@@ -434,7 +434,7 @@ async def update_service_account(
     fields = body.model_fields_set
     name = body.name.strip() if "name" in fields and body.name else None
     if "name" in fields and not name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A service account needs a name")
+        raise HTTPException(status_code=422, detail="A service account needs a name")
     description = (body.description or "").strip() or None
     changes = {}
     if name is not None and name != user.first_name:
@@ -552,7 +552,7 @@ async def grant_role(
     perms = roles.get(body.role)
     if perms is None or not workspace_access.is_requestable(perms):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=(
                 "A service account can hold a workspace role that neither administers the "
                 "workspace nor lets people in"
