@@ -30,6 +30,8 @@ export type LeafKind =
     | 'descendantOf'
     | 'withinHops'
     | 'path'
+    | 'related'
+    | 'is'
 
 
 export interface LeafKindMeta {
@@ -201,6 +203,28 @@ export const LEAF_KINDS: readonly LeafKindMeta[] = [
             value: 0,
             edgeClass: DEFAULT_EDGE_CLASS,
         }),
+    },
+
+    // -- relationships -----------------------------------------------------
+    {
+        kind: 'related',
+        label: 'Relationship',
+        description: 'A condition on its parent, top-level container, children, sources or targets.',
+        icon: 'Network',
+        category: 'identity',
+        makeEmpty: () => ({
+            kind: 'related',
+            axis: 'parent',
+            where: { kind: 'entityType', op: 'in', values: [] },
+        }),
+    },
+    {
+        kind: 'is',
+        label: 'A named entity',
+        description: 'An entity by its path of names — "Sales / orders" — or by URN.',
+        icon: 'Crosshair',
+        category: 'identity',
+        makeEmpty: () => ({ kind: 'is', refs: [] }),
     },
 
     // -- scope -----------------------------------------------------------

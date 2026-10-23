@@ -65,6 +65,26 @@
  *   noDownstream                   → isLeaf edgeClass=lineage
  *   noLineage                      → isOrphan edgeClass=lineage
  *
+ * Relationships — a condition on related entities. The axis word must be
+ * followed by ``(`` with no space between (``parent (x)`` is two words):
+ *   parent(type:domain)            → related axis=parent where=…
+ *   root(name = Sales)             → the top-level container
+ *   child(type:column tag:PII)     → also ancestor / descendant
+ *   upstream()                     → fed by anything; downstream / neighbor
+ *   downstream*..3(type:dashboard) → 1 to 3 hops; *2..4, *2 (exactly 2),
+ *                                    and *2.. (2 levels or more, up or
+ *                                    down the tree)
+ *   upstream(…).via(confidence >= 0.8) → every edge walked meets it
+ *   every child(description IS NOT EMPTY) → each one does (and one exists)
+ *   no upstream(type:topic)        → none does
+ *   count(child(type:column)) > 100 → how many do (distinct entities)
+ *
+ * Entities by name:
+ *   @"Country/United Kingdom"      → is that entity (a path of names from
+ *                                    a top-level entity; ** any depth;
+ *                                    \/ a slash in a name; or a URN)
+ *   inside @"Country/United Kingdom" → descendantOf by name
+ *
  * A condition the words above can't spell exactly — within N hops, a path, a
  * depth-bounded descendantOf, a case-sensitive or exact text match… — is
  * written as its own JSON, `{"kind": "withinHops", …}`, and read back as it
@@ -93,12 +113,18 @@ import type {
     PropertyOp,
     PropertyPredicate,
     EdgeClass,
+    EdgePredicateNode,
+    EdgePropertyPredicate,
+    NodeRef,
+    RelatedPredicate,
 } from '@/types/search'
 import { OPERATOR_TABLE } from '@/types/generated/searchOperators'
 
 import { arityOf, autoTypeOf, isNegative, predicateType } from '../typed/operators'
 import { type DurationUnit, parseDuration, toDuration } from '../typed/valueCodec'
 import type { ValueType } from '../typed/valueTypes'
+
+import { axisMeta, formatNamePath, hopRange, parseNamePath } from './relations'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
@@ -259,6 +285,19 @@ function meaning(p: Predicate): string {
                 arity === 'none' || OPERATOR_TABLE[op].types.length === 1 ? null : predicateType(p),
                 arity !== 'none' && !!p.caseSensitive, isNegative(op) && !!p.includeMissing])
         }
+        case 'related': {
+            const [lo, hi] = hopRange(p)
+            return stable(['related', p.axis, p.count ? null : (p.quantifier ?? 'any'),
+                p.count ? [p.count.op ?? 'gte', p.count.value] : null, lo, hi,
+                p.edgeTypes ?? null, p.edge ? treeMeaning(fromEdge(p.edge)) : null,
+                p.where ? treeMeaning(p.where) : null])
+        }
+        case 'is':
+            return stable(['is', p.refs.map((r) => [r.urn ?? null, r.path ?? null,
+                r.entityType ?? null, r.caseSensitive ?? true])])
+        case 'descendantOf':
+            // Named by path, it is edited by name whether or not it says so.
+            return p.refs?.length && !p.urns?.length ? stable({ ...p, uiScope: 'name' }) : stable(p)
         case 'group': {
             // `not has:x` reads back as NOT around the name test.
             const only = p.children.length === 1 ? p.children[0] : null
@@ -270,6 +309,46 @@ function meaning(p: Predicate): string {
         default:
             return stable(p)
     }
+}
+
+
+function refSpelling(ref: NodeRef): string {
+    return ref.urn ?? formatNamePath(ref.path ?? [])
+}
+
+
+/** ``parent(…)``, ``every child(…)``, ``downstream*..3(…).via(…)``,
+ *  ``count(child(…)) > 3`` — or null when one has edge types, which only
+ *  JSON writes. */
+function relationSpelling(p: RelatedPredicate): string | null {
+    if (p.edgeTypes?.length) return null
+    const meta = axisMeta(p.axis)
+    let hops = ''
+    if (meta.hops) {
+        const [lo, hi] = hopRange(p)
+        if (meta.lineage) {
+            hops = lo === 1 && hi === 1 ? '' : lo === hi ? `*${hi}` : lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
+        } else if (p.maxHops) {
+            hops = lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
+        } else if (lo > 1) {
+            hops = `*${lo}..`
+        }
+    }
+    let text = `${p.axis}${hops}(${p.where ? stringifyPredicate(p.where) : ''})`
+    if (p.edge) text += `.via(${stringifyPredicate(fromEdge(p.edge))})`
+    if (p.count) return `count(${text}) ${COUNT_SYMBOLS[p.count.op ?? 'gte']} ${p.count.value}`
+    if (p.quantifier === 'none') return `no ${text}`
+    if (p.quantifier === 'all') return `every ${text}`
+    return text
+}
+
+
+/** A nested condition's meaning: groups as the parser regroups them, by
+ *  their members' meanings. */
+function treeMeaning(p: Predicate): string {
+    const s = simplify(p)
+    if (s.kind !== 'group' || (s.op === 'not' && s.children[0]?.kind === 'hasProperty')) return meaning(s)
+    return stable(['group', s.op ?? 'and', s.children.map(treeMeaning)])
 }
 
 
@@ -312,11 +391,24 @@ function spelling(c: Predicate): string | null {
         case 'isOrphan':     return 'noLineage'
         case 'hasIncoming':  return 'hasUpstream'
         case 'hasOutgoing':  return 'hasDownstream'
+        case 'related':
+            return relationSpelling(c)
+        case 'is': {
+            const [ref] = c.refs
+            return c.refs.length === 1 && ref && !ref.entityType && ref.caseSensitive !== false
+                ? `@"${refSpelling(ref)}"` : null
+        }
         case 'descendantOf': {
+            if (c.refs?.length === 1 && !c.urns?.length && !c.maxDepth) {
+                const [ref] = c.refs
+                return !ref.entityType && ref.caseSensitive !== false
+                    ? `inside @"${refSpelling(ref)}"` : null
+            }
             // URNs always contain `:`, so quote unconditionally — the
             // prefix lexer would otherwise misread `urn:foo:bar` as a
             // `urn:` prefixed token. One with a maxDepth doesn't read back
             // from this, so it is written as JSON (``formatAtom``).
+            if (!c.urns?.length) return null
             const quoted = c.urns.map((u) => `"${u}"`).join(', ')
             return `descendantOf IN (${quoted})`
         }
@@ -341,6 +433,8 @@ const enum TokenKind {
     OrKw = 'or',
     NotKw = 'not',
     Json = 'json',           // {…}: a condition written as its own JSON
+    Ref = 'ref',             // @"…": an entity named by its path
+    Call = 'call',           // parent( / count( / .via( — the paren consumed
 }
 
 interface Token {
@@ -356,6 +450,13 @@ function lex(input: string): Token[] {
     while (i < input.length) {
         const ch = input[i]
         if (/\s/.test(ch)) { i += 1; continue }
+        if (ch === '@' && (input[i + 1] === '"' || input[i + 1] === "'")) {
+            const close = input.indexOf(input[i + 1], i + 2)
+            const end = close === -1 ? input.length : close
+            out.push({ kind: TokenKind.Ref, text: input.slice(i + 2, end), raw: input.slice(i, end + 1) })
+            i = end + 1
+            continue
+        }
         if (ch === '"' || ch === "'") {
             const close = input.indexOf(ch, i + 1)
             if (close === -1) {
@@ -418,6 +519,12 @@ function lex(input: string): Token[] {
             if (c === '=' || c === '<' || c === '>') break
             j += 1
         }
+        if (j > i && input[j] === '(' && CALL_WORD.test(input.slice(i, j))) {
+            const word = input.slice(i, j)
+            out.push({ kind: TokenKind.Call, text: word.toLowerCase(), raw: `${word}(` })
+            i = j + 1
+            continue
+        }
         if (j > i) {
             const word = input.slice(i, j)
             const up = word.toUpperCase()
@@ -441,6 +548,55 @@ function lex(input: string): Token[] {
     }
     return out
 }
+
+
+const COUNT_OPS: Record<string, NonNullable<NonNullable<RelatedPredicate['count']>['op']>> = {
+    '=': 'eq', '!=': 'neq', '>': 'gt', '>=': 'gte', '<': 'lt', '<=': 'lte',
+}
+const COUNT_SYMBOLS: Record<string, string> = {
+    eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=',
+}
+
+
+/** ``@"…"``: a URN, or a path of names. */
+function refOf(text: string): NodeRef {
+    return /^urn:/i.test(text.trim()) ? { urn: text.trim() } : { path: parseNamePath(text) }
+}
+
+
+/** ``.via(…)``'s condition, read as one on an edge's properties. */
+function toEdge(p: Predicate): EdgePredicateNode {
+    if (p.kind === 'property') {
+        const { kind: _k, ...rest } = p
+        return { ...rest, kind: 'edgeProperty' }
+    }
+    if (p.kind === 'hasProperty' && (p.keyMatch ?? 'exact') === 'exact') {
+        return { kind: 'edgeHasProperty', key: p.key, ...(p.negate ? { negate: true } : {}) }
+    }
+    if (p.kind === 'group') {
+        // `not has:x` is NOT around the presence test.
+        return { kind: 'edgeGroup', op: p.op ?? 'and', children: p.children.map(toEdge) }
+    }
+    throw new Error('.via(…) tests the edges walked: a property comparison or has:key')
+}
+
+
+/** An edge filter written as the conditions ``.via(…)`` reads. */
+function fromEdge(e: EdgePredicateNode): Predicate {
+    if (e.kind === 'edgeGroup') {
+        return { kind: 'group', op: e.op ?? 'and', children: e.children.map(fromEdge) }
+    }
+    if (e.kind === 'edgeHasProperty') {
+        return { kind: 'hasProperty', key: e.key, ...(e.negate ? { negate: true } : {}) }
+    }
+    const { kind: _k, ...rest } = e as EdgePropertyPredicate
+    return { ...rest, kind: 'property' }
+}
+
+
+/** A word that opens a relationship, a count or an edge filter when ``(``
+ *  follows it directly. */
+const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor)(\*\d*(\.\.\d*)?)?|count|\.via)$/i
 
 
 /** Just past the ``}`` closing the JSON object that opens at ``start`` —
@@ -579,6 +735,27 @@ class Parser {
     parsePredicateToken(): Predicate {
         const t = this.consume()
 
+        // Relationships, counts and entities by name.
+        if (t.kind === TokenKind.Call) return this.parseCall(t)
+        if (t.kind === TokenKind.Ref) {
+            this.recognized.push(t.raw)
+            return { kind: 'is', refs: [refOf(t.text)] }
+        }
+        if (t.kind === TokenKind.Word) {
+            const word = t.text.toLowerCase()
+            const next = this.peek()
+            if (word === 'inside' && next?.kind === TokenKind.Ref) {
+                this.consume()
+                this.recognized.push(`${t.raw} ${next.raw}`)
+                return { kind: 'descendantOf', urns: [], refs: [refOf(next.text)], uiScope: 'name' } as Predicate
+            }
+            if ((word === 'every' || word === 'no') && next?.kind === TokenKind.Call
+                && next.text !== 'count' && next.text !== '.via') {
+                this.consume()
+                return this.parseRelation(next, word === 'no' ? 'none' : 'all')
+            }
+        }
+
         // 0) A condition written as its own JSON — read back as it is, or
         //    refused: never searched for as a name.
         if (t.kind === TokenKind.Json) {
@@ -693,6 +870,74 @@ class Parser {
         }
         this.fallbackText.push(value)
         return makeTextPredicate('name', value)
+    }
+
+    /** A relationship, or ``count(<relationship>) <op> <n>``; its ``(`` is
+     *  already consumed. */
+    parseCall(t: Token): Predicate {
+        if (t.text === '.via') throw new Error('.via( follows a relationship: upstream(…).via(…)')
+        if (t.text !== 'count') return this.parseRelation(t)
+        const inner = this.consume()
+        if (inner?.kind !== TokenKind.Call || inner.text === 'count' || inner.text === '.via') {
+            throw new Error('count( takes a relationship: count(child(type:column)) > 10')
+        }
+        const rel = this.parseRelation(inner) as RelatedPredicate
+        this.expectClose('count(')
+        const opT = this.consume()
+        const op = opT?.kind === TokenKind.Op ? COUNT_OPS[opT.text] : undefined
+        const valT = this.consume()
+        const value = valT ? Number(valT.text) : NaN
+        if (!op || !Number.isInteger(value) || value < 0) {
+            throw new Error('count(…) compares to a whole number: count(child()) >= 3')
+        }
+        this.recognized.push(`count(…) ${opT.text} ${value}`)
+        return { ...rel, count: { op, value } }
+    }
+
+    parseRelation(t: Token, quantifier?: 'none' | 'all'): Predicate {
+        const m = /^([a-z]+)(?:(\*)(\d*)(\.\.)?(\d*))?$/.exec(t.text)
+        if (!m) throw new Error(`Not a relationship: ${t.raw}`)
+        const axis = m[1] as RelatedPredicate['axis']
+        const [, , star, first, dots, second] = m
+        const meta = axisMeta(axis)
+        if (star && !meta.hops) throw new Error(`${axis}( takes no hop range`)
+        if (star && !first && !second) throw new Error(`Say how far: ${axis}*..3(…)`)
+        let minHops: number | undefined
+        let maxHops: number | undefined
+        if (dots) {                       // *M..N, *..N, *M..
+            if (first) minHops = Number(first)
+            if (second) maxHops = Number(second)
+        } else if (first) {               // *N: exactly N
+            minHops = Number(first)
+            maxHops = Number(first)
+        }
+        let where: Predicate | undefined
+        if (this.peek()?.kind === TokenKind.RParen) this.consume()
+        else {
+            where = this.parseExpr()
+            this.expectClose(`${t.raw}…`)
+        }
+        const rel: RelatedPredicate = {
+            kind: 'related', axis,
+            ...(quantifier ? { quantifier } : {}),
+            ...(minHops !== undefined && minHops > 1 ? { minHops } : {}),
+            ...(maxHops !== undefined ? { maxHops } : {}),
+            ...(where ? { where } : {}),
+        }
+        const next = this.peek()
+        if (next?.kind === TokenKind.Call && next.text === '.via') {
+            if (!meta.lineage) throw new Error(`.via(…) follows a lineage relationship, not ${axis}(…)`)
+            this.consume()
+            rel.edge = toEdge(this.parseExpr())
+            this.expectClose('.via(…')
+        }
+        this.recognized.push(t.raw)
+        return rel
+    }
+
+    expectClose(what: string): void {
+        if (this.peek()?.kind !== TokenKind.RParen) throw new Error(`Missing ")" after ${what}`)
+        this.consume()
     }
 
     /** `CONTAINS`, `STARTS WITH` or `ENDS WITH` at the cursor — consumed
@@ -1131,6 +1376,7 @@ const OP_MAP: Record<string, PropertyOp> = {
  * one child so the negation is unambiguous downstream.
  */
 function simplify(p: Predicate): Predicate {
+    if (p.kind === 'related' && p.where) return { ...p, where: simplify(p.where) }
     if (p.kind !== 'group') return p
     const op = p.op ?? 'and'
     const children: Predicate[] = []

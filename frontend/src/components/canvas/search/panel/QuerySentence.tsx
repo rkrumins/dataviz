@@ -23,6 +23,7 @@ import type { Predicate } from '@/types/search'
 
 import { findScopeCondition, rootGroupOp, topLevelConditions } from './predicateComposition'
 import { formatPredicateAsSentence } from './predicateSentence'
+import { refLabel } from './relations'
 
 
 /**
@@ -43,6 +44,9 @@ export const QuerySentence: FC<{ draftPredicate: Predicate | null }> = ({
     draftPredicate,
 }) => {
     const scope = findScopeCondition(draftPredicate)
+    const anchors = scope
+        ? [...scope.urns.map((u) => formatUrnLabel(u)), ...(scope.refs ?? []).map(refLabel)]
+        : []
     const sentence = useMemo(
         () => formatPredicateAsSentence(withoutScope(draftPredicate), { leadIn: 'Anything' }),
         [draftPredicate],
@@ -54,15 +58,13 @@ export const QuerySentence: FC<{ draftPredicate: Predicate | null }> = ({
             'text-[12px] leading-snug text-ink/90',
         )}>
             {sentence}
-            {scope && scope.urns.length > 0 && (
+            {anchors.length > 0 && (
                 <span className={cn(
                     'inline-flex items-center px-1.5 py-0.5 rounded-md shrink-0',
                     'text-[10.5px] font-medium',
                     'bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/25',
                 )}>
-                    inside {scope.urns.length === 1
-                        ? formatUrnLabel(scope.urns[0])
-                        : `${scope.urns.length} containers`}
+                    inside {anchors.length === 1 ? anchors[0] : `${anchors.length} containers`}
                 </span>
             )}
         </div>

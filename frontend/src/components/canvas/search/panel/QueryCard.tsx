@@ -79,6 +79,7 @@ import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
+import { RelationProvider } from './RelationshipEditor'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -126,6 +127,14 @@ export const QueryCard: FC<QueryCardProps> = ({
     // pushed by clicking "Clear all".
     const clearSearchResults = useSearchStore((s) => s.clearSearchResults)
     const discovery = useDiscovery(viewId)
+    // What a relationship row's edge filter offers: the discovered edge keys.
+    const edgeDiscovery = useMemo(() => ({
+        edgeTypes: discovery.edgeTypes,
+        keysByEdgeType: discovery.keysByEdgeType,
+        getEdgeValueSamples: discovery.getEdgeValueSamples,
+        edgeKeyStoredAs: discovery.edgeKeyStoredAs,
+    }), [discovery.edgeTypes, discovery.keysByEdgeType, discovery.getEdgeValueSamples,
+        discovery.edgeKeyStoredAs])
     const knownEntityTypes = useEntityTypeNames()
     // What the omnibox and the first-run examples offer: the types this
     // view's data holds, most common first — every "Everything of type …"
@@ -142,31 +151,22 @@ export const QueryCard: FC<QueryCardProps> = ({
     const [mode, setMode] = useState<ViewMode>('visual')
 
     /**
-     * Code-only palette entries (path, withinHops, degree) hand off to the
+     * Code-only palette entries (withinHops, degree) hand off to the
      * main panel's Code view rather than the AdvancedDrawer JSON tab.
      * Seed a stub predicate of the chosen kind into the draft
      * (preserving existing work via AND-wrap), then flip the local
      * mode to 'code' so the user lands directly in the DSL editor.
      */
     const handleOpenCode = useCallback((kind: CodeKind) => {
-        const stub: Predicate = kind === 'path'
-            ? ({
-                kind: 'path',
-                sourceUrns: [],
-                targetUrns: [],
-                maxHops: 4,
+        const stub: Predicate = kind === 'degree'
+            ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
+            : ({
+                kind: 'withinHops',
+                urns: [],
+                hops: 2,
+                direction: 'both',
                 edgeClass: 'lineage',
-                direction: 'outgoing',
             } as unknown as Predicate)
-            : kind === 'degree'
-                ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
-                : ({
-                    kind: 'withinHops',
-                    urns: [],
-                    hops: 2,
-                    direction: 'both',
-                    edgeClass: 'lineage',
-                } as unknown as Predicate)
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {
@@ -452,28 +452,30 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : (
                         <>
-                            <VisualQueryBuilder
-                                predicate={draftPredicate}
-                                onSeed={seedDraftPredicate}
-                                onCommit={commitDraft}
-                                discovery={{
-                                    allKeys: discovery.allKeys,
-                                    keysByEntityType: discovery.keysByEntityType,
-                                    tagValues: discovery.tagValues,
-                                    getValueSamples: discovery.getValueSamples,
-                                    suggestValues: discovery.suggestValues,
-                                }}
-                                knownEntityTypes={knownEntityTypes}
-                                discoveredLayers={discoveredLayers}
-                                isRunning={isRunning}
-                                discoveryLoading={discovery.isInitialLoading}
-                                discoveryError={discovery.error}
-                                freshKind={freshRowKind}
-                                onSubmit={dispatchRun}
-                                onOpenAdvanced={onOpenAdvanced}
-                                onOpenCode={handleOpenCode}
-                                enableRowSelection
-                            />
+                            <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                                <VisualQueryBuilder
+                                    predicate={draftPredicate}
+                                    onSeed={seedDraftPredicate}
+                                    onCommit={commitDraft}
+                                    discovery={{
+                                        allKeys: discovery.allKeys,
+                                        keysByEntityType: discovery.keysByEntityType,
+                                        tagValues: discovery.tagValues,
+                                        getValueSamples: discovery.getValueSamples,
+                                        suggestValues: discovery.suggestValues,
+                                    }}
+                                    knownEntityTypes={knownEntityTypes}
+                                    discoveredLayers={discoveredLayers}
+                                    isRunning={isRunning}
+                                    discoveryLoading={discovery.isInitialLoading}
+                                    discoveryError={discovery.error}
+                                    freshKind={freshRowKind}
+                                    onSubmit={dispatchRun}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    enableRowSelection
+                                />
+                            </RelationProvider>
                             {/* Same surface, compact: the omnibox is how
                                 you add the 2nd filter as well as the 1st,
                                 so there's one thing to learn. */}
@@ -643,6 +645,17 @@ rowCount != 0
 hasProperty:owner        node has property "owner"
 noUpstream / noDownstream / noLineage
 hasUpstream / hasDownstream
+
+parent(type:domain)      its container is a domain
+root(@"Country")         its top-level container is named Country
+child(tag:PII)           contains something tagged PII
+every child(…) / no upstream(…)
+count(child(type:column)) > 100
+downstream*..3(type:dashboard).via(mode = stream)
+                         feeds a dashboard within 3 hops,
+                         every edge in stream mode
+@"Sales/orders"          the entity named by that path
+inside @"Country/United Kingdom"
 
 Combine with: AND, OR, NOT, parentheses, !
 

@@ -1,7 +1,7 @@
 /**
  * EdgePredicateEditor — author ``edge_predicate`` filters that the
  * compiler attaches to ``PathPredicate`` and ``WithinHopsPredicate``
- * (W2.3 / UC3).
+ * (W2.3 / UC3), and a lineage relationship's ``edge``.
  *
  * Three predicate kinds:
  *
@@ -69,6 +69,11 @@ const EDGE_PROPERTY_OPS: { value: PropertyOp; label: string }[] = [
     { value: 'endsWith', label: 'ends with' },
     { value: 'between', label: 'between' },
 ]
+
+/** What a key kept in the edge's JSON of user properties can be asked:
+ *  equality (its presence is "edge has property"). */
+const EDGE_JSON_OPS = EDGE_PROPERTY_OPS.filter((o) => ['eq', 'neq', 'in', 'notIn'].includes(o.value))
+const isJsonOp = (op: PropertyOp | undefined) => EDGE_JSON_OPS.some((o) => o.value === (op ?? 'eq'))
 
 type EdgeKind = NonNullable<EdgePredicateNode['kind']>
 type EdgeGroupOp = NonNullable<EdgeGroupPredicate['op']>
@@ -239,6 +244,7 @@ function EdgePropertyFields({
     }, [ctx, edgeTypeHint, value.key])
 
     const isMultiValue = value.op === 'in' || value.op === 'notIn'
+    const jsonHeld = ctx.edgeKeyStoredAs?.[value.key] === 'json'
 
     return (
         <div className="flex flex-col gap-2">
@@ -246,7 +252,12 @@ function EdgePropertyFields({
                 <FieldLabel>Edge property</FieldLabel>
                 <UnifiedPicker
                     value={value.key}
-                    onChange={(next) => onChange({ ...value, key: next as string })}
+                    onChange={(next) => {
+                        const key = next as string
+                        // A key kept in the JSON compares by equality only.
+                        const json = ctx.edgeKeyStoredAs?.[key] === 'json'
+                        onChange({ ...value, key, ...(json && !isJsonOp(value.op) ? { op: 'eq' } : {}) })
+                    }}
                     options={keyOptions}
                     placeholder={
                         keyOptions.length > 0
@@ -262,7 +273,7 @@ function EdgePropertyFields({
                     <SelectField
                         value={value.op}
                         onChange={(op) => onChange({ ...value, op })}
-                        options={EDGE_PROPERTY_OPS}
+                        options={jsonHeld ? EDGE_JSON_OPS : EDGE_PROPERTY_OPS}
                     />
                 </div>
                 <div className="col-span-2">
@@ -315,6 +326,11 @@ function EdgePropertyFields({
                     )}
                 </div>
             </div>
+            {jsonHeld && (
+                <p className="text-[10.5px] text-ink-muted">
+                    Kept with the edge's own properties: compared by equality.
+                </p>
+            )}
         </div>
     )
 }

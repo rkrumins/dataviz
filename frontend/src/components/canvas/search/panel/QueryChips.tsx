@@ -15,10 +15,12 @@
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
-import type { Predicate } from '@/types/search'
+import type { NodeRef, Predicate } from '@/types/search'
 
 import { arityOf } from '../typed/operators'
 import { describeDuration } from '../typed/valueCodec'
+
+import { axisMeta, hopRange, refLabel } from './relations'
 
 
 export interface QueryChipsProps {
@@ -160,28 +162,54 @@ function describePredicate(p: Predicate): Chip {
             }
         }
 
-        case 'descendantOf':
+        case 'descendantOf': {
+            const anchors = named(p.urns, p.refs)
             return {
                 icon: 'FolderTree',
-                label: `inside ${p.urns.length === 1
-                    ? formatUrnLabel(p.urns[0])
-                    : `${p.urns.length} subtrees`}`,
-                title: p.urns.join('\n'),
+                label: `inside ${anchors.length === 1 ? anchors[0] : `${anchors.length} subtrees`}`,
+                title: anchors.join('\n'),
             }
+        }
 
         case 'withinHops':
             return {
                 icon: 'Waypoints',
-                label: `≤${p.hops} hop${p.hops === 1 ? '' : 's'} ${p.direction === 'both' || !p.direction ? 'around' : p.direction === 'in' ? 'upstream of' : 'downstream of'} ${truncateUrn(p.urns[0] ?? '')}`,
-                title: p.urns.join('\n'),
+                label: `≤${p.hops} hop${p.hops === 1 ? '' : 's'} ${p.direction === 'both' || !p.direction ? 'around' : p.direction === 'in' ? 'upstream of' : 'downstream of'} ${named(p.urns, p.refs)[0] ?? '∅'}`,
+                title: named(p.urns, p.refs).join('\n'),
             }
 
-        case 'path':
+        case 'path': {
+            const end = (urns?: string[] | null, refs?: NodeRef[] | null, where?: Predicate | null) =>
+                where ? describePredicate(where).label : (named(urns, refs)[0] ?? '∅')
             return {
                 icon: 'GitFork',
-                label: `paths ${truncateUrn(p.sourceUrns[0] ?? '')} → ${truncateUrn(p.targetUrns[0] ?? '')} (≤${p.maxHops}h)`,
-                title: `${p.sourceUrns.join(', ')}\n→\n${p.targetUrns.join(', ')}`,
+                label: `paths ${end(p.sourceUrns, p.sourceRefs, p.sourceWhere)} → ${end(p.targetUrns, p.targetRefs, p.targetWhere)} (≤${p.maxHops}h)`,
+                title: `${named(p.sourceUrns, p.sourceRefs).join(', ')}\n→\n${named(p.targetUrns, p.targetRefs).join(', ')}`,
             }
+        }
+
+        case 'is': {
+            const names = named([], p.refs)
+            return {
+                icon: 'Crosshair',
+                label: `is ${names[0] ?? '∅'}${names.length > 1 ? ` +${names.length - 1}` : ''}`,
+                title: names.join('\n'),
+            }
+        }
+
+        case 'related': {
+            const meta = axisMeta(p.axis)
+            const [lo, hi] = hopRange(p)
+            const hops = meta.lineage && hi > 1 ? ` ${lo === hi ? hi : `${lo}–${hi}`}h` : ''
+            const count = p.count ? `${DEGREE_OP_LABEL[p.count.op ?? 'gte']}${p.count.value} ` : ''
+            const lead = p.quantifier === 'none' ? 'no '
+                : p.quantifier === 'all' ? 'every ' : count
+            const noun = count && p.count?.value !== 1 ? meta.plural : meta.noun
+            return {
+                icon: meta.lineage ? 'Workflow' : 'Network',
+                label: `${lead}${noun}${hops}${p.where ? `: ${describePredicate(p.where).label}` : ''}`,
+            }
+        }
 
         case 'group': {
             // op is 'or' or 'not' here ('and' is flattened upstream)
@@ -248,12 +276,9 @@ function truncate(s: string, n = 24): string {
     return s.length > n ? `${s.slice(0, n)}…` : s
 }
 
-function truncateUrn(urn: string, n = 18): string {
-    if (!urn) return '∅'
-    // Show the suffix — that's usually the distinguishing part of a URN.
-    if (urn.length <= n) return urn
-    const tail = urn.split(':').pop() ?? urn
-    return tail.length <= n ? tail : `…${tail.slice(-n + 1)}`
+/** The entities an end names: its URNs' labels, then its names. */
+function named(urns?: string[] | null, refs?: NodeRef[] | null): string[] {
+    return [...(urns ?? []).map((u) => formatUrnLabel(u)), ...(refs ?? []).map(refLabel)]
 }
 
 function valueLabel(v: unknown): string {

@@ -38,6 +38,33 @@ export type Lineageedgetypes = string[]
  */
 export type Notes = string[]
 /**
+ * It names more than one.
+ */
+export type Ambiguous = boolean
+/**
+ * Where it sits: ``$.children[0].refs[1]``.
+ */
+export type At = string
+/**
+ * How many entities it names.
+ */
+export type Count = number
+/**
+ * As people read it: "Country / United Kingdom".
+ */
+export type Ref = string
+export type Displayname = string
+export type Entitytype = string
+export type Urn = string
+/**
+ * The first few it names (up to 5).
+ */
+export type Samples = AncestorRef[]
+/**
+ * What each name reference in the predicate named — how many entities, and the first few — so a reference that names none, or several, can be seen.
+ */
+export type Resolvedrefs = ResolvedRef[]
+/**
  * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
  */
 export type Entitytypes = string[] | null
@@ -67,9 +94,9 @@ export type Urns = string[]
 /**
  * Matches below this container, at any depth.
  */
-export type Count = number
-export type Displayname = string
-export type Entitytype = string
+export type Count1 = number
+export type Displayname1 = string
+export type Entitytype1 = string
 /**
  * ``complete``: exact. ``running``: the search is still scanning; counts so far. ``expired``: the session is gone — run the search again.
  */
@@ -89,7 +116,7 @@ export type Dataversion = string | null
  * Entities in the view's scope read so far.
  */
 export type Entities = number
-export type Count1 = number
+export type Count2 = number
 export type Type = string
 export type Entitytypes1 = SearchCatalogEntityType[]
 export type Notes1 = string[]
@@ -108,7 +135,7 @@ export type Total = number
 /**
  * Entities carrying the key.
  */
-export type Count2 = number
+export type Count3 = number
 /**
  * Distinct values — a floor unless ``distinctExact``.
  */
@@ -130,7 +157,7 @@ export type Residual = number
 /**
  * Entities holding it.
  */
-export type Count3 = number
+export type Count4 = number
 /**
  * Integer, Float, String, Boolean or List.
  */
@@ -153,7 +180,7 @@ export type Tagged = number | null
 /**
  * Entities carrying the tag.
  */
-export type Count4 = number
+export type Count5 = number
 export type Tag = string
 /**
  * Every tag, with the entities carrying it.
@@ -177,6 +204,8 @@ export type Predicate =
     | HasOutgoingPredicate
     | PathPredicate
     | MatchAllPredicate
+    | IsPredicate
+    | RelatedPredicate
     | GroupPredicate
 /**
  * Relevance multiplier when match='fulltext'.
@@ -225,6 +254,11 @@ export type Kind4 = 'hasProperty'
 export type Negate = boolean
 export type Kind5 = 'descendantOf'
 export type Maxdepth1 = number | null
+export type Refs = NodeRef[] | null
+export type Casesensitive2 = boolean
+export type Entitytype2 = string | null
+export type Path = string[] | null
+export type Urn1 = string | null
 export type Urns1 = string[]
 export type Direction = 'out' | 'in' | 'both'
 /**
@@ -236,7 +270,7 @@ export type Edgeclass = 'lineage' | 'containment' | 'any'
  */
 export type Edgepredicate =
     (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
-export type Casesensitive2 = boolean
+export type Casesensitive3 = boolean
 export type Includemissing1 = boolean
 export type Key3 = string
 export type Kind6 = 'edgeProperty'
@@ -270,6 +304,7 @@ export type Op3 = 'and' | 'or' | 'not'
 export type Edgetypes = string[] | null
 export type Hops = number
 export type Kind9 = 'withinHops'
+export type Refs1 = NodeRef[] | null
 export type Urns2 = string[]
 export type Kind10 = 'entityType'
 export type Op4 = 'in' | 'notIn'
@@ -324,14 +359,75 @@ export type Maxhops = number
  */
 export type Maxpaths = number
 /**
+ * Starting nodes by name path (or URN).
+ */
+export type Sourcerefs = NodeRef[] | null
+/**
  * Starting nodes. The provider runs a variable-length match outward (or inward) from each.
  */
 export type Sourceurns = string[]
 /**
- * Endpoint nodes. Paths terminate here.
+ * The starting nodes as a condition instead of named: any entity meeting it — or, when the targets are a condition too, any in the search's scope.
  */
-export type Targeturns = string[]
+export type Sourcewhere =
+    | (
+          | TextPredicate
+          | PropertyPredicate
+          | TagPredicate
+          | HasPropertyPredicate
+          | DescendantOfPredicate
+          | WithinHopsPredicate
+          | EntityTypePredicate
+          | LayerPredicate
+          | DegreePredicate
+          | IsOrphanPredicate
+          | IsLeafPredicate
+          | IsRootPredicate
+          | HasIncomingPredicate
+          | HasOutgoingPredicate
+          | PathPredicate
+          | MatchAllPredicate
+          | IsPredicate
+          | RelatedPredicate
+          | GroupPredicate
+      )
+    | null
 export type Kind19 = 'all'
+export type Kind20 = 'is'
+export type Refs2 = NodeRef[]
+export type Axis =
+    'parent' | 'child' | 'ancestor' | 'descendant' | 'root' | 'upstream' | 'downstream' | 'neighbor'
+export type Op6 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
+export type Value2 = number
+export type Edge = (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
+export type Edgetypes8 = string[] | null
+export type Kind21 = 'related'
+export type Maxhops1 = number | null
+export type Minhops = number
+export type Quantifier = 'any' | 'none' | 'all'
+export type Where =
+    | (
+          | TextPredicate
+          | PropertyPredicate
+          | TagPredicate
+          | HasPropertyPredicate
+          | DescendantOfPredicate
+          | WithinHopsPredicate
+          | EntityTypePredicate
+          | LayerPredicate
+          | DegreePredicate
+          | IsOrphanPredicate
+          | IsLeafPredicate
+          | IsRootPredicate
+          | HasIncomingPredicate
+          | HasOutgoingPredicate
+          | PathPredicate
+          | MatchAllPredicate
+          | IsPredicate
+          | RelatedPredicate
+          | GroupPredicate
+      )
+    | null
 export type Children1 = (
     | TextPredicate
     | PropertyPredicate
@@ -349,16 +445,52 @@ export type Children1 = (
     | HasOutgoingPredicate
     | PathPredicate
     | MatchAllPredicate
+    | IsPredicate
+    | RelatedPredicate
     | GroupPredicate
 )[]
-export type Kind20 = 'group'
-export type Op6 = 'and' | 'or' | 'not'
+export type Kind22 = 'group'
+export type Op7 = 'and' | 'or' | 'not'
+/**
+ * Endpoint nodes by name path (or URN).
+ */
+export type Targetrefs = NodeRef[] | null
+/**
+ * Endpoint nodes. Paths terminate here.
+ */
+export type Targeturns = string[]
+/**
+ * The endpoint nodes as a condition instead of named.
+ */
+export type Targetwhere =
+    | (
+          | TextPredicate
+          | PropertyPredicate
+          | TagPredicate
+          | HasPropertyPredicate
+          | DescendantOfPredicate
+          | WithinHopsPredicate
+          | EntityTypePredicate
+          | LayerPredicate
+          | DegreePredicate
+          | IsOrphanPredicate
+          | IsLeafPredicate
+          | IsRootPredicate
+          | HasIncomingPredicate
+          | HasOutgoingPredicate
+          | PathPredicate
+          | MatchAllPredicate
+          | IsPredicate
+          | RelatedPredicate
+          | GroupPredicate
+      )
+    | null
 export type Items = SearchRuleItem[]
 export type Waitms1 = number
 /**
  * Matches found so far — exact once complete.
  */
-export type Count5 = number
+export type Count6 = number
 export type Error = string | null
 export type Sessionid3 = string | null
 export type Status2 = 'running' | 'complete'
@@ -376,6 +508,12 @@ export type Keys = string[]
  * How many edges of this type were sampled.
  */
 export type Sampled = number
+/**
+ * Where the edge keeps each key: ``native`` — the platform's own fields, every operator applies — or ``json``, a user's property kept in the edge's JSON, which a condition can test with is set, is, is not and is one of.
+ */
+export type Storedas = {
+    [k: string]: 'native' | 'json'
+} | null
 /**
  * Distinct values per edge property key. Powers the edge-predicate editor's value autocomplete in W2.
  */
@@ -464,6 +602,8 @@ export type Predicate1 =
     | HasOutgoingPredicate
     | PathPredicate
     | MatchAllPredicate
+    | IsPredicate
+    | RelatedPredicate
     | GroupPredicate
 export type Sessionid4 = string | null
 export type Waitms2 = number
@@ -568,7 +708,35 @@ export type Predicate2 =
     | HasOutgoingPredicate
     | PathPredicate
     | MatchAllPredicate
+    | IsPredicate
+    | RelatedPredicate
     | GroupPredicate
+export type Refs3 = NodeRef[]
+export type Dataversion4 = string | null
+export type Elapsedms3 = number
+/**
+ * How many entities the reference names.
+ */
+export type Count7 = number
+/**
+ * Why the reference can't be used — it names too many.
+ */
+export type Error1 = string | null
+/**
+ * Top-level container first, parent last.
+ */
+export type Ancestorpath = AncestorRef[]
+export type Displayname2 = string
+export type Entitytype3 = string
+export type Urn2 = string
+/**
+ * The first few, up to 10.
+ */
+export type Matches1 = ResolvedEntity[]
+/**
+ * One per requested reference, in the same order.
+ */
+export type Results1 = SearchRefResolution[]
 export type Aggregates = SearchAggregateBucket[][] | null
 export type Ancestordepthfromscoperoot = number
 export type Ancestordisplayname = string
@@ -578,10 +746,7 @@ export type Matchcount = number
 /**
  * Root → parent (excluding the hit itself). Populated when options.include_ancestor_path is true.
  */
-export type Ancestorpath = AncestorRef[] | null
-export type Displayname1 = string
-export type Entitytype1 = string
-export type Urn = string
+export type Ancestorpath1 = AncestorRef[] | null
 export type Field = string
 /**
  * ``[start, end]`` offsets within ``snippet`` (not within the original field) — the snippet's leading ellipsis is already counted.
@@ -593,14 +758,14 @@ export type Highlights1 = SearchHighlight[]
 export type Matchedpredicates = number[]
 export type Childcount = number | null
 export type Description = string | null
-export type Displayname2 = string
-export type Entitytype2 = string
+export type Displayname3 = string
+export type Entitytype4 = string
 export type Lastsyncedat = string | null
 export type Layerassignment2 = string | null
 export type Qualifiedname = string | null
 export type Sourcesystem = string | null
 export type Tags1 = string[]
-export type Urn1 = string
+export type Urn3 = string
 export type Version = string | null
 export type Score1 = number
 export type Samplehits = SearchHit[]
@@ -627,9 +792,9 @@ export type Cursor1 = string | null
 /**
  * The graph data the session read. Opaque.
  */
-export type Dataversion4 = string | null
+export type Dataversion5 = string | null
 export type Deadlineexceeded = boolean
-export type Elapsedms3 = number
+export type Elapsedms4 = number
 /**
  * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
  */
@@ -678,13 +843,13 @@ export type Truncated = boolean
  * Every entity type was read within the time budget.
  */
 export type Complete = boolean
-export type Elapsedms4 = number
+export type Elapsedms5 = number
 export type Key5 = string
 /**
  * A type had more distinct values than listed.
  */
 export type Truncated1 = boolean
-export type Count6 = number
+export type Count8 = number
 export type Values3 = SearchValueSuggestion[]
 
 /**
@@ -715,6 +880,8 @@ export interface SearchApiContract {
     searchMembershipRequest?: SearchMembershipRequest | null
     searchMembershipResult?: SearchMembershipResult | null
     searchQuery?: SearchQuery | null
+    searchResolveRequest?: SearchResolveRequest | null
+    searchResolveResult?: SearchResolveResult | null
     searchResultPage?: SearchResultPage | null
     searchValuesResult?: SearchValuesResult | null
 }
@@ -738,6 +905,26 @@ export interface ScopeDiagnostics {
     effectiveRootUrns?: Effectiverooturns
     lineageEdgeTypes?: Lineageedgetypes
     notes?: Notes
+    resolvedRefs?: Resolvedrefs
+}
+/**
+ * One name reference in a predicate, and what it named.
+ */
+export interface ResolvedRef {
+    ambiguous: Ambiguous
+    at: At
+    count: Count
+    ref: Ref
+    samples?: Samples
+}
+/**
+ * Compact ancestor identifier — enough for the FE to render a
+ * breadcrumb without re-fetching the node.
+ */
+export interface AncestorRef {
+    displayName: Displayname
+    entityType: Entitytype
+    urn: Urn
 }
 /**
  * ``POST /search/ancestor-counts``: how many of a search's matches each
@@ -795,9 +982,9 @@ export interface Counts {
     [k: string]: SearchAncestorCount
 }
 export interface SearchAncestorCount {
-    count: Count
-    displayName?: Displayname
-    entityType?: Entitytype
+    count: Count1
+    displayName?: Displayname1
+    entityType?: Entitytype1
     typeCounts?: Typecounts
 }
 /**
@@ -834,7 +1021,7 @@ export interface SearchCatalogResult {
     tags?: Tags
 }
 export interface SearchCatalogEntityType {
-    count: Count1
+    count: Count2
     type: Type
 }
 /**
@@ -849,7 +1036,7 @@ export interface SearchProgress {
 }
 export interface SearchCatalogProperty {
     byEntityType?: Byentitytype
-    count: Count2
+    count: Count3
     distinct: Distinct
     distinctExact: Distinctexact
     key: Key
@@ -869,12 +1056,12 @@ export interface Kinds {
     [k: string]: number
 }
 export interface SearchCatalogValue {
-    count: Count3
+    count: Count4
     kind: Kind
     value: unknown
 }
 export interface SearchCatalogTag {
-    count: Count4
+    count: Count5
     tag: Tag
 }
 /**
@@ -964,7 +1151,7 @@ export interface HasPropertyPredicate {
     negate?: Negate
 }
 /**
- * Clamp matches to the subtree(s) rooted at ``urns``.
+ * Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.
  *
  * Lives as a predicate (not on ``SearchScope``) so it can sit inside
  * OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.
@@ -974,7 +1161,32 @@ export interface HasPropertyPredicate {
 export interface DescendantOfPredicate {
     kind?: Kind5
     maxDepth?: Maxdepth1
-    urns: Urns1
+    refs?: Refs
+    urns?: Urns1
+}
+/**
+ * An entity named by its URN, or by its path of display names.
+ *
+ * A path starts at a top-level entity of the data source (one inside no
+ * other) and steps down one containment level per segment:
+ * ``["Country", "United Kingdom"]``. ``"**"`` stands for any number of
+ * levels, none included — ``["Country", "**", "London"]`` is a London
+ * anywhere under Country — and a leading ``"**"`` starts anywhere in the
+ * search's scope, so a name unique within the view (or the layer a
+ * search is scoped to) is enough. Names compare with the display name,
+ * exactly unless ``caseSensitive`` is false (only paths without ``"**"``
+ * may ignore case); ``entityType`` narrows the last step. A path that
+ * names several entities refers to all of them, at most 64.
+ *
+ * Unlike a URN, a path means the same thing in every environment, so a
+ * saved query or rule that uses one survives a library or view moving
+ * between them.
+ */
+export interface NodeRef {
+    caseSensitive?: Casesensitive2
+    entityType?: Entitytype2
+    path?: Path
+    urn?: Urn1
 }
 /**
  * Match nodes within N relationship hops of any anchor URN.
@@ -991,7 +1203,8 @@ export interface WithinHopsPredicate {
     edgeTypes?: Edgetypes
     hops: Hops
     kind?: Kind9
-    urns: Urns2
+    refs?: Refs1
+    urns?: Urns2
 }
 /**
  * Typed comparison against a single edge property.
@@ -1002,7 +1215,7 @@ export interface WithinHopsPredicate {
  * ``PropertyPredicate``'s — same operators, value shapes and types.
  */
 export interface EdgePropertyPredicate {
-    caseSensitive?: Casesensitive2
+    caseSensitive?: Casesensitive3
     includeMissing?: Includemissing1
     key: Key3
     kind?: Kind6
@@ -1127,7 +1340,9 @@ export interface HasOutgoingPredicate {
  * sequences instead of (or in addition to) flat hits / aggregates.
  *
  * Powers UC3: "find all paths from dataset:orders to dataset:reporting
- * going through ≤4 lineage hops".
+ * going through ≤4 lineage hops". Either end may be a condition instead
+ * (``sourceWhere``, ``targetWhere``) — "every route from a topic to a
+ * dataset through edges in stream mode". A route passes no entity twice.
  */
 export interface PathPredicate {
     direction?: Direction2
@@ -1137,8 +1352,12 @@ export interface PathPredicate {
     kind?: Kind18
     maxHops?: Maxhops
     maxPaths?: Maxpaths
-    sourceUrns: Sourceurns
-    targetUrns: Targeturns
+    sourceRefs?: Sourcerefs
+    sourceUrns?: Sourceurns
+    sourceWhere?: Sourcewhere
+    targetRefs?: Targetrefs
+    targetUrns?: Targeturns
+    targetWhere?: Targetwhere
 }
 /**
  * Every entity in scope — "all in this view", "count everything".
@@ -1151,6 +1370,51 @@ export interface MatchAllPredicate {
     kind?: Kind19
 }
 /**
+ * The entities themselves: matches an entity a reference names —
+ * ``Country / United Kingdom``, or a URN.
+ */
+export interface IsPredicate {
+    kind?: Kind20
+    refs: Refs2
+}
+/**
+ * Entities whose related entities meet a condition.
+ *
+ * ``axis`` says which relatives: up the containment tree (``parent``, any
+ * ``ancestor``, the top-level container ``root``), down it (``child``, any
+ * ``descendant``), or along lineage — ``upstream`` (what feeds it),
+ * ``downstream`` (what it feeds), ``neighbor`` (either way) — one step, or
+ * ``minHops`` to ``maxHops``. ``where`` is the condition a relative must
+ * meet: any predicate, relationships included, so conditions chain ("feeds
+ * a dashboard whose parent is Finance"); without one, any relative will
+ * do. A lineage relationship may also require every edge it walks to meet
+ * ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
+ * the rollups).
+ *
+ * ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
+ * ``all`` do — and there is at least one. ``count`` compares how many
+ * distinct relatives meet it instead. An entity is never its own relative,
+ * a cycle notwithstanding.
+ */
+export interface RelatedPredicate {
+    axis: Axis
+    count?: CountSpec | null
+    edge?: Edge
+    edgeTypes?: Edgetypes8
+    kind?: Kind21
+    maxHops?: Maxhops1
+    minHops?: Minhops
+    quantifier?: Quantifier
+    where?: Where
+}
+/**
+ * How many related entities must meet a relationship's condition.
+ */
+export interface CountSpec {
+    op?: Op6
+    value: Value2
+}
+/**
  * Boolean composition of child predicates.
  *
  * ``op='not'`` must have exactly one child — the service-layer validator
@@ -1159,8 +1423,8 @@ export interface MatchAllPredicate {
  */
 export interface GroupPredicate {
     children: Children1
-    kind?: Kind20
-    op?: Op6
+    kind?: Kind22
+    op?: Op7
 }
 /**
  * Rule id → the session a previous answer returned.
@@ -1177,7 +1441,7 @@ export interface Counts1 {
     [k: string]: SearchRuleCount
 }
 export interface SearchRuleCount {
-    count: Count5
+    count: Count6
     error?: Error
     progress?: SearchProgress | null
     sessionId?: Sessionid3
@@ -1213,6 +1477,7 @@ export interface Edges {
 export interface SearchDiscoverEdgeInfo {
     keys?: Keys
     sampled: Sampled
+    storedAs?: Storedas
     valueSamplesByKey?: Valuesamplesbykey
 }
 export interface Labels {
@@ -1372,6 +1637,34 @@ export interface AggregationSpec {
     subAggregation?: AggregationSpec | null
 }
 /**
+ * ``POST /search/resolve``: which entities each name reference names
+ * in the view's scope — what the reference picker checks as it is
+ * typed, and how it learns the shortest path that names one entity.
+ */
+export interface SearchResolveRequest {
+    refs: Refs3
+    scope: SearchScope
+}
+export interface SearchResolveResult {
+    dataVersion?: Dataversion4
+    elapsedMs?: Elapsedms3
+    results: Results1
+}
+export interface SearchRefResolution {
+    count: Count7
+    error?: Error1
+    matches?: Matches1
+}
+/**
+ * One entity a reference names, with the containers it sits in.
+ */
+export interface ResolvedEntity {
+    ancestorPath?: Ancestorpath
+    displayName: Displayname2
+    entityType: Entitytype3
+    urn: Urn2
+}
+/**
  * Provider + service response. One inner list in ``aggregates`` per
  * requested AggregationSpec.
  */
@@ -1381,9 +1674,9 @@ export interface SearchResultPage {
     candidateCount?: Candidatecount
     countStatus?: Countstatus
     cursor?: Cursor1
-    dataVersion?: Dataversion4
+    dataVersion?: Dataversion5
     deadlineExceeded?: Deadlineexceeded
-    elapsedMs: Elapsedms3
+    elapsedMs: Elapsedms4
     hits?: Hits
     paths?: Paths
     progress?: SearchProgress | null
@@ -1419,20 +1712,11 @@ export interface SearchAggregateBucket {
  * enables the FE to show "matched on: name, logicalType" badges.
  */
 export interface SearchHit {
-    ancestorPath?: Ancestorpath
+    ancestorPath?: Ancestorpath1
     highlights?: Highlights1
     matchedPredicates?: Matchedpredicates
     node: GraphNode
     score?: Score1
-}
-/**
- * Compact ancestor identifier — enough for the FE to render a
- * breadcrumb without re-fetching the node.
- */
-export interface AncestorRef {
-    displayName: Displayname1
-    entityType: Entitytype1
-    urn: Urn
 }
 /**
  * Where in a hit's text the match landed, for ``<mark>`` rendering.
@@ -1446,15 +1730,15 @@ export interface SearchHighlight {
 export interface GraphNode {
     childCount?: Childcount
     description?: Description
-    displayName: Displayname2
-    entityType: Entitytype2
+    displayName: Displayname3
+    entityType: Entitytype4
     lastSyncedAt?: Lastsyncedat
     layerAssignment?: Layerassignment2
     properties?: Properties1
     qualifiedName?: Qualifiedname
     sourceSystem?: Sourcesystem
     tags?: Tags1
-    urn: Urn1
+    urn: Urn3
     version?: Version
 }
 export interface Properties1 {
@@ -1511,7 +1795,7 @@ export interface QueryExplain {
  */
 export interface SearchValuesResult {
     complete?: Complete
-    elapsedMs?: Elapsedms4
+    elapsedMs?: Elapsedms5
     key: Key5
     truncated?: Truncated1
     values?: Values3
@@ -1521,6 +1805,6 @@ export interface SearchValuesResult {
  * ``value`` keeps its stored kind — a 19-digit id is that integer.
  */
 export interface SearchValueSuggestion {
-    count?: Count6
+    count?: Count8
     value?: unknown
 }

@@ -9,13 +9,15 @@
  * dropdown.
  */
 import { ChevronDown, Plus } from 'lucide-react'
-import { type FC, useRef, useState } from 'react'
+import { type FC, useContext, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { Predicate } from '@/types/search'
 
 import { LeafPickerDropdown } from './LeafPickerDropdown'
 import type { LeafKindMeta } from '../../builder/leafKinds'
+import { RelationContext } from '../relationContext'
+import { RELATION_DEPTH_MAX } from '../relations'
 
 
 export interface AddRowButtonProps {
@@ -33,6 +35,12 @@ export const AddRowButton: FC<AddRowButtonProps> = ({
 }) => {
     const [open, setOpen] = useState(false)
     const buttonRef = useRef<HTMLButtonElement>(null)
+    // Inside a relationship's condition: no scope of the search, and no
+    // relationship past the deepest the server takes.
+    const depth = useContext(RelationContext).depth
+    const allowed = (m: LeafKindMeta) => (!filter || filter(m))
+        && !(depth > 0 && m.category === 'scope')
+        && !(depth >= RELATION_DEPTH_MAX && m.kind === 'related')
 
     return (
         <>
@@ -65,7 +73,7 @@ export const AddRowButton: FC<AddRowButtonProps> = ({
                     setOpen(false)
                 }}
                 onDismiss={() => setOpen(false)}
-                filter={filter}
+                filter={allowed}
             />
         </>
     )

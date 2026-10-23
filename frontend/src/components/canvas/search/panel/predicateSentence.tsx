@@ -25,10 +25,20 @@ import { type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
-import type { GroupPredicate, Predicate } from '@/types/search'
+import type {
+    EdgePredicateNode,
+    EdgePropertyPredicate,
+    GroupPredicate,
+    NodeRef,
+    Predicate,
+    PropertyPredicate,
+    RelatedPredicate,
+} from '@/types/search'
 
 import { arityOf, isNegative, operatorLabel, predicateType } from '../typed/operators'
 import { describeDuration } from '../typed/valueCodec'
+
+import { axisMeta, hopRange, refLabel } from './relations'
 
 
 // ---------------------------------------------------------------------------
@@ -302,19 +312,32 @@ function leafSentence(p: Predicate): ReactNode {
         case 'isOrphan':     return <>has no lineage edges</>
         case 'hasIncoming':  return <>has incoming lineage edges</>
         case 'hasOutgoing':  return <>has outgoing lineage edges</>
-        case 'descendantOf':
-            return <>is inside {p.urns.length === 1
-                ? <Value>{formatUrnLabel(p.urns[0])}</Value>
-                : <><Value>{p.urns.length}</Value> subtrees</>}</>
+        case 'descendantOf': {
+            const anchors = named(p.urns, p.refs)
+            return <>is inside {anchors.length === 1
+                ? <Value>{anchors[0]}</Value>
+                : <><Value>{anchors.length}</Value> subtrees</>}</>
+        }
         case 'withinHops': {
             const dirText =
                 p.direction === 'in' ? 'upstream of'
                     : p.direction === 'out' ? 'downstream of'
                         : 'within'
-            return <>is ≤ {p.hops} hop{p.hops === 1 ? '' : 's'} {dirText} <Value>{p.urns[0] ?? '…'}</Value></>
+            return <>is ≤ {p.hops} hop{p.hops === 1 ? '' : 's'} {dirText} <Value>{named(p.urns, p.refs)[0] ?? '…'}</Value></>
         }
-        case 'path':
-            return <>lies on a path from <Value>{p.sourceUrns[0] ?? '…'}</Value> to <Value>{p.targetUrns[0] ?? '…'}</Value> (≤ {p.maxHops} hops)</>
+        case 'path': {
+            const end = (urns?: string[] | null, refs?: NodeRef[] | null, where?: Predicate | null) =>
+                where ? <>an entity where {leafOrGroup(where)}</> : <Value>{named(urns, refs)[0] ?? '…'}</Value>
+            return <>lies on a path from {end(p.sourceUrns, p.sourceRefs, p.sourceWhere)} to {end(p.targetUrns, p.targetRefs, p.targetWhere)} (≤ {p.maxHops} hops)</>
+        }
+        case 'is': {
+            const names = named([], p.refs)
+            return names.length === 1
+                ? <>is <Value>{names[0]}</Value></>
+                : <>is one of {names.map((n, i) => <span key={i}>{i > 0 && ', '}<Value>{n}</Value></span>)}</>
+        }
+        case 'related':
+            return relationSentence(p)
         case 'degree':
             return <>has {p.direction ?? 'any'} edges {p.op} {p.value}</>
         case 'all':
@@ -324,6 +347,73 @@ function leafSentence(p: Predicate): ReactNode {
         default:
             return <>(unknown filter)</>
     }
+}
+
+
+/** The entities an end names: its URNs' labels, then its names. */
+function named(urns?: string[] | null, refs?: NodeRef[] | null): string[] {
+    return [...(urns ?? []).map((u) => formatUrnLabel(u)), ...(refs ?? []).map(refLabel)]
+}
+
+
+function leafOrGroup(p: Predicate): ReactNode {
+    return p.kind === 'group' ? renderInner(p, 1) : leafSentence(p)
+}
+
+
+const COUNT_WORDS: Record<string, string> = {
+    eq: 'exactly', neq: 'other than', gt: 'more than', gte: 'at least', lt: 'fewer than',
+    lte: 'at most',
+}
+
+
+/** "has a parent where type is domain", "has no source within 3 hops",
+ *  "has children, every one where …", "has more than 100 children
+ *  where …" — the relative named for what it is, never in or out. */
+function relationSentence(p: RelatedPredicate): ReactNode {
+    const meta = axisMeta(p.axis)
+    const [lo, hi] = hopRange(p)
+    const span = lo === hi ? `${hi}` : `${lo}–${hi}`
+    const reach = meta.lineage
+        ? (hi > 1 ? <> within {span} hops</> : null)
+        : meta.hops && (p.minHops || p.maxHops) ? <> {span} levels away</> : null
+    const via = p.edge ? <> through edges where {edgeSentence(p.edge)}</> : null
+    const cond = p.where ? <> where {leafOrGroup(p.where)}</> : null
+    if (p.count) {
+        const n = p.count.value
+        return <>has {COUNT_WORDS[p.count.op ?? 'gte']} <Value quoted={false}>{n}</Value>{' '}
+            {n === 1 ? meta.noun : meta.plural}{reach}{via}{cond}</>
+    }
+    if (p.quantifier === 'none') return <>has <strong className="text-rose-300">no</strong> {meta.noun}{reach}{via}{cond}</>
+    if (p.quantifier === 'all' && p.where) {
+        return <>has {meta.plural}{reach}{via}, <strong className="text-accent-lineage">every one</strong>{cond}</>
+    }
+    return <>has a{/^[aeiou]/.test(meta.noun) ? 'n' : ''} {meta.noun}{reach}{via}{cond}</>
+}
+
+
+function edgeSentence(ep: EdgePredicateNode): ReactNode {
+    if (ep.kind === 'edgeGroup') {
+        if (ep.op === 'not') return <><strong className="text-rose-300">NOT</strong> {edgeSentence(ep.children[0])}</>
+        const join = ep.op === 'or' ? ' or ' : ' and '
+        return <>{ep.children.map((c, i) => <span key={i}>{i > 0 && join}{edgeSentence(c)}</span>)}</>
+    }
+    if (ep.kind === 'edgeHasProperty') {
+        return <>{ep.negate ? 'there is no' : 'there is a'} <Value>{ep.key}</Value></>
+    }
+    const prop = ep as EdgePropertyPredicate
+    const op = prop.op ?? 'eq'
+    const arity = arityOf(op)
+    const type = predicateType({ ...prop, kind: 'property' } as PropertyPredicate)
+    return (
+        <>
+            <Value>{prop.key}</Value> {operatorLabel(op, type)}
+            {arity !== 'none' && arity !== 'duration' && (
+                <>{' '}<PropertyValue value={prop.value} between={op === 'between'}
+                                      bare={BARE_TYPES.has(type) && !TEXT_OPS.has(op)} /></>
+            )}
+        </>
+    )
 }
 
 

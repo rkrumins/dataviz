@@ -61,6 +61,8 @@ import type {
     SearchDiscoverResult,
     SearchValuesResult,
     SearchMembershipRequest,
+    SearchResolveRequest,
+    SearchResolveResult,
     SearchMembershipResult,
     SearchCountsRequest,
     SearchCountsResult,
@@ -575,6 +577,22 @@ export class RemoteGraphProvider implements GraphDataProvider {
         body: SearchMembershipRequest, opts?: { signal?: AbortSignal },
     ): Promise<SearchMembershipResult> {
         return await this.fetch<SearchMembershipResult>('/search/membership', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Which entities each name reference names, in the view's scope — POST
+     * /search/resolve: every match counted, the first few with their
+     * containers. The picker shows "1 entity", "3 entities", "not found"
+     * as a name path is typed.
+     */
+    async resolveSearchRefs(
+        body: SearchResolveRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchResolveResult> {
+        return await this.fetch<SearchResolveResult>('/search/resolve', {
             method: 'POST',
             body: JSON.stringify(body),
             signal: opts?.signal,

@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import type { Predicate } from '@/types/search'
 
 import { formatPredicateAsSentence } from '../predicateSentence'
+import { QuerySentence } from '../QuerySentence'
 
 
 function leaf(value: string): Predicate {
@@ -196,5 +197,44 @@ describe('predicateSentence — property values read as what they are', () => {
         const text = rendered(prop('contains', ''))
         expect(text).toContain('"gvHash" contains …')
         expect(text).not.toContain('""')
+    })
+})
+
+
+describe('predicateSentence — relationships and names', () => {
+    const type = (value: string): Predicate => ({ kind: 'entityType', op: 'in', values: [value] })
+
+    it.each<[string, Predicate, RegExp]>([
+        ['a parent', { kind: 'related', axis: 'parent', where: type('domain') }, /has a parent where.*domain/],
+        ['the top-level container', { kind: 'related', axis: 'root',
+            where: { kind: 'is', refs: [{ path: ['Country'] }] } }, /has a top-level container where is Country/],
+        ['no source', { kind: 'related', axis: 'upstream', quantifier: 'none' }, /has no source\.$/],
+        ['every child', { kind: 'related', axis: 'child', quantifier: 'all', where: type('column') },
+            /has children, every one where/],
+        ['a count', { kind: 'related', axis: 'child', count: { op: 'gt', value: 100 }, where: type('column') },
+            /has more than 100 children where/],
+        ['one of a count', { kind: 'related', axis: 'upstream', count: { op: 'eq', value: 1 } },
+            /has exactly 1 source\.$/],
+        ['hops and edges', { kind: 'related', axis: 'downstream', maxHops: 3,
+            edge: { kind: 'edgeProperty', key: 'mode', op: 'eq', value: 'stream' } },
+            /has a target within 1–3 hops through edges where mode/],
+        ['levels', { kind: 'related', axis: 'ancestor', minHops: 2, maxHops: 4 }, /has an ancestor 2–4 levels away/],
+        ['a named entity', { kind: 'is', refs: [{ path: ['Sales', 'orders'] }] }, /is Sales \/ orders/],
+        ['named entities', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }, /is one of a, b/],
+        ['inside by name', { kind: 'descendantOf', urns: [], refs: [{ path: ['Country', 'UK'] }] },
+            /is inside Country \/ UK/],
+    ])('reads %s', (_, p, sentence) => {
+        expect(rendered(p).replace(/\s+/g, ' ').replace(/["“”]/g, '')).toMatch(sentence)
+    })
+})
+
+
+describe('QuerySentence — the container a query looks inside', () => {
+    it('shows a container named by its path as the scope chip', () => {
+        const { container } = render(<QuerySentence draftPredicate={{ kind: 'group', op: 'and', children: [
+            leaf('orders'),
+            { kind: 'descendantOf', urns: [], refs: [{ path: ['Country', 'UK'] }] },
+        ] }} />)
+        expect(container.textContent).toContain('inside Country / UK')
     })
 })

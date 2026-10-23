@@ -12,6 +12,8 @@
  */
 import { describe, expect, it } from 'vitest'
 
+import type { Predicate } from '@/types/search'
+
 import { parsePredicate } from '../predicateDsl'
 import { buildRunnablePredicate } from '../runnablePredicate'
 
@@ -70,5 +72,32 @@ describe('buildRunnablePredicate — preserves root op', () => {
 
     it('null draft returns null', () => {
         expect(buildRunnablePredicate(null)).toBeNull()
+    })
+})
+
+
+describe('buildRunnablePredicate — relationships and names', () => {
+    const run = (text: string) => buildRunnablePredicate(parsePredicate(text).predicate)?.predicate ?? null
+
+    it('runs a relationship with no condition: any relative will do', () => {
+        expect(run('child()')).toEqual({ kind: 'related', axis: 'child' })
+    })
+
+    it('holds back a relationship until its own conditions are finished', () => {
+        const draft = { kind: 'group', op: 'and', children: [
+            { kind: 'entityType', op: 'in', values: ['dataset'] },
+            { kind: 'related', axis: 'parent', where: { kind: 'group', op: 'and', children: [
+                { kind: 'entityType', op: 'in', values: ['domain'] },
+                { kind: 'hasProperty', key: ' ' },
+            ] } },
+        ] } as Predicate
+        expect(buildRunnablePredicate(draft)?.predicate).toEqual(
+            { kind: 'entityType', op: 'in', values: ['dataset'] })
+    })
+
+    it('runs a container named by its path, and holds back a name not yet typed', () => {
+        expect(run('inside @"Country/UK"')).toMatchObject({ kind: 'descendantOf',
+            refs: [{ path: ['Country', 'UK'] }] })
+        expect(buildRunnablePredicate({ kind: 'is', refs: [] })).toBeNull()
     })
 })

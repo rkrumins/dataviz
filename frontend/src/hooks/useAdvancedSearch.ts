@@ -74,7 +74,7 @@ const RECENTABLE_KINDS = new Set([
     'group', 'text', 'property', 'tag', 'hasProperty',
     'entityType', 'layer', 'descendantOf', 'withinHops',
     'degree', 'isOrphan', 'isLeaf', 'isRoot',
-    'hasIncoming', 'hasOutgoing',
+    'hasIncoming', 'hasOutgoing', 'related', 'is',
 ])
 
 function isRecentablePredicate(p: Predicate): boolean {
