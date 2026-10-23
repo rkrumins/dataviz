@@ -50,7 +50,6 @@ import {
     useCallback,
     useEffect,
     useMemo,
-    useRef,
     useState,
 } from 'react'
 
@@ -540,36 +539,42 @@ export const QueryCard: FC<QueryCardProps> = ({
 // Code mode — DSL textarea with live parse feedback
 // ---------------------------------------------------------------------------
 
-function CodeMode({
+export function CodeMode({
     draft, isRunning, onCommit,
 }: {
     draft: Predicate | null
     isRunning: boolean
     onCommit: (p: Predicate | null) => void
 }) {
-    const [text, setText] = useState(() => stringifyPredicate(draft))
-    const lastDraftStr = useRef<string>(stringifyPredicate(draft))
-
-    // Mirror external draft → text only when the user hasn't edited.
-    useEffect(() => {
-        const canonical = stringifyPredicate(draft)
-        if (text === lastDraftStr.current) {
-            setText(canonical)
-        }
-        lastDraftStr.current = canonical
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft])
+    const shown = stringifyPredicate(draft)
+    const [text, setText] = useState(shown)
+    // Typed since the text last matched the draft: only then is there
+    // anything to apply, and only then does a change from outside (a
+    // canvas question, How it matches, undo) wait instead of replacing it.
+    const [typed, setTyped] = useState(false)
+    // What the last apply sent: when it comes back as the draft, the box
+    // keeps the user's own spelling.
+    const [applied, setApplied] = useState<string | null>(null)
+    const [seen, setSeen] = useState(shown)
+    if (shown !== seen) {
+        setSeen(shown)
+        setApplied(null)
+        if (shown !== applied && !typed) setText(shown)
+    }
 
     const parsed = useMemo(() => parsePredicate(text), [text])
     const commit = useCallback(() => {
+        if (!typed) return
+        setTyped(false)
+        setApplied(stringifyPredicate(parsed.predicate))
         onCommit(parsed.predicate)
-    }, [parsed, onCommit])
+    }, [typed, parsed, onCommit])
 
     return (
         <div className="flex flex-col gap-1.5">
             <textarea
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => { setText(e.target.value); setTyped(true) }}
                 onKeyDown={(e) => {
                     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                         e.preventDefault()

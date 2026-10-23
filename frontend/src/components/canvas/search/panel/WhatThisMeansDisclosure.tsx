@@ -15,7 +15,7 @@
  * user can glance and decide whether to expand.
  */
 import { ChevronDown, Sparkles } from 'lucide-react'
-import { type FC, useState } from 'react'
+import { type FC, useContext, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useDraftPredicate } from '@/store/searchStore'
@@ -23,6 +23,7 @@ import type { Predicate } from '@/types/search'
 
 import { formatPredicateAsSentence } from './predicateSentence'
 import { rootGroupOp, topLevelConditions } from './predicateComposition'
+import { RelationContext } from './relationContext'
 
 
 /**
@@ -31,13 +32,18 @@ import { rootGroupOp, topLevelConditions } from './predicateComposition'
  * predicate. When omitted, it falls back to the singleton
  * ``draftPredicate`` so the live Advanced-Search panel keeps working
  * with zero-arg call sites untouched.
+ *
+ * Inside a relationship or a route's end it renders nothing: the query's
+ * own disclosure already reads the whole thing, nested conditions included.
  */
 export const WhatThisMeansDisclosure: FC<{ predicate?: Predicate | null }> = ({
     predicate,
 }) => {
     const [open, setOpen] = useState(false)
     const storeDraft = useDraftPredicate()
+    const { depth } = useContext(RelationContext)
     const draft = predicate !== undefined ? predicate : storeDraft
+    if (depth > 0) return null
 
     const oneLiner = collapsedSummary(draft)
 
