@@ -1,5 +1,34 @@
 {
   "$defs": {
+    "CountSpec": {
+      "description": "How many related entities must meet a relationship's condition.",
+      "properties": {
+        "op": {
+          "default": "gte",
+          "enum": [
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "CountSpec",
+      "type": "object"
+    },
     "DegreePredicate": {
       "description": "Match nodes by their edge degree.\n\nPowers structural questions like \"find datasets with zero incoming\nlineage edges\" (UC-1 orphan finder), \"find tables with > 5 children\",\nor \"find views that produce >= 1 downstream artifact\".\n\nThe edge type set is resolved from the live ontology at compile time\nvia the provider's ``_get_lineage_edge_types`` /\n``_get_containment_edge_types`` helpers, so no hardcoded names ever\nleak into Cypher. ``edge_types`` lets a caller pin a specific subset\n(e.g. ``['PRODUCES']`` only); when omitted, the ``edge_class`` chooses\nthe default set.",
       "properties": {
@@ -398,6 +427,7 @@
                 "layer": "#/$defs/LayerPredicate",
                 "path": "#/$defs/PathPredicate",
                 "property": "#/$defs/PropertyPredicate",
+                "related": "#/$defs/RelatedPredicate",
                 "tag": "#/$defs/TagPredicate",
                 "text": "#/$defs/TextPredicate",
                 "withinHops": "#/$defs/WithinHopsPredicate"
@@ -455,6 +485,9 @@
               },
               {
                 "$ref": "#/$defs/IsPredicate"
+              },
+              {
+                "$ref": "#/$defs/RelatedPredicate"
               },
               {
                 "$ref": "#/$defs/GroupPredicate"
@@ -1055,6 +1088,7 @@
           "layer": "#/$defs/LayerPredicate",
           "path": "#/$defs/PathPredicate",
           "property": "#/$defs/PropertyPredicate",
+          "related": "#/$defs/RelatedPredicate",
           "tag": "#/$defs/TagPredicate",
           "text": "#/$defs/TextPredicate",
           "withinHops": "#/$defs/WithinHopsPredicate"
@@ -1112,6 +1146,9 @@
         },
         {
           "$ref": "#/$defs/IsPredicate"
+        },
+        {
+          "$ref": "#/$defs/RelatedPredicate"
         },
         {
           "$ref": "#/$defs/GroupPredicate"
@@ -1190,6 +1227,219 @@
         "key"
       ],
       "title": "PropertyPredicate",
+      "type": "object"
+    },
+    "RelatedPredicate": {
+      "description": "Entities whose related entities meet a condition.\n\n``axis`` says which relatives: up the containment tree (``parent``, any\n``ancestor``, the top-level container ``root``), down it (``child``, any\n``descendant``), or along lineage — ``upstream`` (what feeds it),\n``downstream`` (what it feeds), ``neighbor`` (either way) — one step, or\n``minHops`` to ``maxHops``. ``where`` is the condition a relative must\nmeet: any predicate, relationships included, so conditions chain (\"feeds\na dashboard whose parent is Finance\"); without one, any relative will\ndo. A lineage relationship may also require every edge it walks to meet\n``edge``, and walk only ``edgeTypes`` (by default every lineage type but\nthe rollups).\n\n``quantifier``: ``any`` relative meets the condition, ``none`` does, or\n``all`` do — and there is at least one. ``count`` compares how many\ndistinct relatives meet it instead. An entity is never its own relative,\na cycle notwithstanding.",
+      "properties": {
+        "axis": {
+          "enum": [
+            "parent",
+            "child",
+            "ancestor",
+            "descendant",
+            "root",
+            "upstream",
+            "downstream",
+            "neighbor"
+          ],
+          "title": "Axis",
+          "type": "string"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CountSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "edge": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                  "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                  "edgeProperty": "#/$defs/EdgePropertyPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/EdgePropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeHasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeGroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edge"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "related",
+          "default": "related",
+          "title": "Kind",
+          "type": "string"
+        },
+        "maxHops": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxhops"
+        },
+        "minHops": {
+          "default": 1,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Minhops",
+          "type": "integer"
+        },
+        "quantifier": {
+          "default": "any",
+          "enum": [
+            "any",
+            "none",
+            "all"
+          ],
+          "title": "Quantifier",
+          "type": "string"
+        },
+        "where": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Where"
+        }
+      },
+      "required": [
+        "axis"
+      ],
+      "title": "RelatedPredicate",
       "type": "object"
     },
     "SavedQuery": {

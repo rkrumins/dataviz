@@ -42,8 +42,10 @@ from backend.app.services.view_scope import (
     ViewScopeError,
     ViewScopeResolver,
 )
+from backend.common.derived_artifacts import is_derived_edge_type
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
+    LINEAGE_AXES,
     SEARCH_RESOLVE_MATCHES_SHOWN,
     SEARCH_SCOPE_ENTITY_TYPES_MAX,
     AncestorRef,
@@ -54,6 +56,7 @@ from backend.common.models.search import (
     NodeRef,
     PathPredicate,
     PropertyPredicate,
+    RelatedPredicate,
     ResolvedEntity,
     ResolvedRef,
     ScopeDiagnostics,
@@ -113,7 +116,8 @@ class ValidationError(ValueError):
     """Caller-side input error. HTTP layer translates to 400."""
 
 
-def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
+def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: bool = False,
+                        relations: int = 0, top: bool = True) -> int:
     """Walk the tree, enforce caps, return leaf count for the subtree.
 
     Each leaf and each group counts as one node toward depth; OR groups
@@ -121,6 +125,11 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
     iterative-friendly (recursive here for simplicity; predicate trees
     are small). Caps are read from ``DeepSearchSettings`` so operators
     can tune via env vars (DEEP_SEARCH_MAX_TREE_DEPTH etc.).
+
+    A relationship's condition is part of the tree: it nests one level
+    deeper and its leaves count. ``rule``: the predicate is a display
+    rule's (``_validate_relation``). ``relations``: how many relationships
+    the subtree sits in; ``top``: whether it sits in the top-level AND.
     """
     s = get_deep_search_settings()
     if depth > s.max_tree_depth:
@@ -140,11 +149,61 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
         total = 0
         for i, child in enumerate(predicate.children):
             total += _validate_predicate(
-                child, depth=depth + 1, path=f"{path}.children[{i}]",
+                child, depth=depth + 1, path=f"{path}.children[{i}]", rule=rule,
+                relations=relations, top=top and predicate.op == "and",
             )
         return total
+    if isinstance(predicate, RelatedPredicate):
+        return _validate_relation(predicate, depth=depth, path=path, rule=rule,
+                                  relations=relations, top=top)
+    if relations and predicate.kind in ("descendantOf", "withinHops", "path"):
+        raise ValidationError(
+            f"{predicate.kind} at {path} can't sit inside a relationship's condition — "
+            "use an ancestor or lineage relationship there instead"
+        )
     _validate_comparisons(predicate, path)
     return 1  # leaf
+
+
+def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool,
+                       relations: int, top: bool) -> int:
+    """A relationship's caps: how deep relationships nest, how far lineage
+    goes — tested from every candidate, a few hops; walked from entities
+    its condition names (a top-level ``is``), as far as withinHops; in a
+    display rule, one — and its edge filter's."""
+    s = get_deep_search_settings()
+    if relations + 1 > s.max_relation_depth:
+        raise ValidationError(
+            f"relationship at {path} nests relationships more than "
+            f"{s.max_relation_depth} deep"
+        )
+    hops = p.hop_range()[1]
+    if p.axis in LINEAGE_AXES:
+        named = (top and p.quantifier == "any" and p.count is None
+                 and p.where is not None and p.where.kind == "is")
+        if rule and hops > 1:
+            raise ValidationError(
+                f"relationship at {path}: a rule follows lineage one hop — it is "
+                "asked of every entity on the canvas"
+            )
+        if hops > s.relation_max_hops and not named:
+            raise ValidationError(
+                f"relationship at {path} follows lineage {hops} hops, tested from every "
+                f"candidate: at most {s.relation_max_hops}. Name the far end (by name or "
+                "URN) to follow it further."
+            )
+        rollups = [t for t in p.edge_types or () if is_derived_edge_type(t)]
+        if rollups and hops > 1:
+            raise ValidationError(
+                f"relationship at {path} walks {rollups[0]} edges — rollups of other "
+                "edges, followed one hop only"
+            )
+        if p.edge is not None:
+            _validate_edge_filter(p.edge, f"{path}.edge")
+    if p.where is None:
+        return 1
+    return 1 + _validate_predicate(p.where, depth=depth + 1, path=f"{path}.where", rule=rule,
+                                   relations=relations + 1, top=False)
 
 
 #: An edge filter tests one edge's properties: groups nest at most this
@@ -338,11 +397,12 @@ def _reject_unbounded_text_any(
 SHARED_LINK_RELATIONSHIPS = (
     "This link can't follow lineage or relationships: they lead outside its view."
 )
-_ROUTE_KINDS = frozenset({"path", "withinHops"})
+_ROUTE_KINDS = frozenset({"path", "withinHops", "related"})
 
 
 def follows_relationships(predicate) -> bool:
-    """Whether any condition in the tree walks the graph's edges."""
+    """Whether any condition in the tree walks the graph's edges (one
+    nested in a relationship sits inside one that does)."""
     if predicate.kind in _ROUTE_KINDS:
         return True
     return isinstance(predicate, GroupPredicate) and any(
@@ -367,6 +427,8 @@ def _path_refs(predicate, path: str = "$") -> list:
     if isinstance(predicate, GroupPredicate):
         return [found for i, child in enumerate(predicate.children)
                 for found in _path_refs(child, f"{path}.children[{i}]")]
+    if isinstance(predicate, RelatedPredicate):
+        return [] if predicate.where is None else _path_refs(predicate.where, f"{path}.where")
     return [(f"{path}.{alias}[{i}]", ref)
             for field, alias in _REF_FIELDS.get(predicate.kind, ())
             for i, ref in enumerate(getattr(predicate, field) or ())
@@ -380,6 +442,9 @@ def _with_resolved_refs(predicate, named: dict):
     if isinstance(predicate, GroupPredicate):
         return predicate.model_copy(update={
             "children": [_with_resolved_refs(c, named) for c in predicate.children]})
+    if isinstance(predicate, RelatedPredicate):
+        return predicate if predicate.where is None else predicate.model_copy(
+            update={"where": _with_resolved_refs(predicate.where, named)})
 
     def urns(given, refs):
         return list(dict.fromkeys([*given, *(
@@ -418,7 +483,8 @@ def _validate_items(items) -> None:
     search's — with the path naming the rule."""
     max_leaves = get_deep_search_settings().max_leaf_count
     for i, item in enumerate(items):
-        leaves = _validate_predicate(item.predicate, path=f"$.items[{i}].predicate")
+        leaves = _validate_predicate(item.predicate, path=f"$.items[{i}].predicate",
+                                     rule=True)
         if leaves > max_leaves:
             raise ValidationError(
                 f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")

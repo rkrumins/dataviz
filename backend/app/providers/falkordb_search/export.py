@@ -315,7 +315,8 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops, raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+        within_hops=hops, tail=tuple(compiler.tail),
+        raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)

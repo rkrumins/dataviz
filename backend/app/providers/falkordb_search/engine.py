@@ -153,7 +153,7 @@ async def execute_session_search(
         containment=containment, max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops,
+        within_hops=hops, tail=tuple(compiler.tail),
         tally=(options.results == "both" and bool(containment)
                and any(a.by == "ancestor" for a in options.aggregations or [])),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
@@ -242,7 +242,7 @@ async def execute_count_session(
         max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops,
+        within_hops=hops, tail=tuple(compiler.tail),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = query_identity(query, context.scope_hash, 0)
@@ -538,8 +538,10 @@ async def unit_context(unit: Unit, ctx: Context, run, timeout_s: float) -> Conte
         cypher, params = raw_probe_statement(unit, ctx)
         res = await run(cypher, params, timeout_s)
         lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
-    return dataclasses.replace(ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
-                               params={**ctx.params, **lists})
+    return dataclasses.replace(
+        ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
+        tail=tuple(answered(t, ctx.raw_leaves, lists) for t in ctx.tail),
+        params={**ctx.params, **lists})
 
 
 async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: float

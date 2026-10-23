@@ -343,10 +343,13 @@ async def test_capability_identity_cannot_leave_its_view(
 @pytest.mark.parametrize("route", [
     {"kind": "path", "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"]},
     {"kind": "withinHops", "urns": ["urn:a"], "hops": 2},
+    {"kind": "related", "axis": "upstream", "where": {"kind": "text", "value": "x"}},
+    {"kind": "related", "axis": "parent", "quantifier": "none"},
 ])
 async def test_capability_identity_cannot_follow_lineage(route, slot, patched_search):
     """Lineage leads out of the view: a path returns the entities on it,
-    and a hop test answers yes or no about entities the link can't see."""
+    and a hop test answers yes or no about entities the link can't see —
+    as does a relationship, up the tree as much as along lineage."""
     query = SearchQuery.model_validate({
         **_query("view").model_dump(by_alias=True),
         "predicate": {"kind": "group", "op": "and",

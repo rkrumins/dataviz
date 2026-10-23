@@ -33,7 +33,7 @@ EXPECTED_DISCRIMINATORS: set[str] = {
     "text", "property", "tag", "hasProperty",
     "entityType", "layer", "descendantOf", "withinHops",
     "degree", "isOrphan", "isLeaf", "isRoot",
-    "hasIncoming", "hasOutgoing", "path", "all", "is", "group",
+    "hasIncoming", "hasOutgoing", "path", "all", "is", "related", "group",
     "edgeProperty", "edgeHasProperty", "edgeGroup",
 }
 

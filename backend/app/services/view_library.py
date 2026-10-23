@@ -76,7 +76,8 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
     """``raw`` validated as a search's predicate is — its shape, its typed
     values, its size — or a 422 naming what is wrong. A rule also refuses
     ``withinHops`` and paths: they describe a route through the graph, and a
-    rule is asked about one entity at a time. And it refuses what the engines
+    rule is asked about one entity at a time — as it does lineage
+    relationships of more than one hop. And it refuses what the engines
     that count and tag it would (``_rule_compile_problem``): saved, such a
     rule failed every time the canvas asked about it."""
     try:
@@ -87,7 +88,7 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
         raise LibraryError(422, f"invalid predicate{f' at {where}' if where else ''}: "
                                 f"{first.get('msg', 'not a predicate')}") from exc
     try:
-        leaves = _validate_predicate(model, path="$.predicate")
+        leaves = _validate_predicate(model, path="$.predicate", rule=rule)
     except SearchValidationError as exc:
         raise LibraryError(422, str(exc)) from exc
     max_leaves = get_deep_search_settings().max_leaf_count

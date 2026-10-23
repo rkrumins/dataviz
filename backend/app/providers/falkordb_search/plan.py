@@ -43,6 +43,7 @@ from backend.app.providers.falkordb_deep_search import (
     _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
+    tail_clauses,
 )
 from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
@@ -134,6 +135,9 @@ class Context:
     max_depth: int
     visible: Optional[List[str]] = None
     within_hops: str = ""
+    # The predicate's relationship stages (``_Compiler.tail``), run on what
+    # the head, the clamps and the hops keep.
+    tail: Tuple[str, ...] = ()
     # A first page's units also tally their matches' containment ancestors
     # (the search asked for the ``ancestor`` facet: the canvas's badges).
     tally: bool = False
@@ -397,6 +401,8 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
         params[f"_roots{i}"] = list(ids)
     if ctx.within_hops:
         parts.append(ctx.within_hops)
+    if ctx.tail:
+        parts.append(tail_clauses(list(ctx.tail)))
     return " ".join(parts), params
 
 
@@ -438,7 +444,7 @@ def raw_probe_statement(unit: Unit, ctx: Context) -> Tuple[str, Dict[str, Any]]:
     predicate's keys raw — the unit's nodes alone: the predicate, the scope's
     clamps and hops belong to the statements that use the answer."""
     head, params = match_statement(
-        unit, replace(ctx, where="", params={}, within_hops=""), [])
+        unit, replace(ctx, where="", params={}, within_hops="", tail=()), [])
     cond, cond_params = probe_condition(ctx.raw_leaves)
     params.update(cond_params)
     return f"{head} WITH n WHERE {cond} RETURN ID(n), n.propertiesRaw", params

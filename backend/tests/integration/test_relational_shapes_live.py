@@ -13,7 +13,8 @@ docs/search-engine/S0_FINDINGS.md §15.
 What the compiler does because of them:
 
 * A comprehension never sits in a clause's WHERE (MATCH or WITH): it is
-  projected inside ``ANY(_xt IN [0] WHERE …)`` on a WITH, then filtered.
+  projected on a WITH — ``WITH n, <stage> AS _xt0 WHERE _xt0`` — then
+  filtered.
 * A comprehension is built for every row that reaches its projection, a
   false conjunct beside it notwithstanding. So cheap conditions filter in
   the clause WHERE first (the head), each top-level relationship is its own
@@ -80,6 +81,7 @@ NODES = [
     (23, "dataset", "a", {}), (24, "dataset", "b", {}), (25, "dataset", "c", {}),
     (26, "dataset", "d1", {}), (27, "dataset", "d2", {}), (28, "dataset", "d3", {}),
     (29, "dataset", "d4", {}),
+    (30, "job", "x", {}), (31, "job", "y", {}), (32, "job", "z", {}),
 ]
 # parent -> child. "shared" (21) has two parents; two regions are named
 # "United Kingdom" and two cities "London".
@@ -100,6 +102,8 @@ LINEAGE = [
     (26, 27, "FLOWS_TO", 0.9, {}), (26, 28, "FLOWS_TO", 0.9, {}),
     (27, 29, "FLOWS_TO", 0.9, {}), (28, 29, "FLOWS_TO", 0.9, {}),   # a diamond
     (13, 9, "AGGREGATED", None, None),                   # a rollup, no properties
+    (30, 31, "FLOWS_TO", 0.9, {}), (31, 30, "FLOWS_TO", 0.9, {}),
+    (30, 32, "FLOWS_TO", 0.9, {}),                       # x ⇄ y, x → z
 ]
 LABELS = sorted({label for _, label, _, _ in NODES})
 
@@ -134,9 +138,18 @@ def graph():
 
 
 def _tail(graph, expr, params=None, head="MATCH (n)"):
-    """Ids matching ``expr`` evaluated the way the compiler places a tail."""
+    """Ids matching ``expr`` projected on a WITH and filtered, wrapped so its
+    tests short-circuit."""
     cypher = (f"{head} WITH n, ANY(_xt IN [0] WHERE {expr}) AS _xt0 WHERE _xt0 "
               "WITH n RETURN n.id")
+    return sorted(r[0] for r in graph.query(cypher, params or {}).result_set)
+
+
+def _stages(graph, stages, params=None, head="MATCH (n)"):
+    """Ids matching every one of ``stages``, placed as the compiler places
+    them (``tail_clauses``)."""
+    from backend.app.providers.falkordb_deep_search import tail_clauses
+    cypher = f"{head} {tail_clauses(list(stages))} RETURN n.id"
     return sorted(r[0] for r in graph.query(cypher, params or {}).result_set)
 
 
@@ -182,10 +195,97 @@ def test_the_tail_follows_a_range_unit_and_a_clamp(graph):
 
 def test_the_tail_follows_a_walk_unit(graph):
     roots = [r[0] for r in graph.query(
-        f"MATCH (n) WHERE n.id IN [1, 13] RETURN ID(n)").result_set]
+        "MATCH (n) WHERE n.id IN [1, 13] RETURN ID(n)").result_set]
     head = ("UNWIND $w AS _wi MATCH (_w) WHERE ID(_w) = _wi "
             f"MATCH (_w)-[:{C}*0..12]->(n) WITH DISTINCT n WHERE n.urn IS NOT NULL")
     assert _tail(graph, PARENT_IS_COUNTRY, {"w": roots}, head=head) == [2, 5]
+
+
+def test_bare_stages_follow_every_unit_shape(graph):
+    """What the compiler emits: each relationship its own stage, projected
+    bare — wrapping it would only short-circuit its cheap tests (its lists
+    are built anyway) and costs a nesting level to plan."""
+    country = graph.query("MATCH (n {id: 1}) RETURN ID(n)").result_set[0][0]
+    clamp = (f"MATCH (n:`city`) WHERE ID(n) >= 0 AND n.urn IS NOT NULL "
+             f"WITH n MATCH (n)<-[:{C}*0..12]-(_r0) WHERE ID(_r0) IN $roots WITH DISTINCT n")
+    uk_parent = PARENT_IS_COUNTRY.replace("'Country'", "'United Kingdom'")
+    assert _stages(graph, [uk_parent], {"roots": [country]}, head=clamp) == [3, 4]
+    roots = [r[0] for r in graph.query(
+        "MATCH (n) WHERE n.id IN [1, 13] RETURN ID(n)").result_set]
+    walk = ("UNWIND $w AS _wi MATCH (_w) WHERE ID(_w) = _wi "
+            f"MATCH (_w)-[:{C}*0..12]->(n) WITH DISTINCT n WHERE n.urn IS NOT NULL")
+    assert _stages(graph, [PARENT_IS_COUNTRY], {"w": roots}, head=walk) == [2, 5]
+    hops = ("MATCH (n) WITH n MATCH _whP0 = (anchor)-[:FLOWS_TO*1..2]->(n) "
+            "WHERE anchor.urn = 'urn:18' AND ID(anchor) <> ID(n) WITH DISTINCT n")
+    has_parent = (f"ANY(_xb2 IN [(n)<-[:{C}]-(_xr2) WHERE ID(_xr2) <> ID(n) | true] "
+                  "WHERE _xb2)")
+    assert _stages(graph, [has_parent], head=hops) == [11, 12, 14]
+    # Two stages, the second run only on what the first kept; NOT over one.
+    assert _stages(graph, [PARENT_IS_COUNTRY, f"NOT {has_parent.replace('2', '3')}"]) == []
+
+
+def test_a_null_projection_drops_its_element(graph):
+    """FalkorDB leaves out of a comprehension's list each element whose
+    projection is null — a comparison with a property the entity lacks.
+    Every relative's test is coalesced, or "every child owned by alice"
+    would hold for Sales, whose other children have no owner at all."""
+    owned = "_xr1.owner = 'alice'"
+    listed = "MATCH (n {id: 13}) RETURN [(n)-[:CONTAINS]->(_xr1) | %s]"
+    assert graph.query(listed % owned).result_set[0][0] == [True]
+    assert sorted(graph.query(listed % f"coalesce({owned}, false)").result_set[0][0]) == (
+        [False] * 10 + [True])
+
+    def every(test):
+        return (f"coalesce(reduce(_xa1 = null, _xb1 IN [(n)-[:{C}]->(_xr1) | {test}] | "
+                "CASE WHEN _xa1 IS NULL THEN _xb1 ELSE _xa1 AND _xb1 END), false)")
+
+    assert 13 in _stages(graph, [every(owned)])
+    assert 13 not in _stages(graph, [every(f"coalesce({owned}, false)")])
+
+
+def test_every_one_folds_to_null_when_there_is_none(graph):
+    """``coalesce(reduce(…), false)``: null for no relatives, else whether
+    every one meets it — a list function fewer than ALL over a bound list."""
+    b = _Binder()
+    described = compile_comparison("_xr1.`description`",
+                                   resolve_comparison("isNotEmpty", None), b)
+    every = (f"coalesce(reduce(_xa1 = null, _xb1 IN [(n)-[:{C}]->(_xr1) WHERE ID(_xr1) <> ID(n) "
+             f"| coalesce({described}, false)] | CASE WHEN _xa1 IS NULL THEN _xb1 "
+             "ELSE _xa1 AND _xb1 END), false)")
+    assert _stages(graph, [every], b.params) == [18]
+
+
+def test_a_route_never_goes_on_from_an_entity_it_passed(graph):
+    """x ⇄ y, x → z. Listing routes, FalkorDB goes no further from an entity
+    already on one, yet lets a route end on one — so which it finds depends
+    on the end it starts from: from x nothing is three hops away, while from
+    z back to x, x → y → x → z is found. Past one hop the compiler requires
+    routes that pass no entity twice, which both ends agree on."""
+    def listed(hops):
+        return sorted(graph.query(f"MATCH (n {{id: 30}}) RETURN [(n)-[:FLOWS_TO*{hops}]->(m) "
+                                  "| m.id]").result_set[0][0])
+
+    assert listed("2..2") == [30]                  # back to x: it may end on one
+    assert listed("3..3") == []
+    from_z = ("MATCH (n {{id: 32}}) WITH n MATCH _whP0 = (anchor)-[:FLOWS_TO*3..3]->(n) "
+              "WHERE anchor.id = 30 {} RETURN DISTINCT n.id")
+    assert [r[0] for r in graph.query(from_z.format("")).result_set] == [32]
+    distinct = ("AND size(nodes(_whP0)) = size(reduce(_xs = [], _xm IN nodes(_whP0) | "
+                "CASE WHEN _xm IN _xs THEN _xs ELSE _xs + [_xm] END))")
+    assert graph.query(from_z.format(distinct)).result_set == []
+
+
+def test_an_unnamed_range_in_a_match_reads_walks(graph):
+    """Without a path variable, a MATCH's variable-length step finds the
+    ends of walks — x → y → x → y and x → y → x → z — not of routes, as the
+    same step named, or in a comprehension, does. The compiler names every
+    such path whose range starts past one hop (scope clamps and walks start
+    at none)."""
+    def ids(cypher):
+        return sorted(r[0] for r in graph.query(cypher).result_set)
+
+    assert ids("MATCH (n {id: 30})-[:FLOWS_TO*3..3]->(m) RETURN m.id") == [31, 32]
+    assert ids("MATCH p = (n {id: 30})-[:FLOWS_TO*3..3]->(m) RETURN m.id") == []
 
 
 def test_rules_project_relationships_side_by_side(graph):

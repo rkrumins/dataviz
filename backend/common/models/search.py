@@ -31,7 +31,7 @@ Design notes
   model — the service produces meaningful path-into-tree error messages
   the model can't.
 """
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -534,6 +534,93 @@ class PathPredicate(_Base):
 
 
 # ---------------------------------------------------------------------------
+# Relationships — conditions on the entities related to each one
+# ---------------------------------------------------------------------------
+
+RelationAxis = Literal[
+    "parent", "child", "ancestor", "descendant", "root",
+    "upstream", "downstream", "neighbor",
+]
+CONTAINMENT_AXES = ("parent", "child", "ancestor", "descendant", "root")
+LINEAGE_AXES = ("upstream", "downstream", "neighbor")
+
+RELATION_DEPTH_MAX = 20
+"""How far up or down the containment tree an ``ancestor``, ``descendant``
+or ``root`` relationship looks when it names no depth."""
+
+RELATION_ANCHORED_HOPS_MAX = 10
+"""The lineage hops a relationship may follow at most — as far as
+``withinHops``. A relationship whose far end is a condition rather than
+named entities is held to ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) by the
+service: it is tested from every candidate."""
+
+
+class CountSpec(_Base):
+    """How many related entities must meet a relationship's condition."""
+    op: DegreeOp = "gte"
+    value: int = Field(ge=0, le=1_000_000)
+
+
+class RelatedPredicate(_Base):
+    """Entities whose related entities meet a condition.
+
+    ``axis`` says which relatives: up the containment tree (``parent``, any
+    ``ancestor``, the top-level container ``root``), down it (``child``, any
+    ``descendant``), or along lineage — ``upstream`` (what feeds it),
+    ``downstream`` (what it feeds), ``neighbor`` (either way) — one step, or
+    ``minHops`` to ``maxHops``. ``where`` is the condition a relative must
+    meet: any predicate, relationships included, so conditions chain ("feeds
+    a dashboard whose parent is Finance"); without one, any relative will
+    do. A lineage relationship may also require every edge it walks to meet
+    ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
+    the rollups).
+
+    ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
+    ``all`` do — and there is at least one. ``count`` compares how many
+    distinct relatives meet it instead. An entity is never its own relative,
+    a cycle notwithstanding.
+    """
+    kind: Literal["related"] = "related"
+    axis: RelationAxis
+    where: Optional["Predicate"] = None
+    quantifier: Literal["any", "none", "all"] = "any"
+    count: Optional[CountSpec] = None
+    min_hops: int = Field(1, alias="minHops", ge=1, le=RELATION_DEPTH_MAX)
+    max_hops: Optional[int] = Field(None, alias="maxHops", ge=1, le=RELATION_DEPTH_MAX)
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32)
+    edge: Optional[EdgePredicateType] = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "RelatedPredicate":
+        axis, hi = self.axis, self.max_hops
+        if axis in ("parent", "child") and (self.min_hops, hi) not in ((1, None), (1, 1)):
+            raise ValueError(f"{axis} is one step")
+        if axis == "root" and (self.min_hops != 1 or hi is not None):
+            raise ValueError("root takes no hops: it is the top-level container")
+        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types):
+            raise ValueError("edge filters apply to lineage relationships")
+        if hi is not None and hi < self.min_hops:
+            raise ValueError("maxHops is less than minHops")
+        if axis in LINEAGE_AXES and self.hop_range()[1] > RELATION_ANCHORED_HOPS_MAX:
+            raise ValueError(
+                f"a lineage relationship follows at most {RELATION_ANCHORED_HOPS_MAX} hops")
+        if self.count is not None and self.quantifier != "any":
+            raise ValueError("count takes the place of the quantifier")
+        return self
+
+    def hop_range(self) -> Tuple[int, int]:
+        """The steps it follows, fewest and most."""
+        if self.axis in ("parent", "child"):
+            return 1, 1
+        if self.axis == "root":
+            return 1, RELATION_DEPTH_MAX
+        if self.axis in LINEAGE_AXES:
+            return self.min_hops, self.max_hops or self.min_hops
+        return self.min_hops, self.max_hops or RELATION_DEPTH_MAX
+
+
+# ---------------------------------------------------------------------------
 # Recursive group + discriminated union
 # ---------------------------------------------------------------------------
 
@@ -571,12 +658,14 @@ Predicate = Annotated[
         PathPredicate,
         MatchAllPredicate,
         IsPredicate,
+        RelatedPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),
 ]
 
 GroupPredicate.model_rebuild()
+RelatedPredicate.model_rebuild()
 
 
 # ---------------------------------------------------------------------------

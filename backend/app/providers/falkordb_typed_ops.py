@@ -150,9 +150,13 @@ _TEXT_KINDS = "['String', 'Integer', 'Boolean', 'Date', 'Datetime', 'Duration', 
 
 
 def _decimal_of(text: str) -> str:
-    """"12.5" as 125 * 1.0 / 10.0 ^ 1 — see ``_TEXT_NUMBER``."""
-    return (f"[_p IN [split({text}, '.')] | CASE WHEN size(_p) = 2 "
-            f"THEN toIntegerOrNull(_p[0] + _p[1]) * 1.0 / 10.0 ^ size(_p[1]) END][0]")
+    """"12.5" as 125 * 1.0 / 10.0 ^ 1, for text holding one point — see
+    ``_TEXT_NUMBER``. Written out, not bound in a comprehension: FalkorDB's
+    time to plan a statement multiplies with each list function nested in
+    another, and a comparison inside a relationship already sits in a few
+    (500 ms for one number comparison, against 150 written out)."""
+    parts = f"split({text}, '.')"
+    return f"(toIntegerOrNull({parts}[0] + {parts}[1]) * 1.0 / 10.0 ^ size({parts}[1]))"
 
 
 def _scalar_branches(col: str, cmp: Comparison, test) -> list:
@@ -162,14 +166,15 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
     if cmp.type == "number":
         text = f"toStringOrNull({col})"
         whole = f"toIntegerOrNull({text})"
+        decimal = _decimal_of(text)
         return [
             # A NaN equals nothing, not even itself — yet FalkorDB's IN finds
             # it equal to every value; ``= itself`` keeps it out.
             f"(typeOf({col}) IN ['Integer', 'Float'] AND {col} = {col} AND {test(col)})",
             f"(typeOf({col}) = 'String' AND NOT {text} CONTAINS '.' "
             f"AND {whole} IS NOT NULL AND {test(whole)})",
-            f"(typeOf({col}) = 'String' AND {text} CONTAINS '.' AND ANY(_x IN "
-            f"[_k IN [{_decimal_of(text)}] WHERE _k IS NOT NULL] WHERE {test('_x')}))",
+            f"(typeOf({col}) = 'String' AND {text} CONTAINS '.' "
+            f"AND size(split({text}, '.')) = 2 AND {decimal} IS NOT NULL AND {test(decimal)})",
         ]
     if cmp.type == "string":
         text = f"toStringOrNull({col})"

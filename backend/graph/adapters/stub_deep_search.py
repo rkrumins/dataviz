@@ -37,16 +37,27 @@ from backend.common.search_semantics import (
     resolve_predicate,
     value_slot,
 )
+from backend.common.derived_artifacts import DERIVED_EDGE_TYPES
 from backend.common.models.search import (
     NODE_REF_ANY_DEPTH,
     NODE_REF_MATCHES_MAX,
+    DegreePredicate,
+    EdgeGroupPredicate,
+    EdgeHasPropertyPredicate,
+    EdgePropertyPredicate,
     EntityTypePredicate,
     GroupPredicate,
+    HasIncomingPredicate,
+    HasOutgoingPredicate,
     HasPropertyPredicate,
+    IsLeafPredicate,
+    IsOrphanPredicate,
     IsPredicate,
+    IsRootPredicate,
     LayerPredicate,
     MatchAllPredicate,
     PropertyPredicate,
+    RelatedPredicate,
     SearchHit,
     SearchQuery,
     SearchResultPage,
@@ -87,11 +98,22 @@ class StubDeepSearchProvider:
         nodes: Sequence[Dict[str, Any]] = (),
         edges: Sequence[Dict[str, Any]] = (),
         containment_edge_types: Sequence[str] = ("CONTAINS",),
+        lineage_edge_types: Optional[Sequence[str]] = None,
     ) -> None:
         self._nodes: List[Dict[str, Any]] = list(nodes)
         self._edges: List[Dict[str, Any]] = list(edges)
-        # Containment edges point parent → child, as the graph's do.
+        # Containment edges point parent → child, as the graph's do. Lineage
+        # is every other type unless named.
         contains = set(containment_edge_types)
+        self._containment_types = frozenset(contains)
+        self._lineage_types = frozenset(
+            lineage_edge_types if lineage_edge_types is not None
+            else {e.get("type") for e in self._edges if e.get("type") not in contains})
+        self._out: Dict[str, List[int]] = {}
+        self._in: Dict[str, List[int]] = {}
+        for i, e in enumerate(self._edges):
+            self._out.setdefault(e.get("source"), []).append(i)
+            self._in.setdefault(e.get("target"), []).append(i)
         self._parents: Dict[str, List[str]] = {}
         self._children: Dict[str, List[str]] = {}
         for e in self._edges:
@@ -109,7 +131,7 @@ class StubDeepSearchProvider:
         deadline_ms: Optional[int] = None,
     ) -> SearchResultPage:
         start = time.monotonic()
-        matches = [n for n in self._nodes if _matches(n, query.predicate)]
+        matches = [n for n in self._nodes if _matches(n, query.predicate, self)]
 
         # Apply scope clamp if root_urns are set. Simple containment:
         # match nodes whose urn IS one of the root_urns OR whose
@@ -161,7 +183,8 @@ class StubDeepSearchProvider:
     async def deep_search_count(self, query: SearchQuery, *, context=None,
                                 advance: bool = True) -> Dict[str, Any]:
         """A rule's total over the fixture — complete in one answer."""
-        count = sum(1 for n in self._in_scope(query.scope) if _matches(n, query.predicate))
+        count = sum(1 for n in self._in_scope(query.scope)
+                    if _matches(n, query.predicate, self))
         return {"count": count, "status": "complete", "sessionId": None,
                 "progress": {"scanned": 1, "total": 1, "matched": count},
                 "dataVersion": None, "notes": []}
@@ -174,7 +197,7 @@ class StubDeepSearchProvider:
         errors: Dict[str, str] = {}
         for item_id, predicate in items:
             try:
-                matches[item_id] = [n["urn"] for n in nodes if _matches(n, predicate)]
+                matches[item_id] = [n["urn"] for n in nodes if _matches(n, predicate, self)]
             except CompileError as exc:
                 errors[item_id] = str(exc)
         return {"matches": matches, "errors": errors, "elapsedMs": 0}
@@ -261,6 +284,102 @@ class StubDeepSearchProvider:
             current = {u for u in current
                        if str(self._by_urn.get(u, {}).get("entityType", "")).lower() == wanted}
         return current
+
+    # --- relationships (the reference semantics) ---------------------------
+
+    def _relation_holds(self, node: Dict[str, Any], p: RelatedPredicate) -> bool:
+        related = self._relatives(node["urn"], p)
+        if p.where is None:
+            meets = [True for _ in related]
+        else:
+            meets = [_matches(self._by_urn[u], p.where, self) for u in related]
+        if p.count is not None:
+            return _compare(sum(meets), p.count.op, p.count.value)
+        if p.quantifier == "none":
+            return not any(meets)
+        if p.quantifier == "all":
+            return bool(meets) and all(meets)
+        return any(meets)
+
+    def _relatives(self, urn: str, p: RelatedPredicate) -> List[str]:
+        """R(n): the distinct entities related to ``urn`` along ``p``'s
+        axis — never ``urn`` itself — that the fixture holds."""
+        lo, hi = p.hop_range()
+        if p.axis == "parent":
+            found = set(self._parents.get(urn, ()))
+        elif p.axis == "child":
+            found = set(self._children.get(urn, ()))
+        elif p.axis in ("ancestor", "root"):
+            found = self._walk(urn, lo, hi, lambda u: self._parents.get(u, ()))
+            if p.axis == "root":
+                found = {a for a in found if not self._parents.get(a)}
+        elif p.axis == "descendant":
+            found = self._walk(urn, lo, hi, lambda u: self._children.get(u, ()))
+        else:
+            found = self._trails(urn, p, lo, hi)
+        found.discard(urn)
+        return sorted(u for u in found if u in self._by_urn)
+
+    @staticmethod
+    def _walk(urn: str, lo: int, hi: int, step) -> set:
+        """Entities ``lo``..``hi`` containment steps from ``urn``."""
+        found: set = set()
+        frontier = {urn}
+        for depth in range(1, hi + 1):
+            frontier = {nxt for u in frontier for nxt in step(u)}
+            if not frontier:
+                break
+            if depth >= lo:
+                found |= frontier
+        return found
+
+    def _trails(self, urn: str, p: RelatedPredicate, lo: int, hi: int) -> set:
+        """Ends of the lineage routes from ``urn`` of ``lo``..``hi`` edges
+        that pass no entity twice (``urn`` included), every edge of an
+        allowed type and meeting the edge filter."""
+        allowed = (set(p.edge_types) if p.edge_types
+                   else {t for t in self._lineage_types if t not in DERIVED_EDGE_TYPES})
+        found: set = set()
+
+        def steps(at: str):
+            if p.axis in ("downstream", "neighbor"):
+                for i in self._out.get(at, ()):
+                    yield i, self._edges[i]["target"]
+            if p.axis in ("upstream", "neighbor"):
+                for i in self._in.get(at, ()):
+                    yield i, self._edges[i]["source"]
+
+        def walk(at: str, visited: frozenset, depth: int) -> None:
+            if depth >= lo:
+                found.add(at)
+            if depth == hi:
+                return
+            for i, nxt in steps(at):
+                edge = self._edges[i]
+                if (nxt in visited or edge.get("type") not in allowed
+                        or not _edge_passes(edge, p.edge)):
+                    continue
+                walk(nxt, visited | {nxt}, depth + 1)
+
+        walk(urn, frozenset({urn}), 0)
+        found.discard(urn)
+        return found
+
+    def _degree(self, urn: str, d: DegreePredicate) -> bool:
+        if d.edge_types:
+            types = set(d.edge_types)
+        elif d.edge_class == "lineage":
+            types = set(self._lineage_types)
+        elif d.edge_class == "containment":
+            types = set(self._containment_types)
+        else:
+            types = set(self._lineage_types) | set(self._containment_types)
+        count = 0
+        if d.direction in ("in", "both"):
+            count += sum(1 for i in self._in.get(urn, ()) if self._edges[i].get("type") in types)
+        if d.direction in ("out", "both"):
+            count += sum(1 for i in self._out.get(urn, ()) if self._edges[i].get("type") in types)
+        return _compare(count, d.op, d.value)
 
     def _ancestors(self, node: Dict[str, Any]) -> List[str]:
         """The fixture's ``ancestorUrns`` when it gives them, else every
@@ -461,23 +580,64 @@ class StubDeepSearchProvider:
 # ---------------------------------------------------------------------------
 
 
-def _matches(node: Dict[str, Any], predicate) -> bool:
+_SUGAR = {
+    IsOrphanPredicate: ("both", "eq", 0), IsLeafPredicate: ("out", "eq", 0),
+    IsRootPredicate: ("in", "eq", 0), HasIncomingPredicate: ("in", "gt", 0),
+    HasOutgoingPredicate: ("out", "gt", 0),
+}
+
+
+def _compare(count: int, op: str, value: int) -> bool:
+    return {"eq": count == value, "neq": count != value, "gt": count > value,
+            "gte": count >= value, "lt": count < value, "lte": count <= value}[op]
+
+
+def _edge_passes(edge: Dict[str, Any], ep) -> bool:
+    """An edge filter on a fixture edge, whose properties are its own keys."""
+    if ep is None:
+        return True
+    if isinstance(ep, EdgeGroupPredicate):
+        if ep.op == "not":
+            return not _edge_passes(edge, ep.children[0])
+        tests = (_edge_passes(edge, c) for c in ep.children)
+        return all(tests) if ep.op == "and" else any(tests)
+    if isinstance(ep, EdgeHasPropertyPredicate):
+        present = edge.get(ep.key) is not None
+        return not present if ep.negate else present
+    if isinstance(ep, EdgePropertyPredicate):
+        return evaluate(edge.get(ep.key), resolve_predicate(ep))
+    raise CompileError(f"stub: unsupported edge predicate {type(ep).__name__}")
+
+
+def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
     """Walk the predicate tree against an in-memory node dict.
 
-    Only the predicate kinds the test suite exercises today are
-    supported. Unsupported kinds raise ``CompileError`` with a clear
-    message — the stub is honest about what it can do rather than
+    ``graph`` (the stub) answers what needs more than the node: its
+    relationships and degree. Unsupported kinds raise ``CompileError`` with
+    a clear message — the stub is honest about what it can do rather than
     silently returning wrong results.
     """
     if isinstance(predicate, GroupPredicate):
         if predicate.op == "and":
-            return all(_matches(node, c) for c in predicate.children)
+            return all(_matches(node, c, graph) for c in predicate.children)
         if predicate.op == "or":
-            return any(_matches(node, c) for c in predicate.children)
+            return any(_matches(node, c, graph) for c in predicate.children)
         if predicate.op == "not":
             # Validator enforces exactly one child.
-            return not _matches(node, predicate.children[0])
+            return not _matches(node, predicate.children[0], graph)
         raise CompileError(f"stub: unsupported group op {predicate.op!r}")
+
+    if isinstance(predicate, RelatedPredicate) and graph is not None:
+        return graph._relation_holds(node, predicate)
+
+    if isinstance(predicate, DegreePredicate) and graph is not None:
+        return graph._degree(node["urn"], predicate)
+
+    if type(predicate) in _SUGAR and graph is not None:
+        direction, op, value = _SUGAR[type(predicate)]
+        return graph._degree(node["urn"], DegreePredicate(
+            direction=direction, op=op, value=value, edgeClass=predicate.edge_class,
+            edgeTypes=predicate.edge_types))
 
     if isinstance(predicate, MatchAllPredicate):
         return True
