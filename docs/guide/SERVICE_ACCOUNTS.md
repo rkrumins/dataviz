@@ -122,7 +122,7 @@ Swap `Authorization: Bearer nxpat_…` for `Authorization: Bearer nxsat_…` and
 change nothing else: the same routes answer the same way.
 `GET /api/v1/api-keys/self` shows `"kind": "service"`.
 
-Two refusals are particular to service accounts:
+Two refusals say something particular about a service account:
 
 | Status | `error` | What it means |
 | --- | --- | --- |
