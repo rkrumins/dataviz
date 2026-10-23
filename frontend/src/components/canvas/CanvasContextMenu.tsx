@@ -66,6 +66,9 @@ export interface CanvasContextMenuProps {
     onSelectAll?: () => void
     /** Additional custom actions */
     customActions?: ContextMenuAction[]
+    /** Questions about the node right-clicked, answered by the search
+     *  panel — shown together after its read affordances. */
+    queryActions?: ContextMenuAction[]
     /** Layer options for moving nodes */
     layers?: Array<{ id: string; name: string; color: string }>
     onMoveToLayer?: (nodeId: string, layerId: string) => void
@@ -96,6 +99,7 @@ export function CanvasContextMenu({
     onPaste,
     onSelectAll,
     customActions = [],
+    queryActions = [],
     layers = [],
     onMoveToLayer,
 }: CanvasContextMenuProps) {
@@ -183,6 +187,9 @@ export function CanvasContextMenu({
                     onClick: () => { onCopyUrn(target.id); onClose() }
                 })
             }
+
+            result.push(...queryActions.map((a, i) =>
+                i === queryActions.length - 1 ? { ...a, dividerAfter: true } : a))
 
             if (onCreateChild) {
                 result.push({
@@ -312,7 +319,7 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
-        onSelectAll, customActions, layers, onMoveToLayer, onClose])
+        onSelectAll, customActions, queryActions, layers, onMoveToLayer, onClose])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {

@@ -70,4 +70,16 @@ describe('usePendingSearchRun', () => {
         expect(runPredicate).not.toHaveBeenCalled()
         expect(commitDraft).not.toHaveBeenCalled()
     })
+
+    it('runs routes as routes, leaving the options to the run', () => {
+        const runPredicate = vi.fn().mockResolvedValue(undefined)
+        const route: Predicate = { kind: 'path', sourceUrns: ['urn:a'], targetUrns: [],
+            targetWhere: { kind: 'all' } } as Predicate
+        useSearchStore.setState({ pendingRunPredicate: route })
+
+        renderHook(() => usePendingSearchRun(runPredicate, vi.fn()))
+        act(() => { vi.runAllTimers() })
+
+        expect(runPredicate).toHaveBeenCalledWith(route, undefined)
+    })
 })

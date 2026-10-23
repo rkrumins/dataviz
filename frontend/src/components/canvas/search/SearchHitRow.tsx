@@ -19,14 +19,17 @@
  * visible.
  */
 import { motion } from 'framer-motion'
-import { ChevronRight, ExternalLink, Sparkles } from 'lucide-react'
+import { ChevronRight, ExternalLink, Route, Sparkles } from 'lucide-react'
 import * as LucideIcons from 'lucide-react'
-import { type FC, useMemo } from 'react'
+import { type FC, useContext, useMemo } from 'react'
 
 import { HighlightedText } from '@/components/ui/HighlightedText'
 import { cn } from '@/lib/utils'
-import { useIsFocusedMatch } from '@/store/searchStore'
+import { useIsFocusedMatch, useSearchStore } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
+
+import { howItMatches } from './session/queryFromHere'
+import { ShownQueryContext } from './session/shownQueryContext'
 
 
 /**
@@ -229,6 +232,9 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
     // that listed every field a broad word touched would be taller than
     // the hit itself.
     const highlight = hit.highlights?.[0]
+    // Matched through lineage: the routes to the relatives it was matched by.
+    const shownQuery = useContext(ShownQueryContext)
+    const routes = useMemo(() => howItMatches(shownQuery, hit.node.urn), [shownQuery, hit.node.urn])
 
     return (
         <motion.div
@@ -361,7 +367,7 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                 )}
 
                 {/* Row 3: action chips, hover-revealed */}
-                {(onReveal || onOpen) && (
+                {(onReveal || onOpen || routes) && (
                     <div className={cn(
                         "mt-2.5 flex items-center gap-1.5",
                         "opacity-0 -translate-y-0.5",
@@ -408,6 +414,26 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                             >
                                 <ExternalLink className="w-3 h-3" />
                                 Inspect
+                            </button>
+                        )}
+                        {routes && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    useSearchStore.getState().requestSearchRun(routes)
+                                }}
+                                className={cn(
+                                    "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg",
+                                    "text-[11px] font-medium",
+                                    "bg-glass/50 text-ink-secondary",
+                                    "border border-glass-border",
+                                    "hover:bg-glass/70 hover:text-ink",
+                                    "transition-all",
+                                )}
+                                title="The routes from this entity to the relatives it was matched by — undo to come back to these results"
+                            >
+                                <Route className="w-3 h-3" />
+                                How it matches
                             </button>
                         )}
                     </div>

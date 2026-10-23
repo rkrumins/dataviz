@@ -305,6 +305,7 @@ import {
   useViewSearchSessionController,
   type ViewSearchSession,
 } from '../search/session/useViewSearchSessionController'
+import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -3454,6 +3455,31 @@ export function ContextViewCanvas({
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactions.state.contextMenu.target, nodeSortingEnabled, isDraft, traceActive, displayMap, parentMap, nodeLayerMap, nodesByLayer, nudgeReorder])
+
+  // Right-click questions about a node — or about the selection it is part
+  // of — each opening the search panel on its query (queryFromHere). A
+  // shared link's session may only search inside its view.
+  const queryMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const selection = selectedNodeIds.filter(isSelectableNode)
+    const urns = selection.length > 1 && selection.includes(target.id) ? selection : [target.id]
+    return questionsFromHere(urns, { readOnly }).map((q) => ({
+      id: `query-${q.id}`, label: q.label, icon: q.icon as ContextMenuAction['icon'],
+      onClick: () => {
+        const store = useSearchStore.getState()
+        if (q.refine) {
+          store.commitDraft(q.predicate)
+          search.refine()
+        } else {
+          store.requestSearchRun(q.predicate)
+          search.openPanel()
+        }
+        interactions.closeContextMenu()
+      },
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -7230,6 +7256,7 @@ export function ContextViewCanvas({
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={reorderMenuActions}
+        queryActions={queryMenuActions}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
