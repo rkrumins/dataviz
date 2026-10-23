@@ -9,6 +9,71 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Service accounts: integrations that outlive the person who set them up
+
+### Added
+
+**Service accounts.** An account nobody signs in as, for an integration to run as. Super and org
+admins create one under **Administration → Service accounts**, name its managers — people, or
+teams — and give it workspace roles: any that neither administers a workspace nor lets people in.
+Its managers make, rotate and revoke its keys from **Account → API keys → Service accounts you
+manage**, confirming it's them as for their own keys. A key (`nxsat_…`) acts as the account,
+reaches what the account's roles give it, and counts against the account's own limit of 25. An
+integration swaps its `nxpat_…` key for one and changes nothing else.
+
+**What happens when a manager leaves.**
+- **Teams as managers.** A team, ideally one your identity provider keeps, keeps an account
+  managed as people join and leave. Anyone in it can make keys that act as the account, which
+  the page says where you choose one.
+- **Hand-over.** Suspending someone on **Administration → Users** lists the service accounts they
+  manage, flags those nobody else manages and the keys they made, and hands them to a successor
+  before suspending them. **Administration → Service accounts → Hand over…** does it on its own.
+- **A safety net.** When an account's last manager in good standing goes — suspended, removed,
+  out of their team, or no longer signing in — every super and org admin is told at once. Its
+  keys keep working for a grace period (**Keep a service account's keys working after its last
+  manager goes**: at once, 7, 14 or 30 days; 14 by default), the admins are reminded three days
+  before it ends, and then the keys pause (`401 api_key_unmanaged`) until a manager is appointed.
+- **A single-manager marker** on every account one person is all it depends on.
+
+A new permission, `system:service-accounts:manage`, granted to super and org admins. Someone
+who may manage users (a super admin) can make an account's keys without managing it; its
+managers are told when they do.
+
+### Changed
+
+- A key's notices — misuse, expiry reminders, an administrator revoking it — go to the people
+  who can act for a service account's key: its managers, and the members of its teams, or its
+  administrators while it has none.
+- The API explorer's API key scheme names both kinds of key, `nxpat_…` and `nxsat_…`.
+- People lists, pickers, the directory, analytics and inboxes leave service accounts out; the
+  routes about a person answer `404` for one.
+
+### Security
+
+- A service account never signs in: every sign-in path refuses it, an identity provider can't
+  link to one, and it can't join a team or a workspace's members directly. It holds only the
+  workspace roles given it on its own page: never a platform role, a team's roles, or a role
+  that administers a workspace.
+
+### Upgrading
+
+- The upgrade job adds the `service_accounts` and `service_account_managers` tables and the new
+  permission (`20261023_1200_service_accounts`). Nothing else to run.
+- Secret scanning: widen the pattern to `nx[ps]at_[0-9A-Za-z]{38}` to find service account keys
+  too.
+
+### Known limitations
+
+- Service accounts can't be deleted: disable one, and revoke its keys.
+- Its standing is re-checked when its managers change and once an hour, so a manager who signs
+  in again after their sign-in window lapsed brings its keys back within the hour.
+- No warning before a manager's own standing lapses; the alert comes when the account has nobody
+  left.
+- Auditors see service accounts' keys in the API keys inventory and the activity log, but not
+  the accounts' own page.
+
+---
+
 ## [Unreleased] — Follow a workspace's graphs and their history from a script
 
 ### Added

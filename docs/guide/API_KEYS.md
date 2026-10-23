@@ -11,6 +11,11 @@ can. If your own access shrinks, so does the key's, on its next request.
 > **Note:** *The one-sentence model* — a key is your access, narrowed to what
 > you chose, checked afresh on every request.
 
+A key that acts as you stops when you leave. For an integration that should
+outlive you — a scheduled job, a sync with another system — make its key on a
+[service account](/guide/service-accounts) instead: an account nobody signs in
+as, whose keys its managers make.
+
 ---
 
 ## Creating a key
@@ -171,7 +176,8 @@ checked again each time.
 | 401 | `api_key_revoked` | Revoked. It will not work again. |
 | 401 | `api_key_expired` | Past its expiry, or older than your administrator's maximum. |
 | 401 | `owner_reauth_required` | Paused: you have not signed in through your identity provider for too long — or have no way to sign in, such as only a password while password sign-in is switched off. Sign in and it resumes. |
-| 401 | `api_key_owner_inactive` | Your account is suspended, deleted, or marked as a break-glass (system) account — which holds no keys. |
+| 401 | `api_key_owner_inactive` | Your account is suspended, deleted, or marked as a break-glass (system) account — which holds no keys. For a service account's key: the account is disabled. |
+| 401 | `api_key_unmanaged` | A service account's key, paused: the account has had no manager for longer than the grace period. It works again as soon as an administrator appoints one. |
 | 401 | `api_key_ip_not_allowed` | Used from outside the networks it is limited to. |
 | 401 | `api_keys_disabled` | Your administrator has switched API keys off. |
 | 403 | `api_key_not_allowed` | This endpoint cannot be called with a key. |
@@ -243,11 +249,11 @@ curl -X DELETE -H "Authorization: Bearer nxpat_…" https://your-host/api/v1/api
 ```
 
 Better still, stop a key reaching a repository at all. Every key is `nxpat_`
-followed by 38 letters and digits, the last six a checksum of the rest, so
-this pattern finds one:
+— or, for a service account's, `nxsat_` — followed by 38 letters and digits,
+the last six a checksum of the rest, so this pattern finds one:
 
 ```text
-nxpat_[0-9A-Za-z]{38}
+nx[ps]at_[0-9A-Za-z]{38}
 ```
 
 Add it as a custom pattern to GitHub secret scanning — with push protection
@@ -292,19 +298,25 @@ optionally with a note its owner sees — or every key a person holds; ending
 someone's sessions does not touch their keys. **Export CSV** downloads the list
 as filtered and sorted, up to 10,000 keys; two exports run at once on each
 server, and a third is asked to try again shortly. The access drawer on
-**Administration → Users** links to each person's keys.
+**Administration → Users** links to each person's keys. A service account's
+keys are marked as such; its managers, rather than a person, hear when you
+revoke one.
 
-Four switches in **Administration → Features → Authentication** govern keys:
+Five switches in **Administration → Features → Authentication** govern keys:
 **API keys** (the switch for all of them at once), **Longest an API key may
-live**, **Pause keys of people who stop signing in**, and **Accept a fresh
+live**, **Pause keys of people who stop signing in**, **Accept a fresh
 sign-in round trip for API keys**, which concerns portal connections only (see
-[Confirming it's you](#confirming-its-you)). See [Feature
+[Confirming it's you](#confirming-its-you)), and **Keep a service account's keys
+working after its last manager goes** (see [Service
+Accounts](/guide/service-accounts)). See [Feature
 Switches](/guide/feature-switches).
 
 ---
 
 ## Where to next
 
+- [Service Accounts](/guide/service-accounts) — when an integration must keep
+  running whoever set it up.
 - [Versioning & Change Control](/guide/versioning-change-control) — when your
   integration proposes changes: how drafts, reviews and publishing work.
 - [Import & Export](/guide/import-export) — when a script loads data in bulk

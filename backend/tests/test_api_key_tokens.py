@@ -47,10 +47,11 @@ def test_the_pattern_the_guide_gives_secret_scanners_finds_every_key():
     """The API Keys guide tells people what to add to their secret scanner: it
     must go on finding every key this code makes."""
     guide = (Path(__file__).parents[2] / "docs" / "guide" / "API_KEYS.md").read_text(encoding="utf-8")
-    found = re.search(r"^(nxpat_\S+)$", guide, re.MULTILINE)
+    found = re.search(r"^(nx\S*at_\S+)$", guide, re.MULTILINE)
     assert found, "the guide no longer gives secret scanners a pattern"
     pattern = re.compile(found.group(1))
-    assert all(pattern.fullmatch(api_keys.generate().token) for _ in range(500))
+    for kind in (api_keys.KIND_PERSONAL, api_keys.KIND_SERVICE):
+        assert all(pattern.fullmatch(api_keys.generate(kind).token) for _ in range(500))
 
 
 def test_only_the_hash_is_derived_and_it_is_stable():

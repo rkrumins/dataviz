@@ -462,6 +462,13 @@ one of its data sources is.
   within that window. The cache never touches the owner's sessions: an earlier version
   registered it as one, which kept the owner's session index growing for as long as a key
   was busy.
+- **A service account's keys.** A service account (an id starting `svc_`) is resolved like a
+  person, but keeps only its direct workspace bindings: no groups and no global roles, so no
+  shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
+  administers the workspace nor lets people in. Its managers make keys that act as it, whatever
+  they can reach themselves: appointing a manager delegates the account's access, and whoever
+  controls a managing team's membership controls that delegation. See [Service
+  Accounts](/guide/service-accounts).
 
 ## 403 body
 

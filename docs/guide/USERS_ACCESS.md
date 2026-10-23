@@ -370,7 +370,7 @@ Each row has the actions for that account's state:
 | **Mark as system account** | Make it a break-glass account (see below). |
 | **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly; a password you set is one they replace the next time they sign in. |
 | **End sessions** | Sign them out everywhere, now. They can sign straight back in. Their API keys keep working — revoke those under **Administration → API keys**. |
-| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. |
+| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. If they manage service accounts, the dialog lists them and offers to hand them to a successor first. |
 
 Clicking a row opens that person's access drawer, which leads with an
 **Activity** block:
@@ -538,6 +538,16 @@ workspace's **People with access** list.
 - [ ] Bind at the right **scope** — organization-wide only if truly needed.
 - [ ] Tell them about **My access** and this guide.
 
+## Admin checklist for someone leaving
+
+- [ ] **Hand over their service accounts** — suspending them on **User
+      Management** lists the ones they manage and hands them to a successor.
+      Prefer a team: it outlives the next leaver too.
+- [ ] **Rotate the service account keys they made** — the hand-over names them;
+      they may have kept a copy.
+- [ ] **Revoke their own API keys** under **Administration → API keys** if
+      anything still uses one.
+
 ---
 
 ## Where to next
@@ -552,3 +562,5 @@ workspace's **People with access** list.
   someone can't sign in or has the wrong access.
 - [API Keys](/guide/api-keys) — when someone wants a script or a service to
   act as them, or you need to see and revoke the keys people hold.
+- [Service Accounts](/guide/service-accounts) — when an integration should run
+  as an account of its own, and survive the people who look after it.

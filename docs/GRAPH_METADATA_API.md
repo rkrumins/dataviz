@@ -380,6 +380,10 @@ workspace; it can read the history of the sources it covers, finding each one's 
 `GET /api/v1/{ws_id}/versioning/resolve?dataSourceId={ds_id}` (a `404` there means version control
 isn't on for it). How to create and limit a key is in [API Keys](/guide/api-keys).
 
+For a scheduled job, make the key on a [service account](/guide/service-accounts) rather than
+your own: it keeps working when you leave, and reaches only what the account's roles give it. Its
+key is `nxsat_…` and is used exactly as above.
+
 ---
 
 ## Errors

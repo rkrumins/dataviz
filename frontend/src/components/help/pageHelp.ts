@@ -26,7 +26,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/me/account', slugs: ['users-access', 'sso-operations'] },
   { path: '/me/identities', slugs: ['sso-operations'] },
   { path: '/me/api-keys', slugs: ['api-keys'] },
-  { path: '/me/service-accounts/:accountId', slugs: ['api-keys'] },
+  { path: '/me/service-accounts/:accountId', slugs: ['service-accounts', 'api-keys'] },
   { path: '/me/preferences', slugs: ['users-access', 'quick-start'] },
   { path: '/admin/overview', slugs: ['governance-ops', 'admin-setup'] },
   { path: '/admin/infrastructure', slugs: ['governance-ops', 'rollup-capacity'] },
@@ -42,7 +42,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/admin/sso', slugs: ['sso-setup', 'sso-operations'] },
   { path: '/admin/audit', slugs: ['governance-ops'] },
   { path: '/admin/api-keys', slugs: ['api-keys', 'governance-ops'] },
-  { path: '/admin/service-accounts', slugs: ['api-keys', 'users-access'] },
+  { path: '/admin/service-accounts', slugs: ['service-accounts', 'users-access'] },
 ]
 
 /** The guide slugs for the page at `pathname`, most relevant first. */
