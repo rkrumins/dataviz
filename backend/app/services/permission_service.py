@@ -66,6 +66,7 @@ from backend.auth_service.providers.assurance import (
     at_least as assurance_at_least,
 )
 from backend.common.roles import PLATFORM_ADMIN_ROLES
+from backend.common.service_accounts import is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -351,10 +352,17 @@ async def resolve(
     """
     sid = sid or new_session_id()
 
-    group_ids = await user_repo.get_groups_for_user(session, user_id)
+    # A service account holds its own workspace roles and nothing else: no
+    # team's, and no platform role, whatever ends up attached to it.
+    service = is_service_account(user_id)
+    group_ids = [] if service else await user_repo.get_groups_for_user(session, user_id)
     bindings = await binding_repo.list_for_user_with_groups(
         session, user_id=user_id, group_ids=group_ids
     )
+    if service:
+        bindings = [
+            b for b in bindings if b.scope_type == "workspace" and b.subject_type == "user"
+        ]
 
     # Collect distinct role names so we can fetch role_permissions in
     # one query. This keeps resolve() O(1) DB calls regardless of how

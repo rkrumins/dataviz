@@ -1,4 +1,4 @@
-"""Expiry reminders for API keys.
+"""Expiry reminders for API keys, and the standing of service accounts.
 
 A key that expires unannounced breaks whatever depends on it — often at
 night, often for someone who has forgotten the key exists. So its owner hears
@@ -8,6 +8,10 @@ made to live a week or less was made knowing it would, and gets no reminder.
 The reminder follows the key's own expiry. A deployment's maximum lifetime,
 lowered after a key was made, takes effect at once and is the admin's to
 announce.
+
+Each pass also checks that every service account still has a manager in good
+standing (``service_account_standing.sweep``): a manager's sign-in window
+lapses with time alone, with no request to notice it.
 
 Runs on the CONTROLPLANE/DEV role only, like the other sweepers, and claims
 an advisory lock per pass so two processes never send the same reminder.
@@ -28,6 +32,7 @@ from backend.app.db.repositories import (
     notification_repo,
     outbox_event_repo,
 )
+from backend.app.services import service_account_standing
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +106,9 @@ async def run_sweeper(
     interval: float = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
     """Background loop until ``shutdown`` is set: remind owners of keys about
-    to expire, and drop usage counts past their retention. A failed pass is
-    logged and retried on the next tick."""
+    to expire, check that service accounts still have managers, and drop
+    usage counts past their retention. A failed pass is logged and retried on
+    the next tick."""
     logger.info("API key housekeeping started (interval=%.0fs)", interval)
     while not shutdown.is_set():
         try:
@@ -111,10 +117,18 @@ async def run_sweeper(
                     reminded = await remind_once(session)
                     if reminded:
                         logger.info("Sent %d API key expiry reminder(s)", reminded)
-                    # Committed first, so a prune that fails cannot take the
-                    # reminders back with it. The commit lets the pass go,
-                    # so the prune claims it again.
+                    # Each step commits before the next, so one that fails
+                    # cannot take the earlier ones back with it. A commit lets
+                    # the pass go, so the next step claims it again.
                     await session.commit()
+                    if await claim_this_pass(session, "auth:api-key-housekeeping"):
+                        lost, pausing = await service_account_standing.sweep(session)
+                        if lost or pausing:
+                            logger.info(
+                                "Service accounts: %d lost their last manager, %d pause soon",
+                                lost, pausing,
+                            )
+                        await session.commit()
                     if await claim_this_pass(session, "auth:api-key-housekeeping"):
                         await api_key_usage_repo.prune(session)
         except asyncio.CancelledError:

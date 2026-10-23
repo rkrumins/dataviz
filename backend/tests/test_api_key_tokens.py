@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import Headers
 
-from backend.app.db.models import ApiKeyORM, IdpProviderORM, UserIdentityORM, UserORM
+from backend.app.db.models import ApiKeyORM, IdpProviderORM, ServiceAccountORM, UserIdentityORM, UserORM
 from backend.app.db.repositories import api_key_repo
 from backend.auth_service.core import api_keys
 
@@ -288,13 +288,14 @@ async def test_the_per_person_limit_counts_keys_still_in_date(db_session):
     ) == 1
 
 
-_SHOWN = {None: "active", "owner_reauth_required": "paused"}
+_SHOWN = {None: "active", "owner_reauth_required": "paused", "unmanaged": "paused"}
 
 
 async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets(db_session):
     """``status_expr`` filters and counts the administrators' inventory;
-    ``lifecycle_refusal`` decides each request. For every kind of owner,
-    key and policy, they agree."""
+    ``lifecycle_refusal`` decides each request. For every kind of owner —
+    people, and service accounts with and without a manager — key and policy,
+    they agree."""
     now = datetime.now(timezone.utc)
 
     def ago(days: float) -> str:
@@ -316,8 +317,15 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
         db_session.add(UserIdentityORM(
             user_id=uid, provider_id="idp_x", external_id=f"sub-{uid}", last_login_at=last,
         ))
-    keys = []
-    for uid in owners:
+    # Service accounts: managed, without a manager for a few days, for
+    # longer than any grace, and disabled.
+    unmanaged = {"svc_managed": None, "svc_recent": ago(3), "svc_lapsed": ago(40), "svc_off": None}
+    for uid, since in unmanaged.items():
+        users[uid] = await _user(db_session, uid, status="suspended" if uid == "svc_off" else "active")
+        db_session.add(ServiceAccountORM(user_id=uid, unmanaged_since=since))
+    keys, plain = [], {}
+    for uid in [*owners, *unmanaged]:
+        kind = "service" if uid.startswith("svc_") else "personal"
         for expires_at, created_at, revoked in (
             (None, None, False),
             ((now + timedelta(days=5)).isoformat(), None, False),
@@ -325,18 +333,23 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
             (None, ago(40), False),              # past a 30-day maximum lifetime
             (ago(1), None, True),
         ):
-            _, row = await _key(db_session, uid, expires_at=expires_at)
+            _, row = await _key(db_session, uid, kind=kind, expires_at=expires_at)
             row.created_at = created_at or row.created_at
             row.revoked_at = ago(0) if revoked else None
             keys.append(row)
+            plain.setdefault(uid, row)
+    # A key whose kind and owner disagree never works.
+    _, crossed_to_person = await _key(db_session, "usr_pw", kind="service")
+    _, crossed_to_account = await _key(db_session, "svc_managed", kind="personal")
+    keys += [crossed_to_person, crossed_to_account]
     await db_session.flush()
 
     seen = set()
-    for cap, window, passwords in (
-        (None, 30, True), (30, 30, True), (30, None, True), (None, None, True),
-        (None, 30, False), (30, None, False),
+    for cap, window, passwords, grace in (
+        (None, 30, True, 14), (30, 30, True, 14), (30, None, True, 0), (None, None, True, 14),
+        (None, 30, False, 0), (30, None, False, 14),
     ):
-        base, status = api_key_repo._inventory(now, cap, window, passwords)
+        base, status = api_key_repo._inventory(now, cap, window, passwords, grace)
         in_sql = dict((await db_session.execute(
             base.with_only_columns(ApiKeyORM.id, status)
         )).all())
@@ -347,13 +360,24 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
                 idp_last_login_at=last_login.get(key.user_id),
                 now=now, sso_signin_window_days=window, max_lifetime_days=cap,
                 passwords_allowed=passwords,
+                unmanaged_since=unmanaged.get(key.user_id), unmanaged_grace_days=grace,
             )
             shown = _SHOWN.get(refusal, refusal)
-            assert in_sql[key.id] == shown, (key.user_id, cap, window, passwords, key.expires_at)
+            assert in_sql[key.id] == shown, (
+                key.user_id, key.kind, cap, window, passwords, grace, key.expires_at,
+            )
+            if key in (crossed_to_person, crossed_to_account):
+                assert shown != "active", (key.user_id, key.kind)
             if key.user_id == "usr_sys":
                 assert shown != "active", (cap, window, key.expires_at)
             if key.user_id == "usr_pw" and not passwords:
                 # A password is no way back in while password sign-in is off.
                 assert shown != "active", (cap, window, key.expires_at)
             seen.add(shown)
+        # A service account's keys work while it is managed, and through the
+        # grace period after; then they pause. A disabled account's stop.
+        assert in_sql[plain["svc_managed"].id] == "active"
+        assert in_sql[plain["svc_recent"].id] == ("active" if grace > 3 else "paused")
+        assert in_sql[plain["svc_lapsed"].id] == "paused"
+        assert in_sql[plain["svc_off"].id] == "owner_inactive"
     assert seen == {"active", "paused", "owner_inactive", "expired", "revoked"}

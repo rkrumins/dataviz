@@ -38,6 +38,7 @@ from .core.config import (
     sso_auth_time_is_stale,
 )
 from backend.common.identity_provenance import asserted_fields, build_snapshot
+from backend.common.service_accounts import is_service_account
 
 from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
 from .activity import ActivityGate
@@ -2012,7 +2013,7 @@ class LocalIdentityService:
                 session, existing_identity.user_id,
             )
             if orm is None or orm.deleted_at is not None \
-                    or orm.status != "active":
+                    or orm.status != "active" or is_service_account(orm.id):
                 return SsoDecision("rejected", error="sso_account_inactive")
             return SsoDecision(
                 "sign_in_existing", user=orm, identity_row=existing_identity,
@@ -2239,6 +2240,10 @@ class LocalIdentityService:
             reasons.append(f"existing_status:{existing.status}")
         if existing.deleted_at is not None:
             reasons.append("existing_deleted")
+        if is_service_account(existing.id):
+            # Its address is unroutable, so no provider should assert it —
+            # and nothing may ever sign in as one.
+            reasons.append("service_account")
         if linking_policy == "strict" and has_existing_identity:
             reasons.append("strict_existing_sso")
         return reasons
@@ -2625,7 +2630,13 @@ class LocalIdentityService:
 
         Called inside the session scope for that reason. Everything else
         about minting is pure CPU and deliberately stays outside it.
+
+        Every way of signing in ends here, so this is also where a service
+        account is refused a session, whatever let it this far: it acts
+        only through its keys.
         """
+        if is_service_account(user_id):
+            raise InvalidCredentials("Invalid email or password")
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
             auth_time_proven=auth_time_proven, idp_exp=idp_exp, pwfb=pwfb,
@@ -2837,7 +2848,7 @@ def _ambient_token(settings, *, cookies: dict, headers: dict) -> Optional[str]:
     return cookies.get(settings.token_source_key)
 
 _SELF_SERVICE_REASONS = frozenset({
-    "expired", "owner_inactive", "owner_reauth_required", "ip_not_allowed",
+    "expired", "owner_inactive", "owner_reauth_required", "unmanaged", "ip_not_allowed",
 })
 
 
@@ -2861,6 +2872,8 @@ def _api_key_refusal(
         sso_signin_window_days=policy.sso_signin_window_days,
         max_lifetime_days=policy.max_lifetime_days,
         passwords_allowed=passwords_allowed,
+        unmanaged_since=getattr(row, "unmanaged_since", None),
+        unmanaged_grace_days=policy.service_account_grace_days,
     )
     if reason is None and not api_keys.address_allowed(client_ip, row.key.allowed_cidrs):
         return "ip_not_allowed"

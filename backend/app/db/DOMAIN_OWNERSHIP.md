@@ -51,7 +51,7 @@ places every table by area and schema.
 
 | Domain | Owned tables | Notes |
 |---|---|---|
-| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens`, `api_keys`, `api_key_usage` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. |
+| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens`, `api_keys`, `api_key_usage`, `service_accounts`, `service_account_managers` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. A service account is a `users` row (`svc_…`) with a `service_accounts` row; a team that manages one is named by `service_account_managers.group_id` (FK to `groups`, which has no domain here yet). |
 | **workspace** | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` | Tenancy boundary — `workspace_id` is THE tenant identifier. |
 | **provider** | `providers`, `catalog_items` | Pure infrastructure — no tenant data, no PII. |
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |
@@ -77,7 +77,7 @@ already:
 | visualization → workspace | `views.workspace_id`, `views.data_source_id` | `views` owns its own `workspace_id` FK (intra-schema). |
 | workspace → visualization | `workspaces.default_layout_template_id` | The template a new view in the workspace starts from: a plain id, no FK. A deleted or no-longer-eligible template is simply not offered. |
 | stats → workspace | `data_source_stats.data_source_id`, `data_source_count_snapshots.{data_source_id,workspace_id}` | `data_source_stats` does not need workspace awareness. The snapshot table denormalises `workspace_id`/`provider_id` at capture time, so the per-provider history rollup reads the stats domain alone. It also has no FK: an audit trail must outlive the row it describes. |
-| identity → identity | `user_roles.user_id`, `user_approvals.user_id`, `api_keys.user_id` | Intra-domain — keep DB FK forever. |
+| identity → identity | `user_roles.user_id`, `user_approvals.user_id`, `api_keys.user_id`, `service_accounts.user_id`, `service_account_managers.{service_account_id,user_id}` | Intra-domain — keep DB FK forever. |
 | visualization → visualization | `views.context_model_id`, `view_favourites.view_id`, `view_versions.view_id`, `layout_template_versions.template_id`, `layout_template_favourites.template_id` | Intra-domain. |
 | ontology → ontology | `ontology_audit_log.ontology_id`, `ontology_source_mappings.ontology_id` | Intra-domain. |
 

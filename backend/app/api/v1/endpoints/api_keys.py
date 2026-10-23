@@ -38,8 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth import api_key_auth, api_key_surface
 from backend.app.auth.api_key_auth import (
+    DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS,
     ENABLED_FLAG,
     MAX_LIFETIME_FLAG,
+    SERVICE_ACCOUNT_GRACE_FLAG,
     SSO_WINDOW_FLAG,
 )
 from backend.app.auth.dependencies import (
@@ -53,6 +55,7 @@ from backend.app.db import engine as db_engine
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
     ApiKeyORM,
+    ServiceAccountORM,
     UserIdentityORM,
     UserORM,
     ViewORM,
@@ -87,6 +90,7 @@ from backend.auth_service.core.tokens import (
 from backend.auth_service.interface import User
 from backend.auth_service.ratelimit import get_account_limiter
 from backend.common.display_name import resolve_display_name
+from backend.common.service_accounts import is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +143,7 @@ _STATUS_BY_REFUSAL = {
     "expired": "expired",
     "owner_inactive": "owner_inactive",
     "owner_reauth_required": "paused",
+    "unmanaged": "paused",
 }
 
 
@@ -441,7 +446,7 @@ class AdminRevokeRequest(_Model):
 class _PolicyValues:
     def __init__(
         self, enabled: bool, max_lifetime_days, sso_window_days, sso_round_trip=False,
-        passwords_allowed=True,
+        passwords_allowed=True, grace_days=DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS,
     ):
         self.enabled = enabled
         self.max_lifetime_days = max_lifetime_days
@@ -450,6 +455,8 @@ class _PolicyValues:
         #: The Passwords switch (``allow_local_login``) — never the emergency
         #: window, which opens password sign-in only until it closes.
         self.passwords_allowed = passwords_allowed
+        #: How long a service account's keys outlive its last manager.
+        self.grace_days = grace_days
 
 
 async def _policy(session: AsyncSession) -> _PolicyValues:
@@ -461,12 +468,18 @@ async def _policy(session: AsyncSession) -> _PolicyValues:
         sso_window_days=api_key_auth._days(values.get(SSO_WINDOW_FLAG, "30")),
         sso_round_trip=values.get(SSO_ROUND_TRIP_FLAG, fail_safe_default(SSO_ROUND_TRIP_FLAG)) is True,
         passwords_allowed=posture.allow_local_login,
+        grace_days=api_key_auth.grace_days(
+            values.get(SERVICE_ACCOUNT_GRACE_FLAG, str(DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS)),
+        ),
     )
 
 
 async def _identity_facts(
     session: AsyncSession, user_ids: set[str],
-) -> dict[str, tuple[int, Optional[str]]]:
+) -> dict[str, tuple[int, Optional[str], Optional[str]]]:
+    """Per principal, what its keys' status rests on: how many SSO identities
+    and their latest sign-in — and, for a service account, since when it has
+    had no manager."""
     if not user_ids:
         return {}
     rows = (await session.execute(
@@ -478,11 +491,20 @@ async def _identity_facts(
         .where(UserIdentityORM.user_id.in_(sorted(user_ids)))
         .group_by(UserIdentityORM.user_id)
     )).all()
-    return {uid: (int(count or 0), last) for uid, count, last in rows}
+    facts = {uid: (int(count or 0), last, None) for uid, count, last in rows}
+    accounts = sorted(uid for uid in user_ids if is_service_account(uid))
+    if accounts:
+        for uid, since in (await session.execute(
+            select(ServiceAccountORM.user_id, ServiceAccountORM.unmanaged_since)
+            .where(ServiceAccountORM.user_id.in_(accounts))
+        )).all():
+            count, last, _ = facts.get(uid, (0, None, None))
+            facts[uid] = (count, last, since)
+    return facts
 
 
 def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str:
-    count, last = facts.get(owner.id, (0, None))
+    count, last, unmanaged_since = facts.get(owner.id, (0, None, None))
     reason = api_keys.lifecycle_refusal(
         key, owner,
         identity_count=count, idp_last_login_at=last,
@@ -490,6 +512,8 @@ def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str
         sso_signin_window_days=policy.sso_window_days,
         max_lifetime_days=policy.max_lifetime_days,
         passwords_allowed=policy.passwords_allowed,
+        unmanaged_since=unmanaged_since,
+        unmanaged_grace_days=policy.grace_days,
     )
     return _STATUS_BY_REFUSAL.get(reason, reason)
 
@@ -1631,7 +1655,7 @@ class _InventoryFilters:
             owner_id=self.owner_id, status=self.status, focus=self.focus,
             unused_days=self.unused_days, search=self.q, sort=self.sort, order=self.order,
             max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
-            passwords_allowed=policy.passwords_allowed,
+            passwords_allowed=policy.passwords_allowed, grace_days=policy.grace_days,
         )
 
 
@@ -1681,7 +1705,7 @@ async def api_key_stats(
     counts = await api_key_repo.stats(
         session, owner_id=owner_id, search=q,
         max_lifetime_days=policy.max_lifetime_days, sso_window_days=policy.sso_window_days,
-        passwords_allowed=policy.passwords_allowed,
+        passwords_allowed=policy.passwords_allowed, grace_days=policy.grace_days,
     )
     return AdminApiKeyStats(
         total=counts["total"],
