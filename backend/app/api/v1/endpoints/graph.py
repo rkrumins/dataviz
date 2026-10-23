@@ -38,6 +38,7 @@ from backend.common.models.search import (
     SearchCountsRequest,
     SearchExportRequest,
     SearchMembershipRequest,
+    SearchResolveRequest,
     SearchQuery,
 )
 from backend.common.property_patch import (
@@ -2269,6 +2270,37 @@ async def search_membership(
     from backend.app.services.advanced_search_service import ValidationError
     try:
         return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/resolve", response_model_by_alias=True)
+async def search_resolve(
+    body: SearchResolveRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
+):
+    """Which entities each name reference names in the view — how many, the
+    first ten with the containers they sit in, or why the reference can't
+    be used. What the reference picker checks as a path is typed, and how it
+    finds the shortest path that names one entity. A share link's references
+    are kept to its view.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.resolve(body, run_context=SearchRunContext(
             data_version=await _search_data_version(engine),
             admit=_statement_admission(engine),
         ))

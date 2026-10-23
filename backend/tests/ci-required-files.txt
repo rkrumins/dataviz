@@ -177,6 +177,7 @@ tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_engine.py
 tests/test_search_export.py
+tests/test_search_refs.py
 tests/test_search_rules.py
 tests/test_search_rules_examples.py
 tests/test_search_schema_endpoint.py

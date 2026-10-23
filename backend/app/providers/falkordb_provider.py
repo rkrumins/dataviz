@@ -6678,6 +6678,23 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
 
+    async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
+                                       with_paths=False):
+        """Which entities each name reference names, in ``scope``. See
+        ``falkordb_search/refs.py``."""
+        from .falkordb_search.refs import resolve_refs
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await resolve_refs(self, scope, refs, run=run, data_version=context.data_version,
+                                  confined=confined, with_paths=with_paths)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""

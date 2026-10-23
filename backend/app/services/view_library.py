@@ -31,7 +31,9 @@ from backend.app.db.models import ViewLayoutOverlayORM, ViewORM, ViewSavedQueryO
 from backend.app.db.repositories import view_repo
 from backend.app.services.advanced_search_service import (
     ValidationError as SearchValidationError,
+    _path_refs,
     _validate_predicate,
+    _with_resolved_refs,
 )
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
@@ -107,6 +109,9 @@ def _rule_compile_problem(model: Any) -> Optional[str]:
     only — the edge types are stand-ins, so a graph whose ontology is still
     loading refuses nothing here."""
     from backend.app.providers.falkordb_deep_search import _Compiler
+    # A name path is resolved where the rule runs, against the graph; its
+    # shape is all that is checked here, so each stands in as one urn.
+    model = _with_resolved_refs(model, {id(ref): ["urn:stand-in"] for _, ref in _path_refs(model)})
     try:
         _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(model)
     except CompileError as exc:

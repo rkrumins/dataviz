@@ -270,6 +270,8 @@ class _Compiler:
             return self._visit_entity_type(p)
         if kind == "layer":
             return self._visit_layer(p)
+        if kind == "is":
+            return self._visit_is(p)
         if kind == "descendantOf":
             if in_or or not at_top_and:
                 raise CompileError(
@@ -277,7 +279,13 @@ class _Compiler:
                     "in v1. Move it to scope.root_urns or split into "
                     "multiple queries."
                 )
-            self.hoisted_root_urns.append(list(p.urns))
+            urns = list(p.urns) + _ref_urns(p.refs, "descendantOf")
+            if not urns:
+                # Its references named nothing: nothing is inside nothing.
+                # An empty set must never reach the scope chain, which
+                # would drop it — and the clamp with it.
+                return "false"
+            self.hoisted_root_urns.append(urns)
             self.hoisted_max_depths.append(p.max_depth)
             return "true"  # scope check enforces the constraint
         if kind == "withinHops":
@@ -509,6 +517,14 @@ class _Compiler:
         self.params[pn] = l.layer_assignment
         return f"n.layerAssignment = ${pn}"
 
+    def _visit_is(self, p) -> str:
+        urns = _ref_urns(p.refs, "is")
+        if not urns:
+            return "false"
+        pn = self._next()
+        self.params[pn] = urns
+        return f"n.urn IN ${pn}"
+
     def _resolve_degree_edge_types(self, predicate) -> List[str]:
         """Resolve the edge-type list for a degree / withinHops predicate.
 
@@ -664,8 +680,8 @@ class _Compiler:
             getattr(p, "edge_predicate", None)
         )
         self.hoisted_path = {
-            "source_urns": list(p.source_urns),
-            "target_urns": list(p.target_urns),
+            "source_urns": list(p.source_urns) + _ref_urns(p.source_refs, "a path's sources"),
+            "target_urns": list(p.target_urns) + _ref_urns(p.target_refs, "a path's targets"),
             "direction": p.direction,
             "edge_types": list(edge_types),
             "max_hops": int(p.max_hops),
@@ -689,11 +705,14 @@ class _Compiler:
         edge_where = self._emit_edge_predicate_fragment(
             getattr(w, "edge_predicate", None)
         )
+        urns = list(w.urns) + _ref_urns(w.refs, "withinHops")
+        if not urns:
+            return "false"   # its references named nothing to be near
         if not edge_types:
             # Empty edge-type set ⇒ no node can be within N hops of
             # anything; short-circuit the whole query.
             self.hoisted_within_hops.append({
-                "urns": list(w.urns),
+                "urns": urns,
                 "hops": int(w.hops),
                 "direction": w.direction,
                 "edge_types": [],
@@ -701,7 +720,7 @@ class _Compiler:
             })
             return "true"
         self.hoisted_within_hops.append({
-            "urns": list(w.urns),
+            "urns": urns,
             "hops": int(w.hops),
             "direction": w.direction,
             "edge_types": list(edge_types),
@@ -751,6 +770,22 @@ class _Compiler:
             return "true"
         sep = " AND " if ep.op == "and" else " OR "
         return "(" + sep.join(self._visit_edge(c) for c in ep.children) + ")"
+
+
+def _ref_urns(refs, what: str) -> List[str]:
+    """The URNs of name references the service has resolved (it replaces
+    each path with the URNs it names). A path still standing here was never
+    resolved: compiling it to nothing would widen the search instead of
+    narrowing it, so it is refused."""
+    urns: List[str] = []
+    for ref in refs or ():
+        if ref.urn is None:
+            raise CompileError(
+                f"{what}: the name reference '{ref.label()}' was not resolved "
+                "to entities before compiling"
+            )
+        urns.append(ref.urn)
+    return urns
 
 
 def _normalize_sugar_to_degree(p) -> DegreePredicate:

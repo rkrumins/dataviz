@@ -178,8 +178,85 @@ class MatchAllPredicate(_Base):
     kind: Literal["all"] = "all"
 
 
+# ---------------------------------------------------------------------------
+# Name references — an entity by its place in the containment tree
+# ---------------------------------------------------------------------------
+
+NODE_REF_ANY_DEPTH = "**"
+"""A path segment standing for any number of containment levels, none
+included."""
+
+NODE_REF_MATCHES_MAX = 64
+"""The most entities one reference may name; more is a 400 asking for a
+narrower path."""
+
+
+class NodeRef(_Base):
+    """An entity named by its URN, or by its path of display names.
+
+    A path starts at a top-level entity of the data source (one inside no
+    other) and steps down one containment level per segment:
+    ``["Country", "United Kingdom"]``. ``"**"`` stands for any number of
+    levels, none included — ``["Country", "**", "London"]`` is a London
+    anywhere under Country — and a leading ``"**"`` starts anywhere in the
+    search's scope, so a name unique within the view (or the layer a
+    search is scoped to) is enough. Names compare with the display name,
+    exactly unless ``caseSensitive`` is false (only paths without ``"**"``
+    may ignore case); ``entityType`` narrows the last step. A path that
+    names several entities refers to all of them, at most 64.
+
+    Unlike a URN, a path means the same thing in every environment, so a
+    saved query or rule that uses one survives a library or view moving
+    between them.
+    """
+    urn: Optional[str] = Field(None, min_length=1, max_length=2048)
+    path: Optional[List[str]] = Field(None, min_length=1, max_length=12)
+    entity_type: Optional[str] = Field(
+        None, alias="entityType", min_length=1, max_length=128)
+    case_sensitive: bool = Field(True, alias="caseSensitive")
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "NodeRef":
+        if (self.urn is None) == (self.path is None):
+            raise ValueError("a reference is a urn or a path, not both")
+        if self.urn is not None:
+            if self.entity_type is not None or not self.case_sensitive:
+                raise ValueError("entityType and caseSensitive apply to a path")
+            return self
+        segments = [segment.strip() for segment in self.path]
+        if any(not s or len(s) > 256 for s in segments):
+            raise ValueError("each path segment is 1–256 characters")
+        if segments[-1] == NODE_REF_ANY_DEPTH:
+            raise ValueError("a path ends with a name, not '**'")
+        if any(a == b == NODE_REF_ANY_DEPTH for a, b in zip(segments, segments[1:])):
+            raise ValueError("'**' twice in a row")
+        if NODE_REF_ANY_DEPTH in segments and not self.case_sensitive:
+            raise ValueError("a path with '**' compares names exactly")
+        self.path = segments
+        return self
+
+    def label(self) -> str:
+        """The reference as people read it: "Country / United Kingdom"."""
+        if self.urn is not None:
+            return self.urn
+        text = " / ".join(self.path or [])
+        return f"{text} ({self.entity_type})" if self.entity_type else text
+
+
+class IsPredicate(_Base):
+    """The entities themselves: matches an entity a reference names —
+    ``Country / United Kingdom``, or a URN."""
+    kind: Literal["is"] = "is"
+    refs: List[NodeRef] = Field(min_length=1, max_length=64)
+
+
+def _anchored(urns: List[str], refs: Optional[List[NodeRef]], what: str) -> None:
+    if not urns and not refs:
+        raise ValueError(f"{what} needs urns or refs")
+
+
 class DescendantOfPredicate(_Base):
-    """Clamp matches to the subtree(s) rooted at ``urns``.
+    """Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.
 
     Lives as a predicate (not on ``SearchScope``) so it can sit inside
     OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.
@@ -187,8 +264,14 @@ class DescendantOfPredicate(_Base):
     which the provider may push down as a tighter Cypher anchor.
     """
     kind: Literal["descendantOf"] = "descendantOf"
-    urns: List[str] = Field(min_length=1, max_length=64)
+    urns: List[str] = Field(default_factory=list, max_length=64)
+    refs: Optional[List[NodeRef]] = Field(None, min_length=1, max_length=64)
     max_depth: Optional[int] = Field(None, alias="maxDepth", ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _has_anchors(self) -> "DescendantOfPredicate":
+        _anchored(self.urns, self.refs, "descendantOf")
+        return self
 
 
 class EdgePropertyPredicate(_Base):
@@ -249,7 +332,8 @@ class WithinHopsPredicate(_Base):
     out-edges only, ``'in'`` walks in-edges, ``'both'`` is undirected.
     """
     kind: Literal["withinHops"] = "withinHops"
-    urns: List[str] = Field(min_length=1, max_length=64)
+    urns: List[str] = Field(default_factory=list, max_length=64)
+    refs: Optional[List[NodeRef]] = Field(None, min_length=1, max_length=64)
     hops: int = Field(ge=1, le=10)
     edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")
     direction: Literal["out", "in", "both"] = "both"
@@ -264,6 +348,11 @@ class WithinHopsPredicate(_Base):
                     "edge. ANDs with ``edge_types`` / ``edge_class``. "
                     "Compiles to ``ALL(rel IN relationships(p) WHERE …)``.",
     )
+
+    @model_validator(mode="after")
+    def _has_anchors(self) -> "WithinHopsPredicate":
+        _anchored(self.urns, self.refs, "withinHops")
+        return self
 
 
 class EntityTypePredicate(_Base):
@@ -393,13 +482,21 @@ class PathPredicate(_Base):
     """
     kind: Literal["path"] = "path"
     source_urns: List[str] = Field(
-        alias="sourceUrns", min_length=1, max_length=8,
+        default_factory=list, alias="sourceUrns", max_length=8,
         description="Starting nodes. The provider runs a variable-length "
                     "match outward (or inward) from each.",
     )
+    source_refs: Optional[List[NodeRef]] = Field(
+        None, alias="sourceRefs", min_length=1, max_length=8,
+        description="Starting nodes by name path (or URN).",
+    )
     target_urns: List[str] = Field(
-        alias="targetUrns", min_length=1, max_length=8,
+        default_factory=list, alias="targetUrns", max_length=8,
         description="Endpoint nodes. Paths terminate here.",
+    )
+    target_refs: Optional[List[NodeRef]] = Field(
+        None, alias="targetRefs", min_length=1, max_length=8,
+        description="Endpoint nodes by name path (or URN).",
     )
     direction: PathDirection = Field(
         "outgoing",
@@ -428,6 +525,12 @@ class PathPredicate(_Base):
                     "``edge_class``. Compiles to "
                     "``ALL(rel IN relationships(p) WHERE …)``.",
     )
+
+    @model_validator(mode="after")
+    def _has_ends(self) -> "PathPredicate":
+        _anchored(self.source_urns, self.source_refs, "a path's sources")
+        _anchored(self.target_urns, self.target_refs, "a path's targets")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +570,7 @@ Predicate = Annotated[
         HasOutgoingPredicate,
         PathPredicate,
         MatchAllPredicate,
+        IsPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),
@@ -946,6 +1050,25 @@ class ScopeDiagnostics(_Base):
         description="Human-readable diagnostic notes — e.g. 'view has "
                     "no rootUrns configured; search ran unclamped'.",
     )
+    resolved_refs: List["ResolvedRef"] = Field(
+        default_factory=list, alias="resolvedRefs",
+        description="What each name reference in the predicate named — "
+                    "how many entities, and the first few — so a "
+                    "reference that names none, or several, can be seen.",
+    )
+
+
+class ResolvedRef(_Base):
+    """One name reference in a predicate, and what it named."""
+    at: str = Field(description="Where it sits: ``$.children[0].refs[1]``.")
+    ref: str = Field(description='As people read it: "Country / United Kingdom".')
+    count: int = Field(description="How many entities it names.")
+    ambiguous: bool = Field(description="It names more than one.")
+    samples: List[AncestorRef] = Field(
+        default_factory=list, description="The first few it names (up to 5).")
+
+
+ScopeDiagnostics.model_rebuild()
 
 
 class SearchProgress(_Base):
@@ -1178,6 +1301,46 @@ class SearchRuleItem(_Base):
     its predicate."""
     id: str = Field(min_length=1, max_length=128)
     predicate: Predicate
+
+
+SEARCH_RESOLVE_REFS_MAX = 32
+"""Name references one ``POST /search/resolve`` resolves."""
+
+SEARCH_RESOLVE_MATCHES_SHOWN = 10
+"""The entities a resolution lists for each reference."""
+
+
+class SearchResolveRequest(_Base):
+    """``POST /search/resolve``: which entities each name reference names
+    in the view's scope — what the reference picker checks as it is
+    typed, and how it learns the shortest path that names one entity."""
+    scope: SearchScope
+    refs: List[NodeRef] = Field(min_length=1, max_length=SEARCH_RESOLVE_REFS_MAX)
+
+
+class ResolvedEntity(_Base):
+    """One entity a reference names, with the containers it sits in."""
+    urn: str
+    display_name: str = Field(alias="displayName")
+    entity_type: str = Field(alias="entityType")
+    ancestor_path: List[AncestorRef] = Field(
+        default_factory=list, alias="ancestorPath",
+        description="Top-level container first, parent last.")
+
+
+class SearchRefResolution(_Base):
+    count: int = Field(description="How many entities the reference names.")
+    matches: List[ResolvedEntity] = Field(
+        default_factory=list, description="The first few, up to 10.")
+    error: Optional[str] = Field(
+        None, description="Why the reference can't be used — it names too many.")
+
+
+class SearchResolveResult(_Base):
+    results: List[SearchRefResolution] = Field(
+        description="One per requested reference, in the same order.")
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
 
 
 class SearchMembershipRequest(_Base):
@@ -1418,6 +1581,10 @@ class SearchApiContract(_Base):
         None, alias="searchExportRequest")
     search_export_result: Optional[SearchExportResult] = Field(
         None, alias="searchExportResult")
+    search_resolve_request: Optional[SearchResolveRequest] = Field(
+        None, alias="searchResolveRequest")
+    search_resolve_result: Optional[SearchResolveResult] = Field(
+        None, alias="searchResolveResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

@@ -44,13 +44,18 @@ from backend.app.services.view_scope import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
+    SEARCH_RESOLVE_MATCHES_SHOWN,
     SEARCH_SCOPE_ENTITY_TYPES_MAX,
+    AncestorRef,
     EdgeGroupPredicate,
     EdgePropertyPredicate,
     GroupPredicate,
     MatchAllPredicate,
+    NodeRef,
     PathPredicate,
     PropertyPredicate,
+    ResolvedEntity,
+    ResolvedRef,
     ScopeDiagnostics,
     SearchAncestorCountsRequest,
     SearchAncestorCountsResult,
@@ -65,6 +70,9 @@ from backend.common.models.search import (
     SearchOptions,
     SearchProgress,
     SearchQuery,
+    SearchRefResolution,
+    SearchResolveRequest,
+    SearchResolveResult,
     SearchResultPage,
     SearchRuleCount,
     SearchRuleItem,
@@ -341,6 +349,70 @@ def follows_relationships(predicate) -> bool:
         follows_relationships(child) for child in predicate.children)
 
 
+# Where name references sit: kind → (field, its JSON name).
+_REF_FIELDS = {
+    "is": (("refs", "refs"),),
+    "descendantOf": (("refs", "refs"),),
+    "withinHops": (("refs", "refs"),),
+    "path": (("source_refs", "sourceRefs"), ("target_refs", "targetRefs")),
+}
+
+#: What a reference that names nothing becomes: a condition no entity meets.
+#: Never an empty set, which a scope clamp would drop — and widen.
+_NOTHING = GroupPredicate(op="not", children=[MatchAllPredicate()])
+
+
+def _path_refs(predicate, path: str = "$") -> list:
+    """Every reference written as a name path, with where it sits."""
+    if isinstance(predicate, GroupPredicate):
+        return [found for i, child in enumerate(predicate.children)
+                for found in _path_refs(child, f"{path}.children[{i}]")]
+    return [(f"{path}.{alias}[{i}]", ref)
+            for field, alias in _REF_FIELDS.get(predicate.kind, ())
+            for i, ref in enumerate(getattr(predicate, field) or ())
+            if ref.path is not None]
+
+
+def _with_resolved_refs(predicate, named: dict):
+    """The predicate with each name path replaced by the URNs it names
+    (``named``: ``id(ref)`` → urns). A reference set naming nothing at all
+    becomes ``_NOTHING``; a path's ends are left empty, so it finds no path."""
+    if isinstance(predicate, GroupPredicate):
+        return predicate.model_copy(update={
+            "children": [_with_resolved_refs(c, named) for c in predicate.children]})
+
+    def urns(given, refs):
+        return list(dict.fromkeys([*given, *(
+            u for ref in refs or ()
+            for u in (named[id(ref)] if ref.path is not None else [ref.urn]))]))
+
+    if predicate.kind == "is":
+        found = urns([], predicate.refs)
+        return (predicate.model_copy(update={"refs": [NodeRef(urn=u) for u in found]})
+                if found else _NOTHING)
+    if predicate.kind in ("descendantOf", "withinHops") and predicate.refs:
+        found = urns(predicate.urns, predicate.refs)
+        return predicate.model_copy(update={"urns": found, "refs": None}) if found else _NOTHING
+    if predicate.kind == "path" and (predicate.source_refs or predicate.target_refs):
+        return predicate.model_copy(update={
+            "source_urns": urns(predicate.source_urns, predicate.source_refs),
+            "source_refs": None,
+            "target_urns": urns(predicate.target_urns, predicate.target_refs),
+            "target_refs": None,
+        })
+    return predicate
+
+
+def _resolved_ref(where: str, ref, answer: dict) -> ResolvedRef:
+    urns = answer["urns"]
+    return ResolvedRef(
+        at=where, ref=ref.label(), count=len(urns), ambiguous=len(urns) > 1,
+        samples=[AncestorRef(urn=e["urn"], display_name=e.get("displayName") or "",
+                             entity_type=e.get("entityType") or "")
+                 for e in answer.get("entities", [])[:5]],
+    )
+
+
 def _validate_items(items) -> None:
     """Each rule's predicate, held to the same caps and typed checks as a
     search's — with the path naming the rule."""
@@ -561,6 +633,7 @@ class AdvancedSearchService:
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
         )
+        query, resolved_refs = await self._resolve_query_refs(query, run_context)
 
         try:
             page = await self._run(query, eff_scope, deadline_ms, run_context)
@@ -569,7 +642,7 @@ class AdvancedSearchService:
                 # Notes the engine carried out (a plan's, a facet's failure).
                 extra_notes.extend(page.scope_diagnostics.notes)
             page.scope_diagnostics = self._build_scope_diagnostics(
-                eff_scope, extra_notes=extra_notes or None,
+                eff_scope, extra_notes=extra_notes or None, resolved_refs=resolved_refs,
             )
             return page, eff_scope
         except CompileError as exc:
@@ -622,8 +695,10 @@ class AdvancedSearchService:
                                           errors=refused)
         op = self._provider_op("deep_search_membership")
         context = run_context or SearchRunContext()
-        out = await op(scope, [(item.id, item.predicate) for item in request.items
-                               if item.id not in refused],
+        items, unusable = await self._resolve_item_refs(
+            [item for item in request.items if item.id not in refused], scope, context)
+        refused = {**refused, **unusable}
+        out = await op(scope, [(item.id, item.predicate) for item in items],
                        request.urns, context=context)
         return SearchMembershipResult(
             matches={**{item_id: [] for item_id in refused}, **out["matches"]},
@@ -659,12 +734,16 @@ class AdvancedSearchService:
         deadline = started + min(request.wait_ms / 1000.0, _COUNTS_WAIT_S)
 
         def query_of(item: SearchRuleItem, wait_ms: int, session: Optional[str]) -> SearchQuery:
-            return SearchQuery(predicate=item.predicate, scope=scope,
+            return SearchQuery(predicate=predicates[item.id], scope=scope,
                                options=SearchOptions(results="hits", wait_ms=wait_ms,
                                                      session_id=session))
 
         answers: dict = {}
         errors: dict = self._refused_on_a_shared_link(request.items)
+        resolved, unusable = await self._resolve_item_refs(
+            [item for item in request.items if item.id not in errors], scope, context)
+        errors.update(unusable)
+        predicates = {item.id: item.predicate for item in resolved}
         for item in request.items:
             if item.id in errors:
                 continue
@@ -754,7 +833,9 @@ class AdvancedSearchService:
                                       columns=export_columns(request.columns))
         op = self._provider_op("deep_search_export")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
-        query = SearchQuery(predicate=request.predicate, scope=scope,
+        predicate, _resolved = await self._resolve_predicate_refs(
+            request.predicate, scope, context, at="$.predicate")
+        query = SearchQuery(predicate=predicate, scope=scope,
                             options=SearchOptions(results="hits"))
         out = await op(query, context=context, fmt=request.format, columns=request.columns,
                        wait_ms=request.wait_ms, session_id=request.session_id)
@@ -793,6 +874,78 @@ class AdvancedSearchService:
                        context=context)
         return SearchAncestorCountsResult.model_validate(out)
 
+    async def resolve(
+        self,
+        request: SearchResolveRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchResolveResult:
+        """Which entities each name reference names in the view's scope —
+        what the reference picker checks as the path is typed."""
+        started = time.monotonic()
+        context = run_context or SearchRunContext()
+        scope, _eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchResolveResult(results=[SearchRefResolution(count=0)
+                                                for _ in request.refs])
+        answers = await self._provider_op("deep_search_resolve_refs")(
+            scope, request.refs, context=context, confined=self._confined, with_paths=True)
+        return SearchResolveResult(
+            results=[SearchRefResolution(
+                count=len(answer["urns"]), error=answer.get("error"),
+                matches=[ResolvedEntity.model_validate(e)
+                         for e in answer["entities"][:SEARCH_RESOLVE_MATCHES_SHOWN]],
+            ) for answer in answers],
+            data_version=context.data_version or None,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    async def _resolve_query_refs(self, query: SearchQuery,
+                                  run_context: Optional[SearchRunContext]):
+        predicate, resolved = await self._resolve_predicate_refs(
+            query.predicate, query.scope, run_context)
+        if not resolved:
+            return query, resolved
+        return query.model_copy(update={"predicate": predicate}), resolved
+
+    async def _resolve_predicate_refs(self, predicate, scope: SearchScope,
+                                      run_context: Optional[SearchRunContext], *,
+                                      at: str = "$"):
+        """The predicate with its name references replaced by the URNs they
+        name in ``scope``, and what each one named. A reference that names
+        too many is a 400 saying where."""
+        found = _path_refs(predicate, at)
+        if not found:
+            return predicate, []
+        answers = await self._provider_op("deep_search_resolve_refs")(
+            scope, [ref for _, ref in found], context=run_context or SearchRunContext(),
+            confined=self._confined)
+        named, resolved = {}, []
+        for (where, ref), answer in zip(found, answers):
+            if answer.get("error"):
+                raise ValidationError(f"{where}: {answer['error']}")
+            named[id(ref)] = answer["urns"]
+            resolved.append(_resolved_ref(where, ref, answer))
+        return _with_resolved_refs(predicate, named), resolved
+
+    async def _resolve_item_refs(self, items, scope: SearchScope, context: SearchRunContext):
+        """Each rule with its name references resolved — in one round for
+        every rule — and the rules whose references can't be used, each with
+        why. One rule's unusable reference is its own error."""
+        found = [(item, ref) for i, item in enumerate(items)
+                 for _, ref in _path_refs(item.predicate, f"$.items[{i}].predicate")]
+        if not found:
+            return list(items), {}
+        answers = await self._provider_op("deep_search_resolve_refs")(
+            scope, [ref for _, ref in found], context=context, confined=self._confined)
+        named, errors = {}, {}
+        for (item, ref), answer in zip(found, answers):
+            if answer.get("error"):
+                errors[item.id] = answer["error"]
+            named[id(ref)] = answer["urns"]
+        return [item.model_copy(update={"predicate": _with_resolved_refs(item.predicate, named)})
+                for item in items if item.id not in errors], errors
+
     async def _rule_scope(self, requested: SearchScope):
         """The resolved scope a rule is evaluated in, or None when every root
         the client named lies outside the view (then nothing matches —
@@ -821,10 +974,13 @@ class AdvancedSearchService:
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
         )
+        query, resolved_refs = await self._resolve_query_refs(query, None)
         try:
             result = await self._provider_op("deep_search_explain")(query)
         except CompileError as exc:
             raise ValidationError(str(exc)) from exc
+        if isinstance(result, dict) and resolved_refs:
+            result["resolvedRefs"] = [r.model_dump(by_alias=True) for r in resolved_refs]
         # Attach the resolved-scope summary so the dev panel can show
         # the user *what their search actually scopes to*. Critical
         # for debugging "why didn't this return anything" — answer is
@@ -895,6 +1051,7 @@ class AdvancedSearchService:
         eff_scope: EffectiveViewScope,
         *,
         extra_notes: Optional[list] = None,
+        resolved_refs: Optional[list] = None,
     ) -> ScopeDiagnostics:
         """Assemble the diagnostic block attached to every response.
 
@@ -970,6 +1127,7 @@ class AdvancedSearchService:
             lineage_edge_types=lineage,
             containment_edge_types=containment,
             notes=notes,
+            resolved_refs=resolved_refs or [],
         )
 
     async def _guard_view_data_source(

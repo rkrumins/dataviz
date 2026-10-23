@@ -74,7 +74,7 @@
       "type": "object"
     },
     "DescendantOfPredicate": {
-      "description": "Clamp matches to the subtree(s) rooted at ``urns``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
+      "description": "Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
       "properties": {
         "kind": {
           "const": "descendantOf",
@@ -96,19 +96,32 @@
           "default": null,
           "title": "Maxdepth"
         },
+        "refs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refs"
+        },
         "urns": {
           "items": {
             "type": "string"
           },
           "maxItems": 64,
-          "minItems": 1,
           "title": "Urns",
           "type": "array"
         }
       },
-      "required": [
-        "urns"
-      ],
       "title": "DescendantOfPredicate",
       "type": "object"
     },
@@ -378,6 +391,7 @@
                 "hasIncoming": "#/$defs/HasIncomingPredicate",
                 "hasOutgoing": "#/$defs/HasOutgoingPredicate",
                 "hasProperty": "#/$defs/HasPropertyPredicate",
+                "is": "#/$defs/IsPredicate",
                 "isLeaf": "#/$defs/IsLeafPredicate",
                 "isOrphan": "#/$defs/IsOrphanPredicate",
                 "isRoot": "#/$defs/IsRootPredicate",
@@ -438,6 +452,9 @@
               },
               {
                 "$ref": "#/$defs/MatchAllPredicate"
+              },
+              {
+                "$ref": "#/$defs/IsPredicate"
               },
               {
                 "$ref": "#/$defs/GroupPredicate"
@@ -669,6 +686,31 @@
       "title": "IsOrphanPredicate",
       "type": "object"
     },
+    "IsPredicate": {
+      "description": "The entities themselves: matches an entity a reference names —\n``Country / United Kingdom``, or a URN.",
+      "properties": {
+        "kind": {
+          "const": "is",
+          "default": "is",
+          "title": "Kind",
+          "type": "string"
+        },
+        "refs": {
+          "items": {
+            "$ref": "#/$defs/NodeRef"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "refs"
+      ],
+      "title": "IsPredicate",
+      "type": "object"
+    },
     "IsRootPredicate": {
       "description": "Sugar: nodes with zero incoming edges of the given class\n(\"nobody produces this\"). Normalises to\n``DegreePredicate(direction='in', op='eq', value=0)``.",
       "properties": {
@@ -785,6 +827,63 @@
       "title": "MatchAllPredicate",
       "type": "object"
     },
+    "NodeRef": {
+      "description": "An entity named by its URN, or by its path of display names.\n\nA path starts at a top-level entity of the data source (one inside no\nother) and steps down one containment level per segment:\n``[\"Country\", \"United Kingdom\"]``. ``\"**\"`` stands for any number of\nlevels, none included — ``[\"Country\", \"**\", \"London\"]`` is a London\nanywhere under Country — and a leading ``\"**\"`` starts anywhere in the\nsearch's scope, so a name unique within the view (or the layer a\nsearch is scoped to) is enough. Names compare with the display name,\nexactly unless ``caseSensitive`` is false (only paths without ``\"**\"``\nmay ignore case); ``entityType`` narrows the last step. A path that\nnames several entities refers to all of them, at most 64.\n\nUnlike a URN, a path means the same thing in every environment, so a\nsaved query or rule that uses one survives a library or view moving\nbetween them.",
+      "properties": {
+        "caseSensitive": {
+          "default": true,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "entityType": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entitytype"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "urn": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Urn"
+        }
+      },
+      "title": "NodeRef",
+      "type": "object"
+    },
     "PathPredicate": {
       "description": "Find paths between source and target nodes.\n\nTop-level AND only — the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node→edge→node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through ≤4 lineage hops\".",
       "properties": {
@@ -880,15 +979,50 @@
           "title": "Maxpaths",
           "type": "integer"
         },
+        "sourceRefs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Starting nodes by name path (or URN).",
+          "title": "Sourcerefs"
+        },
         "sourceUrns": {
           "description": "Starting nodes. The provider runs a variable-length match outward (or inward) from each.",
           "items": {
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Sourceurns",
           "type": "array"
+        },
+        "targetRefs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Endpoint nodes by name path (or URN).",
+          "title": "Targetrefs"
         },
         "targetUrns": {
           "description": "Endpoint nodes. Paths terminate here.",
@@ -896,15 +1030,10 @@
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Targeturns",
           "type": "array"
         }
       },
-      "required": [
-        "sourceUrns",
-        "targetUrns"
-      ],
       "title": "PathPredicate",
       "type": "object"
     },
@@ -919,6 +1048,7 @@
           "hasIncoming": "#/$defs/HasIncomingPredicate",
           "hasOutgoing": "#/$defs/HasOutgoingPredicate",
           "hasProperty": "#/$defs/HasPropertyPredicate",
+          "is": "#/$defs/IsPredicate",
           "isLeaf": "#/$defs/IsLeafPredicate",
           "isOrphan": "#/$defs/IsOrphanPredicate",
           "isRoot": "#/$defs/IsRootPredicate",
@@ -979,6 +1109,9 @@
         },
         {
           "$ref": "#/$defs/MatchAllPredicate"
+        },
+        {
+          "$ref": "#/$defs/IsPredicate"
         },
         {
           "$ref": "#/$defs/GroupPredicate"
@@ -1290,18 +1423,33 @@
           "title": "Kind",
           "type": "string"
         },
+        "refs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refs"
+        },
         "urns": {
           "items": {
             "type": "string"
           },
           "maxItems": 64,
-          "minItems": 1,
           "title": "Urns",
           "type": "array"
         }
       },
       "required": [
-        "urns",
         "hops"
       ],
       "title": "WithinHopsPredicate",

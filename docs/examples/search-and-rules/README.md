@@ -20,6 +20,8 @@ change.
 | `queries/changed-last-30-days.search.json` | Datasets whose `updatedAt` is within the last 30 days |
 | `queries/downstream-of-a-table.search.json` | Datasets and dashboards up to three lineage hops downstream of one table |
 | `queries/paths-between-two-tables.search.json` | Lineage paths from one table to another, up to five hops |
+| `queries/under-a-domain-by-name.search.json` | PII datasets inside the domain named *Sales* — by name, so it runs in any environment |
+| `queries/downstream-of-a-table-by-name.search.json` | The downstream example again, naming the table by its path (`Sales / ** / orders`) instead of a URN |
 | `packs/governance.library.json` | Rules **PII**, **Needs owner**, **Certified**, **Classified, not tagged** (off) and three saved searches |
 | `packs/data-quality.library.json` | Rules **Orphan**, **Empty table**, **Stale**, **Dead end** and four saved searches |
 

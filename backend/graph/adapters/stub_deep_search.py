@@ -38,9 +38,12 @@ from backend.common.search_semantics import (
     value_slot,
 )
 from backend.common.models.search import (
+    NODE_REF_ANY_DEPTH,
+    NODE_REF_MATCHES_MAX,
     EntityTypePredicate,
     GroupPredicate,
     HasPropertyPredicate,
+    IsPredicate,
     LayerPredicate,
     MatchAllPredicate,
     PropertyPredicate,
@@ -50,6 +53,9 @@ from backend.common.models.search import (
     TagPredicate,
     TextPredicate,
 )
+
+#: How far below its anchor a ``"**"`` in a name path looks.
+REF_ANY_DEPTH_MAX = 20
 
 
 # Fixture node dict shape: keys ``urn`` (str, required), ``entityType``
@@ -80,9 +86,19 @@ class StubDeepSearchProvider:
         *,
         nodes: Sequence[Dict[str, Any]] = (),
         edges: Sequence[Dict[str, Any]] = (),
+        containment_edge_types: Sequence[str] = ("CONTAINS",),
     ) -> None:
         self._nodes: List[Dict[str, Any]] = list(nodes)
         self._edges: List[Dict[str, Any]] = list(edges)
+        # Containment edges point parent → child, as the graph's do.
+        contains = set(containment_edge_types)
+        self._parents: Dict[str, List[str]] = {}
+        self._children: Dict[str, List[str]] = {}
+        for e in self._edges:
+            if e.get("type") in contains:
+                self._children.setdefault(e["source"], []).append(e["target"])
+                self._parents.setdefault(e["target"], []).append(e["source"])
+        self._by_urn: Dict[str, Dict[str, Any]] = {n["urn"]: n for n in self._nodes}
 
     # --- DeepSearchProvider Protocol -----------------------------------------
 
@@ -103,7 +119,7 @@ class StubDeepSearchProvider:
             matches = [
                 n for n in matches
                 if n.get("urn") in roots
-                or any(a in roots for a in n.get("ancestorUrns", []))
+                or any(a in roots for a in self._ancestors(n))
             ]
         # Entity-type clamp from scope (resolver-stamped) — skipped when
         # root_urns already bound the search, mirroring the FalkorDB
@@ -170,11 +186,107 @@ class StubDeepSearchProvider:
         if scope.root_urns:
             roots = set(scope.root_urns)
             nodes = [n for n in nodes if n.get("urn") in roots
-                     or any(a in roots for a in n.get("ancestorUrns", []))]
+                     or any(a in roots for a in self._ancestors(n))]
         elif scope.entity_types:
             allowed = set(scope.entity_types)
             nodes = [n for n in nodes if n.get("entityType") in allowed]
         return nodes
+
+    async def deep_search_resolve_refs(self, scope, refs, *, context=None,
+                                       confined: bool = False,
+                                       with_paths: bool = False) -> List[Dict[str, Any]]:
+        """Which entities each name reference names — the reference semantics
+        the FalkorDB resolver is held to. One answer per reference:
+        ``{"urns", "entities", "error"}``, at most 10 entities listed."""
+        in_scope = {n["urn"] for n in self._in_scope(scope)}
+        if scope.scope_mode == "data_source" and not confined:
+            in_scope = {n["urn"] for n in self._nodes}
+        out = []
+        for ref in refs:
+            urns = sorted(self._named(ref, in_scope))
+            if confined:
+                urns = [u for u in urns if u in in_scope]
+            error = None
+            if len(urns) > NODE_REF_MATCHES_MAX:
+                error = (f"'{ref.label()}' names more than {NODE_REF_MATCHES_MAX} "
+                         "entities — name a deeper path or a type")
+                urns = []
+            out.append({"urns": urns, "error": error,
+                        "entities": [self._entity(u, with_paths) for u in urns[:10]]})
+        return out
+
+    def _entity(self, urn: str, with_path: bool) -> Dict[str, Any]:
+        node = self._by_urn.get(urn, {})
+        entity = {"urn": urn, "displayName": node.get("displayName", ""),
+                  "entityType": node.get("entityType", "")}
+        if with_path:
+            chain, at = [], urn
+            while self._parents.get(at) and len(chain) < REF_ANY_DEPTH_MAX:
+                at = self._parents[at][0]
+                chain.append(at)
+            entity["ancestorPath"] = [
+                {"urn": a, "displayName": self._by_urn.get(a, {}).get("displayName", ""),
+                 "entityType": self._by_urn.get(a, {}).get("entityType", "")}
+                for a in reversed(chain)]
+        return entity
+
+    def _named(self, ref, in_scope) -> set:
+        if ref.urn is not None:
+            return {ref.urn}
+        segments = list(ref.path)
+
+        def named(urn: str, name: str) -> bool:
+            have = self._by_urn.get(urn, {}).get("displayName") or ""
+            return have == name if ref.case_sensitive else fold_case(have) == fold_case(name)
+
+        if segments[0] == NODE_REF_ANY_DEPTH:
+            # Anywhere in the search's scope.
+            current = {u for u in in_scope if named(u, segments[1])}
+            rest = segments[2:]
+        else:
+            current = {n["urn"] for n in self._nodes
+                       if not self._parents.get(n["urn"]) and named(n["urn"], segments[0])}
+            rest = segments[1:]
+        while rest:
+            if rest[0] == NODE_REF_ANY_DEPTH:
+                current = {d for u in current for d in self._descendants(u)
+                           if named(d, rest[1])}
+                rest = rest[2:]
+            else:
+                current = {c for u in current for c in self._children.get(u, ())
+                           if named(c, rest[0])}
+                rest = rest[1:]
+        if ref.entity_type:
+            wanted = ref.entity_type.lower()
+            current = {u for u in current
+                       if str(self._by_urn.get(u, {}).get("entityType", "")).lower() == wanted}
+        return current
+
+    def _ancestors(self, node: Dict[str, Any]) -> List[str]:
+        """The fixture's ``ancestorUrns`` when it gives them, else every
+        container above the node by its containment edges."""
+        given = node.get("ancestorUrns")
+        if given is not None:
+            return list(given)
+        found: List[str] = []
+        frontier = list(self._parents.get(node.get("urn"), ()))
+        while frontier:
+            urn = frontier.pop()
+            if urn not in found:
+                found.append(urn)
+                frontier.extend(self._parents.get(urn, ()))
+        return found
+
+    def _descendants(self, urn: str) -> set:
+        """Everything below ``urn``, one level down to ``REF_ANY_DEPTH_MAX``."""
+        found: set = set()
+        frontier = [urn]
+        for _ in range(REF_ANY_DEPTH_MAX):
+            frontier = [c for u in frontier for c in self._children.get(u, ()) if c not in found]
+            if not frontier:
+                break
+            found.update(frontier)
+        return found
 
     async def deep_search_explain(self, query: SearchQuery) -> Dict[str, Any]:
         # The stub doesn't emit Cypher; it returns a diagnostic dict
@@ -369,6 +481,14 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
 
     if isinstance(predicate, MatchAllPredicate):
         return True
+
+    if isinstance(predicate, IsPredicate):
+        urns = set()
+        for ref in predicate.refs:
+            if ref.urn is None:
+                raise CompileError(f"is: the name reference '{ref.label()}' was not resolved")
+            urns.add(ref.urn)
+        return node.get("urn") in urns
 
     if isinstance(predicate, EntityTypePredicate):
         et = node.get("entityType")
