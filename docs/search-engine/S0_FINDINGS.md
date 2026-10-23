@@ -658,3 +658,49 @@ Raw data was forced on to measure the probes, because the graph has none.
 | One probe, per 50k–150k-node unit | 8–32 ms |
 
 The counts vary by about ±0.4 s from run to run as FalkorDB's caches warm.
+
+## 15. Relationship predicates: where a comprehension may sit
+
+A relationship predicate ("parent is a domain", "feeds a dashboard within
+three hops", "every column described") tests the entities related to each
+candidate, so it compiles to a pattern comprehension evaluated per
+candidate. FalkorDB 4.18 accepts a comprehension only in some places, and
+in two of the others it returns wrong rows rather than an error.
+`tests/integration/test_relational_shapes_live.py` pins each behaviour
+below on a graph whose right answers are known: a cycle, a diamond, a
+multi-parent node, duplicate names, JSON edge properties, a rollup edge.
+The shapes that fail are `xfail(strict=True)`, so an engine upgrade that
+changes one turns the file red.
+
+| Shape | Result | What the compiler does |
+|---|---|---|
+| Comprehension in a MATCH's WHERE | "Unable to resolve filtered alias" | Never placed there |
+| Comprehension in a WITH's WHERE | `_AR_EXP_UpdateEntityIdx` error | Never placed there |
+| `WITH n, ANY(_xt IN [0] WHERE …) AS _xt0 WHERE _xt0` | Correct after range, walk, clamp and withinHops shapes | The **tail**: every relationship is evaluated here |
+| `ANY(_mz IN [0] WHERE …)` in a RETURN | Correct; one column per rule | Membership, unchanged |
+| A related entity tested in the comprehension's projection, `[(n)<-[:C]-(_xr) WHERE … \| test(_xr)]` | Correct, nested three levels | The form for every axis and quantifier |
+| A nested comprehension anchored on the outer list's element variable | **Wrong rows**: the inner pattern ignores the anchor | Never used; nesting anchors on the pattern variable `_xr` |
+| A nested comprehension or a pattern predicate in a comprehension's WHERE | Fails to compile | That WHERE holds only ID comparisons, `ALL(… IN relationships(p) …)` and simple tests |
+| `size((_xr)<-[:C]-())` on a comprehension variable | **Wrong rows** | "Has no parent" is `size([(_xr)<-[:C]-(_xz) \| 1]) = 0` |
+| A pattern predicate such as `(n)<-[:C]-()` in a projection | "Type mismatch" | Degree inside the tail is `size([(V)<-[:R]-(_xd) \| 1]) op $p` |
+| Two comprehensions reusing a name | The second comes back empty | Every name carries the compiler's counter |
+| Typed comparisons (`compile_comparison`) on `_xr` or on `_xe` in the edge filter | Correct | Unchanged |
+| JSON text needles on `r.properties` (`"k": "v",` / `"k": "v"}`) | Correct; nested objects are a known false positive | Edge keys held in JSON |
+| `count(DISTINCT _xr)` after `OPTIONAL MATCH`; a deduplicated `size(reduce(…))` | Both correct; a diamond counts once | Counts |
+
+**Cost.** A comprehension is built for every row that reaches its
+projection, even when a conjunct beside it is false. Inside
+`ANY(… WHERE …)`, AND and OR short-circuit the tests, not the building of
+the lists. Three rules follow:
+
+- Cheap top-level conditions filter in the clause's WHERE (the **head**),
+  so a row that fails them never pays for a traversal.
+- Each top-level relationship is its own tail stage, cheapest first, so a
+  row that one rejects is spared the rest.
+- A related entity's simple tests (typed and text comparisons, its type,
+  its URN, key names) sit in the comprehension's WHERE, which spares the
+  projection for related entities that fail them.
+
+A related entity's own conditions are compiled for its native values only.
+The raw-property probe (§14) answers for the unit's own nodes, not for
+their relatives.
