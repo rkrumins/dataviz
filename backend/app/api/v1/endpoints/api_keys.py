@@ -1,12 +1,17 @@
 """API keys: your own, the one making this request, and everyone's.
 
-Mounted three ways:
+Mounted four ways:
 
 ``/api/v1/me/api-keys``
     A person managing their own keys from the browser. Minting one — create
     or rotate — needs a fresh proof that it is them (step-up): their password,
     or a sign-in at their identity provider within the last few minutes. The
     token is in the response that creates it and nowhere else, ever.
+``/api/v1/me/service-accounts/{account_id}/api-keys``
+    The same routes, for a service account's keys (``_principal``): the keys
+    act as the account, and the person managing them — one of its managers,
+    or anyone holding ``system:users:manage`` — proves it is them and is
+    recorded as having acted.
 ``/api/v1/api-keys/self``
     A key describing or revoking itself — allowed even when it is paused,
     expired or used from an address it does not allow, so whoever finds a
@@ -25,10 +30,11 @@ import io
 import ipaddress
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional, Union
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
@@ -36,6 +42,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.endpoints.service_accounts import MINT_ANY
 from backend.app.auth import api_key_auth, api_key_surface
 from backend.app.auth.api_key_auth import (
     DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS,
@@ -47,6 +54,7 @@ from backend.app.auth.api_key_auth import (
 from backend.app.auth.dependencies import (
     _identity_service,
     get_current_user,
+    get_permission_claims,
     requires,
 )
 from backend.app.common.bulkhead import Bulkhead, Busy
@@ -69,9 +77,15 @@ from backend.app.db.repositories import (
     app_auth_config_repo,
     notification_repo,
     outbox_event_repo,
+    service_account_repo,
     user_repo,
 )
-from backend.app.services import api_key_service, permission_service, view_access
+from backend.app.services import (
+    api_key_service,
+    permission_service,
+    service_account_standing,
+    view_access,
+)
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.auth_service.cookies import read_access_cookie
@@ -103,8 +117,8 @@ admin_users_router = APIRouter()
 # per address like the password-change route, and per account below.
 limiter = Limiter(key_func=get_remote_address)
 
-#: Active keys one person may hold. Enough for every integration a person
-#: runs; few enough that a forgotten key is noticed.
+#: Active keys one person, or one service account, may hold. Enough for every
+#: integration a person runs; few enough that a forgotten key is noticed.
 MAX_ACTIVE_KEYS = 25
 #: How recently an SSO session must have authenticated at its identity
 #: provider to mint a key.
@@ -344,7 +358,7 @@ class ApiKeyOptions(_Model):
     policy: Policy
     step_up: StepUp = Field(alias="stepUp")
     active_keys: int = Field(alias="activeKeys")
-    #: Every workspace the person can reach, with what they can do there.
+    #: Every workspace the keys' owner can reach, with what it can do there.
     workspaces: List[WorkspaceAccess]
     #: The address this request came from, as the server sees it — what a
     #: key limited to "this address" would be limited to.
@@ -695,7 +709,7 @@ def _minting_refusal(
 
 async def _sso_step_up(
     request: Request, user: User, session: AsyncSession, payload: dict,
-    policy: _PolicyValues, *, ask_gateway: bool = True,
+    policy: _PolicyValues, *, next_path: str = _STEP_UP_NEXT, ask_gateway: bool = True,
 ) -> tuple[Optional[str], Optional[HTTPException]]:
     """How a session signed in through an identity provider confirms it is
     the person: ``(method, None)`` when it does, else ``(None, refusal)``.
@@ -720,13 +734,13 @@ async def _sso_step_up(
     would ask it or send the person to it is answered at once: try again
     later (``_provider_down``). ``ask_gateway`` False — the create form,
     before anything is submitted — takes a gateway that can be asked as
-    confirming without asking it."""
+    confirming without asking it. A sign-in comes back to ``next_path``."""
     if _fresh(payload, proven=True):
         return "sso_proven", None
     provider_id = payload.get(SIGNIN_PROVIDER_CLAIM)
     identity = _identity_service(request)
     target = await identity.step_up_target(
-        user.id, next_path=_STEP_UP_NEXT, provider_id=provider_id,
+        user.id, next_path=next_path, provider_id=provider_id,
     )
     if target.confirms == "gateway_live":
         if target.unreachable:
@@ -778,9 +792,9 @@ async def _sso_step_up(
 
 async def _step_up(
     request: Request, user: User, session: AsyncSession, password: Optional[str],
-    policy: _PolicyValues,
+    policy: _PolicyValues, *, next_path: str = _STEP_UP_NEXT,
 ) -> str:
-    """Confirm it is really the account's owner before a key is minted: a
+    """Confirm it is really the person signed in before a key is minted: a
     session left open on a shared machine must not be enough to walk away
     with a credential that outlives it. Returns how it was confirmed
     (``password``, or a method of ``_sso_step_up``), for the record."""
@@ -791,7 +805,9 @@ async def _step_up(
     if refusal is not None:
         raise refusal
     if how == "sso":
-        method, refusal = await _sso_step_up(request, user, session, payload, policy)
+        method, refusal = await _sso_step_up(
+            request, user, session, payload, policy, next_path=next_path,
+        )
         if refusal is not None:
             raise refusal
         return method
@@ -971,12 +987,12 @@ async def _validated_draft(
     return permissions, resources, expires_at, cidrs
 
 
-def _too_many(hint: str = "Revoke one you no longer use.") -> HTTPException:
+def _too_many(hint: str = "Revoke one you no longer use.", *, who: str = "You") -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
             "error": "too_many_api_keys",
-            "message": f"You can have {MAX_ACTIVE_KEYS} active keys. {hint}",
+            "message": f"{who} can have {MAX_ACTIVE_KEYS} active keys. {hint}",
         },
     )
 
@@ -1119,27 +1135,136 @@ async def _lineage(session: AsyncSession, key: ApiKeyORM) -> tuple[Optional[KeyR
     )
 
 
-# ── Your own keys ───────────────────────────────────────────────────
+# ── Your own keys, and a service account's ──────────────────────────
 
 
-async def _owner_and_facts(session: AsyncSession, user: User):
-    owner = await user_repo.get_user_by_id(session, user.id)
+@dataclass(frozen=True)
+class _Principal:
+    """Whose keys a request is about, and who is acting on them: the same
+    person on ``/me/api-keys``; under ``/me/service-accounts/{account_id}``,
+    the account and someone answering for it. The keys belong to the owner —
+    they act as it, reach what it can and count against its limit — while the
+    actor proves it is them and is recorded as having acted."""
+    actor: User
+    #: The service account whose keys these are; ``None``: the actor's own.
+    account: Optional[UserORM] = None
+    #: Whether the actor manages ``account``, rather than acting for it
+    #: through ``system:users:manage``.
+    manages: bool = True
+
+    @property
+    def owner(self):
+        """What the keys act as: anything with an ``id``."""
+        return self.actor if self.account is None else self.account
+
+    @property
+    def id(self) -> str:
+        return self.owner.id
+
+    @property
+    def kind(self) -> str:
+        return api_keys.KIND_PERSONAL if self.account is None else api_keys.KIND_SERVICE
+
+    @property
+    def next_path(self) -> str:
+        """The page a sign-in to confirm it's you comes back to."""
+        return _STEP_UP_NEXT if self.account is None else f"/me/service-accounts/{self.account.id}"
+
+    @property
+    def who(self) -> str:
+        """The owner, opening a sentence about its keys."""
+        return "You" if self.account is None else f"“{self.account.first_name}”"
+
+    @property
+    def revoke_reason(self) -> str:
+        if self.account is None:
+            return "owner"
+        return "manager" if self.manages else "admin"
+
+
+def service_account_path(account_id: str = Path(..., max_length=64)) -> None:
+    """The service-account mount's path parameter (``api.py``), declared so
+    its routes document it; ``_principal`` reads it."""
+
+
+async def _principal(
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> _Principal:
+    """The person signed in — or, under ``/me/service-accounts/{account_id}``,
+    that account, for one of its managers (or a member of a team managing it)
+    and for anyone holding ``system:users:manage``. To anyone else it does not
+    exist. Read from the path rather than declared: the personal mount has no
+    such parameter."""
+    account_id = request.path_params.get("account_id")
+    if account_id is None:
+        return _Principal(actor=user)
+    found = await service_account_repo.get(session, account_id)
+    if found is not None:
+        account, _row = found
+        if await service_account_repo.is_manager(session, account_id, user.id):
+            return _Principal(actor=user, account=account)
+        if has_permission(await get_permission_claims(request), MINT_ANY):
+            return _Principal(actor=user, account=account, manages=False)
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
+
+
+def _unless_disabled(principal: _Principal) -> None:
+    """A disabled service account's keys don't work, so none is made for it."""
+    if principal.account is not None and principal.account.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "service_account_disabled",
+                "message": (
+                    "This service account is disabled, so its keys don't work and none can be "
+                    "made or rotated. An administrator can enable it."
+                ),
+            },
+        )
+
+
+async def _tell_managers(session: AsyncSession, principal: _Principal, key: ApiKeyORM) -> None:
+    """Someone who does not manage a service account made it a key: those who
+    do hear of it, since a credential acting as their account is now in hands
+    they did not choose."""
+    if principal.manages:
+        return
+    audience = await service_account_standing.key_audience(session, principal.id)
+    actor = principal.actor.display_name
+    await notification_repo.notify(
+        session, user_ids=audience.user_ids, kind="service_account_key_created",
+        title=f"{actor} made a key for “{audience.account}”",
+        body=(
+            f"“{key.name}” ({key.token_prefix}…) acts as this service account. {actor} doesn't "
+            "manage it: if nobody expected the key, revoke it."
+        ),
+        link=audience.link, actor_id=principal.actor.id,
+        resource_type="api_key", resource_id=key.id,
+    )
+
+
+async def _owner_and_facts(session: AsyncSession, principal: _Principal):
+    owner = await user_repo.get_user_by_id(session, principal.id)
     if owner is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return owner, await _identity_facts(session, {user.id})
+    return owner, await _identity_facts(session, {principal.id})
 
 
 @router.get("/options", response_model=ApiKeyOptions)
 async def get_api_key_options(
     request: Request,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Everything the create form needs: the deployment's policy, how this
-    session confirms it is you (and whether it can), what you can reach in
-    each workspace, and the address you are calling from."""
+    session confirms it is you (and whether it can), what the keys' owner —
+    you, or the service account — can reach in each workspace, and the
+    address you are calling from."""
+    user = principal.actor
     policy = await _policy(session)
-    owner_claims = await permission_service.resolve(session, user.id, sid="")
+    owner_claims = await permission_service.resolve(session, principal.id, sid="")
     org_wide, reachable = _owner_reach(owner_claims)
     names = (
         await _all_workspace_names(session) if org_wide
@@ -1151,7 +1276,8 @@ async def get_api_key_options(
     sign_in_url = None
     if (await _identity_facts(session, {user.id})).get(user.id, (0, None))[0]:
         target = await _identity_service(request).step_up_target(
-            user.id, next_path=_STEP_UP_NEXT, provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
+            user.id, next_path=principal.next_path,
+            provider_id=payload.get(SIGNIN_PROVIDER_CLAIM),
         )
         # Not while it is confirmed down: that page cannot answer. Nor for a
         # gateway only the browser reaches: its sign-in route can't complete.
@@ -1165,7 +1291,8 @@ async def get_api_key_options(
         # Past step-up now, or after signing in again — not "never, here".
         # A gateway that can be asked is asked when the form is submitted.
         confirmed, refusal = await _sso_step_up(
-            request, user, session, payload, policy, ask_gateway=False,
+            request, user, session, payload, policy, next_path=principal.next_path,
+            ask_gateway=False,
         )
         fresh = confirmed is not None
     # A refusal that says why is one signing in again would not change.
@@ -1178,7 +1305,7 @@ async def get_api_key_options(
         ),
         step_up=StepUp(method=method, fresh=fresh),
         active_keys=await api_key_repo.count_active_for_user(
-            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+            session, principal.id, max_lifetime_days=policy.max_lifetime_days,
         ),
         workspaces=[
             WorkspaceAccess(id=ws, name=names[ws], **_access(_perms_in(owner_claims, ws)))
@@ -1206,15 +1333,16 @@ async def search_api_key_resources(
     q: Optional[str] = Query(None, max_length=200),
     workspace_id: Optional[str] = Query(None, alias="workspaceId", max_length=128),
     limit: int = Query(20, ge=1, le=_PICKER_MAX),
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Views or data sources you can give a key, with what you can do to each
-    — including views reached through a grant or published to everyone."""
-    owner = await permission_service.resolve(session, user.id, sid="")
+    """Views or data sources a key can be given, with what its owner — you,
+    or the service account — can do to each: including views reached through
+    a grant or published to everyone."""
+    owner = await permission_service.resolve(session, principal.id, sid="")
     needle = f"%{q.strip().lower()}%" if q and q.strip() else None
     if type == "view":
-        ctx = await view_access.ViewerContext.build(session, user=user, claims=owner)
+        ctx = await view_access.ViewerContext.build(session, user=principal.owner, claims=owner)
         scope = await view_access.build_read_scope(session, ctx)
         stmt = select(ViewORM).where(view_access.readable_views_clause(scope), view_is_live())
         if workspace_id:
@@ -1264,15 +1392,15 @@ async def search_api_key_resources(
 @router.get("", response_model=List[ApiKeyDTO])
 async def list_my_api_keys(
     history: Literal["recent", "all"] = Query("recent"),
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Your keys, newest first: those still in date, and those that ended in
-    the last 90 days — or, with ``history=all``, every one you have had, up
-    to the newest 500."""
-    owner, facts = await _owner_and_facts(session, user)
+    """Your keys — or the service account's — newest first: those still in
+    date, and those that ended in the last 90 days — or, with
+    ``history=all``, every one there has been, up to the newest 500."""
+    owner, facts = await _owner_and_facts(session, principal)
     policy = await _policy(session)
-    keys = await api_key_repo.list_for_user(session, user.id, history=history == "all")
+    keys = await api_key_repo.list_for_user(session, principal.id, history=history == "all")
     usage = await _usage(session, [k.id for k in keys])
     return [ApiKeyDTO(**_fields(key, owner, facts, policy, usage)) for key in keys]
 
@@ -1282,7 +1410,7 @@ async def list_my_api_keys(
 async def preview_my_api_key(
     request: Request,
     body: KeyDraft,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
     """What a key described like this would be able to do, were it created
@@ -1290,17 +1418,17 @@ async def preview_my_api_key(
     proof that it is you is needed to look."""
     policy = await _policy(session)
     permissions, resources, expires_at, cidrs = await _validated_draft(
-        session, user, body, policy,
+        session, principal.owner, body, policy,
     )
     scope = permission_service.key_scope_from_profile(
-        "preview", kind=api_keys.KIND_PERSONAL, permissions=permissions, resources=resources,
+        "preview", kind=principal.kind, permissions=permissions, resources=resources,
     )
     return ApiKeyPreview(
         permissions=permissions, resources=resources, allowed_cidrs=cidrs,
         expires_at=expires_at,
-        effective_access=await _effective_access(session, user, scope),
+        effective_access=await _effective_access(session, principal.owner, scope),
         active_keys=await api_key_repo.count_active_for_user(
-            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+            session, principal.id, max_lifetime_days=policy.max_lifetime_days,
         ),
     )
 
@@ -1308,21 +1436,23 @@ async def preview_my_api_key(
 @router.get("/{key_id}", response_model=ApiKeyDetail)
 async def get_my_api_key(
     key_id: str,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """One of your keys: what it can do right now, how much it has been used,
-    and what it replaced or was replaced by."""
-    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    """One of your keys, or the service account's: what it can do right now,
+    how much it has been used, and what it replaced or was replaced by."""
+    key = await api_key_repo.get_for_user(session, principal.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
-    owner, facts = await _owner_and_facts(session, user)
+    owner, facts = await _owner_and_facts(session, principal)
     policy = await _policy(session)
     usage = await _usage(session, [key.id])
     replaces, replaced_by = await _lineage(session, key)
     return ApiKeyDetail(
         **_fields(key, owner, facts, policy, usage),
-        effective_access=await _effective_access(session, user, api_key_service.scope_of(key)),
+        effective_access=await _effective_access(
+            session, principal.owner, api_key_service.scope_of(key),
+        ),
         usage_days=_usage_days(usage.get(key.id, {})),
         replaces=replaces, replaced_by=replaced_by,
     )
@@ -1331,12 +1461,12 @@ async def get_my_api_key(
 @router.get("/{key_id}/last-use", response_model=LastUse)
 async def get_my_api_key_last_use(
     key_id: str,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """When, and from where, one of your keys was last used — and nothing
+    """When, and from where, one of the keys was last used — and nothing
     else, in one read: for a page waiting on a new key's first call."""
-    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    key = await api_key_repo.get_for_user(session, principal.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
     return LastUse(
@@ -1351,36 +1481,40 @@ async def create_my_api_key(
     request: Request,
     response: Response,
     body: CreateApiKeyRequest,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Create a key that acts as you, limited to what you choose. The token
-    is in this response and nowhere else."""
+    """Create a key that acts as you — or as the service account — limited to
+    what you choose. The token is in this response and nowhere else."""
     policy = await _policy(session)
     if not policy.enabled:
         raise _refused("api_keys_disabled", "API keys are turned off for this deployment.")
+    _unless_disabled(principal)
     permissions, resources, expires_at, cidrs = await _validated_draft(
-        session, user, body, policy,
+        session, principal.owner, body, policy,
     )
 
     async def _at_limit() -> bool:
         return await api_key_repo.count_active_for_user(
-            session, user.id, max_lifetime_days=policy.max_lifetime_days,
+            session, principal.id, max_lifetime_days=policy.max_lifetime_days,
         ) >= MAX_ACTIVE_KEYS
 
     if await _at_limit():  # before asking anyone to prove anything
-        raise _too_many()
-    confirmed_by = await _step_up(request, user, session, body.current_password, policy)
+        raise _too_many(who=principal.who)
+    confirmed_by = await _step_up(
+        request, principal.actor, session, body.current_password, policy,
+        next_path=principal.next_path,
+    )
     # Counted again and minted under one lock: two requests racing each
     # other cannot both pass the limit.
-    await api_key_repo.hold_principal(session, user.id)
+    await api_key_repo.hold_principal(session, principal.id)
     if await _at_limit():
-        raise _too_many()
+        raise _too_many(who=principal.who)
 
-    generated = api_keys.generate(api_keys.KIND_PERSONAL)
+    generated = api_keys.generate(principal.kind)
     key = await api_key_repo.create(
         session,
-        user_id=user.id, kind=api_keys.KIND_PERSONAL, created_by=user.id,
+        user_id=principal.id, kind=principal.kind, created_by=principal.actor.id,
         name=body.name.strip(), description=(body.description or "").strip() or None,
         token_prefix=generated.display_prefix, token_hash=generated.token_hash,
         permissions=permissions, resources=resources, allowed_cidrs=cidrs,
@@ -1389,12 +1523,13 @@ async def create_my_api_key(
     )
     await _record(
         session, "created", key,
-        created_by=user.id, permissions=permissions, resources=resources,
+        created_by=principal.actor.id, permissions=permissions, resources=resources,
         expires_at=expires_at, allowed_cidrs=cidrs, client_ip=_client_ip(request),
         step_up=confirmed_by,
     )
+    await _tell_managers(session, principal, key)
     await session.commit()
-    account, facts = await _owner_and_facts(session, user)
+    account, facts = await _owner_and_facts(session, principal)
     response.headers["Cache-Control"] = "no-store"
     return CreatedApiKey(key=ApiKeyDTO(**_fields(key, account, facts, policy)), token=generated.token)
 
@@ -1403,13 +1538,13 @@ async def create_my_api_key(
 async def update_my_api_key(
     key_id: str,
     body: UpdateApiKeyRequest,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Rename a key, or say what it is for. What it may do, where it reaches
     and when it expires stay as they were made: change those by rotating it
     or making a new one."""
-    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    key = await api_key_repo.get_for_user(session, principal.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
     if key.revoked_at:
@@ -1436,10 +1571,10 @@ async def update_my_api_key(
     }
     if changes:
         await api_key_repo.update_details(session, key.id, name=name, description=description)
-        await _record(session, "updated", key, updated_by=user.id, changes=changes)
+        await _record(session, "updated", key, updated_by=principal.actor.id, changes=changes)
         await session.commit()
         await session.refresh(key)
-    owner, facts = await _owner_and_facts(session, user)
+    owner, facts = await _owner_and_facts(session, principal)
     policy = await _policy(session)
     usage = await _usage(session, [key.id])
     return ApiKeyDTO(**_fields(key, owner, facts, policy, usage))
@@ -1452,7 +1587,7 @@ async def rotate_my_api_key(
     response: Response,
     key_id: str,
     body: RotateApiKeyRequest,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Replace a key with a new token that can do exactly the same, keeping
@@ -1461,7 +1596,8 @@ async def rotate_my_api_key(
     policy = await _policy(session)
     if not policy.enabled:
         raise _refused("api_keys_disabled", "API keys are turned off for this deployment.")
-    old = await api_key_repo.get_for_user(session, user.id, key_id)
+    _unless_disabled(principal)
+    old = await api_key_repo.get_for_user(session, principal.id, key_id)
     if old is None:
         raise HTTPException(status_code=404, detail="API key not found")
 
@@ -1481,11 +1617,14 @@ async def rotate_my_api_key(
             )
 
     await _replaceable()  # before asking anyone to prove anything
-    confirmed_by = await _step_up(request, user, session, body.current_password, policy)
+    confirmed_by = await _step_up(
+        request, principal.actor, session, body.current_password, policy,
+        next_path=principal.next_path,
+    )
     # Everything below decides on the key as it stands under the lock: a
     # revocation racing this rotation either lands first (and is seen) or
     # waits for it (and revokes the old key, which has its successor).
-    await api_key_repo.hold_principal(session, user.id)
+    await api_key_repo.hold_principal(session, principal.id)
     await session.refresh(old)
     await _replaceable()
     old_expiry = api_keys.effective_expiry(old, max_lifetime_days=policy.max_lifetime_days)
@@ -1495,11 +1634,12 @@ async def rotate_my_api_key(
     # beside its replacement; only a rotation that ends the old key at once
     # leaves the count where it was.
     if (renewing or grace) and await api_key_repo.count_active_for_user(
-        session, user.id, max_lifetime_days=policy.max_lifetime_days,
+        session, principal.id, max_lifetime_days=policy.max_lifetime_days,
     ) >= MAX_ACTIVE_KEYS:
         raise _too_many(
             "Revoke one you no longer use." if renewing else
-            "Rotate without a grace period, or revoke one you no longer use."
+            "Rotate without a grace period, or revoke one you no longer use.",
+            who=principal.who,
         )
     created = api_keys.parse_instant(old.created_at)
     stored_expiry = api_keys.parse_instant(old.expires_at)
@@ -1512,7 +1652,7 @@ async def rotate_my_api_key(
     generated = api_keys.generate(old.kind)
     key = await api_key_repo.create(
         session,
-        user_id=user.id, kind=old.kind, created_by=user.id,
+        user_id=principal.id, kind=old.kind, created_by=principal.actor.id,
         name=old.name, description=old.description,
         token_prefix=generated.display_prefix, token_hash=generated.token_hash,
         permissions=api_key_repo.loads(old.permissions, {}),
@@ -1526,16 +1666,17 @@ async def rotate_my_api_key(
             session, old.id, (_now() + timedelta(seconds=grace)).isoformat(),
         )
     else:
-        await api_key_repo.revoke(session, old.id, by=user.id, reason="rotated")
+        await api_key_repo.revoke(session, old.id, by=principal.actor.id, reason="rotated")
     api_key_service.forget(old.id)
     await _record(
         session, "rotated", key,
-        created_by=user.id, previous_key_id=old.id, grace_seconds=grace,
+        created_by=principal.actor.id, previous_key_id=old.id, grace_seconds=grace,
         renewed=renewing, expires_at=expires_at, client_ip=_client_ip(request),
         step_up=confirmed_by,
     )
+    await _tell_managers(session, principal, key)
     await session.commit()
-    account, facts = await _owner_and_facts(session, user)
+    account, facts = await _owner_and_facts(session, principal)
     response.headers["Cache-Control"] = "no-store"
     return CreatedApiKey(key=ApiKeyDTO(**_fields(key, account, facts, policy)), token=generated.token)
 
@@ -1544,14 +1685,20 @@ async def rotate_my_api_key(
 async def revoke_my_api_key(
     key_id: str,
     request: Request,
-    user: User = Depends(get_current_user),
+    principal: _Principal = Depends(_principal),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Revoke one of your keys. Immediate, and permanent."""
-    key = await api_key_repo.get_for_user(session, user.id, key_id)
+    """Revoke one of your keys, or the service account's. Immediate, and
+    permanent. Someone revoking a service account's key without managing it
+    tells those who do."""
+    key = await api_key_repo.get_for_user(session, principal.id, key_id)
     if key is None:
         raise HTTPException(status_code=404, detail="API key not found")
-    await _revoke(session, key, by=user.id, reason="owner", client_ip=_client_ip(request))
+    if await _revoke(
+        session, key, by=principal.actor.id, reason=principal.revoke_reason,
+        client_ip=_client_ip(request),
+    ) and not principal.manages:
+        await _tell_revoked(session, key, principal.actor.id, None)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1837,15 +1984,29 @@ async def get_api_key(key_id: str, session: AsyncSession = Depends(get_db_sessio
 
 
 async def _tell_owner(
-    session: AsyncSession, owner_id: str, admin_id: str, *,
+    session: AsyncSession, audience: service_account_standing.KeyAudience, admin_id: str, *,
     title: str, body: str, resource_id: str, note: Optional[str] = None,
 ) -> None:
     if note:
         body = f"{body} The administrator said: “{note}”"
     await notification_repo.notify(
-        session, user_ids=[owner_id], kind="api_key_revoked_by_admin",
-        title=title, body=body, link="/me/api-keys", actor_id=admin_id,
+        session, user_ids=audience.user_ids, kind="api_key_revoked_by_admin",
+        title=title, body=body, link=audience.link, actor_id=admin_id,
         resource_type="api_key", resource_id=resource_id,
+    )
+
+
+async def _tell_revoked(
+    session: AsyncSession, key: ApiKeyORM, admin_id: str, note: Optional[str],
+) -> None:
+    audience = await service_account_standing.key_audience(session, key.user_id)
+    await _tell_owner(
+        session, audience, admin_id, resource_id=key.id, note=note,
+        title=f"An administrator revoked one of {audience.whose} API keys",
+        body=(
+            f"“{key.name}” ({key.token_prefix}…) no longer works. "
+            "Create a new key if you still need one."
+        ),
     )
 
 
@@ -1857,14 +2018,7 @@ async def _admin_revoke(
         raise HTTPException(status_code=404, detail="API key not found")
     note = (note or "").strip() or None
     if await _revoke(session, key, by=admin.id, reason="admin", note=note):
-        await _tell_owner(
-            session, key.user_id, admin.id, resource_id=key.id, note=note,
-            title="An administrator revoked one of your API keys",
-            body=(
-                f"“{key.name}” ({key.token_prefix}…) no longer works. "
-                "Create a new key if you still need one."
-            ),
-        )
+        await _tell_revoked(session, key, admin.id, note)
     await session.commit()
 
 
@@ -1910,11 +2064,12 @@ async def admin_revoke_all_api_keys(
         )
         api_key_service.forget(key.id)
     if keys:
+        audience = await service_account_standing.key_audience(session, user_id)
         await _tell_owner(
-            session, user_id, admin.id, resource_id=user_id, note=note,
-            title="An administrator revoked your API keys",
+            session, audience, admin.id, resource_id=user_id, note=note,
+            title=f"An administrator revoked {audience.whose} API keys",
             body=(
-                f"All {len(keys)} of your API keys were revoked. "
+                f"All {len(keys)} of {audience.whose} API keys were revoked. "
                 "Create new ones if you still need them."
             ),
         )

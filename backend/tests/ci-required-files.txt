@@ -184,6 +184,7 @@ tests/test_search_semantics.py
 tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_seed_templates.py
+tests/test_service_account_keys.py
 tests/test_service_account_lifecycle.py
 tests/test_service_accounts_api.py
 tests/test_shard_capacity.py

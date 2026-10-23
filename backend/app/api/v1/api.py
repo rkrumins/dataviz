@@ -92,6 +92,11 @@ api_router.include_router(
 api_router.include_router(
     service_accounts.me_router, prefix="/me/service-accounts", tags=["me:service-accounts"],
 )
+# A service account's keys: the same routes as a person's own, for its managers.
+api_router.include_router(
+    api_keys.router, prefix="/me/service-accounts/{account_id}/api-keys",
+    tags=["me:service-accounts"], dependencies=[Depends(api_keys.service_account_path)],
+)
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
 # Phase 18: router-level ``system:admin`` gates dropped from providers /

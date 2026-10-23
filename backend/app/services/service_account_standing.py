@@ -10,6 +10,10 @@ and again three days before its keys pause.
 ``sweep`` once an hour by the API key housekeeping loop, for what changes with
 time alone: a manager's sign-in window lapsing, a team's membership synced from
 the identity provider.
+
+``key_audience`` says who hears about a key — misuse, its expiry, someone else
+revoking it: its owner, or for a service account's key the people who can act
+for the account.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ from backend.app.db.repositories import (
     service_account_repo,
 )
 from backend.app.services.feature_flags import feature_flags
-from backend.common.service_accounts import DEFAULT_GRACE_DAYS, grace_days
+from backend.common.service_accounts import DEFAULT_GRACE_DAYS, grace_days, is_service_account
 
 #: How far ahead of its keys pausing the administrators are reminded.
 REMIND_AHEAD = timedelta(days=3)
@@ -147,3 +151,41 @@ async def sweep(session: AsyncSession, *, now: Optional[datetime] = None) -> tup
     lost = await refresh(session, now=now, rules=rules)
     reminded = await remind_pausing(session, now=now, rules=rules)
     return len(lost), reminded
+
+
+@dataclass(frozen=True)
+class KeyAudience:
+    """Who is told about a key, and the page the note sends them to."""
+    user_ids: set[str]
+    link: str
+    #: The service account the key acts as, by name; ``None`` for a person's own.
+    account: Optional[str] = None
+
+    @property
+    def whose(self) -> str:
+        """Whose keys, mid-sentence: "your", or the service account's."""
+        return "your" if self.account is None else f"“{self.account}”’s"
+
+    def key(self, key) -> str:
+        """A key, opening a sentence."""
+        whose = "Your" if self.account is None else self.whose
+        return f"{whose} key “{key.name}” ({key.token_prefix}…)"
+
+
+async def key_audience(session: AsyncSession, owner_id: str) -> KeyAudience:
+    """Who hears about a key: its owner — or, for a service account's, the
+    people who can act for the account (managers in good standing, and the
+    members of its teams who are), and while there are none, the
+    administrators who appoint them."""
+    if not is_service_account(owner_id):
+        return KeyAudience({owner_id}, "/me/api-keys")
+    found = await service_account_repo.get(session, owner_id)
+    name = found[0].first_name if found else owner_id
+    rules = await policy(session)
+    people = (await service_account_repo.people_who_can_act(
+        session, [owner_id], now=datetime.now(timezone.utc),
+        window_days=rules.window_days, passwords_allowed=rules.passwords_allowed,
+    ))[owner_id]
+    if people:
+        return KeyAudience(people, f"/me/service-accounts/{owner_id}", name)
+    return KeyAudience(await binding_repo.platform_admin_user_ids(session), _LINK, name)

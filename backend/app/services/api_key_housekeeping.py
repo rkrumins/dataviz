@@ -2,8 +2,9 @@
 
 A key that expires unannounced breaks whatever depends on it — often at
 night, often for someone who has forgotten the key exists. So its owner hears
-about it a week ahead, once: in their inbox, and as an audit event. A key
-made to live a week or less was made knowing it would, and gets no reminder.
+about it a week ahead, once: in their inbox, and as an audit event — for a
+service account's key, those who answer for the account. A key made to live a
+week or less was made knowing it would, and gets no reminder.
 
 The reminder follows the key's own expiry. A deployment's maximum lifetime,
 lowered after a key was made, takes effect at once and is the admin's to
@@ -67,16 +68,17 @@ async def remind_once(session: AsyncSession) -> int:
         expires = _instant(key.expires_at)
         if created is None or expires is None or expires - created <= REMIND_AHEAD:
             continue
+        audience = await service_account_standing.key_audience(session, key.user_id)
         await notification_repo.notify(
             session,
-            user_ids=[key.user_id],
+            user_ids=audience.user_ids,
             kind="api_key_expiring",
             title="An API key expires in less than a week",
             body=(
-                f"“{key.name}” ({key.token_prefix}…) stops working on "
+                f"{audience.key(key)} stops working on "
                 f"{expires.date().isoformat()}. Rotate it to keep whatever uses it working."
             ),
-            link="/me/api-keys",
+            link=audience.link,
             resource_type="api_key",
             resource_id=key.id,
             dedupe_unread=True,
