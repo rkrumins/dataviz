@@ -162,6 +162,24 @@ export function formatNamePath(path: string[]): string {
     return path.map(escapeName).join('/')
 }
 
+/** The paths of names that could name one entity, fewest names first: its
+ *  name anywhere in the view (``** / name``), then with each container
+ *  above it, and its whole path from the top, which reads first of two as
+ *  long. Names a reference can't hold (blank, padded, longer than 256, or
+ *  ``**`` itself) and paths past 12 names are left out. */
+export function pathCandidates(name: string, ancestors: string[]): string[][] {
+    const ok = (s: string) => s.length > 0 && s.length <= 256 && s.trim() === s && s !== ANY_DEPTH
+    if (!ok(name)) return []
+    const candidates: string[][] = []
+    for (let k = 0; k <= ancestors.length; k++) {
+        const above = ancestors.slice(ancestors.length - k)
+        if (above.every(ok) && k + 2 <= 12) candidates.push([ANY_DEPTH, ...above, name])
+    }
+    if (ancestors.every(ok) && ancestors.length < 12) candidates.push([...ancestors, name])
+    return candidates.sort((a, b) =>
+        a.length - b.length || Number(a[0] === ANY_DEPTH) - Number(b[0] === ANY_DEPTH))
+}
+
 /** The text a reference is typed as in the name picker. */
 export function refText(ref: NodeRef | null | undefined): string {
     if (!ref) return ''

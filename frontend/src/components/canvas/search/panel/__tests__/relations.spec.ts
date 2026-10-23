@@ -9,6 +9,7 @@ import {
     maxHopsFor,
     newRelation,
     parseNamePath,
+    pathCandidates,
     refLabel,
     relationDepth,
 } from '../relations'
@@ -75,5 +76,26 @@ describe('relations — name paths', () => {
         expect(refLabel({ path: ['Country', 'UK'] })).toBe('Country / UK')
         expect(refLabel({ path: ['Sales'], entityType: 'domain' })).toBe('Sales (domain)')
         expect(refLabel({ urn: 'urn:li:dataset:orders' })).toContain('orders')
+    })
+
+    it('offers the paths that could name an entity, fewest names first', () => {
+        expect(pathCandidates('channel', ['Snowflake', 'GOLD', 'fact_orders'])).toEqual([
+            ['**', 'channel'],
+            ['**', 'fact_orders', 'channel'],
+            // As long as the next, and read first: no "any depth".
+            ['Snowflake', 'GOLD', 'fact_orders', 'channel'],
+            ['**', 'GOLD', 'fact_orders', 'channel'],
+            ['**', 'Snowflake', 'GOLD', 'fact_orders', 'channel'],
+        ])
+        expect(pathCandidates('Finance', [])).toEqual([['Finance'], ['**', 'Finance']])
+    })
+
+    it('leaves out names a reference cannot hold', () => {
+        expect(pathCandidates(' padded', ['A'])).toEqual([])
+        expect(pathCandidates('**', [])).toEqual([])
+        // A container it can't name stops the paths that would hold it.
+        expect(pathCandidates('x', ['', 'B'])).toEqual([['**', 'x'], ['**', 'B', 'x']])
+        expect(pathCandidates('x', Array.from({ length: 14 }, (_, i) => `c${i}`))
+            .every((path) => path.length <= 12)).toBe(true)
     })
 })
