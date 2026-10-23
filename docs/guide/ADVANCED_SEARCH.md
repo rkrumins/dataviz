@@ -207,7 +207,7 @@ Both modes edit the same query, so you can move between them freely. Press
 | `every child(description IS NOT EMPTY)` · `no upstream()` | Every one matches (and there is one) · none does |
 | `count(child(type:column)) > 100` | How many relatives match |
 | `upstream(…).via(confidence >= 0.8)` | Every edge walked meets the condition |
-| `@"Country/United Kingdom"` · `inside @"Country/**/London"` | The entity named by that path · anything inside it (`\/` is a slash in a name) |
+| `@"Country/United Kingdom"` · `inside @"Country/**/London"` | The entity named by that path · anything inside it (`\/` is a slash in a name, `\\` a backslash) |
 
 A relationship word counts only when `(` follows it directly: `root cause` and
 `parent (x)` are still a search for the words. Hops read like Cypher: `*2`

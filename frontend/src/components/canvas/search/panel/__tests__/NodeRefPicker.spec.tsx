@@ -34,10 +34,13 @@ describe('NodeRefPicker — text', () => {
         expect(textToRef(text)).toEqual(ref)
     })
 
-    it('writes a slash in a name escaped, so it reads back', () => {
+    it('writes a slash or backslash in a name escaped, so it reads back', () => {
         const ref = { path: ['a/b', 'c'] }
         expect(refText(ref)).toBe('a\\/b / c')
         expect(textToRef(refText(ref))).toEqual(ref)
+        const trailing = { path: ['a\\', 'b'] }
+        expect(refText(trailing)).toBe('a\\\\ / b')
+        expect(textToRef(refText(trailing))).toEqual(trailing)
     })
 })
 

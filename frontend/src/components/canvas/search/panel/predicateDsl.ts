@@ -82,7 +82,8 @@
  * Entities by name:
  *   @"Country/United Kingdom"      → is that entity (a path of names from
  *                                    a top-level entity; ** any depth;
- *                                    \/ a slash in a name; or a URN)
+ *                                    \/ a slash in a name, \\ a
+ *                                    backslash; or a URN)
  *   inside @"Country/United Kingdom" → descendantOf by name
  *
  * A condition the words above can't spell exactly — within N hops, a path, a

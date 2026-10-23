@@ -278,8 +278,10 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `DEEP_SEARCH_EXPORT_TTL` | `86400` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_MAX_LEAF_COUNT` | `64` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_MAX_OR_BRANCH` | `24` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_MAX_RELATION_DEPTH` | `3` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_MAX_TREE_DEPTH` | `6` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_RATE_LIMIT_PER_MIN` | `120` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_RELATION_MAX_HOPS` | `3` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SCOPE_PRE_FILTER_THRESHOLD` | `8` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` | `5000` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SEARCHABLE_TEXT_CAP` | `8192` | `backend/app/services/deep_search/settings.py` |

@@ -58,11 +58,14 @@ describe('relations — name paths', () => {
     it('splits on slashes, keeps an escaped one, trims and drops empty segments', () => {
         expect(parseNamePath(' Country / United Kingdom ')).toEqual(['Country', 'United Kingdom'])
         expect(parseNamePath('a\\/b/**/c//')).toEqual(['a/b', '**', 'c'])
+        // "\\" is a backslash; one before anything else is kept as typed.
+        expect(parseNamePath('a\\\\/b')).toEqual(['a\\', 'b'])
+        expect(parseNamePath('C:\\data / x')).toEqual(['C:\\data', 'x'])
     })
 
     it('writes what it reads', () => {
-        const segment = fc.string({ minLength: 1, maxLength: 8 })
-            .filter((s) => s.trim() === s && s.length > 0 && !s.endsWith('\\'))
+        const segment = fc.string({ minLength: 1, maxLength: 8, unit: fc.constantFrom('a', ' ', '/', '\\', '*') })
+            .filter((s) => s.trim() === s && s.length > 0)
         fc.assert(fc.property(fc.array(segment, { minLength: 1, maxLength: 4 }), (path) => {
             expect(parseNamePath(formatNamePath(path))).toEqual(path)
         }), { numRuns: 300 })

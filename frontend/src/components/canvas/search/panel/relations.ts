@@ -132,14 +132,14 @@ export function refLabel(ref: NodeRef): string {
 }
 
 /** A name path typed as text: segments split on "/", "\/" a slash in a
- *  name, each trimmed; empty segments dropped. */
+ *  name and "\\" a backslash, each trimmed; empty segments dropped. */
 export function parseNamePath(text: string): string[] {
     const out: string[] = []
     let current = ''
     for (let i = 0; i < text.length; i++) {
         const ch = text[i]
-        if (ch === '\\' && text[i + 1] === '/') {
-            current += '/'
+        if (ch === '\\' && (text[i + 1] === '/' || text[i + 1] === '\\')) {
+            current += text[i + 1]
             i += 1
         } else if (ch === '/') {
             out.push(current.trim())
@@ -152,16 +152,21 @@ export function parseNamePath(text: string): string[] {
     return out.filter(Boolean)
 }
 
+/** A name as a path holds it: its slashes and backslashes escaped. */
+function escapeName(name: string): string {
+    return name.replace(/[\\/]/g, '\\$&')
+}
+
 /** A name path as text: the inverse of ``parseNamePath``. */
 export function formatNamePath(path: string[]): string {
-    return path.map((s) => s.replace(/\//g, '\\/')).join('/')
+    return path.map(escapeName).join('/')
 }
 
 /** The text a reference is typed as in the name picker. */
 export function refText(ref: NodeRef | null | undefined): string {
     if (!ref) return ''
     if (ref.urn) return ref.urn
-    return (ref.path ?? []).map((s) => s.replace(/\//g, '\\/')).join(' / ')
+    return (ref.path ?? []).map(escapeName).join(' / ')
 }
 
 /** The reference typed text names: a URN, or a name path. */
