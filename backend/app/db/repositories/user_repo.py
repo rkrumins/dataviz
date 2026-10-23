@@ -12,10 +12,11 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, delete, or_, update
+from sqlalchemy import and_, select, func, delete, or_, update
 
 from backend.app.common import activity_context
 from backend.common.display_name import resolve_display_name
+from backend.common.service_accounts import is_person
 from backend.auth_service.activity import (
     RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
     ActivityGate,
@@ -378,7 +379,8 @@ _NULLS_LAST_SORTS = frozenset({"lastSeenAt", "lastLoginAt"})
 def _user_list_filters(status: Optional[str], search: Optional[str]) -> list:
     """WHERE clauses shared by :func:`list_users` and :func:`count_users`, so
     a page and the total it is counted against can never disagree."""
-    filters = [UserORM.deleted_at.is_(None)]
+    # People only: service accounts have a page of their own.
+    filters = [UserORM.deleted_at.is_(None), is_person(UserORM.id)]
     if status:
         filters.append(UserORM.status == status)
     term = (search or "").strip()
@@ -533,9 +535,10 @@ async def user_stats(session: AsyncSession) -> dict[str, int]:
     """Counts across every account, for the admin list's KPI cards and tabs.
 
     The list is paged, so the page in hand can only count itself. Soft-deleted
-    accounts are left out throughout, exactly as the list leaves them out.
+    accounts are left out throughout, exactly as the list leaves them out —
+    and service accounts, which are not people.
     """
-    live = UserORM.deleted_at.is_(None)
+    live = and_(UserORM.deleted_at.is_(None), is_person(UserORM.id))
     by_status = dict((await session.execute(
         select(UserORM.status, func.count())
         .where(live)

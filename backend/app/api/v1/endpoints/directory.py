@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_current_user
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupMemberORM, GroupORM, UserORM
+from backend.common.service_accounts import is_person
 from backend.app.db.repositories import user_repo
 from backend.auth_service.interface import User
 
@@ -91,6 +92,7 @@ async def search_directory(
             select(UserORM)
             .where(
                 UserORM.status == "active",
+                is_person(UserORM.id),
                 or_(
                     UserORM.first_name.ilike(pattern),
                     UserORM.last_name.ilike(pattern),

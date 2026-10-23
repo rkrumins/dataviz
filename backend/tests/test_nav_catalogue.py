@@ -127,6 +127,7 @@ _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "sso":           ("/admin/idp-providers", "/admin/idp-group-mappings", "/admin/sso-config"),
     "audit":         ("/admin/audit", "/admin/activity"),
     "api-keys":      ("/admin/api-keys",),
+    "service-accounts": ("/admin/service-accounts",),
 }
 
 # The sidebar entries are ``anyPerm`` unions of two universal global

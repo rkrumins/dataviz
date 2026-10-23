@@ -32,6 +32,7 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
     GroupORM, PermissionORM, RoleORM, UserORM, WorkspaceORM,
 )
+from backend.common.service_accounts import is_person
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import RBACSearchHit
@@ -73,12 +74,13 @@ async def _search_users(session: AsyncSession, q: str) -> list[RBACSearchHit]:
     rows = await session.execute(
         select(UserORM)
         .where(
+            is_person(UserORM.id),
             or_(
                 UserORM.email.ilike(pat),
                 UserORM.first_name.ilike(pat),
                 UserORM.last_name.ilike(pat),
                 UserORM.id.ilike(pat),
-            )
+            ),
         )
         .limit(PER_TYPE_CAP)
     )

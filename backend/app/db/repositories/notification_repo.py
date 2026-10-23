@@ -28,6 +28,7 @@ from backend.app.db.models import (
     RolePermissionORM,
     UserORM,
 )
+from backend.common.service_accounts import is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,10 @@ async def notify(
     Best-effort: a notification failure must not roll back the action it
     describes.
     """
-    recipients = {u for u in user_ids if u and u != actor_id}
+    # A service account has no inbox: nobody signs in as one to read it.
+    recipients = {
+        u for u in user_ids if u and u != actor_id and not is_service_account(u)
+    }
     if not recipients:
         return 0
     try:

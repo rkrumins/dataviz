@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
+from backend.common.service_accounts import is_service_account
 from backend.app.db.models import GroupORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.db.repositories import (
     binding_repo,
@@ -394,6 +395,11 @@ async def create_member_binding(
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
+        if is_service_account(body.subject_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A service account's roles are given on its own page, under Service accounts",
+            )
     elif body.subject_type == "group":
         if await group_repo.get_group_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="Group not found")

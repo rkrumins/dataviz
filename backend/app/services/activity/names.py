@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 #: payload routinely names a third — a ``granted_by``, an inviter, a member
 #: added to a group, the subject of an SSO mapping — and without this that
 #: id rendered raw while every other kind beside it was named.
-REF_ID = re.compile(r"\b(?:grp|ws|idp|view|usr|apk)_[A-Za-z0-9]+\b")
+REF_ID = re.compile(r"\b(?:grp|ws|idp|view|usr|svc|apk)_[A-Za-z0-9]+\b")
 
 
 async def resolve_reference_names(
@@ -143,10 +143,11 @@ async def name_page(
 
     ``references`` may hold ids of any kind; ``usr_`` and ``ws_`` among them
     are folded into the people and workspace lookups, so a page never asks
-    for either twice.
+    for either twice — and a service account (``svc_``) is named the way a
+    person is.
     """
     page = PageNames()
-    people = {p for p in people | {r for r in references if r.startswith("usr_")} if p}
+    people = {p for p in people | {r for r in references if r.startswith(("usr_", "svc_"))} if p}
     workspaces = {w for w in workspaces | {r for r in references if r.startswith("ws_")} if w}
 
     try:
@@ -158,7 +159,7 @@ async def name_page(
     except Exception:  # noqa: BLE001
         logger.warning("activity: could not name the workspaces on this page", exc_info=True)
 
-    others = {r for r in references if not r.startswith(("usr_", "ws_"))}
+    others = {r for r in references if not r.startswith(("usr_", "svc_", "ws_"))}
     names: dict[str, str] = {}
     try:
         names.update(await _data_source_names(session, {r for r in others if r.startswith("ds_")}))

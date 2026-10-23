@@ -26,9 +26,12 @@ from backend.app.auth.dependencies import get_current_user, get_permission_claim
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (
     binding_repo, group_repo, grant_repo, idp_group_mapping_repo, user_repo,
+    service_account_repo,
 )
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.revocation_service import revoke_subject_sessions
+from backend.app.services import service_account_standing
+from backend.common.service_accounts import is_service_account
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import (
@@ -106,6 +109,14 @@ def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
         status=identity.get("status"),
         deleted=bool(identity.get("deleted")),
         avatar_id=identity.get("avatar_id"),
+    )
+
+
+async def _restand_service_accounts(session: AsyncSession, group_id: str) -> None:
+    """A team that manages service accounts answers for them through its
+    members: when they change, bring those accounts up to date now."""
+    await service_account_standing.refresh(
+        session, await service_account_repo.accounts_managed_by_team(session, group_id),
     )
 
 
@@ -235,6 +246,7 @@ async def delete_group(
     deleted = await group_repo.soft_delete_group(session, group_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Group not found")
+    await _restand_service_accounts(session, group_id)
 
     # Tear down every binding the group held — orphaned bindings would
     # otherwise leak access to ex-members through the resolver.
@@ -322,11 +334,16 @@ async def add_member(
     user = await user_repo.get_user_by_id(session, body.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if is_service_account(body.user_id):
+        # A team's members may answer for service accounts and carry its
+        # roles; a service account holds only roles given to it directly.
+        raise HTTPException(status_code=409, detail="A service account can't join a team")
     await _require_super_admin_for_super_admin_group(session, group_id, claims)
 
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,
     )
+    await _restand_service_accounts(session, group_id)
 
     # The user just inherited every binding this group holds. Their
     # current JWT was issued BEFORE the membership existed, so its
@@ -387,6 +404,7 @@ async def remove_member(
             status_code=404,
             detail="Membership not found",
         )
+    await _restand_service_accounts(session, group_id)
 
     # The user just lost every binding inherited from this group.
     # Revoke their sessions so the next request re-resolves from DB
