@@ -42,6 +42,15 @@ describe('a parked draft', () => {
         expect(sessionStorage.getItem('nx-api-key-draft')).not.toMatch(/password|token/i)
     })
 
+    it('comes back only for the keys it was made for', () => {
+        parkDraft(draft({ principal: 'svc_sync' }), T0)
+        expect(peekDraft(T0)).toBeNull()
+        expect(peekDraft(T0, 'svc_other')).toBeNull()
+        expect(peekDraft(T0, 'svc_sync')).toEqual(draft({ principal: 'svc_sync' }))
+        parkDraft(draft(), T0)
+        expect(peekDraft(T0, 'svc_sync')).toBeNull()
+    })
+
     it('is cleared once read', () => {
         parkDraft(draft(), T0)
         clearDraft()

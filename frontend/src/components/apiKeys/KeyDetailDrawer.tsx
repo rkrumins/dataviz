@@ -32,6 +32,7 @@ import { KeyChips } from './KeyCard'
 import { LifetimeBar } from './LifetimeBar'
 import { UsagePanel } from './UsagePanel'
 import { describeLastUsed, describeRevocation } from './apiKeyFormat'
+import { useOwnerWords } from './keyClient'
 import { KeyStatusBadge } from './parts'
 
 type Tab = 'overview' | 'access' | 'usage'
@@ -96,6 +97,7 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
     actions?: React.ReactNode
     onOpenKey?: (ref: KeyRef) => void
 }) {
+    const keysOf = useOwnerWords()
     const [tab, setTab] = useState<Tab>('overview')
     const [detail, setDetail] = useState<ApiKeyDetail | null>(null)
     const [failed, setFailed] = useState<string | null>(null)
@@ -173,8 +175,8 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                     </TabsContent>
                     <TabsContent value="access">
                         <p className="text-xs text-ink-muted mb-4 leading-relaxed">
-                            What it can do right now: {variant === 'owner' ? 'your' : 'its owner’s'} access today,
-                            narrowed by the key. It changes as {variant === 'owner' ? 'yours' : 'theirs'} does.
+                            What it can do right now: {variant === 'owner' ? keysOf.possessive : 'its owner’s'} access today,
+                            narrowed by the key. It changes as {variant === 'owner' ? (keysOf.you ? 'yours' : 'the account’s') : 'theirs'} does.
                         </p>
                         {detail ? <AccessMatrix access={detail.effectiveAccess} /> : <Loading />}
                     </TabsContent>

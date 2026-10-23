@@ -13,7 +13,9 @@
  * the page has never needed a Router to render, and its tests rely on that.
  *
  * Auditors (`system:audit:read`) see the inventory; revoking needs
- * `system:users:manage`, as the server enforces.
+ * `system:users:manage`, as the server enforces. A service account's keys are
+ * marked as such: they act as the account, and its managers hear of what
+ * happens to them.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -30,6 +32,7 @@ import { Button, IconButton } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { Badge } from '@/components/ui/Badge'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Sparkline } from '@/components/ui/Sparkline'
@@ -91,7 +94,7 @@ const KPIS: {
         tone: { icon: 'bg-slate-500/10 text-slate-500', on: 'border-slate-500 ring-slate-500/15', text: 'text-ink' },
     },
     {
-        id: 'paused', label: 'Paused', hint: 'Waiting for their owner to sign in again', icon: PauseCircle,
+        id: 'paused', label: 'Paused', hint: 'Waiting for their owner to sign in again, or a service account for a manager', icon: PauseCircle,
         value: (s) => s.byStatus.paused,
         tone: { icon: 'bg-amber-500/10 text-amber-500', on: 'border-amber-500 ring-amber-500/15', text: 'text-amber-600 dark:text-amber-400' },
     },
@@ -349,6 +352,7 @@ export function AdminApiKeys() {
                                         </span>
                                         <span className="flex items-center gap-2">
                                             <PersonChip id={key.owner.id} person={key.owner} size="sm" link={false} />
+                                            {key.kind === 'service' && <ServiceAccountBadge />}
                                         </span>
                                         <span className="grid grid-cols-2 gap-3">
                                             <span className="text-xs text-ink-secondary tabular-nums">{key.usage.requests30d.toLocaleString()} requests · 30 d</span>
@@ -429,7 +433,7 @@ export function AdminApiKeys() {
                         setRevoking(null)
                         setDrawerKey(null)
                         notify('success', scope === 'one'
-                            ? `“${apiKey.name}” revoked. Its owner has been told.`
+                            ? `“${apiKey.name}” revoked. ${apiKey.kind === 'service' ? 'Its managers have' : 'Its owner has'} been told.`
                             : `${revoked} key${revoked === 1 ? '' : 's'} of ${apiKey.owner.displayName} revoked.`)
                         reload()
                     }}
@@ -490,7 +494,14 @@ function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: (
                 </p>
             </td>
             <td className="px-3 py-3.5">
-                <PersonChip id={key.owner.id} person={key.owner} size="md" showEmail className="max-w-[11rem]" />
+                {key.kind === 'service' ? (
+                    <span className="flex flex-col items-start gap-1">
+                        <PersonChip id={key.owner.id} person={key.owner} size="md" link={false} className="max-w-[11rem]" />
+                        <ServiceAccountBadge />
+                    </span>
+                ) : (
+                    <PersonChip id={key.owner.id} person={key.owner} size="md" showEmail className="max-w-[11rem]" />
+                )}
             </td>
             <td className="px-3 py-3.5">
                 <div className="flex items-center gap-2">
@@ -526,6 +537,10 @@ function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: (
             </td>
         </tr>
     )
+}
+
+function ServiceAccountBadge() {
+    return <Badge tone="info" size="sm" className="shrink-0">Service account</Badge>
 }
 
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {

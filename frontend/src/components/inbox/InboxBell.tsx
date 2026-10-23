@@ -190,6 +190,28 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
     },
+    // Service accounts: one left with nobody answering for it, its keys
+    // about to pause, a new manager, a key made by someone who isn't one.
+    service_account_unmanaged: {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    service_account_pausing: {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    service_account_manager_added: {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    service_account_key_created: {
+        Icon: KeySquare,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
 }
 
 /** Kinds are added backend-side without a frontend deploy, so an unknown

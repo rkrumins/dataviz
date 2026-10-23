@@ -2,10 +2,11 @@
  * Choosing what a key reaches: whole workspaces, or particular views and
  * data sources.
  *
- * Both pickers show what YOU hold on each item, because a key never reaches
- * past its owner: ask for write on something you only read and the key will
- * only read it. That is said beside the item, before the key exists, rather
- * than discovered in a 403 later.
+ * Both pickers show what the keys' owner holds on each item — you, or the
+ * service account — because a key never reaches past its owner: ask for
+ * write on something the owner only reads and the key will only read it.
+ * That is said beside the item, before the key exists, rather than
+ * discovered in a 403 later.
  *
  * Borders are `border-black/[0.08] dark:border-white/[0.10]`, not
  * `border-glass-border`, which is a white hairline in light mode — no edge at
@@ -16,24 +17,26 @@ import { Check, Database, Eye, Loader2, Search, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import {
-    apiKeyService,
     type ApiKeyOptions,
     type ApiKeyPermissions,
     type Level,
     type PickerItem,
 } from '@/services/apiKeyService'
 import { RANK } from './apiKeyFormat'
+import { useKeyClient, useOwnerWords, type OwnerWords } from './keyClient'
 import { LevelPill } from './parts'
 
 const EDGE = 'border-black/[0.08] dark:border-white/[0.10]'
 
 /** "You can only read data here, so the key will only read them." */
-function shortfall(permissions: ApiKeyPermissions, held: { views: Level; data: Level }): string | null {
+function shortfall(
+    permissions: ApiKeyPermissions, held: { views: Level; data: Level }, owner: OwnerWords,
+): string | null {
     const lines = (['views', 'data'] as const)
         .filter((k) => RANK[permissions[k]] > RANK[held[k]])
         .map((k) => (held[k] === 'read'
-            ? `You can only read ${k} here, so the key will only read them.`
-            : `You have no access to ${k} here, so the key won’t either.`))
+            ? `${owner.subject} can only read ${k} here, so the key will only read them.`
+            : `${owner.subject} ${owner.has} no access to ${k} here, so the key won’t either.`))
     return lines.length > 0 ? lines.join(' ') : null
 }
 
@@ -45,14 +48,19 @@ export function WorkspacePicker({
     permissions: ApiKeyPermissions
     onChange: (ids: string[]) => void
 }) {
+    const owner = useOwnerWords()
     if (workspaces.length === 0) {
-        return <p className="text-sm text-ink-muted text-center py-6">You are not a member of any workspace.</p>
+        return (
+            <p className="text-sm text-ink-muted text-center py-6">
+                {owner.subject} {owner.is} not a member of any workspace.
+            </p>
+        )
     }
     return (
         <ul className="grid gap-2 sm:grid-cols-2" aria-label="Workspaces">
             {workspaces.map((w) => {
                 const on = selected.includes(w.id)
-                const hint = on ? shortfall(permissions, w) : null
+                const hint = on ? shortfall(permissions, w, owner) : null
                 return (
                     <li key={w.id}>
                         <button
@@ -101,17 +109,19 @@ export function ResourcePicker({
     onChange: (items: PickerItem[]) => void
 }) {
     const Icon = type === 'view' ? Eye : Database
+    const client = useKeyClient()
+    const owner = useOwnerWords()
     const [q, setQ] = useState('')
     const [results, setResults] = useState<{ q: string; items: PickerItem[] } | null>(null)
     useEffect(() => {
         let cancelled = false
         const handle = setTimeout(() => {
-            apiKeyService.searchResources(type, q)
+            client.searchResources(type, q)
                 .then((items) => { if (!cancelled) setResults({ q, items }) })
                 .catch(() => { if (!cancelled) setResults({ q, items: [] }) })
         }, 200)
         return () => { cancelled = true; clearTimeout(handle) }
-    }, [type, q])
+    }, [type, q, client])
 
     const asked = type === 'view' ? permissions.views : permissions.data
     const chosen = new Set(selected.map((s) => s.id))
@@ -138,7 +148,7 @@ export function ResourcePicker({
                                     <span className="block text-xs font-medium text-ink truncate">{s.name}</span>
                                     {short ? (
                                         <span className="block text-[11px] leading-snug text-amber-600 dark:text-amber-400">
-                                            You can only read this — the key will only read it.
+                                            {owner.subject} can only read this — the key will only read it.
                                         </span>
                                     ) : s.workspaceName && (
                                         <span className="block text-[11px] text-ink-muted truncate">{s.workspaceName}</span>
@@ -193,14 +203,16 @@ export function ResourcePicker({
                                         ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
                                         : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted',
                                 )}>
-                                    {r.level === 'write' ? 'you edit' : 'you read'}
+                                    {owner.you
+                                        ? (r.level === 'write' ? 'you edit' : 'you read')
+                                        : (r.level === 'write' ? 'it edits' : 'it reads')}
                                 </span>
                             </button>
                         </li>
                     ))}
                     {!searching && offered.length === 0 && (
                         <li className="px-2 py-3 text-center text-[11px] text-ink-muted">
-                            {q.trim() ? `Nothing called “${q.trim()}” that you can reach.` : 'Nothing more to add.'}
+                            {q.trim() ? `Nothing called “${q.trim()}” that ${owner.object} can reach.` : 'Nothing more to add.'}
                         </li>
                     )}
                 </ul>
