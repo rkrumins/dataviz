@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
+from backend.common.service_accounts import is_service_account
 from backend.app.db.models import GroupORM, WorkspaceDataSourceORM, WorkspaceORM
 from backend.app.db.repositories import (
     binding_repo,
@@ -113,11 +114,13 @@ async def _hydrate_subjects(
     # override column and, for a full-name-only IdP, rendered a raw user id
     # in the UI. Soft-deleted users are included, as they always were here.
     for uid, ident in (await user_repo.get_identities_by_ids(session, user_ids)).items():
+        # A service account's address is a placeholder nobody can write to.
+        email = None if is_service_account(uid) else ident["email"]
         out[("user", uid)] = WorkspaceMemberSubject(
             type="user",
             id=uid,
-            display_name=ident["name"] or ident["email"] or None,
-            secondary=ident["email"],
+            display_name=ident["name"] or email or None,
+            secondary=email,
         )
 
     if group_ids:
@@ -284,7 +287,7 @@ async def list_effective_access(
             WorkspaceAccessUser(
                 user_id=uid,
                 display_name=(ident["name"] or None) if ident else None,
-                email=ident["email"] if ident else None,
+                email=ident["email"] if ident and not is_service_account(uid) else None,
                 avatar_id=ident["avatar_id"] if ident else None,
                 status=ident["status"] if ident else None,
                 deleted=ident["deleted"] if ident else False,
@@ -394,6 +397,11 @@ async def create_member_binding(
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
+        if is_service_account(body.subject_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A service account's roles are given on its own page, under Service accounts",
+            )
     elif body.subject_type == "group":
         if await group_repo.get_group_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="Group not found")

@@ -65,9 +65,19 @@ from backend.app.services.permission_service import (
     has_permission,
 )
 from backend.auth_service.interface import User
+from backend.common.service_accounts import is_service_account
 
 
 # ── Caller context ───────────────────────────────────────────────────
+
+def _is_creator(ctx: "ViewerContext", view) -> bool:
+    """Whoever made a view keeps it — but a service account only while it still
+    holds a role in the view's workspace: its roles are all it has, and a view
+    it once made is no way back in."""
+    if ctx.is_anonymous or view.created_by != ctx.user_id:
+        return False
+    return not is_service_account(ctx.user_id) or bool(ctx.claims.ws_perms.get(view.workspace_id))
+
 
 @dataclass(frozen=True)
 class ViewerContext:
@@ -162,7 +172,7 @@ def _is_workspace_member(ctx: ViewerContext, view: ViewORM) -> bool:
 def _has_private_reach(ctx: ViewerContext, view: ViewORM) -> bool:
     """Creator or workspace admin — the identities that reach a view
     regardless of its tier."""
-    if not ctx.is_anonymous and view.created_by == ctx.user_id:
+    if _is_creator(ctx, view):
         return True
     return has_permission(
         ctx.claims, "workspace:admin", workspace_id=view.workspace_id,
@@ -214,7 +224,7 @@ async def can_edit_view(
         return False
     if has_permission(ctx.claims, "system:admin"):
         return True
-    if not ctx.is_anonymous and view.created_by == ctx.user_id:
+    if _is_creator(ctx, view):
         return True
     if has_permission(
         ctx.claims, "workspace:view:edit", workspace_id=view.workspace_id,
@@ -234,7 +244,7 @@ def can_delete_view(ctx: ViewerContext, view: ViewORM) -> bool:
         return False
     if has_permission(ctx.claims, "system:admin"):
         return True
-    if not ctx.is_anonymous and view.created_by == ctx.user_id:
+    if _is_creator(ctx, view):
         return True
     return has_permission(
         ctx.claims, "workspace:view:delete", workspace_id=view.workspace_id,
@@ -273,7 +283,7 @@ def can_change_visibility(
         return False
     if has_permission(ctx.claims, "system:admin"):
         return True
-    if not ctx.is_anonymous and view.created_by == ctx.user_id:
+    if _is_creator(ctx, view):
         return True
     return has_permission(
         ctx.claims, "workspace:admin", workspace_id=view.workspace_id,
@@ -490,7 +500,7 @@ def can_manage_grants(ctx: ViewerContext, view: ViewORM) -> bool:
         return False
     if has_permission(ctx.claims, "system:admin"):
         return True
-    if not ctx.is_anonymous and view.created_by == ctx.user_id:
+    if _is_creator(ctx, view):
         return True
     return has_permission(
         ctx.claims, "workspace:admin", workspace_id=view.workspace_id,
@@ -527,7 +537,7 @@ async def compute_access_envelope(
     ``editor`` grantees, is 'readonly'.
     """
     claims = ctx.claims
-    is_creator = not ctx.is_anonymous and view.created_by == ctx.user_id
+    is_creator = _is_creator(ctx, view)
     is_admin = has_permission(claims, "system:admin") or has_permission(
         claims, "workspace:admin", workspace_id=view.workspace_id,
     )
@@ -607,6 +617,9 @@ class ViewReadScope:
     key_view_ids: Optional[tuple[str, ...]] = None
     #: An API key whose profile reads no views at all.
     key_blind: bool = False
+    #: Where the caller holds any role: a service account's own views count
+    #: only there (``_is_creator``).
+    role_ws_ids: tuple[str, ...] = ()
 
 
 async def build_read_scope(
@@ -662,6 +675,7 @@ async def build_read_scope(
         granted_view_ids=granted,
         key_workspace_ids=key_ws,
         key_view_ids=key_views,
+        role_ws_ids=tuple(ws for ws, perms in claims.ws_perms.items() if perms),
     )
 
 
@@ -682,10 +696,13 @@ def readable_views_clause(scope: ViewReadScope) -> ColumnElement[bool]:
                 workspace_tier,
                 ViewORM.workspace_id.in_(scope.member_ws_ids),
             )
+        mine: ColumnElement[bool] = ViewORM.created_by == scope.user_id
+        if is_service_account(scope.user_id):
+            mine = and_(mine, ViewORM.workspace_id.in_(scope.role_ws_ids))
         clause = or_(
             ViewORM.visibility == "enterprise",
             workspace_tier,
-            ViewORM.created_by == scope.user_id,
+            mine,
             ViewORM.workspace_id.in_(scope.admin_ws_ids),
             ViewORM.id.in_(scope.granted_view_ids),
         )

@@ -24,7 +24,6 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { cn } from '@/lib/utils'
 import {
     ApiKeyError,
-    apiKeyService,
     type ApiKey,
     type ApiKeyDetail,
     type ApiKeyOptions,
@@ -40,6 +39,7 @@ import { StepUpField } from './StepUpField'
 import { customDateProblem, expiryFields, formatWhen, isRenewable, siteUrl, type ExpiryChoice } from './apiKeyFormat'
 import { freshDraft, parkDraft, type ApiKeyDraft, type Grace } from './apiKeyDraft'
 import { withGatewayStepUp } from './gatewayStepUp'
+import { useKeyAccount, useKeyClient, useOwnerWords } from './keyClient'
 
 const GRACE: { value: Grace; label: string; sub: string; icon: typeof Zap }[] = [
     { value: 0, label: 'Right away', sub: 'For a key that may have leaked', icon: Zap },
@@ -66,6 +66,9 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
     /** A new key exists: the list should reload. Called as the dialog closes. */
     onDone: () => void
 }) {
+    const client = useKeyClient()
+    const account = useKeyAccount()
+    const owner = useOwnerWords()
     const renew = isRenewable(apiKey)
     const [grace, setGrace] = useState<Grace>(resumed?.grace ?? (renew ? 0 : 86400))
     const [expiry, setExpiry] = useState<ExpiryChoice | 'same'>(resumed?.expiry ?? 'same')
@@ -85,9 +88,9 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
     useEffect(() => {
         if (!renew) return
         let live = true
-        apiKeyService.get(apiKey.id).then((d) => { if (live) setDetail(d) }).catch(() => {})
+        client.get(apiKey.id).then((d) => { if (live) setDetail(d) }).catch(() => {})
         return () => { live = false }
-    }, [renew, apiKey.id])
+    }, [renew, apiKey.id, client])
 
     const max = options.policy.maxLifetimeDays
     const stepUpAvailable = options.stepUpAvailable && refused === null
@@ -111,7 +114,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
         setError(null)
         setPasswordFailed(false)
         try {
-            const result = await withGatewayStepUp(() => apiKeyService.rotate(apiKey.id, {
+            const result = await withGatewayStepUp(() => client.rotate(apiKey.id, {
                 graceSeconds: renew ? 0 : grace,
                 ...(expiry === 'same' ? {} : expiryFields(expiry, customDate)),
                 currentPassword: options.stepUp.method === 'password' ? password : undefined,
@@ -124,7 +127,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
             if (signIn) {
                 parkDraft({
                     ...freshDraft(options, apiKey, renew ? 'renew' : 'rotate'),
-                    step: 'review', grace, expiry, customDate,
+                    step: 'review', grace, expiry, customDate, principal: account?.id,
                 })
                 window.location.href = signIn
                 return
@@ -183,7 +186,9 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
                             <p className="flex items-start gap-2.5 p-3.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] text-xs text-ink-secondary leading-relaxed">
                                 <PauseCircle className="w-4 h-4 mt-px shrink-0 text-amber-500" aria-hidden />
                                 <span>
-                                    This key is only paused: signing in through your identity provider again resumes it,
+                                    {apiKey.kind === 'service'
+                                        ? 'This key is only paused: it works again as soon as the service account has a manager, '
+                                        : 'This key is only paused: signing in through your identity provider again resumes it, '}
                                     and nothing was revoked. Rotate it only if you want a new token as well.
                                 </span>
                             </p>
@@ -193,7 +198,7 @@ export function RotateKeyDialog({ apiKey, options, resumed, onClose, onDone }: {
                             <section>
                                 <FieldLabel>What it will reach</FieldLabel>
                                 <p className="text-xs text-ink-muted mb-3 leading-relaxed">
-                                    The renewed key keeps this key’s limits, on your access as it is today.
+                                    The renewed key keeps this key’s limits, on {owner.possessive} access as it is today.
                                 </p>
                                 {detail ? <AccessMatrix access={detail.effectiveAccess} /> : <Skeleton className="h-24 rounded-xl" />}
                             </section>

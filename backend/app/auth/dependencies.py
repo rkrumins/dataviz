@@ -68,6 +68,8 @@ _FAIL_CLOSED_PERMISSIONS = frozenset({
     "system:org-admin",
     "system:users:manage",
     "system:groups:manage",
+    # Creates principals and decides who may act as them.
+    "system:service-accounts:manage",
     "system:workspaces:create",
     "workspace:admin",
     # Lets people into a workspace: an unconfirmable session must not.

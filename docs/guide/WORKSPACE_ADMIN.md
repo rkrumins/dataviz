@@ -146,6 +146,12 @@ and its chips to answer "why?":
 Hover a chip for who did it and when, the identity-provider groups and
 provider, or the team. The counts at the top include **Organization-wide**.
 
+A row marked **Service account** is an account an integration acts as,
+through API keys its managers make; nobody signs in as it. Administrators
+give it its roles under **Administration → Service accounts** — it can't be
+added here — and you can still remove it here: its managers hear about it.
+See [Service Accounts](/guide/service-accounts).
+
 ### Removing someone
 
 On their row, select **Revoke binding**. A preview shows what they would
@@ -234,6 +240,9 @@ Then:
   and one the groups' roles cover is ended. The person and whoever granted it
   hear about it.
 - Groups can still be bound with **Add member**.
+- A [service account](/guide/service-accounts)'s role is not an exception: the
+  identity provider doesn't know the account, so its roles are an
+  administrator's decision on its own page, and they don't end on their own.
 
 ### Reviewing who has access
 
@@ -250,7 +259,8 @@ the **Members** tab; only admins see it.
    it came about, when it was granted and ends, and when the person last
    signed in. **Remove** asks you to confirm, then takes the access away at
    once; the person hears why. A kept grant can still be removed while the
-   review is open.
+   review is open. A **Service account** never signs in — an integration acts
+   as it — and its managers are the ones who hear why.
 3. When every grant is decided, select **Complete review**.
 
 **You should now see** the review under the earlier ones, with how many grants

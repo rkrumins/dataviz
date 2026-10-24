@@ -380,6 +380,18 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Owners who sign in with a password are not affected",
         ),
     ),
+    "serviceAccountUnmanagedGrace": FeatureWiring(
+        key="serviceAccountUnmanagedGrace",
+        posture="security",
+        server_gates=(
+            "Every request made with a service account's API key — paused once the account has "
+            "had no manager in good standing for longer than this",
+        ),
+        still_allowed=(
+            "A paused key works again as soon as a manager is appointed; nothing is revoked",
+            "Personal keys are not affected",
+        ),
+    ),
     # Widens who may mint a key: when it cannot be read, assume it is off.
     "apiKeySsoRoundTripStepUp": FeatureWiring(
         key="apiKeySsoRoundTripStepUp",

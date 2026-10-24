@@ -36,6 +36,9 @@ import { InviteWizard } from './InviteWizard'
 import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { apiKeyService } from '@/services/apiKeyService'
+import { serviceAccountService } from '@/services/serviceAccountService'
+import { HandOverPanel, holdsSeats, useManagedBy } from '@/components/serviceAccounts/HandOver'
+import type { Subject } from '@/components/serviceAccounts/SubjectPicker'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -350,6 +353,8 @@ export function AdminUsers() {
     // legacy + claim) so the FE filter agrees with the BE gate.
     const canGrantSuperAdmin = usePermission('system:admin')
     const canSeeApiKeys = usePermission('system:audit:read')
+    const canHandOver = usePermission('system:service-accounts:manage')
+    const canRevokeKeys = usePermission('system:users:manage')
     const { notify } = useAppNotifications()
     const assignableRoles = useMemo(
         () =>
@@ -409,6 +414,15 @@ export function AdminUsers() {
     const [modal, setModal] = useState<ModalType>(null)
     const [modalInput, setModalInput] = useState('')
     const [selectedRole, setSelectedRole] = useState('')
+    // Suspending someone who manages service accounts: hand them over first,
+    // so nothing is left with nobody answering for it — and revoke the keys
+    // they made, which they may have kept a copy of.
+    const { accounts: managedAccounts, total: managedTotal, error: managedError } = useManagedBy(
+        modal?.kind === 'suspend' && canHandOver ? modal.userId : null,
+    )
+    const [successor, setSuccessor] = useState<Subject | null>(null)
+    const [revokeMade, setRevokeMade] = useState(false)
+    const hasSeats = managedAccounts ? holdsSeats(managedAccounts, managedTotal) : false
 
     // Reset token display
     const [generatedToken, setGeneratedToken] = useState<{ token: string; expiresAt: string } | null>(null)
@@ -594,10 +608,22 @@ export function AdminUsers() {
 
     const handleSuspendConfirm = async () => {
         if (modal?.kind !== 'suspend') return
-        await withAction(modal.userId, () =>
-            adminUserService.suspendUser(modal.userId),
-            `${nameOf(modal.userId)} is suspended — they are signed out and cannot sign back in.`,
-            `Could not suspend ${nameOf(modal.userId)}.`)
+        const who = nameOf(modal.userId)
+        const to = successor && hasSeats ? successor : null
+        const revoke = revokeMade && canRevokeKeys && !!managedAccounts?.some((a) => a.handOver?.keysCreatedBy.length)
+        await withAction(modal.userId, async () => {
+            // Revoked first, so the hand-over doesn't tell the successor of keys about to go.
+            if (revoke) await apiKeyService.adminRevokeMade(modal.userId)
+            if (to) {
+                await serviceAccountService.handOver({ fromUserId: modal.userId, to: { type: to.type, id: to.id } })
+            }
+            await adminUserService.suspendUser(modal.userId)
+        },
+            to && revoke ? `${who}’s service accounts are handed over to ${to.name}, the keys they made are revoked, and ${who} is suspended.`
+                : to ? `${who}’s service accounts are handed over to ${to.name}, and ${who} is suspended.`
+                    : revoke ? `The keys ${who} made are revoked, and ${who} is suspended.`
+                        : `${who} is suspended — they are signed out and cannot sign back in.`,
+            `Could not suspend ${who}.`)
         closeModal()
     }
 
@@ -678,6 +704,8 @@ export function AdminUsers() {
 
     const closeModal = () => {
         setModal(null)
+        setSuccessor(null)
+        setRevokeMade(false)
         setModalInput('')
         setSelectedRole('')
         setGeneratedToken(null)
@@ -1340,8 +1368,36 @@ export function AdminUsers() {
                                     <p className="text-sm text-ink-secondary mb-5">
                                         This will prevent the user from logging in. You can reactivate them later.
                                     </p>
+                                    {managedError && (
+                                        <p role="alert" className="mb-5 text-sm text-rose-600 dark:text-rose-400">
+                                            {managedError} Suspending them may leave service accounts nobody manages.
+                                        </p>
+                                    )}
+                                    {managedAccounts && managedAccounts.length > 0 && (
+                                        <div className="mb-5">
+                                            <HandOverPanel
+                                                person={{ id: modal.userId, name: modal.name }}
+                                                accounts={managedAccounts}
+                                                total={managedTotal}
+                                                successor={successor}
+                                                onSuccessor={setSuccessor}
+                                                revokeKeys={revokeMade}
+                                                onRevokeKeys={canRevokeKeys ? setRevokeMade : undefined}
+                                            />
+                                            {managedAccounts.some((a) => a.handOver?.lastManager && !(successor && a.handOver.seat)) && (
+                                                <p role="status" className="mt-3 text-xs text-amber-700 dark:text-amber-300">
+                                                    {successor ? 'Suspended, they' : 'Suspended without a hand-over, they'} leave
+                                                    service accounts nobody manages: those keys keep working for a grace
+                                                    period, then pause.
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
-                                        confirmLabel="Suspend User" confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
+                                        confirmLabel={hasSeats
+                                            ? (successor ? 'Hand over and suspend' : 'Suspend without handing over')
+                                            : 'Suspend User'}
+                                        confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
                                         loading={!!actionLoading} />
                                 </>
                             )}

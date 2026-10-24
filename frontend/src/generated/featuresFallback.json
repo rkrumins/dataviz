@@ -455,6 +455,50 @@
       "dependsOn": []
     },
     {
+      "key": "serviceAccountUnmanagedGrace",
+      "name": "Keep a service account's keys working after its last manager goes",
+      "description": "A service account's API keys work while someone in good standing manages it. When its last manager goes \u2014 suspended, removed, or no longer signing in \u2014 its keys keep working for this long, so whatever uses them keeps running while an administrator appoints a successor. Administrators are told at once, and again three days before the keys pause.",
+      "category": "auth",
+      "type": "string",
+      "default": "14",
+      "options": [
+        {
+          "id": "0",
+          "label": "Pause at once"
+        },
+        {
+          "id": "7",
+          "label": "For 7 days"
+        },
+        {
+          "id": "14",
+          "label": "For 14 days"
+        },
+        {
+          "id": "30",
+          "label": "For 30 days"
+        }
+      ],
+      "helpUrl": null,
+      "adminHint": "Teams as managers, and handing over when someone leaves, keep most accounts from ever reaching this. The period is the safety net for a leaver nobody handed over \u2014 someone removed only in your identity provider, say.",
+      "impactWhenOff": "With 'Pause at once', an integration stops as soon as its service account has no manager left, until an administrator appoints one. A longer period keeps it running longer while nobody answers for it.",
+      "sortOrder": 7,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "Every request made with a service account's API key \u2014 paused once the account has had no manager in good standing for longer than this"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "A paused key works again as soon as a manager is appointed; nothing is revoked",
+        "Personal keys are not affected"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "workspaceDirectoryEnabled",
       "name": "Find a workspace",
       "description": "Let everyone who can sign in browse the organization's workspaces \u2014 what each is for, who answers requests and how access works \u2014 and ask to join one.",
@@ -473,7 +517,8 @@
       "posture": "security",
       "serverGates": [
         "GET /workspace-directory \u2014 refused while off",
-        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed"
+        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed",
+        "GET \u2026/data-sources/{ds}/move-destinations, move-preview, and moving or asking to move a data source \u2014 offer or accept a workspace the person cannot open only while this is on and the workspace is listed (404 otherwise)"
       ],
       "uiSurfaces": [
         "The Find a workspace tab on Workspaces, and its entry in search",
@@ -1280,6 +1325,7 @@
     "apiKeyMaxLifetime": "none",
     "apiKeySsoSignInWindow": "30",
     "apiKeySsoRoundTripStepUp": false,
+    "serviceAccountUnmanagedGrace": "14",
     "workspaceDirectoryEnabled": false,
     "versioningEnabled": true,
     "traceEnabled": true,

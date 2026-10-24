@@ -25,6 +25,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from backend.common.service_accounts import is_service_account
 from backend.app.common.activity_context import (
     API_KEY_KEY,
     CORRELATION_KEY,
@@ -332,12 +333,34 @@ def _api_key_label(p: dict) -> str:
     return f"“{p.get('key_name') or '?'}” ({p.get('token_prefix') or '?'}…)"
 
 
-_API_KEY_REVOKED_BY = {"owner": "by its owner", "self": "with itself", "admin": "by an admin"}
+_API_KEY_REVOKED_BY = {
+    "owner": "by its owner", "self": "with itself", "admin": "by an admin",
+    "manager": "by a manager",
+}
 
 
 def _summary_api_key_revoked(p: dict) -> str:
     how = _API_KEY_REVOKED_BY.get(p.get("reason"), "")
     return f"API key {_api_key_label(p)} revoked {how}".rstrip()
+
+
+def _service_account_name(p: dict) -> str:
+    return p.get("name") or p.get("user_id") or "?"
+
+
+def _summary_service_account(verb: str) -> Callable[[dict], str]:
+    return lambda p: f"Service account “{_service_account_name(p)}” {verb}"
+
+
+def _summary_service_account_manager(added: bool) -> Callable[[dict], str]:
+    def build(p: dict) -> str:
+        who = p.get("manager_name") or p.get("manager_id") or "?"
+        if p.get("manager_type") == "group":
+            who = f"The team {who}"
+        handed = " (handed over)" if p.get("via") == "hand_over" else ""
+        manages = "now manages" if added else "no longer manages"
+        return f"{who} {manages} service account “{_service_account_name(p)}”{handed}"
+    return build
 
 
 def _summary_api_key_updated(p: dict) -> str:
@@ -466,6 +489,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         "warning", _summary_access_request("still unanswered — sent to the Org Admins"),
     ),
     "rbac.workspace.access_review_cancelled": ("warning", _summary_access_review("cancelled")),
+    "identity.service_account.disabled": ("warning", _summary_service_account("disabled")),
+    "identity.service_account.manager_removed": (
+        "warning", _summary_service_account_manager(added=False),
+    ),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
     "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
@@ -535,6 +562,12 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         ),
     ),
     "identity.api_key.updated": ("info", _summary_api_key_updated),
+    "identity.service_account.created": ("info", _summary_service_account("created")),
+    "identity.service_account.updated": ("info", _summary_service_account("edited")),
+    "identity.service_account.enabled": ("info", _summary_service_account("enabled")),
+    "identity.service_account.manager_added": (
+        "info", _summary_service_account_manager(added=True),
+    ),
     "identity.api_key.expiring": (
         "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
     ),
@@ -835,6 +868,12 @@ LABELS: dict[str, str] = {
     "identity.api_key.expiring": "Reminded of an expiring API key",
     "identity.api_key.rejected": "Refused an API key",
     "identity.api_key.misuse": "Refused a misused API key",
+    "identity.service_account.created": "Created a service account",
+    "identity.service_account.updated": "Edited a service account",
+    "identity.service_account.disabled": "Disabled a service account",
+    "identity.service_account.enabled": "Enabled a service account",
+    "identity.service_account.manager_added": "Appointed a service account's manager",
+    "identity.service_account.manager_removed": "Removed a service account's manager",
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",
@@ -1084,6 +1123,8 @@ def _legacy_target(
         return "backchannel_host", host, host
     if event_type.startswith("identity.api_key."):
         return "api_key", _str(p.get("key_id")), _str(p.get("key_name"))
+    if event_type.startswith("identity.service_account."):
+        return "service_account", _str(p.get("user_id")), _str(p.get("name"))
     if event_type == "workspace.datasource.moved":
         return "data_source", _str(p.get("data_source_id")), None
     if event_type.startswith("visualization.view."):
@@ -1184,7 +1225,7 @@ def _project(
     actor_id = None if event_type in _UNAUTHENTICATED else _actor(event_type, p)
     if not actor_id:
         actor_kind = "anonymous" if event_type in _UNAUTHENTICATED else "system"
-    elif actor_id in _SERVICE_ACTORS:
+    elif actor_id in _SERVICE_ACTORS or is_service_account(actor_id):
         actor_kind = "service"
     else:
         actor_kind = "user"

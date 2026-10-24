@@ -63,12 +63,17 @@ from backend.auth_service.interface import (
     User,
 )
 from backend.auth_service.ratelimit import get_account_limiter
+from backend.common.service_accounts import (
+    DEFAULT_GRACE_DAYS as DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS,
+    grace_days,
+)
 
 logger = logging.getLogger(__name__)
 
 ENABLED_FLAG = "apiKeysEnabled"
 MAX_LIFETIME_FLAG = "apiKeyMaxLifetime"
 SSO_WINDOW_FLAG = "apiKeySsoSignInWindow"
+SERVICE_ACCOUNT_GRACE_FLAG = "serviceAccountUnmanagedGrace"
 
 _FAILURE_SCOPE = "apikey-refused-ip"
 _KEY_SCOPE = "apikey"
@@ -91,6 +96,11 @@ _REFUSALS: dict[str, tuple[str, str]] = {
     "owner_reauth_required": (
         "owner_reauth_required",
         "This API key is paused until its owner signs in again.",
+    ),
+    "unmanaged": (
+        "api_key_unmanaged",
+        "This API key is paused: its service account has had no manager for longer than "
+        "the grace period. It works again as soon as an administrator appoints one.",
     ),
     "ip_not_allowed": (
         "api_key_ip_not_allowed",
@@ -239,6 +249,9 @@ async def _policy() -> ApiKeyPolicy:
         )
         lifetime = await feature_flags.get_value_self_session(MAX_LIFETIME_FLAG, "none")
         window = await feature_flags.get_value_self_session(SSO_WINDOW_FLAG, "30")
+        grace = await feature_flags.get_value_self_session(
+            SERVICE_ACCOUNT_GRACE_FLAG, str(DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("API key policy unreadable: %s", exc)
         raise _unavailable("API key policy cannot be read right now. Try again shortly.")
@@ -248,6 +261,7 @@ async def _policy() -> ApiKeyPolicy:
         )
     return ApiKeyPolicy(
         sso_signin_window_days=_days(window), max_lifetime_days=_days(lifetime),
+        service_account_grace_days=grace_days(grace),
     )
 
 

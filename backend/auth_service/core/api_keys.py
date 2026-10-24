@@ -4,8 +4,7 @@ API key tokens: minting, recognising, and reading one off a request.
 A key is ``<prefix><32 random base62><6-char checksum>`` — 44 characters:
 
 * the **prefix** names what kind of principal holds it (``nxpat_`` for a
-  person's own key; ``nxsat_`` is reserved for service accounts, which
-  will mint keys through the same machinery). A fixed, distinctive prefix
+  person's own key, ``nxsat_`` for a service account's). A fixed, distinctive prefix
   is what lets secret scanners find a key pasted into a repository or a
   chat log, and what lets a request be recognised as key-authenticated
   before anything is looked up;
@@ -38,13 +37,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional
 
+from backend.common.service_accounts import is_service_account
+
 from .password import is_password_set
 
 #: A person's own key, acting as them.
 KIND_PERSONAL = "personal"
-#: Reserved for service accounts — non-human principals. Recognised here so
-#: the format, the scanners and the CSRF exemption need no change when they
-#: arrive; nothing mints one yet.
+#: A service account's key: a principal that never signs in, whose managers
+#: mint its keys and answer for it.
 KIND_SERVICE = "service"
 
 _PREFIX_BY_KIND = {
@@ -177,6 +177,46 @@ def effective_expiry(key, *, max_lifetime_days: Optional[int]) -> Optional[datet
     return expiry
 
 
+def person_refusal(
+    person,
+    *,
+    identity_count: int,
+    idp_last_login_at: Optional[str],
+    now: datetime,
+    sso_signin_window_days: Optional[int],
+    passwords_allowed: bool,
+) -> Optional[str]:
+    """``owner_inactive`` or ``owner_reauth_required`` — or ``None`` when this
+    person could still sign in: the rule a personal key holds its owner to,
+    and a service account each of its managers to.
+
+    They must be active, and not a break-glass (system) account: one is kept
+    for when nobody else can sign in, and nothing should run as it day to
+    day, so its keys stop while it is one — and come back if it stops being
+    one. With an SSO identity, their identity provider must have vouched for
+    them recently: the platform hears about a leaver only when they next try
+    to sign in, so a key must not outlive that silence for long. With neither
+    a password nor an identity, nobody can sign in as them at all — and a
+    password counts only while password sign-in is switched on
+    (``passwords_allowed``, the Passwords switch; never the emergency window,
+    which closes): with it off, someone with no identity has no lasting way
+    in.
+    """
+    if (
+        person.deleted_at is not None or person.status != "active"
+        or getattr(person, "is_system_account", False)
+    ):
+        return "owner_inactive"
+    if identity_count:
+        if sso_signin_window_days is not None:
+            last = parse_instant(idp_last_login_at)
+            if last is None or now - last > timedelta(days=sso_signin_window_days):
+                return "owner_reauth_required"
+    elif not (passwords_allowed and is_password_set(getattr(person, "password_hash", None))):
+        return "owner_reauth_required"
+    return None
+
+
 def lifecycle_refusal(
     key,
     owner,
@@ -187,40 +227,45 @@ def lifecycle_refusal(
     sso_signin_window_days: Optional[int],
     max_lifetime_days: Optional[int],
     passwords_allowed: bool,
+    unmanaged_since: Optional[str] = None,
+    unmanaged_grace_days: int = 14,
+    account_on_record: bool = True,
 ) -> Optional[str]:
     """Why this key may not act now — ``revoked``, ``expired``,
-    ``owner_inactive`` or ``owner_reauth_required`` — or ``None`` if it may.
+    ``owner_inactive``, ``owner_reauth_required`` or ``unmanaged`` — or
+    ``None`` if it may.
 
-    The owner must still be someone who could sign in, and not a break-glass
-    (system) account: one is kept for when nobody else can sign in, and
-    nothing should run as it day to day, so its keys stop while it is one —
-    and come back if it stops being one. With an SSO identity,
-    that means their identity provider has vouched for them recently: the
-    platform hears about a leaver only when they next try to sign in, so a
-    key must not outlive that silence for long. With neither a password nor
-    an identity, nobody can sign in as them at all — and a password counts
-    only while password sign-in is switched on (``passwords_allowed``, the
-    Passwords switch; never the emergency window, which closes): with it
-    off, an owner with no identity has no lasting way in.
+    A personal key's owner must still be someone who could sign in
+    (:func:`person_refusal`). A service account never signs in: its keys
+    work while it is enabled and has a manager in good standing — and, once
+    its last one has gone, for ``unmanaged_grace_days`` more, counted from
+    ``unmanaged_since`` (when that was first noticed), so an integration
+    keeps running while someone appoints a successor. A key whose kind and
+    owner disagree never works, and nor does a service account's whose
+    record is gone (``account_on_record``): a rollback of its tables leaves
+    the account's ``users`` row and keys behind, answering to no one.
     """
     if key.revoked_at:
         return "revoked"
     expiry = effective_expiry(key, max_lifetime_days=max_lifetime_days)
     if expiry is not None and expiry <= now:
         return "expired"
-    if (
-        owner.deleted_at is not None or owner.status != "active"
-        or getattr(owner, "is_system_account", False)
-    ):
-        return "owner_inactive"
-    if identity_count:
-        if sso_signin_window_days is not None:
-            last = parse_instant(idp_last_login_at)
-            if last is None or now - last > timedelta(days=sso_signin_window_days):
-                return "owner_reauth_required"
-    elif not (passwords_allowed and is_password_set(getattr(owner, "password_hash", None))):
-        return "owner_reauth_required"
-    return None
+    if getattr(key, "kind", KIND_PERSONAL) == KIND_SERVICE:
+        if (
+            owner.deleted_at is not None or owner.status != "active"
+            or getattr(owner, "is_system_account", False)
+            or not is_service_account(owner.id) or not account_on_record
+        ):
+            return "owner_inactive"
+        since = parse_instant(unmanaged_since)
+        if since is not None and now >= since + timedelta(days=unmanaged_grace_days):
+            return "unmanaged"
+        return None
+    return person_refusal(
+        owner, identity_count=identity_count, idp_last_login_at=idp_last_login_at,
+        now=now, sso_signin_window_days=sso_signin_window_days,
+        passwords_allowed=passwords_allowed,
+    )
 
 
 def client_address(raw: Optional[str]) -> Optional[str]:
@@ -295,5 +340,6 @@ __all__ = [
     "parse_instant",
     "effective_expiry",
     "lifecycle_refusal",
+    "person_refusal",
     "address_allowed",
 ]

@@ -27,7 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from backend.app.db.advisory import hold_for_transaction
-from backend.app.db.models import ApiKeyORM, UserIdentityORM, UserORM
+from backend.app.db.models import ApiKeyORM, ServiceAccountORM, UserIdentityORM, UserORM
+from backend.common.service_accounts import ID_PREFIX as _SERVICE_ACCOUNT_PREFIX
 
 #: Stored user agents are cut to this. They are a hint for a person reading
 #: "last used from", not evidence, and an unbounded header should not grow
@@ -120,13 +121,14 @@ def _identity_facts():
 
 def status_expr(
     facts, *, now: datetime, max_lifetime_days: Optional[int],
-    sso_window_days: Optional[int], passwords_allowed: bool,
+    sso_window_days: Optional[int], passwords_allowed: bool, grace_days: int = 14,
 ):
     """The status a key shows, in SQL — ``api_keys.lifecycle_refusal`` in its
     own order — so the inventory's filters and counts agree with every badge
     (``revoked``, ``expired``, ``owner_inactive``, ``paused``, ``active``).
     Needs the key joined to its owner and outer-joined to ``facts``
-    (``_identity_facts``)."""
+    (``_identity_facts``) and to ``service_accounts``. A service account's key
+    shows paused once the account has had no manager for ``grace_days``."""
     # Here, not at the top: the control plane's expiry sweep imports this
     # module and starts without the auth service's modules.
     from backend.auth_service.core.password import disabled_password_hash
@@ -142,6 +144,9 @@ def status_expr(
         cutoff = (now - timedelta(days=sso_window_days)).isoformat()
         stale = or_(facts.c.last_login_at.is_(None), facts.c.last_login_at < cutoff)
         paused = or_(and_(has_identity, stale), paused)
+    service = ApiKeyORM.kind == "service"
+    service_owner = UserORM.id.startswith(_SERVICE_ACCOUNT_PREFIX, autoescape=True)
+    unmanaged = ServiceAccountORM.unmanaged_since <= (now - timedelta(days=grace_days)).isoformat()
     return case(
         (ApiKeyORM.revoked_at.is_not(None), "revoked"),
         (_expired_clause(now, max_lifetime_days), "expired"),
@@ -149,25 +154,30 @@ def status_expr(
             or_(
                 UserORM.deleted_at.is_not(None), UserORM.status != "active",
                 UserORM.is_system_account.is_(True),
+                and_(service, ~service_owner),
+                and_(service, ServiceAccountORM.user_id.is_(None)),
             ),
             "owner_inactive",
         ),
-        (paused, "paused"),
+        (and_(service, unmanaged), "paused"),
+        (and_(~service, paused), "paused"),
         else_="active",
     )
 
 
-def _inventory(now: datetime, max_lifetime_days, sso_window_days, passwords_allowed):
+def _inventory(now: datetime, max_lifetime_days, sso_window_days, passwords_allowed, grace_days=14):
     """Keys joined to what their status depends on, and that status."""
     facts = _identity_facts()
     status = status_expr(
         facts, now=now, max_lifetime_days=max_lifetime_days,
         sso_window_days=sso_window_days, passwords_allowed=passwords_allowed,
+        grace_days=grace_days,
     )
     joined = (
         select(ApiKeyORM, UserORM)
         .join(UserORM, UserORM.id == ApiKeyORM.user_id)
         .outerjoin(facts, facts.c.user_id == ApiKeyORM.user_id)
+        .outerjoin(ServiceAccountORM, ServiceAccountORM.user_id == ApiKeyORM.user_id)
     )
     return joined, status
 
@@ -337,6 +347,12 @@ class AuthRow:
     #: keeps an SSO owner's keys alive.
     identity_count: int
     idp_last_login_at: Optional[str]
+    #: For a service account: since when it has had no manager in good
+    #: standing (``service_accounts.unmanaged_since``), or ``None``.
+    unmanaged_since: Optional[str] = None
+    #: Whether the owner has a ``service_accounts`` row: a service account
+    #: without one is refused.
+    account_on_record: bool = True
 
 
 async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[AuthRow]:
@@ -351,17 +367,22 @@ async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[Auth
         .scalar_subquery()
     )
     row = (await session.execute(
-        select(ApiKeyORM, UserORM, identity_count, idp_last_login)
+        select(
+            ApiKeyORM, UserORM, identity_count, idp_last_login,
+            ServiceAccountORM.unmanaged_since, ServiceAccountORM.user_id,
+        )
         .join(UserORM, UserORM.id == ApiKeyORM.user_id)
+        .outerjoin(ServiceAccountORM, ServiceAccountORM.user_id == ApiKeyORM.user_id)
         .where(ApiKeyORM.token_hash == token_hash)
         .options(_NO_PICTURE)
     )).first()
     if row is None:
         return None
-    key, owner, count, last_login = row
+    key, owner, count, last_login, unmanaged_since, account_row = row
     return AuthRow(
         key=key, owner=owner,
         identity_count=int(count or 0), idp_last_login_at=last_login,
+        unmanaged_since=unmanaged_since, account_on_record=account_row is not None,
     )
 
 
@@ -512,6 +533,7 @@ async def list_all(
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
     passwords_allowed: bool = True,
+    grace_days: int = 14,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[tuple[ApiKeyORM, UserORM]], int]:
@@ -524,7 +546,7 @@ async def list_all(
     base = _filtered(
         owner_id=owner_id, status=status, focus=focus, unused_days=unused_days,
         search=search, max_lifetime_days=max_lifetime_days, sso_window_days=sso_window_days,
-        passwords_allowed=passwords_allowed,
+        passwords_allowed=passwords_allowed, grace_days=grace_days,
     )
     total = int((await session.execute(
         select(func.count()).select_from(base.subquery())
@@ -579,10 +601,13 @@ def _filtered(
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
     passwords_allowed: bool = True,
+    grace_days: int = 14,
 ):
     """The inventory, narrowed by ``list_all``'s filters."""
     now = _now()
-    base, key_status = _inventory(now, max_lifetime_days, sso_window_days, passwords_allowed)
+    base, key_status = _inventory(
+        now, max_lifetime_days, sso_window_days, passwords_allowed, grace_days,
+    )
     conditions = []
     if owner_id:
         conditions.append(ApiKeyORM.user_id == owner_id)
@@ -610,11 +635,14 @@ async def stats(
     max_lifetime_days: Optional[int] = None,
     sso_window_days: Optional[int] = None,
     passwords_allowed: bool = True,
+    grace_days: int = 14,
 ) -> dict[str, int]:
     """The inventory's counts — per status, and per focus — in one row, over
     the same owner and search filters the list takes."""
     now = _now()
-    base, key_status = _inventory(now, max_lifetime_days, sso_window_days, passwords_allowed)
+    base, key_status = _inventory(
+        now, max_lifetime_days, sso_window_days, passwords_allowed, grace_days,
+    )
 
     def _count(condition):
         return func.coalesce(func.sum(case((condition, 1), else_=0)), 0)

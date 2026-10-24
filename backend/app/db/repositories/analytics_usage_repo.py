@@ -32,6 +32,7 @@ from backend.app.db.models import (
     WorkspaceORM,
     view_is_live,
 )
+from backend.common.service_accounts import is_person
 from backend.app.db.repositories.activity_repo import _cadence, _punchcard
 from backend.app.db.repositories.analytics_repo import (
     REDACTED_WORKSPACE,
@@ -202,7 +203,8 @@ async def platform_usage(
         else_="never",
     ).label("k")
     presence = dict((await session.execute(
-        select(presence_kind, func.count()).where(UserORM.deleted_at.is_(None)).group_by("k")
+        select(presence_kind, func.count())
+        .where(UserORM.deleted_at.is_(None), is_person(UserORM.id)).group_by("k")
     )).all())
     by_hour = dict((await session.execute(
         select(func.substr(ProductEventORM.created_at, 1, 13).label("h"), func.count())
