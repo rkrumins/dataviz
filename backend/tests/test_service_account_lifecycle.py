@@ -26,7 +26,7 @@ from backend.app.db.models import (
     UserIdentityORM,
     UserORM,
 )
-from backend.app.db.repositories import api_key_repo, service_account_repo
+from backend.app.db.repositories import api_key_repo, role_repo, service_account_repo
 from backend.app.services import permission_service, service_account_standing
 from backend.auth_service.core import api_keys
 from backend.auth_service.interface import InvalidCredentials
@@ -357,6 +357,34 @@ async def test_a_service_account_acts_only_through_its_own_workspace_roles(db_se
     assert account.global_perms == ()
     assert set(account.ws_perms) == {"ws_a"}
     assert person.global_perms and set(person.ws_perms) == {"ws_a", "ws_b"}
+
+
+async def test_a_role_widened_after_it_was_given_brings_the_account_none_of_it(db_session):
+    """A role it holds may later be given the power to administer a workspace;
+    the account's keys never get that, though a person holding it does."""
+    db_session.add_all(_account("svc_wide"))
+    db_session.add(_person("usr_peer"))
+    await db_session.flush()
+    for subject in ("svc_wide", "usr_peer"):
+        db_session.add(RoleBindingORM(
+            subject_type="user", subject_id=subject, role_name="workspace_viewer",
+            scope_type="workspace", scope_id="ws_a",
+        ))
+    await db_session.commit()
+    before = await permission_service.resolve(db_session, "svc_wide")
+
+    viewer = (await role_repo.role_names_with_permissions(db_session, ["workspace_viewer"]))
+    await role_repo.update_role(
+        db_session, "workspace_viewer",
+        permissions=[*viewer["workspace_viewer"], "workspace:admin"],
+    )
+    await db_session.commit()
+
+    account = await permission_service.resolve(db_session, "svc_wide")
+    person = await permission_service.resolve(db_session, "usr_peer")
+    assert account.ws_perms == before.ws_perms
+    assert not permission_service.has_permission(account, "workspace:admin", workspace_id="ws_a")
+    assert permission_service.has_permission(person, "workspace:admin", workspace_id="ws_a")
 
 
 # ── Never a session ─────────────────────────────────────────────────

@@ -64,6 +64,7 @@ from backend.common.models.layout_templates import (
     LayoutTemplateVersionSummary,
 )
 from backend.common.models.rbac import ViewGrantCreateRequest, ViewGrantResponse
+from backend.common.service_accounts import is_service_account
 
 # Admin → Features → Layout templates: every route answers to it first.
 router = APIRouter(dependencies=[Depends(require_feature("layoutTemplatesEnabled"))])
@@ -752,6 +753,12 @@ async def create_layout_template_grant(
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
+        if is_service_account(body.subject_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A template can't be shared with a service account: its access is the "
+                "workspace roles given on its own page, under Service accounts",
+            )
     elif body.subject_type == "group":
         if await group_repo.get_group_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="Group not found")

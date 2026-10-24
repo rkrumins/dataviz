@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.common.property_patch import InvalidPatch, normalize_update
+from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
@@ -1495,6 +1496,11 @@ async def add_branch_member(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    if body.subject_type == "user" and is_service_account(body.subject_id):
+        raise HTTPException(status_code=409, detail=(
+            "A draft can't be shared with a service account: its access is the "
+            "workspace roles given on its own page, under Service accounts"
+        ))
     with _domain_errors():
         return await svc.add_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=body.subject_type,

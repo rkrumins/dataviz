@@ -12,8 +12,10 @@ import contextlib
 import json
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
+from backend.app.api.v1.endpoints import versioning
 from backend.app.auth.dependencies import get_permission_claims
 from backend.app.db.models import (
     GroupMemberORM,
@@ -23,10 +25,12 @@ from backend.app.db.models import (
     RoleBindingORM,
     ServiceAccountORM,
     UserORM,
+    ViewORM,
     WorkspaceORM,
 )
 from backend.app.db.repositories import api_key_repo, notification_repo, user_repo
 from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 from backend.auth_service.core import api_keys
 
 BASE = "/api/v1/admin/service-accounts"
@@ -327,6 +331,40 @@ async def test_a_service_account_is_not_one_of_the_people(test_client, db_sessio
     assert await notification_repo.notify(
         db_session, user_ids=[svc], kind="anything", title="hello",
     ) == 0
+
+
+async def test_nothing_is_shared_with_a_service_account(test_client, db_session, people):
+    """Its access is the workspace roles on its own page: a view or a draft
+    can't be shared with it, and it neither reviews nor approves a PR — its
+    managers would be approving through it."""
+    svc = (await _create(test_client))["id"]
+    db_session.add(ViewORM(
+        id="view_sa", name="Lineage", workspace_id="ws_x", visibility="workspace", created_by=ADMIN,
+    ))
+    await db_session.commit()
+    shared = await test_client.post("/api/v1/views/view_sa/grants", json={
+        "subjectType": "user", "subjectId": svc, "role": "viewer",
+    })
+    assert shared.status_code == 409, shared.text
+
+    with pytest.raises(HTTPException) as refused:
+        await versioning.add_branch_member(
+            ws_id="ws_x", graph_id="g_sa", branch_id="b_sa",
+            body=versioning.BranchMemberRequest(subjectType="user", subjectId=svc, role="viewer"),
+            user=None, _meta={}, svc=None,
+        )
+    assert refused.value.status_code == 409
+
+    def untouched():
+        raise AssertionError("refused before anything is read")
+
+    service = GraphVersioningService(session_factory=untouched)
+    with pytest.raises(AccessDenied):
+        await service.approve_pr(pr_id="mr_sa", actor=svc)
+    with pytest.raises(AccessDenied):
+        await service.open_pr(source_graph_id="g_fork", actor=ADMIN, reviewers=[svc])
+    with pytest.raises(AccessDenied):
+        await service.open_draft_mr(graph_id="g_sa", branch_id="b_sa", actor=ADMIN, reviewers=[svc])
 
 
 # ── For managers ────────────────────────────────────────────────────

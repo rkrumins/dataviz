@@ -40,6 +40,7 @@ from sqlalchemy.exc import IntegrityError
 from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
+from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
@@ -1933,6 +1934,8 @@ class GraphVersioningService:
 
         ``reviewers`` makes approval a merge precondition: every listed reviewer
         must :meth:`approve_pr` before the PR can merge (plan §17 #5)."""
+        if any(is_service_account(r) for r in reviewers or ()):
+            raise AccessDenied("a service account cannot review a PR: name a person")
         async with self._session() as s:
             fork = await s.get(GraphORM, source_graph_id)
             if fork is None or not fork.fork_parent_graph_id:
@@ -1961,8 +1964,11 @@ class GraphVersioningService:
 
     async def approve_pr(self, *, pr_id: str, actor: str) -> dict:
         """Record ``actor``'s approval of a PR. The author can't approve their own
-        PR; once every requested reviewer has approved, ``approval_status`` flips
+        PR, nor can a service account — its managers would approve through it;
+        once every requested reviewer has approved, ``approval_status`` flips
         to ``approved`` (and an otherwise-mergeable PR to status ``approved``)."""
+        if is_service_account(actor):
+            raise AccessDenied("a service account cannot approve a PR: approving is a person's call")
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
@@ -2230,6 +2236,8 @@ class GraphVersioningService:
         ``main`` — the reviewed alternative to a bare :meth:`publish`. Records the
         current mergeability/conflict set + the ``title``/``description``;
         ``reviewers`` makes approval a merge precondition (plan §17 #5)."""
+        if any(is_service_account(r) for r in reviewers or ()):
+            raise AccessDenied("a service account cannot review a PR: name a person")
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             draft = await s.get(BranchORM, branch_id)

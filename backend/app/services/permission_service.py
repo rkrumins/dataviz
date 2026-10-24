@@ -363,6 +363,9 @@ async def resolve(
         bindings = [
             b for b in bindings if b.scope_type == "workspace" and b.subject_type == "user"
         ]
+        # And never more than it could be given: a role it holds that is later
+        # widened to administer a workspace or let people in brings it none of that.
+        from backend.app.services.workspace_access import is_requestable
 
     # Collect distinct role names so we can fetch role_permissions in
     # one query. This keeps resolve() O(1) DB calls regardless of how
@@ -381,6 +384,8 @@ async def resolve(
 
     for b in bindings:
         perms_for_role = role_perms.get(b.role_name, [])
+        if service:
+            perms_for_role = [p for p in perms_for_role if is_requestable((p,))]
         for perm in perms_for_role:
             cat = perm_categories.get(perm, "system")
             if b.scope_type == "global" and cat == "system":
