@@ -332,7 +332,8 @@ async def test_a_disabled_account_gets_no_new_keys_but_its_old_ones_can_be_ended
 
     listed = await client.get(_keys(account))
     assert [(k["id"], k["status"]) for k in listed.json()] == [(key.id, "owner_inactive")]
-    assert (await client.delete(f"{_keys(account)}/{key.id}", headers=headers)).status_code == 204
+    revoked = await client.delete(f"{_keys(account)}/{key.id}", headers=headers)
+    assert revoked.status_code == 204
 
 
 # ── Rotating and revoking ───────────────────────────────────────────
@@ -358,7 +359,8 @@ async def test_rotating_keeps_the_key_with_the_account(client, db_session, accou
 async def test_a_manager_revoking_is_recorded_as_one(client, db_session, account):
     key = await _minted(db_session, account)
     headers = _sign_in(client)
-    assert (await client.delete(f"{_keys(account)}/{key.id}", headers=headers)).status_code == 204
+    revoked = await client.delete(f"{_keys(account)}/{key.id}", headers=headers)
+    assert revoked.status_code == 204
     row = await db_session.get(ApiKeyORM, key.id)
     await db_session.refresh(row)
     assert (row.revoked_by, row.revoked_reason) == (OWNER, "manager")
@@ -368,7 +370,8 @@ async def test_a_manager_revoking_is_recorded_as_one(client, db_session, account
 async def test_a_super_admin_revoking_tells_the_managers(client, db_session, account):
     key = await _minted(db_session, account)
     headers = _sign_in(client, ROOT, global_perms=_ROOT_PERMS)
-    assert (await client.delete(f"{_keys(account)}/{key.id}", headers=headers)).status_code == 204
+    revoked = await client.delete(f"{_keys(account)}/{key.id}", headers=headers)
+    assert revoked.status_code == 204
     row = await db_session.get(ApiKeyORM, key.id)
     await db_session.refresh(row)
     assert (row.revoked_by, row.revoked_reason) == (ROOT, "admin")

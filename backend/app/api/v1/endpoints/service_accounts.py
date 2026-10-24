@@ -232,7 +232,7 @@ async def _roles(session: AsyncSession, account_id: str) -> list[RoleBindingORM]
 
 async def _detail(session: AsyncSession, account_id: str) -> ServiceAccountDetail:
     found = await _account_or_404(session, account_id)
-    [base], _grace = await _accounts_out(session, [found])
+    [base], _ = await _accounts_out(session, [found])
     bindings = await _roles(session, account_id)
     names = await user_repo.get_workspace_names_by_ids(
         session, sorted({b.scope_id for b in bindings if b.scope_id}),

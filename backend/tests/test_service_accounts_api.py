@@ -312,8 +312,9 @@ async def test_a_service_account_is_not_one_of_the_people(test_client, db_sessio
 
     found = (await test_client.get("/api/v1/directory", params={"q": "Metadata"})).json()
     assert svc not in {u["id"] for u in found.get("users", [])}
-    hits = (await test_client.get("/api/v1/admin/rbac/search", params={"q": "Metadata"})).json()
-    assert svc not in {h.get("id") for h in hits}
+    hits = await test_client.get("/api/v1/admin/rbac/search", params={"q": "Metadata", "types": "user"})
+    assert hits.status_code == 200, hits.text
+    assert svc not in {h["id"] for h in hits.json()}
 
     joined = await test_client.post("/api/v1/admin/groups/grp_ops/members", json={"userId": svc})
     assert joined.status_code == 409
