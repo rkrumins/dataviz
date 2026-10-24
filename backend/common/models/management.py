@@ -1309,6 +1309,9 @@ class ViewAccessInfo(BaseModel):
     can_query_data_source: bool = Field(False, alias="canQueryDataSource")
     # May tick "can query its data source" on a share of this view.
     can_grant_source_query: bool = Field(False, alias="canGrantSourceQuery")
+    # The engine those queries run on — 'falkordb' | 'neo4j' — when the
+    # caller may run them and the source takes them; null otherwise.
+    native_query_engine: Optional[str] = Field(None, alias="nativeQueryEngine")
     # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     access_via: str = Field(alias="accessVia")
     # 'full' | 'readonly'

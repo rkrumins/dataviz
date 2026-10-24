@@ -44,6 +44,15 @@ export interface ViewAccess {
     /** The enterprise tier exists on this deployment at all. False HIDES
      *  the option rather than disabling it. */
     enterpriseAvailable?: boolean
+    /** May run their own read-only queries on the view's data source — as
+     *  a reader of the workspace's sources, or through a share that opts
+     *  in. Absent on backends that predate native queries. */
+    canQueryDataSource?: boolean
+    /** May tick "can query its data source" on a share of this view. */
+    canGrantSourceQuery?: boolean
+    /** The engine those queries run on, when the caller may run them and
+     *  the source takes them. */
+    nativeQueryEngine?: 'falkordb' | 'neo4j' | null
     /** How this caller reaches the view. */
     accessVia: 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     /** What the DATA plane accepts: 'full' = graph mutations allowed;

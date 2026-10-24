@@ -11,11 +11,13 @@
  *     locked note renders instead of an error box;
  *   - the people picker searches the signed-in directory, never the
  *     admin listing;
- *   - a grant's role is editable in place.
+ *   - a grant's role is editable in place;
+ *   - a share can let its holder query the view's data source, offered
+ *     only by someone who may query it themselves, and always revocable.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/viewApiService', async () => {
   const actual = await vi.importActual<typeof import('@/services/viewApiService')>(
@@ -36,6 +38,7 @@ vi.mock('@/services/viewGrantsService', () => ({
     list: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    setSourceQuery: vi.fn(),
     delete: vi.fn(),
   },
 }))
@@ -53,6 +56,7 @@ vi.mock('@/store/branding', () => ({
 
 import { ShareViewDialog } from '../ShareViewDialog'
 import { viewGrantsService } from '@/services/viewGrantsService'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { searchDirectory } from '@/services/userDirectoryService'
 import {
   approveViewPublication,
@@ -68,6 +72,7 @@ import type { ViewVisibility } from '@/lib/viewVisibility'
 
 const mockList = vi.mocked(viewGrantsService.list)
 const mockUpdate = vi.mocked(viewGrantsService.update)
+const mockSetSourceQuery = vi.mocked(viewGrantsService.setSourceQuery)
 const mockSearch = vi.mocked(searchDirectory)
 const mockGetView = vi.mocked(getView)
 const mockSetVisibility = vi.mocked(updateViewVisibility)
@@ -367,6 +372,65 @@ describe('grants section gating', () => {
     await waitFor(() =>
       expect(mockUpdate).toHaveBeenCalledWith('view_1', 'grant_1', 'editor'),
     )
+  })
+})
+
+describe('the Query data switch', () => {
+  const QUERIER_ACCESS: ViewAccess = { ...MANAGER_ACCESS, canQueryDataSource: true, canGrantSourceQuery: true }
+  const nativeQueries = (on: boolean) =>
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, nativeQueryEnabled: on } })
+  const querySwitch = async () => await screen.findByRole('switch', { name: /Query data/ })
+
+  beforeEach(() => {
+    nativeQueries(true)
+    mockGetView.mockResolvedValue(viewResponse({ dataSourceName: 'Warehouse' }))
+  })
+  afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+  it('is offered by someone who may query the source, and says how far it reaches', async () => {
+    mockSetSourceQuery.mockResolvedValue({ ...GRANT, canQuerySource: true })
+    renderDialog(QUERIER_ACCESS)
+    const toggle = await querySwitch()
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(await screen.findByText(/everything in Warehouse — not just this view/)).toBeTruthy()
+
+    fireEvent.click(toggle)
+    await waitFor(() => expect(mockSetSourceQuery).toHaveBeenCalledWith('view_1', 'grant_1', true))
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'))
+  })
+
+  it('goes back when the change is refused', async () => {
+    mockSetSourceQuery.mockRejectedValue(new Error('Only someone who may query its data source can let others.'))
+    renderDialog(QUERIER_ACCESS)
+    const toggle = await querySwitch()
+    fireEvent.click(toggle)
+    await waitFor(() => expect(mockSetSourceQuery).toHaveBeenCalled())
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'))
+  })
+
+  it('is not offered by someone who may not query the source', async () => {
+    renderDialog(MANAGER_ACCESS)
+    await screen.findByText('Xavier')
+    expect(screen.queryByRole('switch', { name: /Query data/ })).toBeNull()
+  })
+
+  it('can still be turned off by whoever manages the shares', async () => {
+    mockList.mockResolvedValue([{ ...GRANT, canQuerySource: true }])
+    mockSetSourceQuery.mockResolvedValue({ ...GRANT, canQuerySource: false })
+    renderDialog(MANAGER_ACCESS)
+    const toggle = await querySwitch()
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect((toggle as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(toggle)
+    await waitFor(() => expect(mockSetSourceQuery).toHaveBeenCalledWith('view_1', 'grant_1', false))
+  })
+
+  it('is hidden while native queries are switched off', async () => {
+    nativeQueries(false)
+    renderDialog(QUERIER_ACCESS)
+    await screen.findByText('Xavier')
+    expect(screen.queryByRole('switch', { name: /Query data/ })).toBeNull()
+    expect(screen.queryByText(/not just this view/)).toBeNull()
   })
 })
 

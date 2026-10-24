@@ -88,6 +88,9 @@ import type {
     SearchRuleCount as GenSearchRuleCount,
     SearchExportRequest as GenSearchExportRequest,
     SearchExportResult as GenSearchExportResult,
+    NativeQueryRequest as GenNativeQueryRequest,
+    NativeQueryResponse as GenNativeQueryResponse,
+    NativeQueryErrorDetail as GenNativeQueryErrorDetail,
 } from './generated/searchquery'
 
 
@@ -275,6 +278,12 @@ export type SearchCatalogResult = RequireKeys<
 /** ``POST /search/exports`` — every match of a search, written to a file. */
 export type SearchExportRequest = GenSearchExportRequest
 export type SearchExportResult = RequireKeys<GenSearchExportResult, 'rows' | 'columns' | 'format'>
+
+/** ``POST /search/native`` — a person's own read-only Cypher. */
+export type NativeQueryRequest = GenNativeQueryRequest
+export type NativeQueryResponse = RequireKeys<GenNativeQueryResponse, 'notes'>
+/** The ``detail`` of every refusal and failure of a native query. */
+export type NativeQueryErrorDetail = GenNativeQueryErrorDetail
 
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },

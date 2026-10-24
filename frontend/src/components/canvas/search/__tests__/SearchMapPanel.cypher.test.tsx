@@ -1,6 +1,8 @@
 /**
  * The Query card's Cypher tab sits beside Visual and Code, and the card
  * reopens on it — the card remounts each time the Advanced drawer closes.
+ * A native query's highlight is no draft's, so emptying the draft leaves
+ * it lit.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -56,5 +58,15 @@ describe('SearchMapPanel — the Cypher tab', () => {
 
         renderPanel(stubSession({ refineOpen: true }))
         expect(screen.getByText('Compiling the query…')).toBeInTheDocument()
+    })
+
+    it.each([
+        ['native:abc123', 'native:abc123'],     // a native query's highlight stays lit
+        ['h1', null],                           // a search's goes with its draft
+    ])('with no draft, a highlight from %s leaves %s', (published, left) => {
+        useSearchStore.getState().clear()
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['urn:a'], queryHash: published })
+        renderPanel(stubSession({ refineOpen: true }))
+        expect(useSearchStore.getState().queryHash).toBe(left)
     })
 })

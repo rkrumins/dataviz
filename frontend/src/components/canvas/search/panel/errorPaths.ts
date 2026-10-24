@@ -100,3 +100,37 @@ export function readableSearchError(message: string): string {
         ?? (status >= 500 ? "The server couldn't answer right now. Try again." : `The request failed (${status}).`)
     return humanizeQueryPaths(text)
 }
+
+
+/** A failed request, read for a console: the message as a person reads it,
+ *  and what else the body says — where in the query, the code, and the
+ *  request id to quote when asking for help. */
+export interface RequestFailure {
+    message: string
+    status: number | null
+    code: string | null
+    position: number | null
+    requestId: string | null
+}
+
+export function requestFailure(message: string): RequestFailure {
+    const failure: RequestFailure = {
+        message: readableSearchError(message), status: null, code: null, position: null, requestId: null,
+    }
+    const match = API_ERROR.exec(message)
+    if (!match) return failure
+    failure.status = Number(match[1])
+    let detail: Record<string, unknown> = {}
+    try {
+        const parsed = JSON.parse(match[2]) as { detail?: unknown } | null
+        const inner = parsed?.detail ?? parsed
+        if (inner && typeof inner === 'object' && !Array.isArray(inner)) detail = inner as Record<string, unknown>
+    } catch {
+        return failure
+    }
+    const code = detail.code ?? detail.type
+    if (typeof code === 'string') failure.code = code
+    if (typeof detail.position === 'number') failure.position = detail.position
+    if (typeof detail.requestId === 'string') failure.requestId = detail.requestId
+    return failure
+}

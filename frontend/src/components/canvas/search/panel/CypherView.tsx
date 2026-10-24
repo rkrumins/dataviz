@@ -11,29 +11,35 @@
  * **Copy** gives the statement with its values written in, so it runs as
  * it is anywhere Cypher runs. A data source that compiles no Cypher (only
  * FalkorDB does) says so, instead of a spinner that never stops.
- * ``children``: what follows the compiled query — the native console.
+ *
+ * Below it, for whoever may query the view's data source: Edit and run,
+ * starting from that same statement (``NativeConsole``).
  */
 import { AlertCircle, AlertTriangle, CheckCircle2, Copy, Info, Loader2 } from 'lucide-react'
 import { type FC, type ReactNode, useCallback, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useIsDraftMode } from '@/store/branchStore'
 import { useDraftPredicate } from '@/store/searchStore'
 
 import { CypherEditor } from '../editor/CypherEditor'
 
+import { NativeConsole } from './native/NativeConsole'
 import { useCompiledQuery } from './native/useCompiledQuery'
+import { useNativeQueryEngine } from './native/useNativeQueryEngine'
 import { QuerySentence } from './QuerySentence'
 
 
 export interface CypherViewProps {
     viewId: string
-    children?: ReactNode
 }
 
 
-export const CypherView: FC<CypherViewProps> = ({ viewId, children }) => {
+export const CypherView: FC<CypherViewProps> = ({ viewId }) => {
     const draft = useDraftPredicate()
     const compiled = useCompiledQuery(draft, viewId)
+    const nativeEngine = useNativeQueryEngine()
+    const onDraft = useIsDraftMode()
 
     let body: ReactNode
     if (compiled.status === 'empty') {
@@ -102,7 +108,16 @@ export const CypherView: FC<CypherViewProps> = ({ viewId, children }) => {
         <div className="flex flex-col gap-3">
             <QuerySentence draftPredicate={draft} />
             {body}
-            {children}
+            {nativeEngine && (
+                <NativeConsole
+                    viewId={viewId}
+                    engine={nativeEngine}
+                    seed={compiled.status === 'ok' ? compiled.result.inlinedCypher ?? null : null}
+                    unavailable={onDraft
+                        ? 'Native queries read the published graph. Switch the view to main to run one.'
+                        : null}
+                />
+            )}
         </div>
     )
 }

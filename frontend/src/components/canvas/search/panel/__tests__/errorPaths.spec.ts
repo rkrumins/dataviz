@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeQueryPath, humanizeQueryPaths, readableSearchError } from '../errorPaths'
+import { describeQueryPath, humanizeQueryPaths, readableSearchError, requestFailure } from '../errorPaths'
 
 
 describe('errorPaths — a server message in the panel’s words', () => {
@@ -59,5 +59,34 @@ describe('readableSearchError — a failed request in plain words', () => {
         expect(readableSearchError('API Error 400: query too wide')).toBe('query too wide')
         expect(readableSearchError('Request timed out')).toBe('Request timed out')
         expect(readableSearchError('bad $.children[0]')).toBe('bad filter 1')
+    })
+})
+
+
+describe('requestFailure — what a console needs from a refusal', () => {
+    it('reads the message, the code, where in the query, and the request id', () => {
+        const body = JSON.stringify({ detail: {
+            code: 'native_query_refused', message: 'LOAD reads files or URLs, and native queries only read.',
+            requestId: 'req_123', position: 0,
+        } })
+        expect(requestFailure(`API Error 400: ${body}`)).toEqual({
+            message: 'LOAD reads files or URLs, and native queries only read.',
+            status: 400, code: 'native_query_refused', position: 0, requestId: 'req_123',
+        })
+    })
+
+    it('reads a switched-off feature by its type', () => {
+        const body = JSON.stringify({ detail: { type: 'feature_disabled', message: 'Turned off.' } })
+        expect(requestFailure(`API Error 403: ${body}`)).toMatchObject({ code: 'feature_disabled', status: 403 })
+    })
+
+    it('says something even when the body says nothing', () => {
+        expect(requestFailure('API Error 502: <html>bad gateway</html>')).toEqual({
+            message: "The server couldn't answer right now. Try again.",
+            status: 502, code: null, position: null, requestId: null,
+        })
+        expect(requestFailure('Failed to fetch')).toEqual({
+            message: 'Failed to fetch', status: null, code: null, position: null, requestId: null,
+        })
     })
 })

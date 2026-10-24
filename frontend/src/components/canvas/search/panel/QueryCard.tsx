@@ -75,6 +75,7 @@ import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
 import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
 import { CypherView } from './CypherView'
+import { isNativeResult } from './native/nativeCells'
 import { CodeMode } from './dsl/CodeMode'
 import type { DslVocabulary } from './dsl/dslLanguage'
 import { namePathFor, searchEntitiesByName } from './entityNames'
@@ -236,8 +237,10 @@ export const QueryCard: FC<QueryCardProps> = ({
         // populated draft even after the canvas has gone dim.
         if (runnable === null) {
             // ``queryHash`` is the "results are published" sentinel —
-            // only clear when there's actually something to drop.
-            if (useSearchStore.getState().queryHash !== null) clearSearchResults()
+            // only clear when there's actually something to drop, and
+            // never a native query's highlight, which no draft produced.
+            const published = useSearchStore.getState().queryHash
+            if (published !== null && !isNativeResult(published)) clearSearchResults()
             return
         }
         // Manual mode: wait for the explicit Run click.

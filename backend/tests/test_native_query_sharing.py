@@ -81,12 +81,15 @@ async def test_an_owner_who_may_query_may_offer_it_on_a_share(test_client: Async
     with _auth(user=OWNER, claims=OWNER_CLAIMS):
         access = await envelope(test_client)
     assert (access["canQueryDataSource"], access["canGrantSourceQuery"]) == (True, True)
+    assert access["nativeQueryEngine"] == "falkordb"
 
 
 async def test_without_the_permission_neither(test_client: AsyncClient, db_session, estate):
     with _auth(user=OWNER, claims=OWNER_WITHOUT):
         access = await envelope(test_client)
     assert (access["canQueryDataSource"], access["canGrantSourceQuery"]) == (False, False)
+    # And no engine named to someone who may not query it.
+    assert access["nativeQueryEngine"] is None
 
 
 async def test_an_org_wide_view_lets_no_one_query_its_source(test_client: AsyncClient, db_session,

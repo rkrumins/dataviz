@@ -72,6 +72,8 @@ import type {
     SearchCatalogResult,
     SearchExportRequest,
     SearchExportResult,
+    NativeQueryRequest,
+    NativeQueryResponse,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -703,6 +705,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify(query),
             signal: opts?.signal,
+        })
+    }
+
+    /**
+     * A person's own read-only Cypher on the view's data source.
+     *
+     * Never retried — every run that reaches the server is recorded in the
+     * activity log, so a replay would be a second run — which is why
+     * ``/search/native`` is absent from the idempotent read list. The
+     * request may take as long as the query is allowed, and a little more.
+     */
+    async runNativeQuery(body: NativeQueryRequest, opts?: { signal?: AbortSignal }): Promise<NativeQueryResponse> {
+        return await this.fetch<NativeQueryResponse>('/search/native', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: (body.timeoutMs ?? 10_000) + 15_000,
         })
     }
 
