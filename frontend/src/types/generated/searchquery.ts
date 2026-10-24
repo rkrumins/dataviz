@@ -12,6 +12,55 @@
  * and finally regenerate these types.
  */
 
+export type Code = string
+export type Message = string
+export type Permission = string | null
+/**
+ * Where in the query the problem is, in characters, when known.
+ */
+export type Position = number | null
+export type Requestid = string | null
+export type Retryafterseconds = number | null
+/**
+ * The most rows to show. Held to the server's maximum (``NATIVE_QUERY_MAX_ROWS``); its default when omitted.
+ */
+export type Limit = number | null
+/**
+ * Cypher. One statement; reads only. Values are written in — no parameters.
+ */
+export type Query = string
+/**
+ * How long it may run. Held to the server's maximum (``NATIVE_QUERY_MAX_TIMEOUT_MS``); its default when omitted.
+ */
+export type Timeoutms = number | null
+export type Columns = string[]
+export type Elapsedms = number
+export type Engine = 'falkordb' | 'neo4j'
+/**
+ * What ran: the query with its row limit written in.
+ */
+export type Executedquery = string
+/**
+ * The row limit it ran under.
+ */
+export type Limitapplied = number
+export type Notes = string[]
+export type Queryhash = string
+export type Requestid1 = string | null
+export type Rowcount = number
+export type Rows = unknown[][]
+/**
+ * The time limit it ran under.
+ */
+export type Timeoutms1 = number
+/**
+ * More rows matched than are shown.
+ */
+export type Truncated = boolean
+/**
+ * ``rows``: past the row limit. ``size``: past the size an answer may be.
+ */
+export type Truncatedreason = ('rows' | 'size') | null
 /**
  * Edge types the active ontology flags as containment. Empty list means the graph is flat (no hierarchy) and ancestor-aware features (aggregation by='ancestorType', DescendantOf scope hoisting) won't produce useful results.
  */
@@ -36,7 +85,7 @@ export type Lineageedgetypes = string[]
 /**
  * Human-readable diagnostic notes — e.g. 'view has no rootUrns configured; search ran unclamped'.
  */
-export type Notes = string[]
+export type Notes1 = string[]
 /**
  * It names more than one.
  */
@@ -119,7 +168,7 @@ export type Entities = number
 export type Count2 = number
 export type Type = string
 export type Entitytypes1 = SearchCatalogEntityType[]
-export type Notes1 = string[]
+export type Notes2 = string[]
 /**
  * Matches found so far — exact for the parts scanned.
  */
@@ -495,7 +544,7 @@ export type Error = string | null
 export type Sessionid3 = string | null
 export type Status2 = 'running' | 'complete'
 export type Dataversion1 = string | null
-export type Elapsedms = number
+export type Elapsedms1 = number
 /**
  * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
  */
@@ -523,7 +572,7 @@ export type Valuesamplesbykey = {
 /**
  * Discovery query duration in milliseconds.
  */
-export type Elapsedms1 = number
+export type Elapsedms2 = number
 /**
  * Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).
  */
@@ -577,7 +626,7 @@ export type Inlinedcypher = string | null
 /**
  * Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').
  */
-export type Notes2 = string[]
+export type Notes3 = string[]
 /**
  * Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.
  */
@@ -587,7 +636,7 @@ export type Resolvedscope = {
 /**
  * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included.
  */
-export type Columns = string[]
+export type Columns1 = string[]
 export type Format = 'csv' | 'ndjson'
 export type Predicate1 =
     | TextPredicate
@@ -614,7 +663,7 @@ export type Waitms2 = number
 /**
  * Every column, in order.
  */
-export type Columns1 = string[]
+export type Columns2 = string[]
 export type Dataversion2 = string | null
 /**
  * Once complete: ``GET /search/exports/{sessionId}/download?token=…`` for an hour, for whoever ran the export.
@@ -628,13 +677,13 @@ export type Format1 = 'csv' | 'ndjson'
 /**
  * Rows written so far — every match, once complete.
  */
-export type Rows = number
+export type Rows1 = number
 export type Sessionid5 = string
 export type Status3 = 'running' | 'complete'
 export type Items1 = SearchRuleItem[]
 export type Urns3 = string[]
 export type Dataversion3 = string | null
-export type Elapsedms2 = number
+export type Elapsedms3 = number
 export type $Schemaversion = '1'
 /**
  * Parallel facets — each spec produces its own bucket list in the response. Omit for hits-only requests.
@@ -717,7 +766,7 @@ export type Predicate2 =
     | GroupPredicate
 export type Refs3 = NodeRef[]
 export type Dataversion4 = string | null
-export type Elapsedms3 = number
+export type Elapsedms4 = number
 /**
  * How many entities the reference names.
  */
@@ -798,7 +847,7 @@ export type Cursor1 = string | null
  */
 export type Dataversion5 = string | null
 export type Deadlineexceeded = boolean
-export type Elapsedms4 = number
+export type Elapsedms5 = number
 /**
  * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
  */
@@ -822,7 +871,7 @@ export type Estimatedrows = number | null
 /**
  * Diagnostic hints — e.g. 'no index on properties.foo'.
  */
-export type Notes3 = string[]
+export type Notes4 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
@@ -842,17 +891,17 @@ export type Totalcount = number | null
 /**
  * True when the provider hit its candidate cap or soft deadline before exhausting the candidate set.
  */
-export type Truncated = boolean
+export type Truncated1 = boolean
 /**
  * Every entity type was read within the time budget.
  */
 export type Complete = boolean
-export type Elapsedms5 = number
+export type Elapsedms6 = number
 export type Key5 = string
 /**
  * A type had more distinct values than listed.
  */
-export type Truncated1 = boolean
+export type Truncated2 = boolean
 export type Count8 = number
 export type Values3 = SearchValueSuggestion[]
 
@@ -870,6 +919,9 @@ export type Values3 = SearchValueSuggestion[]
  * valid (empty) instance for tooling that needs one.
  */
 export interface SearchApiContract {
+    nativeQueryError?: NativeQueryErrorDetail | null
+    nativeQueryRequest?: NativeQueryRequest | null
+    nativeQueryResponse?: NativeQueryResponse | null
     scopeDiagnostics?: ScopeDiagnostics | null
     searchAncestorCountsRequest?: SearchAncestorCountsRequest | null
     searchAncestorCountsResult?: SearchAncestorCountsResult | null
@@ -890,6 +942,46 @@ export interface SearchApiContract {
     searchValuesResult?: SearchValuesResult | null
 }
 /**
+ * The ``detail`` of every refusal and failure of a native query.
+ */
+export interface NativeQueryErrorDetail {
+    code: Code
+    message: Message
+    permission?: Permission
+    position?: Position
+    requestId?: Requestid
+    retryAfterSeconds?: Retryafterseconds
+}
+/**
+ * A person's own read-only query, in the data source's language
+ * (``POST /graph/search/native``).
+ */
+export interface NativeQueryRequest {
+    limit?: Limit
+    query: Query
+    timeoutMs?: Timeoutms
+}
+/**
+ * What a native query answered. Each cell is a plain string, number,
+ * true/false or null, or an object with a ``kind`` — node, edge, path, map,
+ * list, temporal, point, bytes, number, string, truncated.
+ */
+export interface NativeQueryResponse {
+    columns: Columns
+    elapsedMs: Elapsedms
+    engine: Engine
+    executedQuery: Executedquery
+    limitApplied: Limitapplied
+    notes?: Notes
+    queryHash: Queryhash
+    requestId?: Requestid1
+    rowCount: Rowcount
+    rows: Rows
+    timeoutMs: Timeoutms1
+    truncated: Truncated
+    truncatedReason?: Truncatedreason
+}
+/**
  * Resolved-scope information returned on every search response.
  *
  * Surfaces the values the server actually applied — both the
@@ -908,7 +1000,7 @@ export interface ScopeDiagnostics {
     effectiveMaxDepth: Effectivemaxdepth
     effectiveRootUrns?: Effectiverooturns
     lineageEdgeTypes?: Lineageedgetypes
-    notes?: Notes
+    notes?: Notes1
     resolvedRefs?: Resolvedrefs
 }
 /**
@@ -1015,7 +1107,7 @@ export interface SearchCatalogResult {
     dataVersion?: Dataversion
     entities?: Entities
     entityTypes?: Entitytypes1
-    notes?: Notes1
+    notes?: Notes2
     progress?: SearchProgress | null
     properties?: Properties
     sessionId: Sessionid2
@@ -1439,7 +1531,7 @@ export interface Sessions {
 export interface SearchCountsResult {
     counts?: Counts1
     dataVersion?: Dataversion1
-    elapsedMs?: Elapsedms
+    elapsedMs?: Elapsedms1
 }
 export interface Counts1 {
     [k: string]: SearchRuleCount
@@ -1463,7 +1555,7 @@ export interface SearchRuleCount {
 export interface SearchDiscoverResult {
     blobOnlyLabels?: Blobonlylabels
     edges?: Edges
-    elapsedMs?: Elapsedms1
+    elapsedMs?: Elapsedms2
     labels?: Labels
     missingContainment?: Missingcontainment
     missingSearchableText?: Missingsearchabletext
@@ -1517,7 +1609,7 @@ export interface SearchExplainResult {
     hits_cypher: HitsCypher
     hoisted_root_urns?: HoistedRootUrns
     inlinedCypher?: Inlinedcypher
-    notes?: Notes2
+    notes?: Notes3
     params?: Params
     resolvedScope?: Resolvedscope
 }
@@ -1535,7 +1627,7 @@ export interface Params {
  * it from ``GET /search/exports/{sessionId}/download``.
  */
 export interface SearchExportRequest {
-    columns?: Columns
+    columns?: Columns1
     format?: Format
     predicate: Predicate1
     scope: SearchScope
@@ -1543,13 +1635,13 @@ export interface SearchExportRequest {
     waitMs?: Waitms2
 }
 export interface SearchExportResult {
-    columns?: Columns1
+    columns?: Columns2
     dataVersion?: Dataversion2
     downloadToken?: Downloadtoken
     filename?: Filename
     format?: Format1
     progress?: SearchProgress | null
-    rows?: Rows
+    rows?: Rows1
     sessionId: Sessionid5
     status: Status3
 }
@@ -1565,7 +1657,7 @@ export interface SearchMembershipRequest {
 }
 export interface SearchMembershipResult {
     dataVersion?: Dataversion3
-    elapsedMs?: Elapsedms2
+    elapsedMs?: Elapsedms3
     errors?: Errors
     matches?: Matches
 }
@@ -1652,7 +1744,7 @@ export interface SearchResolveRequest {
 }
 export interface SearchResolveResult {
     dataVersion?: Dataversion4
-    elapsedMs?: Elapsedms3
+    elapsedMs?: Elapsedms4
     results: Results1
 }
 export interface SearchRefResolution {
@@ -1681,7 +1773,7 @@ export interface SearchResultPage {
     cursor?: Cursor1
     dataVersion?: Dataversion5
     deadlineExceeded?: Deadlineexceeded
-    elapsedMs: Elapsedms4
+    elapsedMs: Elapsedms5
     hits?: Hits
     paths?: Paths
     progress?: SearchProgress | null
@@ -1694,7 +1786,7 @@ export interface SearchResultPage {
     stale?: Stale1
     status?: Status4
     totalCount?: Totalcount
-    truncated?: Truncated
+    truncated?: Truncated1
 }
 /**
  * One ancestor (or facet) with N matches inside it.
@@ -1788,7 +1880,7 @@ export interface QueryExplain {
     costScore?: Costscore
     cypher: Cypher1
     estimatedRows?: Estimatedrows
-    notes?: Notes3
+    notes?: Notes4
 }
 /**
  * Response shape for ``GET /search/values``: a property's most common
@@ -1800,9 +1892,9 @@ export interface QueryExplain {
  */
 export interface SearchValuesResult {
     complete?: Complete
-    elapsedMs?: Elapsedms5
+    elapsedMs?: Elapsedms6
     key: Key5
-    truncated?: Truncated1
+    truncated?: Truncated2
     values?: Values3
 }
 /**

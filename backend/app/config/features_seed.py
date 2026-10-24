@@ -67,6 +67,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "traceEnabled":
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "nativeQueryEnabled":
+        "Running your own queries on a data source is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "editModeEnabled":
         "Editing is turned off for this deployment, so views are read-only. "
         "An administrator can enable it under Admin → Features.",
@@ -638,6 +641,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "data. If you are turning one off for confidentiality, you almost certainly want both."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "nativeQueryEnabled",
+        "name": "Native read-only queries",
+        "description": (
+            "Let people who can query a data source write and run their own read-only queries "
+            "on it, in its own language (Cypher, on FalkorDB and Neo4j), from the search panel's "
+            "Cypher tab."
+        ),
+        "impact_when_off": (
+            "Edit and run disappears from the Cypher tab and the server refuses every native "
+            "query. Searches, and the compiled Cypher the Cypher tab shows and copies, are "
+            "unaffected. Who may run them otherwise is decided by the "
+            "'workspace:native-query:read' permission and by view shares that opt in."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A native query reads the whole data source, not only the view it starts from. Writes "
+            "are refused, and every run is capped in rows, time and size and recorded in the "
+            "activity log. Turn this off to withdraw the feature everywhere at once; to withdraw "
+            "it from some people, remove the permission from their role instead."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     {

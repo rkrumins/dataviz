@@ -1717,6 +1717,54 @@ class SearchExportResult(_Base):
                     "for an hour, for whoever ran the export.")
 
 
+class NativeQueryRequest(_Base):
+    """A person's own read-only query, in the data source's language
+    (``POST /graph/search/native``)."""
+    query: str = Field(
+        min_length=1, max_length=20_000,
+        description="Cypher. One statement; reads only. Values are written in — no parameters.")
+    limit: Optional[int] = Field(
+        None, ge=1, description="The most rows to show. Held to the server's maximum "
+                                "(``NATIVE_QUERY_MAX_ROWS``); its default when omitted.")
+    timeout_ms: Optional[int] = Field(
+        None, alias="timeoutMs", ge=100,
+        description="How long it may run. Held to the server's maximum "
+                    "(``NATIVE_QUERY_MAX_TIMEOUT_MS``); its default when omitted.")
+
+
+class NativeQueryResponse(_Base):
+    """What a native query answered. Each cell is a plain string, number,
+    true/false or null, or an object with a ``kind`` — node, edge, path, map,
+    list, temporal, point, bytes, number, string, truncated."""
+    engine: Literal["falkordb", "neo4j"]
+    columns: List[str]
+    rows: List[List[Any]]
+    row_count: int = Field(alias="rowCount")
+    truncated: bool = Field(description="More rows matched than are shown.")
+    truncated_reason: Optional[Literal["rows", "size"]] = Field(
+        None, alias="truncatedReason",
+        description="``rows``: past the row limit. ``size``: past the size an answer may be.")
+    limit_applied: int = Field(alias="limitApplied", description="The row limit it ran under.")
+    timeout_ms: int = Field(alias="timeoutMs", description="The time limit it ran under.")
+    executed_query: str = Field(alias="executedQuery",
+                                description="What ran: the query with its row limit written in.")
+    query_hash: str = Field(alias="queryHash")
+    elapsed_ms: int = Field(alias="elapsedMs")
+    notes: List[str] = Field(default_factory=list)
+    request_id: Optional[str] = Field(None, alias="requestId")
+
+
+class NativeQueryErrorDetail(_Base):
+    """The ``detail`` of every refusal and failure of a native query."""
+    code: str
+    message: str
+    request_id: Optional[str] = Field(None, alias="requestId")
+    position: Optional[int] = Field(
+        None, description="Where in the query the problem is, in characters, when known.")
+    permission: Optional[str] = None
+    retry_after_seconds: Optional[int] = Field(None, alias="retryAfterSeconds")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1762,3 +1810,6 @@ class SearchApiContract(_Base):
     # surfaces it as a top-level codegen target too, so the FE can
     # import it directly without going through SearchResultPage.
     scope_diagnostics: Optional[ScopeDiagnostics] = Field(None, alias="scopeDiagnostics")
+    native_query_request: Optional[NativeQueryRequest] = Field(None, alias="nativeQueryRequest")
+    native_query_response: Optional[NativeQueryResponse] = Field(None, alias="nativeQueryResponse")
+    native_query_error: Optional[NativeQueryErrorDetail] = Field(None, alias="nativeQueryError")

@@ -146,6 +146,22 @@ def tokenize(text: str, *, trivia: bool = False) -> List[Token]:
     return out
 
 
+def is_clause_word(tokens: List[Token], i: int) -> bool:
+    """Whether ``tokens[i]`` stands where a keyword would: a bare word that
+    isn't a property (``n.set``), a label or type (``:Set``), a map key or a
+    variable before its label (``set: 1``, ``(set:Label)``), or a variable
+    or namespace before a dot (``set.name``) — in none of those places can
+    Cypher read a keyword."""
+    token = tokens[i]
+    if token.kind != WORD:
+        return False
+    before = tokens[i - 1] if i > 0 else None
+    after = tokens[i + 1] if i + 1 < len(tokens) else None
+    if before is not None and before.kind == PUNCT and before.text in (".", ":"):
+        return False
+    return not (after is not None and after.kind == PUNCT and after.text in (":", "."))
+
+
 def _string_end(text: str, i: int) -> int:
     quote, j, n = text[i], i + 1, len(text)
     while j < n:

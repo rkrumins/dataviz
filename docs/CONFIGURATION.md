@@ -244,6 +244,13 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | `30` | one reading of every node serves every viewer this long | `backend/app/services/graph_store/topology.py` |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | `8` | deadline per wave of 8 nodes; the sweep scales with the fleet, capped at 60s | `backend/app/services/graph_store/topology.py` |
 | `LOCAL_DEV_FALKORDB_OVERRIDE` | (empty) | Local development only: set `true` when the backend runs on your machine and FalkorDB in Docker, so `FALKORDB_HOST` and `FALKORDB_PORT` replace the host and port stored on graph data sources. | `backend/app/providers/manager.py` |
+| `NATIVE_QUERY_CONCURRENCY` | `2` | runs at once per data source, per API process | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_DEFAULT_ROWS` | `200` | rows shown when a run doesn't say | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_DEFAULT_TIMEOUT_MS` | `10000` | how long a run may take when it doesn't say | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_MAX_REPLY_BYTES` | `16777216` | the most a FalkorDB reply may carry before it is cut off | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_MAX_ROWS` | `1000` | the most rows a run may ask for (up to 10000) | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_MAX_TIMEOUT_MS` | `30000` | the longest a run may take (up to 60000) | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_RATE` | `20/minute` | runs per person | `backend/app/services/native_query/settings.py` |
 | `PROVIDER_CLOSE_TIMEOUT_S` | `2.0` | give up on a wedged close instead of freezing the warmup cycle | `backend/app/providers/manager.py` |
 | `PROVIDER_PREFLIGHT_DEADLINE_S` | `2.5` | reachability probe budget (was 1.5: a healthy-but-loaded provider fails its own probe) | `backend/app/providers/manager.py` |
 | `PROVIDER_SEMAPHORE_BUDGET_S` | `2.0` | wait for a slot before shedding (was 0.25: sheds the tail of a normal fan-out as 429s) | `backend/app/providers/manager.py` |

@@ -336,6 +336,9 @@ class ViewGrantResponse(BaseModel):
     granted_at: str = Field(alias="grantedAt")
     granted_by: Optional[str] = Field(default=None, alias="grantedBy")
     subject: ViewGrantSubject
+    # The share also lets its holder run their own read-only queries on the
+    # view's data source.
+    can_query_source: bool = Field(default=False, alias="canQuerySource")
 
 
 class ViewGrantCreateRequest(BaseModel):
@@ -343,6 +346,7 @@ class ViewGrantCreateRequest(BaseModel):
     subject_type: str = Field(alias="subjectType")
     subject_id: str = Field(alias="subjectId")
     role: str  # "editor" | "viewer"
+    can_query_source: bool = Field(default=False, alias="canQuerySource")
 
 
 # ── Audit / role-binding debug ──────────────────────────────────────

@@ -235,6 +235,17 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Background sync of already-versioned data keeps running",
         ),
     ),
+    # SECURITY: it decides whether a person's own query reaches a data source.
+    # An unreadable value must refuse it, not guess.
+    "nativeQueryEnabled": FeatureWiring(
+        key="nativeQueryEnabled",
+        posture="security",
+        server_gates=("POST /graph/search/native — native read-only queries",),
+        still_allowed=(
+            "Searching, and the compiled Cypher the Cypher tab shows and copies",
+            "Nothing is deleted — the activity log keeps every run",
+        ),
+    ),
     "traceEnabled": FeatureWiring(
         key="traceEnabled",
         posture="capability",

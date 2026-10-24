@@ -1023,6 +1023,229 @@
       "title": "MatchAllPredicate",
       "type": "object"
     },
+    "NativeQueryErrorDetail": {
+      "description": "The ``detail`` of every refusal and failure of a native query.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permission"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where in the query the problem is, in characters, when known.",
+          "title": "Position"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requestid"
+        },
+        "retryAfterSeconds": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retryafterseconds"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "NativeQueryErrorDetail",
+      "type": "object"
+    },
+    "NativeQueryRequest": {
+      "description": "A person's own read-only query, in the data source's language\n(``POST /graph/search/native``).",
+      "properties": {
+        "limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows to show. Held to the server's maximum (``NATIVE_QUERY_MAX_ROWS``); its default when omitted.",
+          "title": "Limit"
+        },
+        "query": {
+          "description": "Cypher. One statement; reads only. Values are written in \u2014 no parameters.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "timeoutMs": {
+          "anyOf": [
+            {
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How long it may run. Held to the server's maximum (``NATIVE_QUERY_MAX_TIMEOUT_MS``); its default when omitted.",
+          "title": "Timeoutms"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "NativeQueryRequest",
+      "type": "object"
+    },
+    "NativeQueryResponse": {
+      "description": "What a native query answered. Each cell is a plain string, number,\ntrue/false or null, or an object with a ``kind`` \u2014 node, edge, path, map,\nlist, temporal, point, bytes, number, string, truncated.",
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "elapsedMs": {
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "engine": {
+          "enum": [
+            "falkordb",
+            "neo4j"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "executedQuery": {
+          "description": "What ran: the query with its row limit written in.",
+          "title": "Executedquery",
+          "type": "string"
+        },
+        "limitApplied": {
+          "description": "The row limit it ran under.",
+          "title": "Limitapplied",
+          "type": "integer"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "queryHash": {
+          "title": "Queryhash",
+          "type": "string"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requestid"
+        },
+        "rowCount": {
+          "title": "Rowcount",
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "items": {},
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "timeoutMs": {
+          "description": "The time limit it ran under.",
+          "title": "Timeoutms",
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "More rows matched than are shown.",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "truncatedReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "rows",
+                "size"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "``rows``: past the row limit. ``size``: past the size an answer may be.",
+          "title": "Truncatedreason"
+        }
+      },
+      "required": [
+        "engine",
+        "columns",
+        "rows",
+        "rowCount",
+        "truncated",
+        "limitApplied",
+        "timeoutMs",
+        "executedQuery",
+        "queryHash",
+        "elapsedMs"
+      ],
+      "title": "NativeQueryResponse",
+      "type": "object"
+    },
     "NodeRef": {
       "description": "An entity named by its URN, or by its path of display names.\n\nA path starts at a top-level entity of the data source (one inside no\nother) and steps down one containment level per segment:\n``[\"Country\", \"United Kingdom\"]``. ``\"**\"`` stands for any number of\nlevels, none included \u2014 ``[\"Country\", \"**\", \"London\"]`` is a London\nanywhere under Country \u2014 and a leading ``\"**\"`` starts anywhere in the\nsearch's scope, so a name unique within the view (or the layer a\nsearch is scoped to) is enough. Names compare with the display name,\nexactly unless ``caseSensitive`` is false (only paths without ``\"**\"``\nmay ignore case); ``entityType`` narrows the last step. A path that\nnames several entities refers to all of them, at most 64.\n\nUnlike a URN, a path means the same thing in every environment, so a\nsaved query or rule that uses one survives a library or view moving\nbetween them.",
       "properties": {
@@ -4251,6 +4474,39 @@
   },
   "description": "Bundle root that wraps every API-surface shape in one model.\n\nExists purely as a code-generation seed: ``model_json_schema()`` on\nthis class produces a single JSON Schema document whose ``$defs``\ncontain every type the FE / AI agents need. The frontend's\n``gen:search-schema`` script feeds this schema into\n``json-schema-to-typescript`` to produce the canonical TS types.\n\nNot used at runtime \u2014 no endpoint sends or receives this shape.\nFields are kept ``Optional`` so a default constructor produces a\nvalid (empty) instance for tooling that needs one.",
   "properties": {
+    "nativeQueryError": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryErrorDetail"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "nativeQueryRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "nativeQueryResponse": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryResponse"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "scopeDiagnostics": {
       "anyOf": [
         {

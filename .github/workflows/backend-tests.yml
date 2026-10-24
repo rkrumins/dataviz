@@ -132,7 +132,7 @@ jobs:
       # relationship predicates are built on must keep behaving as pinned.
       # Run whatever the rebuild pipeline step above did: its result says
       # nothing about these.
-      - name: Search comparison semantics and the uncapped engine, against the real engine
+      - name: Search comparison semantics, the uncapped engine and native queries, against the real engine
         if: ${{ !cancelled() }}
         working-directory: backend
         env:
@@ -146,7 +146,8 @@ jobs:
             tests/integration/test_search_export_live.py \
             tests/integration/test_relational_shapes_live.py \
             tests/integration/test_search_refs_live.py \
-            tests/integration/test_search_relations_live.py -q
+            tests/integration/test_search_relations_live.py \
+            tests/integration/test_native_query_live.py -q
 
   full-suite:
     name: Full backend suite (informational)
