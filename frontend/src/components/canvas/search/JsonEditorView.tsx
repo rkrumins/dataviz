@@ -16,7 +16,7 @@
 import { json, jsonParseLinter } from '@codemirror/lang-json'
 import { bracketMatching, foldGutter, indentOnInput } from '@codemirror/language'
 import { lintGutter, linter, type Diagnostic } from '@codemirror/lint'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import {
@@ -47,6 +47,8 @@ import {
     encodePredicate,
 } from '@/utils/predicateCodec'
 
+import { editorChrome } from './editor/codeMirrorBase'
+
 
 export interface JsonEditorViewProps {
     /** Back-link target — kept on prop surface for callsite compat. */
@@ -72,6 +74,9 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
 
     const containerRef = useRef<HTMLDivElement>(null)
     const viewRef = useRef<EditorView | null>(null)
+    // The schema linter is swapped in when the schema arrives: built at
+    // mount, the editor would keep the schema-less one it started with.
+    const schemaLint = useMemo(() => new Compartment(), [])
 
     const initialBuffer = useMemo(
         () => encodePredicate(draftPredicate ?? PLACEHOLDER_PREDICATE),
@@ -161,7 +166,7 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
                 autocompletion({ override: [snippetSource] }),
                 lintGutter(),
                 linter(jsonParseLinter()),
-                schemaLinter,
+                schemaLint.of(schemaLinter),
                 json(),
                 keymap.of([
                     ...defaultKeymap,
@@ -174,27 +179,9 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
                         setBuffer(update.state.doc.toString())
                     }
                 }),
-                EditorView.theme({
-                    '&': {
-                        height: '100%',
-                        fontSize: '12px',
-                    },
-                    '.cm-content': {
-                        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                        caretColor: 'var(--ink, #fff)',
-                    },
-                    '.cm-gutters': {
-                        backgroundColor: 'transparent',
-                        borderRight: '1px solid rgba(255,255,255,0.08)',
-                        color: 'var(--ink-muted, #888)',
-                    },
-                    '.cm-activeLineGutter': {
-                        backgroundColor: 'rgba(255,255,255,0.04)',
-                    },
-                    '.cm-activeLine': {
-                        backgroundColor: 'rgba(255,255,255,0.03)',
-                    },
-                }),
+                // The app's colour tokens, so light mode reads as well as dark.
+                editorChrome,
+                EditorView.theme({ '&': { height: '100%', fontSize: '12px' } }),
             ],
         })
 
@@ -208,11 +195,14 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
             view.destroy()
             viewRef.current = null
         }
-        // We intentionally only spin up the editor once; the linter
-        // extension closes over schemaState via the linter ref. Schema
-        // updates re-render via the dispatched effect below.
+        // We intentionally only spin up the editor once; the schema
+        // linter is reconfigured by the effect below when it changes.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
+
+    useEffect(() => {
+        viewRef.current?.dispatch({ effects: schemaLint.reconfigure(schemaLinter) })
+    }, [schemaLint, schemaLinter])
 
     // External writes (visual builder mirrors / template seeds) bump
     // ``draftRevision``. Reformat the buffer to match.

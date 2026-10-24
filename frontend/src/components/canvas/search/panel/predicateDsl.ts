@@ -136,7 +136,7 @@ const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 // ---------------------------------------------------------------------------
 
 export interface ParseResult {
-    /** The parsed predicate tree, or ``null`` for empty input. */
+    /** The parsed predicate tree, or ``null`` for empty input or an error. */
     predicate: Predicate | null
     /** Number of structured leaves recognised (for the parse-feedback chip). */
     recognized: string[]
@@ -144,6 +144,24 @@ export interface ParseResult {
     fallbackText: string[]
     /** Hard parse error message (parens unbalanced, dangling operator, etc.). */
     error?: string
+    /** Where in the input the error points (character offsets). */
+    errorAt?: { from: number; to: number }
+    /** Every token, in order, with the part it played — what an editor
+     *  highlights, so its colours always agree with what is parsed. */
+    tokens: DslToken[]
+}
+
+/** The part a token plays: ``prefixed`` is ``key:value`` in one token. */
+export type DslRole =
+    | 'keyword' | 'function' | 'ref' | 'field' | 'operator' | 'value'
+    | 'prefixed' | 'text' | 'json' | 'punct'
+
+export interface DslToken {
+    from: number
+    to: number
+    role: DslRole
+    /** The source text. */
+    text: string
 }
 
 
@@ -151,28 +169,48 @@ export function parsePredicate(input: string): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
-    if (tokens.length === 0) {
-        return { predicate: null, recognized, fallbackText }
+    const result = (rest: Pick<ParseResult, 'predicate' | 'error' | 'errorAt'>): ParseResult => ({
+        ...rest, recognized, fallbackText, tokens: tokens.map(publicToken),
+    })
+    if (tokens.length === 0) return result({ predicate: null })
+    const unclosed = tokens.find((t) => t.unclosed)
+    if (unclosed) {
+        const quote = unclosed.raw[unclosed.kind === TokenKind.Ref ? 1 : 0]
+        return result({
+            predicate: null,
+            error: unclosed.kind === TokenKind.Ref
+                ? `Close the name with ${quote}: @${quote}…${quote}`
+                : `Close the text with ${quote}`,
+            errorAt: { from: unclosed.from, to: unclosed.to },
+        })
     }
-    const p = new Parser(tokens, recognized, fallbackText)
+    const p = new Parser(tokens, recognized, fallbackText, input.length)
     try {
         const pred = p.parseExpr()
         if (p.pos < tokens.length) {
-            return {
-                predicate: pred,
-                recognized,
-                fallbackText,
-                error: `Unexpected token at end: ${tokens[p.pos]}`,
-            }
+            const extra = tokens[p.pos]
+            // Something the grammar can't place — a stray ")" most often.
+            return result({
+                predicate: null,
+                error: `Unexpected ${extra.raw}`,
+                errorAt: { from: extra.from, to: extra.to },
+            })
         }
-        return { predicate: simplify(pred), recognized, fallbackText }
+        return result({ predicate: simplify(pred) })
     } catch (err) {
-        return {
+        return result({
             predicate: null,
-            recognized,
-            fallbackText,
             error: err instanceof Error ? err.message : String(err),
-        }
+            ...(err instanceof DslError ? { errorAt: { from: err.from, to: err.to } } : {}),
+        })
+    }
+}
+
+
+/** A parse error and the source range it points at. */
+class DslError extends Error {
+    constructor(message: string, readonly from: number, readonly to: number) {
+        super(message)
     }
 }
 
@@ -442,6 +480,24 @@ interface Token {
     kind: TokenKind
     text: string  // canonical text (no quotes for Quoted)
     raw: string   // original source for diagnostics
+    from: number  // where it starts in the input
+    to: number    // just past where it ends
+    role?: DslRole       // what the parser read it as
+    unclosed?: boolean   // a quote or @"…" never closed
+}
+
+
+/** What a token is when the parser said nothing more about it. */
+const LEXICAL_ROLE: Record<TokenKind, DslRole> = {
+    [TokenKind.Word]: 'text', [TokenKind.Quoted]: 'value', [TokenKind.Op]: 'operator',
+    [TokenKind.LParen]: 'punct', [TokenKind.RParen]: 'punct', [TokenKind.Comma]: 'punct',
+    [TokenKind.AndKw]: 'keyword', [TokenKind.OrKw]: 'keyword', [TokenKind.NotKw]: 'keyword',
+    [TokenKind.Json]: 'json', [TokenKind.Ref]: 'ref', [TokenKind.Call]: 'function',
+}
+
+
+function publicToken(t: Token): DslToken {
+    return { from: t.from, to: t.to, role: t.role ?? LEXICAL_ROLE[t.kind], text: t.raw }
 }
 
 
@@ -454,14 +510,20 @@ function lex(input: string): Token[] {
         if (ch === '@' && (input[i + 1] === '"' || input[i + 1] === "'")) {
             const close = input.indexOf(input[i + 1], i + 2)
             const end = close === -1 ? input.length : close
-            out.push({ kind: TokenKind.Ref, text: input.slice(i + 2, end), raw: input.slice(i, end + 1) })
+            out.push({
+                kind: TokenKind.Ref, text: input.slice(i + 2, end), raw: input.slice(i, end + 1),
+                from: i, to: Math.min(end + 1, input.length), ...(close === -1 ? { unclosed: true } : {}),
+            })
             i = end + 1
             continue
         }
         if (ch === '"' || ch === "'") {
             const close = input.indexOf(ch, i + 1)
             if (close === -1) {
-                out.push({ kind: TokenKind.Quoted, text: input.slice(i + 1), raw: input.slice(i) })
+                out.push({
+                    kind: TokenKind.Quoted, text: input.slice(i + 1), raw: input.slice(i),
+                    from: i, to: input.length, unclosed: true,
+                })
                 i = input.length
                 continue
             }
@@ -469,6 +531,7 @@ function lex(input: string): Token[] {
                 kind: TokenKind.Quoted,
                 text: input.slice(i + 1, close),
                 raw: input.slice(i, close + 1),
+                from: i, to: close + 1,
             })
             i = close + 1
             continue
@@ -477,7 +540,7 @@ function lex(input: string): Token[] {
             // A condition as JSON: to its matching brace, strings and all.
             const end = jsonEnd(input, i)
             const text = input.slice(i, end)
-            out.push({ kind: TokenKind.Json, text, raw: text })
+            out.push({ kind: TokenKind.Json, text, raw: text, from: i, to: end })
             i = end
             continue
         }
@@ -488,6 +551,7 @@ function lex(input: string): Token[] {
                         : TokenKind.Comma,
                 text: ch,
                 raw: ch,
+                from: i, to: i + 1,
             })
             i += 1
             continue
@@ -495,34 +559,40 @@ function lex(input: string): Token[] {
         // 2-char operators
         if ((ch === '!' || ch === '<' || ch === '>' || ch === '=') && input[i + 1] === '=') {
             const t = input.slice(i, i + 2)
-            out.push({ kind: TokenKind.Op, text: t, raw: t })
+            out.push({ kind: TokenKind.Op, text: t, raw: t, from: i, to: i + 2 })
             i += 2
             continue
         }
         if (ch === '=' || ch === '<' || ch === '>') {
-            out.push({ kind: TokenKind.Op, text: ch, raw: ch })
+            out.push({ kind: TokenKind.Op, text: ch, raw: ch, from: i, to: i + 1 })
             i += 1
             continue
         }
         // Standalone NOT-bang
         if (ch === '!') {
-            out.push({ kind: TokenKind.NotKw, text: '!', raw: '!' })
+            out.push({ kind: TokenKind.NotKw, text: '!', raw: '!', from: i, to: i + 1 })
             i += 1
             continue
         }
-        // Bareword — read until whitespace, operator, paren, comma, or quote
+        // Bareword — read until whitespace, operator, paren, comma, or quote.
+        // A comma inside ``prefix:a,b`` is part of its list of values.
         let j = i
         while (j < input.length) {
             const c = input[j]
             if (/\s/.test(c)) break
             if (c === '"' || c === "'") break
+            if (c === ',' && input.slice(i, j).includes(':') && j + 1 < input.length
+                && !/[\s(),"'!=<>]/.test(input[j + 1])) {
+                j += 1
+                continue
+            }
             if (c === '(' || c === ')' || c === ',' || c === '!') break
             if (c === '=' || c === '<' || c === '>') break
             j += 1
         }
         if (j > i && input[j] === '(' && CALL_WORD.test(input.slice(i, j))) {
             const word = input.slice(i, j)
-            out.push({ kind: TokenKind.Call, text: word.toLowerCase(), raw: `${word}(` })
+            out.push({ kind: TokenKind.Call, text: word.toLowerCase(), raw: `${word}(`, from: i, to: j + 1 })
             i = j + 1
             continue
         }
@@ -533,14 +603,15 @@ function lex(input: string): Token[] {
             // ``AND`` ``OR`` ``NOT``. Anything containing a colon, dot,
             // or other operator-y char is treated as a token even if
             // the prefix matches.
+            const at = { from: i, to: j }
             if ((up === 'AND' || up === '&&') && !word.includes(':')) {
-                out.push({ kind: TokenKind.AndKw, text: 'AND', raw: word })
+                out.push({ kind: TokenKind.AndKw, text: 'AND', raw: word, ...at })
             } else if (up === 'OR' && !word.includes(':')) {
-                out.push({ kind: TokenKind.OrKw, text: 'OR', raw: word })
+                out.push({ kind: TokenKind.OrKw, text: 'OR', raw: word, ...at })
             } else if (up === 'NOT' && !word.includes(':')) {
-                out.push({ kind: TokenKind.NotKw, text: 'NOT', raw: word })
+                out.push({ kind: TokenKind.NotKw, text: 'NOT', raw: word, ...at })
             } else {
-                out.push({ kind: TokenKind.Word, text: word, raw: word })
+                out.push({ kind: TokenKind.Word, text: word, raw: word, ...at })
             }
             i = j
         } else {
@@ -595,6 +666,16 @@ function fromEdge(e: EdgePredicateNode): Predicate {
 }
 
 
+/** Words a comparison is spelled with — highlighted as keywords. */
+const TAIL_KEYWORDS = new Set([
+    'IS', 'SET', 'EMPTY', 'WITHIN', 'LAST', 'CONTAINS', 'ALL', 'STARTS', 'ENDS', 'WITH',
+    'IN', 'BETWEEN', 'AND', 'AS', 'MATCH', 'CASE', 'INCLUDING', 'MISSING',
+    'NUMBER', 'TEXT', 'BOOLEAN', 'DATE',
+    'MINUTE', 'MINUTES', 'HOUR', 'HOURS', 'DAY', 'DAYS', 'WEEK', 'WEEKS', 'MONTH', 'MONTHS',
+    'YEAR', 'YEARS',
+])
+
+
 /** A word that opens a relationship, a count or an edge filter when ``(``
  *  follows it directly. */
 const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor)(\*\d*(\.\.\d*)?)?|count|\.via)$/i
@@ -639,6 +720,8 @@ class Parser {
         readonly tokens: Token[],
         readonly recognized: string[],
         readonly fallbackText: string[],
+        /** The input's length: where "it ended too soon" points. */
+        readonly length: number,
     ) {}
 
     peek(): Token | null {
@@ -647,6 +730,27 @@ class Parser {
 
     consume(): Token {
         return this.tokens[this.pos++]
+    }
+
+    /** Stop with ``message``, pointing at ``at`` — or at the token under the
+     *  cursor, or the end of the input when there is none. */
+    fail(message: string, at?: Token | null): never {
+        const t = at ?? this.peek()
+        throw t ? new DslError(message, t.from, t.to) : new DslError(message, this.length, this.length)
+    }
+
+    /** Say what ``tokens[from, to)`` were read as: keywords as keywords,
+     *  punctuation as punctuation, the rest as values. */
+    markTail(from: number, to: number): void {
+        for (let i = from; i < to; i += 1) {
+            const t = this.tokens[i]
+            if (t.kind === TokenKind.NotKw || t.kind === TokenKind.AndKw
+                || (t.kind === TokenKind.Word && TAIL_KEYWORDS.has(t.text.toUpperCase()))) t.role = 'keyword'
+            else if (t.kind === TokenKind.LParen || t.kind === TokenKind.RParen
+                     || t.kind === TokenKind.Comma) t.role = 'punct'
+            else if (t.kind === TokenKind.Op) t.role = 'operator'
+            else t.role = 'value'
+        }
     }
 
     parseExpr(): Predicate {
@@ -718,13 +822,13 @@ class Parser {
 
     parseAtom(): Predicate {
         const t = this.peek()
-        if (!t) throw new Error('Unexpected end of input')
+        if (!t) this.fail('The query ends too soon: a condition should follow', null)
         if (t.kind === TokenKind.LParen) {
             this.consume()
             const inner = this.parseExpr()
             const closing = this.peek()
             if (!closing || closing.kind !== TokenKind.RParen) {
-                throw new Error('Missing closing parenthesis')
+                this.fail('Missing ")" to close this "("', t)
             }
             this.consume()
             return inner
@@ -747,12 +851,14 @@ class Parser {
             const next = this.peek()
             if (word === 'inside' && next?.kind === TokenKind.Ref) {
                 this.consume()
+                t.role = 'keyword'
                 this.recognized.push(`${t.raw} ${next.raw}`)
                 return { kind: 'descendantOf', urns: [], refs: [refOf(next.text)], uiScope: 'name' } as Predicate
             }
             if ((word === 'every' || word === 'no') && next?.kind === TokenKind.Call
                 && next.text !== 'count' && next.text !== '.via') {
                 this.consume()
+                t.role = 'keyword'
                 return this.parseRelation(next, word === 'no' ? 'none' : 'all')
             }
         }
@@ -768,7 +874,7 @@ class Parser {
             }
             const kind = (value as { kind?: unknown } | null)?.kind
             if (!value || typeof value !== 'object' || Array.isArray(value) || typeof kind !== 'string') {
-                throw new Error(`Not a condition: ${t.raw}`)
+                this.fail('Not a condition written as JSON: it needs a "kind"', t)
             }
             this.recognized.push(kind)
             return value as Predicate
@@ -778,6 +884,7 @@ class Parser {
         if (t.kind === TokenKind.Word) {
             const bool = matchBooleanToken(t.text)
             if (bool) {
+                t.role = 'keyword'
                 this.recognized.push(t.text)
                 return bool
             }
@@ -802,6 +909,8 @@ class Parser {
             if (textOp && rhs && (rhs.kind === TokenKind.Word || rhs.kind === TokenKind.Quoted)
                 && !(t.kind === TokenKind.Word && lhsToTextTarget(t.text) && !rhs.text.trim())) {
                 this.consume()
+                t.role = 'field'
+                this.markTail(checkpoint, this.pos)
                 const target = t.kind === TokenKind.Word ? lhsToTextTarget(t.text) : null
                 this.recognized.push(`${t.raw} ${textOp.raw} ${rhs.raw}`)
                 if (target) {
@@ -819,8 +928,11 @@ class Parser {
 
         // 3) `type [NOT] IN ( a, b, c )` — and `key [NOT] IN (…)` for a property
         if (t.kind === TokenKind.Word || t.kind === TokenKind.Quoted) {
+            const before = this.pos
             const inResult = this.tryConsumeInExpression(t.text, t.kind === TokenKind.Quoted)
             if (inResult) {
+                t.role = 'field'
+                this.markTail(before, this.pos)
                 this.recognized.push(inResult.label)
                 return inResult.predicate.kind === 'property'
                     ? this.consumeSuffixes(inResult.predicate)
@@ -837,7 +949,14 @@ class Parser {
                 const propOp = OP_MAP[opT.text]
                 if (propOp) {
                     this.consume()  // op
-                    const valT = this.consume()
+                    const valT = this.peek()
+                    if (!valT || (valT.kind !== TokenKind.Word && valT.kind !== TokenKind.Quoted)) {
+                        this.fail(`Expected a value after ${t.raw} ${opT.raw}`, valT ?? opT)
+                    }
+                    this.consume()
+                    t.role = 'field'
+                    opT.role = 'operator'
+                    valT.role = 'value'
                     const rawValue = valT.kind === TokenKind.Quoted ? valT.text : valT.text
                     this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
                     // `layer = "X"` is a layer predicate
@@ -858,6 +977,7 @@ class Parser {
         if (t.kind === TokenKind.Word && t.text.includes(':')) {
             const prefixed = matchPrefixedToken(t.text)
             if (prefixed) {
+                t.role = 'prefixed'
                 this.recognized.push(t.text)
                 return prefixed
             }
@@ -865,10 +985,13 @@ class Parser {
 
         // 6) Bareword / quoted → substring text predicate against name
         const value = (t.kind === TokenKind.Quoted ? t.text : t.text).trim()
-        if (!value) {
-            // Operator-only token with no atom — fail.
-            throw new Error(`Unexpected token: ${t.raw}`)
+        if (!value || t.kind === TokenKind.Op || t.kind === TokenKind.RParen
+            || t.kind === TokenKind.Comma) {
+            // An operator or bracket with nothing to compare — not a name.
+            this.fail(t.kind === TokenKind.Quoted ? 'Empty quotes: put text between them'
+                : `Unexpected ${t.raw}`, t)
         }
+        t.role = 'text'
         this.fallbackText.push(value)
         return makeTextPredicate('name', value)
     }
@@ -876,11 +999,12 @@ class Parser {
     /** A relationship, or ``count(<relationship>) <op> <n>``; its ``(`` is
      *  already consumed. */
     parseCall(t: Token): Predicate {
-        if (t.text === '.via') throw new Error('.via( follows a relationship: upstream(…).via(…)')
+        if (t.text === '.via') this.fail('.via( follows a relationship: upstream(…).via(…)', t)
         if (t.text !== 'count') return this.parseRelation(t)
+        t.role = 'function'
         const inner = this.consume()
         if (inner?.kind !== TokenKind.Call || inner.text === 'count' || inner.text === '.via') {
-            throw new Error('count( takes a relationship: count(child(type:column)) > 10')
+            this.fail('count( takes a relationship: count(child(type:column)) > 10', inner ?? t)
         }
         const rel = this.parseRelation(inner) as RelatedPredicate
         this.expectClose('count(')
@@ -889,20 +1013,23 @@ class Parser {
         const valT = this.consume()
         const value = valT ? Number(valT.text) : NaN
         if (!op || !Number.isInteger(value) || value < 0) {
-            throw new Error('count(…) compares to a whole number: count(child()) >= 3')
+            this.fail('count(…) compares to a whole number: count(child()) >= 3', valT ?? opT ?? t)
         }
+        opT.role = 'operator'
+        valT.role = 'value'
         this.recognized.push(`count(…) ${opT.text} ${value}`)
         return { ...rel, count: { op, value } }
     }
 
     parseRelation(t: Token, quantifier?: 'none' | 'all'): Predicate {
         const m = /^([a-z]+)(?:(\*)(\d*)(\.\.)?(\d*))?$/.exec(t.text)
-        if (!m) throw new Error(`Not a relationship: ${t.raw}`)
+        if (!m) this.fail(`Not a relationship: ${t.raw}`, t)
+        t.role = 'function'
         const axis = m[1] as RelatedPredicate['axis']
         const [, , star, first, dots, second] = m
         const meta = axisMeta(axis)
-        if (star && !meta.hops) throw new Error(`${axis}( takes no hop range`)
-        if (star && !first && !second) throw new Error(`Say how far: ${axis}*..3(…)`)
+        if (star && !meta.hops) this.fail(`${axis}( takes no hop range`, t)
+        if (star && !first && !second) this.fail(`Say how far: ${axis}*..3(…)`, t)
         let minHops: number | undefined
         let maxHops: number | undefined
         if (dots) {                       // *M..N, *..N, *M..
@@ -927,9 +1054,15 @@ class Parser {
         }
         const next = this.peek()
         if (next?.kind === TokenKind.Call && next.text === '.via') {
-            if (!meta.lineage) throw new Error(`.via(…) follows a lineage relationship, not ${axis}(…)`)
+            if (!meta.lineage) this.fail(`.via(…) follows a lineage relationship, not ${axis}(…)`, next)
             this.consume()
-            rel.edge = toEdge(this.parseExpr())
+            next.role = 'function'
+            const condition = this.parseExpr()
+            try {
+                rel.edge = toEdge(condition)
+            } catch (err) {
+                this.fail(err instanceof Error ? err.message : String(err), next)
+            }
             this.expectClose('.via(…')
         }
         this.recognized.push(t.raw)
@@ -937,7 +1070,7 @@ class Parser {
     }
 
     expectClose(what: string): void {
-        if (this.peek()?.kind !== TokenKind.RParen) throw new Error(`Missing ")" after ${what}`)
+        if (this.peek()?.kind !== TokenKind.RParen) this.fail(`Missing ")" after ${what}`)
         this.consume()
     }
 
@@ -975,6 +1108,8 @@ class Parser {
             return null  // "values between" is just words
         }
         const label = [lhs.raw, ...this.tokens.slice(this.pos, this.pos + width).map((x) => x.raw)].join(' ')
+        lhs.role = 'field'
+        this.markTail(this.pos, this.pos + width)
         this.pos += width
         this.recognized.push(label)
         return this.consumeSuffixes({
@@ -1044,6 +1179,8 @@ class Parser {
             this.pos = start
             return null
         }
+        lhs.role = 'field'
+        this.markTail(start, this.pos)
         this.recognized.push([lhs.raw, ...this.tokens.slice(start, this.pos).map((x) => x.raw)].join(' '))
         return pred.kind === 'property' ? this.consumeSuffixes(pred) : pred
     }
@@ -1061,16 +1198,16 @@ class Parser {
                 ? TYPE_WORDS[at(1)!.text.toUpperCase()] : undefined
             if (typeWord) {
                 out = { ...out, valueType: typeWord }
-                this.pos += 2
             } else if (word(0, 'MATCH') && word(1, 'CASE')) {
                 out = { ...out, caseSensitive: true }
-                this.pos += 2
             } else if (word(0, 'INCLUDING') && word(1, 'MISSING')) {
                 out = { ...out, includeMissing: true }
-                this.pos += 2
             } else {
                 return out
             }
+            at(0)!.role = 'keyword'
+            at(1)!.role = 'keyword'
+            this.pos += 2
         }
     }
 

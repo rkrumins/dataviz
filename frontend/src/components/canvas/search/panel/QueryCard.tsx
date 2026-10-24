@@ -26,7 +26,6 @@ import {
     Eye,
     Loader2,
     AlertCircle,
-    CheckCircle2,
     Sparkles,
     ArrowRight,
     Play,
@@ -54,6 +53,8 @@ import {
 } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useActiveView, useSchemaStore } from '@/store/schema'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
@@ -73,8 +74,11 @@ import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
 import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { CodeMode } from './dsl/CodeMode'
+import type { DslVocabulary } from './dsl/dslLanguage'
+import { namePathFor, searchEntitiesByName } from './entityNames'
 import { appendCondition, topLevelConditions } from './predicateComposition'
-import { parsePredicate, stringifyPredicate } from './predicateDsl'
+import { stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
@@ -146,8 +150,25 @@ export const QueryCard: FC<QueryCardProps> = ({
     // ``layerAssignment`` values entities carry, named from the view's
     // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
+    // What Code mode's editor completes from: the view's own types, tags,
+    // layers and keys, values and names from the server as they're typed.
+    const provider = useGraphProviderIfAvailable()
+    const remote = provider instanceof RemoteGraphProvider ? provider : null
+    const vocabulary = useMemo<DslVocabulary>(() => ({
+        entityTypes: presentEntityTypes,
+        tags: discovery.tagValues,
+        layers: discoveredLayers.map((l) => l.value),
+        propertyKeys: discovery.allKeys,
+        edgeKeys: [...new Set(Object.values(discovery.keysByEdgeType).flat())].sort(),
+        suggestValues: discovery.suggestValues,
+        names: remote ? {
+            search: (word, signal) => searchEntitiesByName(remote, viewId, word, { signal }),
+            pathFor: (entity) => namePathFor(remote, viewId, entity),
+        } : undefined,
+    }), [presentEntityTypes, discovery.tagValues, discoveredLayers, discovery.allKeys,
+        discovery.keysByEdgeType, discovery.suggestValues, remote, viewId])
 
-    const [mode, setMode] = useState<ViewMode>('visual')
+    const [mode, setMode] = useEditorMode()
 
     /**
      * Code-only palette entries (withinHops, degree) hand off to the
@@ -521,7 +542,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                     <CodeMode
                         draft={draftPredicate}
                         isRunning={isRunning}
-                        onCommit={(p) => commitDraft(p)}
+                        onCommit={commitDraft}
+                        vocabulary={vocabulary}
                     />
                 )}
             </div>
@@ -566,189 +588,6 @@ export const QueryCard: FC<QueryCardProps> = ({
                     onClose={() => setRuleModalOpen(false)}
                 />
             )}
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Code mode — DSL textarea with live parse feedback
-// ---------------------------------------------------------------------------
-
-export function CodeMode({
-    draft, isRunning, onCommit,
-}: {
-    draft: Predicate | null
-    isRunning: boolean
-    onCommit: (p: Predicate | null) => void
-}) {
-    const shown = stringifyPredicate(draft)
-    const [text, setText] = useState(shown)
-    // Typed since the text last matched the draft: only then is there
-    // anything to apply, and only then does a change from outside (a
-    // canvas question, How it matches, undo) wait instead of replacing it.
-    const [typed, setTyped] = useState(false)
-    // What the last apply sent: when it comes back as the draft, the box
-    // keeps the user's own spelling.
-    const [applied, setApplied] = useState<string | null>(null)
-    const [seen, setSeen] = useState(shown)
-    if (shown !== seen) {
-        setSeen(shown)
-        setApplied(null)
-        if (shown !== applied && !typed) setText(shown)
-    }
-
-    const parsed = useMemo(() => parsePredicate(text), [text])
-    const commit = useCallback(() => {
-        if (!typed) return
-        setTyped(false)
-        setApplied(stringifyPredicate(parsed.predicate))
-        onCommit(parsed.predicate)
-    }, [typed, parsed, onCommit])
-
-    return (
-        <div className="flex flex-col gap-1.5">
-            <textarea
-                value={text}
-                onChange={(e) => { setText(e.target.value); setTyped(true) }}
-                onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault()
-                        commit()
-                    }
-                }}
-                onBlur={commit}
-                disabled={isRunning}
-                spellCheck={false}
-                rows={4}
-                placeholder='t2 AND (account OR opp) OR NOT T1'
-                className={cn(
-                    'w-full px-3 py-2 rounded-lg resize-none',
-                    'bg-canvas-base/60 border border-glass-border',
-                    'text-[12.5px] font-mono text-ink placeholder:text-ink-muted/60',
-                    'focus:outline-none focus:border-accent-lineage/60',
-                )}
-            />
-            <ParseFeedback
-                recognized={parsed.recognized.length}
-                fallback={parsed.fallbackText.length}
-                isEmpty={!parsed.predicate}
-                error={parsed.error}
-            />
-            <CodeModeCheatsheet />
-            <div className="text-[10.5px] text-ink-muted/70 px-1">
-                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘↵</kbd> or blur to apply ·{' '}
-                use <span className="font-mono text-ink">AND</span> /{' '}
-                <span className="font-mono text-ink">OR</span> /{' '}
-                <span className="font-mono text-ink">NOT</span> with parentheses
-            </div>
-        </div>
-    )
-}
-
-
-function CodeModeCheatsheet() {
-    const [open, setOpen] = useState(false)
-    return (
-        <div className={cn(
-            'rounded-md border border-glass-border/50',
-            'bg-canvas-base/40 overflow-hidden',
-        )}>
-            <button
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                className={cn(
-                    'w-full flex items-center justify-between gap-2',
-                    'px-2.5 py-1.5 text-[10.5px] text-ink-muted',
-                    'hover:bg-canvas-base/70 transition-colors',
-                )}
-            >
-                <span className="inline-flex items-center gap-1.5">
-                    <Code2 className="w-3 h-3" /> Cheat-sheet
-                </span>
-                <ArrowRight className={cn('w-3 h-3 transition-transform', open && 'rotate-90')} />
-            </button>
-            {open && (
-                <div className="px-3 py-2 text-[10.5px] text-ink-muted/95 leading-relaxed">
-                    <div className="font-mono whitespace-pre-wrap">
-{`t2                       text in name contains "t2"
-"customer orders"        quoted phrase
-name CONTAINS foo        text in name
-qname:foo                in qualifiedName
-description:foo          in description
-type:dataset             entityType IN [dataset]
-type IN (dataset, schemaField)
-tag:PII                  tag hasAny [PII]
-tag:PII,GDPR             tag hasAny [PII, GDPR]
-layer:Source             layer = "Source"
-rowCount > 1000          property gt 1000
-rowCount != 0
-hasProperty:owner        node has property "owner"
-noUpstream / noDownstream / noLineage
-hasUpstream / hasDownstream
-
-parent(type:domain)      its container is a domain
-root(@"Country")         its top-level container is named Country
-child(tag:PII)           contains something tagged PII
-every child(…) / no upstream(…)
-count(child(type:column)) > 100
-downstream*..3(type:dashboard).via(mode = stream)
-                         feeds a dashboard within 3 hops,
-                         every edge in stream mode
-@"Sales/orders"          the entity named by that path
-inside @"Country/United Kingdom"
-
-Combine with: AND, OR, NOT, parentheses, !
-
-  t2 AND (account OR opp) OR NOT T1
-  NOT tag:PII AND type:dataset
-  (rowCount > 0) AND noUpstream`}
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-
-function ParseFeedback({
-    recognized, fallback, isEmpty, error,
-}: { recognized: number; fallback: number; isEmpty: boolean; error?: string }) {
-    if (error) {
-        return (
-            <div className="flex items-start gap-1.5 px-1 text-[10.5px] text-rose-300">
-                <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
-                <span className="leading-snug">{error}</span>
-            </div>
-        )
-    }
-    if (isEmpty) {
-        return (
-            <div className="flex items-center gap-1.5 px-1 text-[10.5px] text-ink-muted/70">
-                <AlertCircle className="w-3 h-3" />
-                Empty query — type something or paste DSL.
-            </div>
-        )
-    }
-    const parts: ReactNode[] = []
-    if (recognized > 0) {
-        parts.push(
-            <span key="r" className="inline-flex items-center gap-1 text-emerald-400/90">
-                <CheckCircle2 className="w-3 h-3" />
-                {recognized} structured filter{recognized === 1 ? '' : 's'}
-            </span>,
-        )
-    }
-    if (fallback > 0) {
-        parts.push(
-            <span key="f" className="inline-flex items-center gap-1 text-ink-muted">
-                · {fallback} word{fallback === 1 ? '' : 's'} as substring text
-            </span>,
-        )
-    }
-    return (
-        <div className="flex items-center flex-wrap gap-1 px-1 text-[10.5px]">
-            {parts}
         </div>
     )
 }
@@ -1522,7 +1361,26 @@ function RunButton({
 // ---------------------------------------------------------------------------
 
 const RUN_MODE_KEY = 'synodic.advancedSearch.runMode'
+const EDITOR_MODE_KEY = 'synodic.advancedSearch.editorMode'
 type RunMode = 'auto' | 'manual'
+
+/** Visual or Code, as this browser last left it — the card remounts each
+ *  time the Advanced drawer closes, and a power user's Code mode with it. */
+function useEditorMode(): [ViewMode, (next: ViewMode) => void] {
+    const [mode, setMode] = useState<ViewMode>(() => {
+        try {
+            return localStorage.getItem(EDITOR_MODE_KEY) === 'code' ? 'code' : 'visual'
+        } catch {
+            return 'visual'
+        }
+    })
+    const update = useCallback((next: ViewMode) => {
+        setMode(next)
+        try { localStorage.setItem(EDITOR_MODE_KEY, next) } catch { /* ignore */ }
+    }, [])
+    return [mode, update]
+}
+
 
 function useRunMode(): [RunMode, (next: RunMode) => void] {
     const [mode, setMode] = useState<RunMode>(() => {

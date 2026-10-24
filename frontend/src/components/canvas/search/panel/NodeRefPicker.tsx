@@ -19,40 +19,24 @@ import { rememberUrnLabels, urnDisplayName } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
-import type { AncestorRef, NodeRef } from '@/types/search'
+import type { NodeRef } from '@/types/search'
 
 import { inputClass } from '../typed/fieldStyles'
 
-import { ANY_DEPTH, pathCandidates, refText, textToRef } from './relations'
+import {
+    type NamedEntity as Entity,
+    namePathFor,
+    namedEntityOf as entityOf,
+    searchEntitiesByName,
+} from './entityNames'
+import { ANY_DEPTH, refText, textToRef } from './relations'
 import { RelationContext } from './relationContext'
-
-
-/** An entity as the picker shows it: name, type, and its containers' names, top first. */
-interface Entity {
-    urn: string
-    name: string
-    type: string
-    ancestors: string[]
-}
 
 type Resolution =
     | { status: 'idle' }
     | { status: 'loading' }
     | { status: 'done'; count: number; matches: Entity[] }
     | { status: 'error'; message: string }
-
-/** Suggestions offered for a typed name. */
-const SUGGESTIONS = 8
-
-
-function entityOf(e: { urn: string; displayName?: string | null; entityType?: string | null;
-                       ancestorPath?: AncestorRef[] | null }): Entity {
-    return {
-        urn: e.urn, name: e.displayName || e.urn, type: e.entityType ?? '',
-        ancestors: (e.ancestorPath ?? []).map((a) => a.displayName),
-    }
-}
-
 
 /** The provider and view a picker asks, or nulls when it can't (a preview:
  *  the picker still edits, without the help). */
@@ -106,37 +90,14 @@ function useSuggestions(word: string | null): Entity[] | null {
         if (!key || !word || !remote || !viewId) return
         const controller = new AbortController()
         const timer = setTimeout(() => {
-            remote.searchAdvanced({
-                predicate: { kind: 'group', op: 'and', children: [
-                    { kind: 'text', value: word, target: 'name', match: 'substring' }] },
-                scope: { viewId, scopeMode: 'view' },
-                options: { results: 'hits', pageSize: SUGGESTIONS, includeAncestorPath: true,
-                           highlights: false, waitMs: 800 },
-            }, { signal: controller.signal })
-                .then((page) => setAnswered((page.hits ?? []).map((h) =>
-                    entityOf({ ...h.node, ancestorPath: h.ancestorPath }))))
+            searchEntitiesByName(remote, viewId, word, { signal: controller.signal })
+                .then(setAnswered)
                 .catch(() => { if (!controller.signal.aborted) setAnswered([]) })
         }, 250)
         return () => { clearTimeout(timer); controller.abort() }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [key])
     return key ? answered : null
-}
-
-
-/** The shortest path of names that names ``entity`` alone in the view —
- *  every candidate checked in one request — or its URN when none does. */
-async function namePathFor(remote: RemoteGraphProvider, viewId: string, entity: Entity): Promise<NodeRef> {
-    const candidates = pathCandidates(entity.name, entity.ancestors)
-    if (!candidates.length) return { urn: entity.urn }
-    try {
-        const { results } = await remote.resolveSearchRefs(
-            { scope: { viewId }, refs: candidates.map((path) => ({ path })) })
-        const i = results.findIndex((r) => r.count === 1 && r.matches?.[0]?.urn === entity.urn)
-        return i >= 0 ? { path: candidates[i] } : { urn: entity.urn }
-    } catch {
-        return { urn: entity.urn }
-    }
 }
 
 

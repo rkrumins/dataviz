@@ -647,3 +647,58 @@ describe('predicateDsl — relationships and names', () => {
         }), { numRuns: 400 })
     })
 })
+
+
+describe('predicateDsl — what an editor reads off a parse', () => {
+    const roles = (input: string) => parsePredicate(input).tokens.map((t) => `${t.text}:${t.role}`)
+
+    it('says what each token was read as, and where it is', () => {
+        expect(roles('type:dataset AND owner = "alice" upstream*..3(@"Sales/orders").via(rows > 5)')).toEqual([
+            'type:dataset:prefixed', 'AND:keyword', 'owner:field', '=:operator', '"alice":value',
+            'upstream*..3(:function', '@"Sales/orders":ref', '):punct', '.via(:function',
+            'rows:field', '>:operator', '5:value', '):punct',
+        ])
+        expect(roles('notes IS NOT EMPTY customer')).toEqual([
+            'notes:field', 'IS:keyword', 'NOT:keyword', 'EMPTY:keyword', 'customer:text'])
+        const [first, , second] = parsePredicate('tag:PII  AND x').tokens
+        expect([first.from, first.to, second.from, second.to]).toEqual([0, 7, 13, 14])
+    })
+
+    it('points an error at where it is', () => {
+        const at = (input: string) => {
+            const r = parsePredicate(input)
+            return { error: r.error, text: r.errorAt && input.slice(r.errorAt.from, r.errorAt.to),
+                     predicate: r.predicate }
+        }
+        // A stray ")" once read "Unexpected token at end: [object Object]"
+        // and handed back the half-parsed query.
+        expect(at('foo )')).toEqual({ error: 'Unexpected )', text: ')', predicate: null })
+        // A comparison with no value once threw a raw TypeError.
+        expect(at('rowCount >')).toMatchObject({ error: 'Expected a value after rowCount >', text: '>' })
+        expect(at('(a OR b')).toMatchObject({ error: 'Missing ")" to close this "("', text: '(' })
+        expect(at('parent(type:x')).toMatchObject({ error: expect.stringMatching(/Missing "\)"/), text: '' })
+        expect(at('count(type:x) > 1')).toMatchObject({ text: 'type:x' })
+        expect(at('a AND')).toMatchObject({ predicate: { kind: 'text' } })   // a trailing AND is let go
+    })
+
+    it('reports an unclosed quote or name instead of reading to the end', () => {
+        expect(parsePredicate('name CONTAINS "acc')).toMatchObject({
+            predicate: null, error: 'Close the text with "', errorAt: { from: 14, to: 18 } })
+        expect(parsePredicate('upstream(@"Sales/ord')).toMatchObject({
+            predicate: null, error: 'Close the name with ": @"…"', errorAt: { from: 9, to: 20 } })
+    })
+
+    it('reads a comma list inside prefix:value as one condition', () => {
+        expect(parsePredicate('tag:PII,GDPR type:dataset,schemaField').predicate).toEqual({
+            kind: 'group', op: 'and', children: [
+                { kind: 'tag', op: 'hasAny', values: ['PII', 'GDPR'] },
+                { kind: 'entityType', op: 'in', values: ['dataset', 'schemaField'] },
+            ],
+        })
+        // …so the writer spells several values as words again, not JSON.
+        expect(stringifyPredicate({ kind: 'tag', op: 'hasAny', values: ['PII', 'GDPR'] })).toBe('tag:PII,GDPR')
+        // A list in brackets is still its own tokens.
+        expect(parsePredicate('type IN (a, b)').predicate).toEqual(
+            { kind: 'entityType', op: 'in', values: ['a', 'b'] })
+    })
+})
