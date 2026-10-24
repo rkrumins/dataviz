@@ -404,7 +404,8 @@ const COUNT_WORDS: Record<string, string> = {
 /** "has a parent where type is domain", "has a parent that is Finance",
  *  "has no source within 3 hops", "has children, every one where …",
  *  "has more than 100 children that have …" — the relative named for
- *  what it is, never in or out. */
+ *  what it is, never in or out. The edges walked come last: "has a target
+ *  that is X, through edges where …". */
 function relationSentence(p: RelatedPredicate, many = false): ReactNode {
     const v = many ? MANY : ONE
     const meta = axisMeta(p.axis)
@@ -413,23 +414,25 @@ function relationSentence(p: RelatedPredicate, many = false): ReactNode {
     const reach = meta.lineage
         ? (hi > 1 ? <> within {span} hops</> : null)
         : meta.hops && (p.minHops || p.maxHops) ? <> {span} levels away</> : null
-    const via = p.edge ? <> through edges where {edgeSentence(p.edge)}</> : null
+    // After a condition, a comma keeps the edges from reading as part of it.
+    const via = p.edge
+        ? <>{p.where ? ',' : ''} through edges where {edgeSentence(p.edge)}</> : null
     const cond = (several = false) => p.where
         ? <> {connector(p.where, several)} {leafOrGroup(p.where, several)}</> : null
     if (p.count) {
         const n = p.count.value
         return <>{v.has} {COUNT_WORDS[p.count.op ?? 'gte']} <Value quoted={false}>{n}</Value>{' '}
-            {n === 1 ? meta.noun : meta.plural}{reach}{via}{cond(n !== 1)}</>
+            {n === 1 ? meta.noun : meta.plural}{reach}{cond(n !== 1)}{via}</>
     }
-    if (p.quantifier === 'none') return <>{v.has} <strong className="text-rose-300">no</strong> {meta.noun}{reach}{via}{cond()}</>
+    if (p.quantifier === 'none') return <>{v.has} <strong className="text-rose-300">no</strong> {meta.noun}{reach}{cond()}{via}</>
     if (p.quantifier === 'all' && p.where) {
         const every = <strong className="text-accent-lineage">every one</strong>
         // "…, every one where type is column"; a verb reads "…, and every one is inside X".
         return connector(p.where) === 'that'
-            ? <>{v.has} {meta.plural}{reach}{via}, and {every} {leafOrGroup(p.where)}</>
-            : <>{v.has} {meta.plural}{reach}{via}, {every}{cond()}</>
+            ? <>{v.has} {meta.plural}{reach}, and {every} {leafOrGroup(p.where)}{via}</>
+            : <>{v.has} {meta.plural}{reach}, {every}{cond()}{via}</>
     }
-    return <>{v.has} a{/^[aeiou]/.test(meta.noun) ? 'n' : ''} {meta.noun}{reach}{via}{cond()}</>
+    return <>{v.has} a{/^[aeiou]/.test(meta.noun) ? 'n' : ''} {meta.noun}{reach}{cond()}{via}</>
 }
 
 
