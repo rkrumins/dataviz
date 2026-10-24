@@ -535,6 +535,10 @@ export type Targetwhere =
       )
     | null
 export type Items = SearchRuleItem[]
+/**
+ * What is counted. ``rule`` (the default): display rules, held to a rule's limits — a rule is asked of every entity on the canvas, so it follows lineage one hop. ``search``: the conditions of a search being built, held to a search's limits instead, so a condition that follows lineage several hops is counted as the search would run it.
+ */
+export type Purpose = 'rule' | 'search'
 export type Waitms1 = number
 /**
  * Matches found so far — exact once complete.
@@ -1168,6 +1172,7 @@ export interface SearchCatalogTag {
  */
 export interface SearchCountsRequest {
     items: Items
+    purpose?: Purpose
     scope: SearchScope
     sessions?: Sessions
     waitMs?: Waitms1

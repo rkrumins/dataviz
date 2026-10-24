@@ -509,13 +509,14 @@ def _resolved_ref(where: str, ref, answer: dict) -> ResolvedRef:
     )
 
 
-def _validate_items(items) -> None:
+def _validate_items(items, *, rule: bool = True) -> None:
     """Each rule's predicate, held to the same caps and typed checks as a
-    search's — with the path naming the rule."""
+    search's — with the path naming the rule. ``rule``: held to a display
+    rule's limits too; a search's conditions being counted are not."""
     max_leaves = get_deep_search_settings().max_leaf_count
     for i, item in enumerate(items):
         leaves = _validate_predicate(item.predicate, path=f"$.items[{i}].predicate",
-                                     rule=True)
+                                     rule=rule)
         if leaves > max_leaves:
             raise ValidationError(
                 f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")
@@ -821,7 +822,7 @@ class AdvancedSearchService:
         work), then moves on the least advanced counts until its wait is
         spent — so many rules all progress, none starve."""
         started = time.monotonic()
-        _validate_items(request.items)
+        _validate_items(request.items, rule=request.purpose == "rule")
         scope, eff = await self._rule_scope(request.scope)
         if scope is None:
             return SearchCountsResult(counts={

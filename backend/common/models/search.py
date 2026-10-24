@@ -1550,6 +1550,16 @@ class SearchCountsRequest(_Base):
         default_factory=dict,
         description="Rule id → the session a previous answer returned.",
     )
+    purpose: Literal["rule", "search"] = Field(
+        "rule",
+        description=(
+            "What is counted. ``rule`` (the default): display rules, held to a "
+            "rule's limits — a rule is asked of every entity on the canvas, so "
+            "it follows lineage one hop. ``search``: the conditions of a search "
+            "being built, held to a search's limits instead, so a condition that "
+            "follows lineage several hops is counted as the search would run it."
+        ),
+    )
 
 
 class SearchRuleCount(_Base):

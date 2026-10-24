@@ -163,6 +163,37 @@ class TestService:
         await _service(_Counts()).counts(request)
         assert waits and waits[0] <= 5_000
 
+    async def test_a_searchs_condition_counts_lineage_several_hops_out(self):
+        """A rule follows lineage one hop — it is asked of every entity on
+        the canvas. The conditions of a search being built are counted as
+        the search would run them, so "feeds X within 3 hops" counts."""
+        counted = []
+
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                counted.append(query.predicate)
+                return {"count": 7, "status": "complete", "sessionId": "s"}
+
+        three_hops = {"kind": "related", "axis": "downstream", "maxHops": 3,
+                      "where": {"kind": "entityType", "op": "in", "values": ["dashboard"]}}
+        body = {"scope": {"viewId": "v"}, "items": [{"id": "feeds", "predicate": three_hops}]}
+
+        out = await _service(_Counts()).counts(
+            SearchCountsRequest.model_validate({**body, "purpose": "search"}))
+        assert out.counts["feeds"].count == 7 and counted
+
+        with pytest.raises(ValidationError, match="a rule follows lineage one hop"):
+            await _service(_Counts()).counts(SearchCountsRequest.model_validate(body))
+
+    async def test_a_searchs_condition_keeps_a_searchs_limits(self):
+        # Beyond the hops a search tests from every candidate, still a 400.
+        too_far = {"kind": "related", "axis": "downstream", "maxHops": 9}
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "purpose": "search",
+            "items": [{"id": "far", "predicate": too_far}]})
+        with pytest.raises(ValidationError, match="Name the far end"):
+            await _service(StubDeepSearchProvider()).counts(request)
+
     async def test_a_rule_the_engine_cannot_count_says_why(self):
         from backend.app.services.deep_search import CompileError
 
