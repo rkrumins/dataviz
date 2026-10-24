@@ -249,6 +249,15 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
             { kind: 'hasProperty', key: 'owner', negate: false },
         ] },
     },
+    rescue: {
+        editorMode: 'sentence',
+        note: 'A query that matches nothing: the line where it runs out, and the fixes that find something.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'tag', op: 'hasAny', values: ['Certified'] },
+            { kind: 'related', axis: 'downstream', where: type('dashboard') },
+        ] },
+    },
     sentenceAny: {
         editorMode: 'sentence',
         note: 'Any of several clauses, each counted within the subject: datasets holding PII or read by nothing.',

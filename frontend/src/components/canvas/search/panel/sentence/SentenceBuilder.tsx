@@ -22,6 +22,8 @@ import type { LayerOption } from '../layerOptions'
 import { useClauseCounts } from '../counts/useClauseCounts'
 import { layoutQueryMap } from '../map/layoutQueryMap'
 import { QueryMap } from '../map/QueryMap'
+import { RescueNote } from '../rescue/RescueFixes'
+import { useRescue } from '../rescue/useRescue'
 import type { CodeKind } from '../vocabulary/filterKinds'
 
 import {
@@ -32,6 +34,7 @@ import {
     listedClauses,
     prependAt,
     setAt,
+    withCombine,
     wrapAt,
     type Path,
     type SentenceLine,
@@ -66,19 +69,6 @@ export interface SentenceBuilderProps {
 
 
 const typeCondition = (types: string[]): Predicate => ({ kind: 'entityType', op: 'in', values: types })
-
-/** ``draft`` with its listed clauses combined by ``op``. A subject stays
- *  first; its clauses combined by any become one any-of group after it. */
-function withCombine(draft: Predicate | null, op: 'and' | 'or'): Predicate | null {
-    const { subject, clauses } = listedClauses(draft)
-    const list = clauses.map((c) => c.predicate)
-    if (list.length < 2) return draft
-    if (!subject) return { kind: 'group', op, children: list }
-    return { kind: 'group', op: 'and', children: [
-        subject.predicate, ...(op === 'or' ? [{ kind: 'group', op: 'or', children: list } as Predicate] : list),
-    ] }
-}
-
 
 export function SentenceBuilder({
     viewId, predicate, onSeed, onCommit, discovery, knownEntityTypes, presentEntityTypes,
@@ -207,6 +197,8 @@ export function SentenceBuilder({
 
     // The shape is drawn once there is one: a relationship, or a route.
     const map = useMemo(() => layoutQueryMap(sentence), [sentence])
+    // Where the matches run out, and the way back — before anything runs.
+    const rescue = useRescue(viewId, predicate, counts)
 
     return (
         <SentenceContext.Provider value={ctx}>
@@ -219,6 +211,11 @@ export function SentenceBuilder({
                                 <ClauseLine key={line.key} line={line} count={lineCounts.get(line.key) ?? null}
                                             openToken={openToken?.startsWith(`${line.key}:`) ? openToken : null} />
                             ))}
+                            {rescue.clause !== null && block[0].topIndex === rescue.clause && (
+                                <div role="none" className="py-1 pl-3.5">
+                                    <RescueNote rescue={rescue} onApply={onCommit} />
+                                </div>
+                            )}
                         </div>
                     ))}
                 </div>

@@ -65,7 +65,7 @@ import {
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { SavedViewQuery } from '@/services/viewLibraryService'
-import type { AncestorRef } from '@/types/search'
+import type { AncestorRef, Predicate } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
 import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
@@ -82,9 +82,11 @@ import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { setScopeCondition } from './panel/predicateComposition'
+import { buildRunnablePredicate } from './panel/runnablePredicate'
 import { useLoadAll } from './panel/useLoadAll'
 import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext'
 import { hasReportableView } from './session/useViewSearchSessionController'
+import { SEARCH_OPTIONS } from './searchOptions'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
@@ -266,6 +268,13 @@ function PanelInner({
     ) => {
         void runPredicate(p, options)
     }, [runPredicate])
+    // A fix offered over an empty answer: the query changes and runs at
+    // once, whether or not the builder is open to run it.
+    const handleApplyFix = useCallback((next: Predicate) => {
+        useSearchStore.getState().commitDraft(next)
+        const runnable = buildRunnablePredicate(next)
+        if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
+    }, [handleRun])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -610,6 +619,8 @@ function PanelInner({
                                     onLoadAll={loadAll}
                                     isLoadingAll={isLoadingAll}
                                     onCancelLoadAll={cancelLoadAll}
+                                    draft={draftPredicate}
+                                    onApplyFix={handleApplyFix}
                                 />
                                 {exportOpen && view.kind === 'results' && (
                                     <ExportMatchesDialog

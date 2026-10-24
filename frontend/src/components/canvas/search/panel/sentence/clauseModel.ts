@@ -284,6 +284,19 @@ export function listedClauses(draft: Predicate | null): ListedClauses {
 }
 
 
+/** ``draft`` with its listed clauses combined by ``op``. A subject stays
+ *  first; its clauses combined by any become one any-of group after it. */
+export function withCombine(draft: Predicate | null, op: 'and' | 'or'): Predicate | null {
+    const { subject, clauses } = listedClauses(draft)
+    const list = clauses.map((c) => c.predicate)
+    if (list.length < 2) return draft
+    if (!subject) return { kind: 'group', op, children: list }
+    return { kind: 'group', op: 'and', children: [
+        subject.predicate, ...(op === 'or' ? [{ kind: 'group', op: 'or', children: list } as Predicate] : list),
+    ] }
+}
+
+
 export function buildSentence(draft: Predicate | null): Sentence {
     const { subject, clauses, combine, into } = listedClauses(draft)
     const lines: SentenceLine[] = []

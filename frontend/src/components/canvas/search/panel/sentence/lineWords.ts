@@ -6,7 +6,7 @@
 import type { Predicate } from '@/types/search'
 
 import { refName } from '../relations'
-import { reachSegments, relationVerb, viaSegments, type Segment, type Slot } from '../vocabulary/sentenceGrammar'
+import { leafSegments, reachSegments, relationVerb, viaSegments, type Segment, type Slot } from '../vocabulary/sentenceGrammar'
 
 import type { SentenceLine } from './clauseModel'
 
@@ -101,5 +101,29 @@ export function relationWords(line: Extract<SentenceLine, { kind: 'relation' }>,
             ? via.map((s) => (s.t === 'text' || s.t === 'value' || s.t === 'em' ? s.text : '')).join('')
                 .replace(/^,? through edges where /, '')
             : '',
+    }
+}
+
+
+const GROUP_WORDS = { and: 'all of', or: 'any of', not: 'none of' } as const
+
+/** What a line says, as plain words: "are tagged #PII", "feed a Chart
+ *  within 1–3 hops", "Datasets" — null for a line that says nothing. */
+export function lineText(line: SentenceLine, typeName: (type: string, plural?: boolean) => string): string | null {
+    switch (line.kind) {
+        case 'subject':
+            return line.types.length ? line.types.map((t) => typeName(t, true)).join(' or ') : null
+        case 'clause':
+            return toRuns(leafSegments(line.predicate, line.many)).map((r) => r.text).join('').trim()
+        case 'relation': {
+            const w = relationWords(line, typeName)
+            return [w.verb, w.relative, w.reach].filter(Boolean).join(' ')
+        }
+        case 'group': {
+            const n = line.predicate.children.length
+            return `match ${GROUP_WORDS[line.op]} ${n} condition${n === 1 ? '' : 's'}`
+        }
+        default:
+            return null
     }
 }

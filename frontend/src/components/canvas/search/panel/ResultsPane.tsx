@@ -22,6 +22,7 @@ import {
 } from '@/store/searchStore'
 import type {
     AncestorRef,
+    Predicate,
     SearchAggregateBucket,
     SearchHit,
     SearchQuery,
@@ -100,12 +101,16 @@ export interface ResultsPaneProps {
     isLoadingAll?: boolean
     /** Stop the loop where it is; the pages already loaded stay. */
     onCancelLoadAll?: () => void
+    /** The builder's query, and how to change it — an empty answer then
+     *  offers the fixes that would find something. */
+    draft?: Predicate | null
+    onApplyFix?: (next: Predicate) => void
 }
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
@@ -137,6 +142,8 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onLoadAll={onLoadAll}
                     isLoadingAll={isLoadingAll}
                     onCancelLoadAll={onCancelLoadAll}
+                    draft={draft}
+                    onApplyFix={onApplyFix}
                     scrollElementRef={scrollContainerRef}
                 />
             </div>
@@ -147,7 +154,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 function Dispatch({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix, scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
@@ -168,6 +175,8 @@ function Dispatch({
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
+                        draft={draft}
+                        onApplyFix={onApplyFix}
                         scrollElementRef={scrollElementRef}
                     />
                 </ShownQueryContext.Provider>
@@ -180,7 +189,7 @@ function Dispatch({
 
 function ResultsContent({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     viewId: string
@@ -192,6 +201,8 @@ function ResultsContent({
     onLoadAll?: ResultsPaneProps['onLoadAll']
     isLoadingAll?: ResultsPaneProps['isLoadingAll']
     onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
+    draft?: ResultsPaneProps['draft']
+    onApplyFix?: ResultsPaneProps['onApplyFix']
     scrollElementRef: RefObject<HTMLDivElement | null>
 }) {
     const { result } = view
@@ -370,6 +381,8 @@ function ResultsContent({
                         onSwitchMatch={session
                             ? (match) => session.setQuick({ match })
                             : undefined}
+                        draft={draft}
+                        onApplyFix={onApplyFix}
                     />
                 </div>
             )}
