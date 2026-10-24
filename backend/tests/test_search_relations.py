@@ -561,15 +561,15 @@ class TestReachPlan:
     what it reaches, in scope, is read."""
 
     @staticmethod
-    def _run(seen, *, reached=((20,), (21,), (22,)), anchors=((10,), (11,), (12,))):
+    def _run(seen, *, reached=(20, 21, 22), anchors=(10, 11, 12)):
         async def run(cypher, params):
             seen.append((cypher, params))
             if cypher.startswith("MATCH (r:"):                      # the named entities
                 return SimpleNamespace(result_set=[[10]])
             if "]->(_a)" in cypher:                                 # what is inside them
-                return SimpleNamespace(result_set=[list(a) for a in anchors])
+                return SimpleNamespace(result_set=[[list(anchors)]])
             if "MATCH _whP0" in cypher:                             # the walk
-                return SimpleNamespace(result_set=[list(r) for r in reached])
+                return SimpleNamespace(result_set=[[list(reached)]])
             if "labels(n)" in cypher:                               # the scope's check
                 return SimpleNamespace(result_set=[
                     [20, "u20", ["Column"], []], [21, None, ["Column"], []],
@@ -595,6 +595,10 @@ class TestReachPlan:
         walk = next(p for cy, p in seen if "MATCH _whP0" in cy)
         assert walk["_anchors"] == [10, 11, 12]
         assert "ID(anchor) <> ID(n)" in next(cy for cy, _ in seen if "MATCH _whP0" in cy)
+        # One row each, however many IDs: FalkorDB cuts a reply at
+        # RESULTSET_SIZE rows (10,000 on the stock image) without saying so.
+        assert all(cy.endswith("RETURN collect(ID(_a))") or cy.endswith("RETURN collect(ID(n))")
+                   for cy, _ in seen if "]->(_a)" in cy or "MATCH _whP0" in cy)
 
     async def test_it_steps_aside_when_the_walk_reaches_too_far(self, monkeypatch):
         from backend.app.providers.falkordb_search import plan as plan_mod

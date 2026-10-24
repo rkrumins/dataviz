@@ -386,6 +386,64 @@ async def test_a_named_lineage_walk_plans_the_scan(provider):
     assert plan.units and not any(u.kind == "ids" for u in plan.units)
 
 
+async def test_a_walk_larger_than_one_reply_finds_every_entity():
+    """A container whose contents feed more entities than FalkorDB returns
+    rows in one reply (the stock image's ``RESULTSET_SIZE`` is 10,000): the
+    walk starts from everything inside it and finds every entity they feed,
+    and the count is exact — not the first 10,000 of each."""
+    from backend.app.providers.falkordb_deep_search import _build_compiler_for_provider
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+    from backend.app.providers.falkordb_search.plan import make_plan
+
+    n = 12_000
+    p = FalkorDBProvider(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        graph_name=f"reach_{uuid.uuid4().hex[:8]}",
+        auth_enabled=False,
+    )
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.set_resolved_edge_metadata({"TRANSFORMS": {"isLineage": True}}, ["TRANSFORMS"])
+    await p._ensure_connected()
+    try:
+        for label in ("container", "column", "dataset"):
+            await p._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.urn)")
+        await p._graph.query(
+            "CREATE (c:container {urn: 'urn:c', displayName: 'c', qualifiedName: 'c'}) "
+            "WITH c UNWIND range(1, $n) AS i "
+            "CREATE (c)-[:CONTAINS]->(f:column {urn: 'urn:f:' + toString(i), "
+            "displayName: 'f' + toString(i), qualifiedName: 'f' + toString(i)}) "
+            "CREATE (f)-[:TRANSFORMS {properties: '{}'}]->(:dataset {urn: 'urn:t:' + toString(i), "
+            "displayName: 't' + toString(i), qualifiedName: 't' + toString(i)})", {"n": n})
+        is_c = {"kind": "is", "refs": [{"urn": "urn:c"}]}
+        query = _query(rel("upstream", OR(is_c, rel("ancestor", is_c)), maxHops=3),
+                       SCOPES["data_source"])
+
+        async def run(cypher, params):
+            return await p._ro_query(cypher, params=params, timeout=30)
+
+        compiler = _build_compiler_for_provider(p)
+        compiler.compile(query.predicate)
+        plan = await make_plan(p, query, compiler, run=run, width=500, walk_max=50_000,
+                               timeout_s=30)
+        assert all(u.kind == "ids" for u in plan.units)
+        assert sum(u.size for u in plan.units) == n
+
+        context = SearchRunContext(data_version="reach-v1", scope_hash="h-reach")
+        session, answer = None, None
+        for _ in range(50):
+            answer = await p.deep_search_count(query.model_copy(update={
+                "options": query.options.model_copy(update={"wait_ms": 1000, "session_id": session})}),
+                context=context)
+            session = answer["sessionId"]
+            if answer["status"] == "complete":
+                break
+        assert (answer["status"], answer["count"]) == ("complete", n)
+    finally:
+        await p._graph.delete()
+        await p.close()
+
+
 @pytest.mark.parametrize("scope_name", list(SCOPES))
 async def test_uncapped_search_and_count(provider, expected, scope_name):
     scope = SCOPES[scope_name]

@@ -417,10 +417,10 @@ async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
             res = await run(
                 "UNWIND $_ids AS _wi MATCH (_w) WHERE ID(_w) = _wi "
                 f"MATCH (_w)-[:{rel}*{int(group['lo'])}..{int(group['hi'])}]->(_a) "
-                "WITH DISTINCT _a LIMIT $_lim RETURN ID(_a)",
+                "WITH DISTINCT _a LIMIT $_lim RETURN collect(ID(_a))",
                 {"_ids": roots, "_lim": REACH_ANCHORS_MAX + 1},
             )
-            ids.update(int(r[0]) for r in (res.result_set or []) if r and r[0] is not None)
+            ids.update(_collected(res))
         if len(ids) > REACH_ANCHORS_MAX:
             return None
     return sorted(ids)
@@ -434,11 +434,19 @@ async def _reached_ids(run: Run, anchors: List[int], entry: Dict[str, Any],
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     res = await run(
         "UNWIND $_anchors AS _ai MATCH (anchor) WHERE ID(anchor) = _ai "
-        f"MATCH {pattern}{where} WITH DISTINCT n LIMIT $_lim RETURN ID(n)",
+        f"MATCH {pattern}{where} WITH DISTINCT n LIMIT $_lim RETURN collect(ID(n))",
         {**params, "_anchors": anchors, "_lim": REACH_MAX + 1},
     )
-    reached = sorted({int(r[0]) for r in (res.result_set or []) if r and r[0] is not None})
+    reached = sorted(_collected(res))
     return None if len(reached) > REACH_MAX else reached
+
+
+def _collected(res) -> set:
+    """The IDs a ``RETURN collect(ID(…))`` answered. One row however many:
+    FalkorDB cuts a reply at ``RESULTSET_SIZE`` rows (10,000 on the stock
+    image) without saying so, which one row per ID would hit."""
+    rows = res.result_set or []
+    return {int(i) for i in ((rows[0][0] if rows and rows[0] else None) or []) if i is not None}
 
 
 async def _in_scope(run: Run, provider, query, compiler, labels: Sequence[str],
