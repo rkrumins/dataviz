@@ -56,6 +56,7 @@ from sqlalchemy.orm import aliased
 
 from . import config, db, job_lease
 from .job_lease import Draining, Lease, Superseded
+from .errors import JobActive
 from .models import GraphORM, JobORM, ProjectionStateORM, _now
 
 logger = logging.getLogger(__name__)
@@ -741,6 +742,12 @@ async def purge_state_for_data_source(*, data_source_id: str,
         return await _purge_state(s, data_source_id, deleted_at)
 
 
+# ------------------------------------------------------------------------ a move --
+class MoveBlocked(Exception):
+    """A data source's versioned graph can't move to another workspace yet. The message says
+    why, as a sentence the person moving it can act on. Nothing was changed."""
+
+
 #: How long a data source made from a view package may stand without its versioned graph before the
 #: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
 ORPHAN_PACKAGE_SOURCE_SECS = 3600
@@ -763,7 +770,9 @@ class Reaper:
 
     It also tombstones a data source made from a view package that has stood without a graph for
     ``ORPHAN_PACKAGE_SOURCE_SECS`` (:meth:`_orphaned_package_sources`); the stages above take it
-    from there.
+    from there. And before any of it, it files each graph, with its forks, under its data source's
+    workspace where the two disagree (:meth:`_misplaced_graphs`), so the stages find the graphs
+    they look for.
 
     A trashed fork has no data-source row (its ``dsfork_`` id is minted, not stored), so its own
     tombstone's age is its schedule (:meth:`_expired_forks`).
@@ -782,6 +791,7 @@ class Reaper:
     async def run_once(self) -> Dict[str, int]:
         from backend.app.db.models import WorkspaceDataSourceORM
 
+        rehomed = await self._misplaced_graphs()
         cutoff = _now_minus(config.PURGE_GRACE_DAYS * 86400)
         Session = self._app_sessions()
         async with Session() as s:
@@ -815,8 +825,9 @@ class Reaper:
                         logger.info("reaper: grace expired for %s — purge queued %s", ds_id, jobs)
                     elif ds_id not in _LEFT_STANDING:
                         # Restored under us, read by a fork, or tombstoned without its graph
-                        # (a force-delete whose graph tombstone failed; a moved data source).
-                        # Its row is never removed while a graph of it stands.
+                        # (a force-delete whose graph tombstone failed; a graph filed under
+                        # another workspace, which _misplaced_graphs re-files once it
+                        # settles). Its row is never removed while a graph of it stands.
                         _LEFT_STANDING.add(ds_id)
                         logger.warning("reaper: %s is past its grace period but its graph was "
                                        "not purged; leaving both alone", ds_id)
@@ -861,10 +872,12 @@ class Reaper:
                 logger.exception("reaper: re-queueing the purge of graph %s failed", gid)
 
         orphans = await self._orphaned_package_sources()
-        if queued or reaped or orphans or revived:
+        if queued or reaped or orphans or revived or rehomed:
             logger.info("reaper: %s purge(s) queued, %s re-queued, %s data source(s) removed, %s "
-                        "orphaned package source(s) tombstoned", queued, revived, reaped, orphans)
-        return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived}
+                        "orphaned package source(s) tombstoned, %s graph(s) re-filed", queued,
+                        revived, reaped, orphans, rehomed)
+        return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived,
+                "rehomed": rehomed}
 
     async def _expired_forks(self, cutoff: str) -> int:
         """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge
@@ -887,6 +900,70 @@ class Reaper:
             except Exception:
                 logger.exception("reaper: fork %s failed; carrying on with the rest", gid)
         return queued
+
+    async def _misplaced_graphs(self) -> int:
+        """File each data source's versioned graph, with its forks, under the data source's
+        workspace where the two disagree.
+
+        A source moved before moves carried their graphs leaves its graph filed under the old
+        workspace — readable there, external where the source went, and missed by the trash and
+        the purge — and so does a move whose graph could not be moved back after its data source
+        failed to commit. The management database decides tenancy, so the graph follows its
+        source, tombstone and all: a source in the trash whose graph is still live gets the delete
+        it missed, in the same transaction. It is a data-source move without the refusals that
+        keep people's drafts and reviews where they work (the source already lives elsewhere), and
+        a graph a job still runs on waits for a later pass: a job runs in the workspace it was
+        queued in. A move commits the graph first and its source a moment later, holding the
+        source's row in between, so the row is read again FOR SHARE SKIP LOCKED and held while
+        the graph moves: a move in flight is skipped, left to finish. A fork moves with its
+        graph, never on its own; a graph whose source row is gone is the purge's business, not
+        this."""
+        from backend.app.db.models import WorkspaceDataSourceORM as DS
+        from .service import GraphVersioningService
+
+        async with self._gv() as gs:
+            graphs = (await gs.execute(select(
+                GraphORM.data_source_id, GraphORM.workspace_id, GraphORM.deleted_at,
+            ).where(GraphORM.fork_parent_graph_id.is_(None)))).all()
+        if not graphs:
+            return 0
+        ids = [ds_id for ds_id, _ws, _deleted in graphs]
+        homes: Dict[str, Tuple[str, Optional[str]]] = {}
+        Session = self._app_sessions()
+        async with Session() as s:
+            for i in range(0, len(ids), 500):
+                homes.update({ds_id: (ws_id, deleted) for ds_id, ws_id, deleted in (await s.execute(
+                    select(DS.id, DS.workspace_id, DS.deleted_at).where(DS.id.in_(ids[i:i + 500]))
+                )).all()})
+
+        svc = GraphVersioningService(session_factory=self._gv)
+        refiled = 0
+        for ds_id, ws_id, graph_deleted in graphs:
+            home = homes.get(ds_id)
+            if home is None or home[0] == ws_id:
+                continue
+            try:
+                async with Session() as s:
+                    home = (await s.execute(select(DS.workspace_id, DS.deleted_at).where(
+                        DS.id == ds_id).with_for_update(read=True, skip_locked=True))).first()
+                    if home is None or home[0] == ws_id:
+                        continue              # being moved, gone, or no longer misplaced
+                    to_ws, source_deleted = home
+                    await svc.move_graph_workspace(
+                        ds_id, to_ws, from_workspace_id=ws_id, refuse_open_work=False,
+                        tombstone_by="reaper" if source_deleted and not graph_deleted else None)
+            except JobActive:
+                logger.info("reaper: %s's graph is filed under %s; re-filed once its job ends",
+                            ds_id, ws_id)
+                continue
+            except Exception:
+                logger.exception("reaper: re-filing %s's graph failed; carrying on with the rest",
+                                 ds_id)
+                continue
+            refiled += 1
+            logger.info("reaper: %s's graph was filed under %s; its source lives in %s — re-filed",
+                        ds_id, ws_id, to_ws)
+        return refiled
 
     async def _orphaned_package_sources(self) -> int:
         """Tombstone each live data source made from a view package (``extra_config.origin.kind =

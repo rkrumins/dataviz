@@ -433,9 +433,12 @@ async def graph_in_workspace(
     """Resolve a graph and assert it lives in ``ws_id`` — 404 (not 403) on a
     cross-tenant miss so graph existence doesn't leak across workspaces.
 
+    A graph in the trash is gone too: deleting its data source hides it from every read at
+    once, and one being purged is coming apart row by row.
+
     An API key must also cover the data source behind the graph."""
     meta = await svc.get_graph(graph_id)
-    if meta is None or meta["workspace_id"] != ws_id:
+    if meta is None or meta.get("deleted_at") or meta["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="graph not found in workspace")
     await api_key_auth.hold_to_data_source(request, meta.get("data_source_id"), ws_id)
     return meta
@@ -456,7 +459,7 @@ async def pr_in_workspace(
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
     base = await svc.get_graph(str(pr["target_graph_id"]))
-    if base is None or base["workspace_id"] != ws_id:
+    if base is None or base.get("deleted_at") or base["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     if not (viewer.can_manage or pr.get("actor") == viewer.actor
             or viewer.actor in (pr.get("reviewers") or [])):
@@ -1056,11 +1059,33 @@ class EntitySummaryResponse(_ApiModel):
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
+class CommitLogEntry(_ApiModel):
+    """One commit as the log returns it, under the stored row's own (snake_case) names —
+    ``GraphVersioningService._commit_meta``."""
+    commit_id: str
+    commit_seq: int                        # per branch; on main, the graph's revision number
+    parent_commit_id: Optional[str] = None
+    kind: str                              # genesis|import|sync|edit|checkpoint|squash_publish|revert|restore|pull
+    message: Optional[str] = None
+    actor: Optional[str] = None            # a user id, or a system actor such as "system"
+    contributors: Optional[List[str]] = None
+    source_branch_id: Optional[str] = None
+    source_commit_count: Optional[int] = None
+    originating_view_id: Optional[str] = None
+    merkle_root: Optional[str] = None      # may be filled in after the commit lands
+    stats: Optional[Dict[str, Any]] = None  # shape varies by kind
+    created_at: str
+
+
 class CommitLogResponse(_ApiModel):
-    commits: List[dict]
+    commits: List[CommitLogEntry]
     # ONE wrapper-level map covering every commit's actor + contributors (this
     # response wraps a list, so the map hangs here rather than per commit dict).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    has_more: bool = Field(default=False, alias="hasMore")
+    # The oldest ``commit_seq`` on the page while one branch's log has more; pass it back as
+    # ``before``. Null for a view's raw history, which spans branches.
+    next_before: Optional[int] = Field(default=None, alias="nextBefore")
 
 
 class DiffResponse(_ApiModel):
@@ -2214,6 +2239,10 @@ async def get_commit_log(
     published_only: bool = Query(False, alias="publishedOnly"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    before: Optional[int] = Query(None, ge=0, description="Only commits whose `commit_seq` is "
+                                  "lower — the previous page's `nextBefore`"),
+    after: Optional[int] = Query(None, ge=0, description="Only commits whose `commit_seq` is "
+                                 "higher — the newest one you already have"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -2223,12 +2252,27 @@ async def get_commit_log(
     """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — one
     view's history. ``publishedOnly=true`` returns the view's PUBLISHED (main) timeline
     (its squash-publishes + shared graph-level events), each drillable via the ``/squashed``
-    endpoint; without it, every raw draft commit attributed to the view across branches."""
+    endpoint; without it, every raw draft commit attributed to the view across branches.
+
+    Newest first. ``before``/``after`` bound ``commit_seq`` (exclusive), so a walk through one
+    branch's log with ``before=nextBefore`` neither skips nor repeats a commit while new ones
+    land, and ``after`` fetches only what is new since the last one you stored."""
+    one_branch = originating_view_id is None or published_only
+    if before is not None or after is not None:
+        if offset:
+            raise HTTPException(status_code=400, detail="Page by before/after or by offset, not both")
+        if not one_branch:
+            raise HTTPException(
+                status_code=400,
+                detail="before/after page one branch's log; a view's raw history spans branches, "
+                       "so page it by offset")
     with _domain_errors():
-        commits = await svc.commit_log(
+        commits, has_more = await svc.commit_log_page(
             graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
-            published_only=published_only, limit=limit, offset=offset, viewer=viewer)
-    payload = {"commits": commits}
+            published_only=published_only, limit=limit, offset=offset, before=before,
+            after=after, viewer=viewer)
+    next_before = commits[-1]["commit_seq"] if has_more and one_branch and commits else None
+    payload = {"commits": commits, "has_more": has_more, "next_before": next_before}
     await _attach_user_names(session, commits, wrapper=payload)
     return payload
 
@@ -2247,9 +2291,9 @@ async def get_squashed_commits(
     the "merged N commits" affordance. Empty for a non-squash commit."""
     with _domain_errors():
         commits = await svc.squashed_commits(
-            graph_id=graph_id, commit_id=commit_id, limit=limit, offset=offset)
-    payload = {"commits": commits}
-    await _attach_user_names(session, commits, wrapper=payload)
+            graph_id=graph_id, commit_id=commit_id, limit=limit + 1, offset=offset)
+    payload = {"commits": commits[:limit], "has_more": len(commits) > limit}
+    await _attach_user_names(session, payload["commits"], wrapper=payload)
     return payload
 
 

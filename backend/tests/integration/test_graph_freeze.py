@@ -204,12 +204,13 @@ async def _reads(svc):
                                    actor="u")
     await svc.update_branch(graph_id=gid, branch_id=other, actor="u", name="kept", is_shared=False)
     assert (await svc.abandon_draft(graph_id=gid, branch_id=other, actor="u"))["status"] == "abandoned"
-    # Moving its data source moves no content.
+    # Moving its data source moves no content, once no draft or review holds it back.
+    assert (await svc.abandon_draft(graph_id=gid, branch_id=draft, actor="u"))["status"] == "abandoned"
+    await svc.close_pr(pr_id=g["pr"], actor="v")
     assert await svc.move_graph_workspace(g["ds"], "ws2", from_workspace_id="ws1")
     assert await svc.move_graph_workspace(g["ds"], "ws1", from_workspace_id="ws2")
 
     # A frozen fork is trashed and restored like any other; its PR writes only the parent.
-    await svc.close_pr(pr_id=g["pr"], actor="v")
     fork = g["fork"]
     await svc.set_frozen(graph_id=fork, frozen=True, expected_rev=0)
     assert await svc.delete_fork(graph_id=fork, workspace_id="ws1", actor="v") == gid

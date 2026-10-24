@@ -148,7 +148,7 @@ export const docPersonas: DocPersona[] = [
       'Sign in from a script, find the endpoint you need, follow the API’s conventions, and automate the jobs people script most.',
     sectionId: 'reference',
     startSlug: 'api-guide',
-    path: ['api-guide', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
+    path: ['api-guide', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
     accent: {
       gradient: 'from-violet-500 to-purple-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -361,6 +361,13 @@ export const docEntries: DocEntry[] = [
     title: 'API Guide',
     description: 'Sign in from a script, find endpoints, and automate common jobs — Integrators start here',
     importFn: () => import('@docs/API_GUIDE.md?raw'),
+  },
+  {
+    slug: 'graph-metadata-api',
+    section: 'reference',
+    title: 'Graph Metadata & History API',
+    description: 'A workspace’s graphs, external or versioned, and each versioned graph’s full commit history — every field explained',
+    importFn: () => import('@docs/GRAPH_METADATA_API.md?raw'),
   },
   {
     slug: 'backend',

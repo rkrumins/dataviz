@@ -318,9 +318,17 @@ becomes **Move Data Source** and the final button **Move it here**.
 > their owners.
 
 Sources that *are* eligible show a clear **Move** badge, along with which
-workspace currently holds them. Moving one takes its aggregation state and
-stats with it — the members of its old workspace simply lose access, and the
+workspace currently holds them. Moving one takes its aggregation state, its
+stats and — when it is under version control — its version history, forks
+included, with it: the members of its old workspace simply lose access, and the
 new workspace gains a fully working data source, not a blank slate.
+
+A source under version control waits to move while version control is working
+on it or on a fork of it — turning it on, an import, an export or a publish —
+while a failed attempt to turn it on waits to be resumed or cancelled, and while
+it or a fork of it holds open drafts or review requests, whose authors work in
+the old workspace. **Move it here** then says which, so you can finish, publish
+or abandon them first.
 
 ---
 

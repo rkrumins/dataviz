@@ -17,11 +17,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ContextModelORM, WorkspaceORM, WorkspaceDataSourceORM, ViewORM
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view_dspath
+from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.api.v1.view_read_scope import readable_clause
 from backend.app.auth.dependencies import (
     get_current_user,
@@ -66,6 +68,7 @@ from backend.common.models.management import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceResponse,
+    DataSourceVersioning,
     DeletedDataSource,
     WorkspaceDataSourceImpactResponse,
     WorkspaceImpactResponse,
@@ -75,6 +78,7 @@ from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning.errors import LockBusy
+from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
 
@@ -589,14 +593,48 @@ async def set_default_workspace(
 @router.get("/{workspace_id}/data-sources", response_model=List[DataSourceResponse])
 async def list_data_sources(
     workspace_id: str = Path(...),
+    provider_id: Optional[str] = Query(None, alias="providerId",
+                                       description="Only the data sources on this provider"),
+    include: Optional[str] = Query(None, pattern="^versioning$",
+                                   description="`versioning`: each data source's version control — "
+                                               "whether it is on, its graph, and the head of `main`"),
     _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """List all data sources for a workspace."""
+    """List all data sources for a workspace, or one provider's with ``providerId``.
+
+    ``include=versioning`` adds each one's version control from the version store. Its
+    ``mainHeadCommitSeq`` is a change watermark: the graph's commit log has something new only
+    when it moved. While the store can't be read the answer is a 503 to retry — never a list
+    with those facts left out."""
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    return await data_source_repo.list_data_sources(session, workspace_id)
+    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id)
+    if include != "versioning" or not sources:
+        return sources
+    try:
+        heads = await svc.main_heads(workspace_id=workspace_id, data_source_ids=[d.id for d in sources])
+    except (SQLAlchemyError, OSError) as exc:
+        logger.warning("data-source list for %s: version store unreadable: %s", workspace_id, exc)
+        raise HTTPException(status_code=503, headers={"Retry-After": "5"}, detail={
+            "code": "DB_UNAVAILABLE",
+            "message": "Version control can't be read right now. Try again shortly, "
+                       "or ask without include=versioning."})
+    return [d.model_copy(update={"versioning": _versioning_of(heads.get(d.id))}) for d in sources]
+
+
+def _versioning_of(head: Optional[dict]) -> DataSourceVersioning:
+    """One source's version control, from :meth:`GraphVersioningService.main_heads`."""
+    if head is None:
+        return DataSourceVersioning(enabled=False)
+    return DataSourceVersioning(
+        enabled=True, graph_id=head["graph_id"], kind=head["kind"],
+        main_head_commit_seq=head["main_head_commit_seq"],
+        main_head_commit_id=head["main_head_commit_id"],
+        main_head_committed_at=head["main_head_committed_at"],
+    )
 
 
 # Declared here, beside the list route and BEFORE every "/{ds_id}" route, so that a later
@@ -1073,6 +1111,11 @@ async def move_data_source(
     Soft-deleted views count. Restoring one afterwards would recreate exactly the
     situation above, so a source with a view in the trash cannot move either.
 
+    A versioned source's graph moves with it, and so do its forks and their jobs: the graph
+    records its workspace, and every tenant check on it reads that. They move FIRST, so when
+    version control refuses (it is busy, or holds drafts or reviews by people of this
+    workspace) or can't be reached, nothing has changed; a failed commit moves them back.
+
     Requires datasource:manage on BOTH workspaces — the decorator covers the source
     workspace; the target is checked below. Moving a source INTO a workspace you
     don't administer would otherwise be a way to plant data in it.
@@ -1136,15 +1179,18 @@ async def move_data_source(
     target_fields = recorder.data_source_target(ds)   # read now: a failed commit expires the row
 
     # The versioned graph and its forks move FIRST, so a refusal (a job still running: 409
-    # job_active) or an unreachable store changes nothing. The other order would leave the
-    # source in B with its history readable only through A.
+    # job_active; drafts or reviews open on them, or a failed enable: 409 with the reason) or an
+    # unreachable store changes nothing. The other order would leave the source in B with its
+    # history readable only through A.
     from backend.app.services.versioning.errors import HTTP_MAPPED
-    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.services.versioning.purge_worker import MoveBlocked
     svc = GraphVersioningService()
     try:
-        await svc.move_graph_workspace(ds_id, target_id, from_workspace_id=workspace_id)
+        moved = await svc.move_graph_workspace(ds_id, target_id, from_workspace_id=workspace_id)
     except HTTP_MAPPED:
         raise
+    except MoveBlocked as blocked:
+        raise HTTPException(status_code=409, detail=str(blocked))
     except Exception:
         logger.exception("could not move the versioned graph of %s", ds_id)
         raise HTTPException(
@@ -1173,6 +1219,8 @@ async def move_data_source(
                 "to_workspace_id": target_id,
                 "to_workspace_name": target.name,
                 "actor_id": user.id,
+                # its version history, moved with it; None when external
+                "graph_id": moved[0] if moved else None,
             },
         )
         # Committed here, not at request end, so a failure can still put the graph back.
@@ -1191,7 +1239,7 @@ async def move_data_source(
                   "Try again shortly.")
         try:
             await asyncio.shield(svc.move_graph_workspace(
-                ds_id, workspace_id, from_workspace_id=target_id))
+                ds_id, workspace_id, from_workspace_id=target_id, refuse_open_work=False))
         except Exception:
             logger.exception("data source %s stayed in %s but its versioned graph could not be "
                              "moved back from %s", ds_id, workspace_id, target_id)

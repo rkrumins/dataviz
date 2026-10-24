@@ -102,13 +102,13 @@ def _live():
 
 
 async def list_data_sources(
-    session: AsyncSession, workspace_id: str
+    session: AsyncSession, workspace_id: str, provider_id: Optional[str] = None,
 ) -> List[DataSourceResponse]:
-    result = await session.execute(
-        select(WorkspaceDataSourceORM)
-        .where(WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
-        .order_by(WorkspaceDataSourceORM.created_at)
-    )
+    query = select(WorkspaceDataSourceORM).where(
+        WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
+    if provider_id is not None:
+        query = query.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    result = await session.execute(query.order_by(WorkspaceDataSourceORM.created_at))
     rows = list(result.scalars().all())
     # Resolve each row's mapping so the list reports what is actually in force.
     # The per-row cost is three keyed gets that all hit the session identity map

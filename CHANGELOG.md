@@ -305,10 +305,14 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
   403) and ignores a `dataSourceId` in the body: a fork always gets its own data source id. A graph
   has at most `GRAPHVER_MAX_FORKS_PER_GRAPH` (default `10`) live forks; one more, or restoring a fork
   past that, answers **409 `fork_limit`** `{limit}`. Forks in the trash do not count.
-- Moving a data source to another workspace (`POST /api/v1/workspaces/{ws}/data-sources/{dsId}/move`)
-  moves its versioned graph, its forks at any depth and their jobs with it; before, the history
-  stayed in the old workspace and answered 404 in the new one. The move answers **409 `job_active`**
-  while any of their jobs is pending or running, **409 `graph_moved`** when another move took the
+- Moving a data source to another workspace
+  (`POST /api/v1/admin/workspaces/{ws}/data-sources/{dsId}/move`) moves its versioned graph, its
+  forks at any depth and their jobs with it; before, the history stayed in the old workspace and
+  answered 404 in the new one. The move answers **409 `job_active`** while any of their jobs is
+  pending or running, **409** with the reason while turning on version control for it failed and
+  waits to be resumed or cancelled, or while the graph or one of its live forks holds open drafts
+  or review requests (publish or abandon them first: their authors work in the old workspace),
+  **409 `graph_moved`** when another move took the
   graph elsewhere, **503 `lock_busy`** when a publish, sync or bulk ingest holds one of the graphs
   past `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS`, and 503 with nothing changed when the version store can't
   be reached. A move
@@ -472,6 +476,71 @@ grants can't be read.
   `allowMassDelete`.
 - A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
   key as unregistered meanwhile, as it does for a data source in the trash.
+
+---
+
+## [Unreleased] — Follow a workspace's graphs and their history from a script
+
+### Added
+
+**For integrators: a workspace's graphs, and which are versioned.**
+`GET /api/v1/admin/workspaces/{ws}/data-sources` takes `providerId` to list one provider's graphs,
+and `include=versioning` to add each one's version control:
+`{enabled, graphId, kind, mainHeadCommitSeq, mainHeadCommitId, mainHeadCommittedAt}`.
+`mainHeadCommitSeq` is a change watermark — a graph's history has something new only when it
+moved — so one call per workspace tells a script which histories to read. `enabled` stays `false`
+while version control is still being turned on, so a `graphId` it hands out never vanishes.
+
+**For integrators: a commit log you can walk end to end.**
+`GET /api/v1/{ws}/versioning/graphs/{graph_id}/commits` takes `before` and `after`, exclusive bounds
+on `commit_seq`, and answers `hasMore` and `nextBefore`. A walk never skips or repeats a commit
+while new ones land, and `after` fetches only what is new. Every field of a commit is now described
+in the API explorer.
+
+**Graph Metadata & History API**, a new page on the integrators' reading path: every field of both
+answers, every kind of commit, what a script can rely on, and a polling loop that keeps a copy in
+step.
+
+### Changed
+
+- The log of `main` stops at `main`'s head. It no longer shows the import commit of a "turn on
+  version control" that hasn't finished — or failed.
+- On the commit log, `before`/`after` with `offset`, or on a view's history across drafts, answer
+  `400`.
+- Data-source answers carry `versioning`, `null` unless asked for.
+- The `workspace.datasource.moved` event names the versioned graph that moved with the source
+  (`graph_id`).
+
+### Fixed
+
+- A graph in the trash still answered its routes by id — history, state, drafts and reviews, even
+  while its purge ran. It now answers `404` until its data source is restored.
+- Moving a versioned data source left its version history behind: the source read as external in
+  its new workspace, and deleting it later left its graph standing for good. The history now moves
+  with it, forks included; when a move waits, and what it answers, is under Versioning Stage 2 →
+  Upgrading.
+
+### Security
+
+- After a move, a versioned data source's history, state, drafts and reviews stayed readable by
+  the members of its **old** workspace, through the versioning routes. They now answer only in the
+  workspace the source lives in.
+
+### Upgrading
+
+- Nothing to run. When the versioning worker's bootstrap lane starts, and every 15 minutes after
+  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind, with
+  its forks, under its data source's workspace — and puts it in the trash if its source is there.
+  A graph a job is still pending or running on is filed on a later pass, once the job ends.
+
+### Known limitations
+
+- No push notification of new commits yet: poll the data-source list and compare
+  `mainHeadCommitSeq`.
+- The list answers for one workspace at a time, and a key limited to particular data sources
+  can't call it; `GET /api/v1/{ws}/versioning/resolve?dataSourceId=` finds each source's graph.
+- The data-source list doesn't fill in its aggregation fields; a source's readiness
+  (`GET /api/v1/admin/data-sources/{id}/readiness`) has them.
 
 ---
 

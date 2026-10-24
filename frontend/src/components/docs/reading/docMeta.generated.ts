@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-12",
+    "updated": "2026-10-20",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -59,8 +59,12 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/local-integration-testing.md"
   },
   "api-guide": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-20",
     "path": "docs/API_GUIDE.md"
+  },
+  "graph-metadata-api": {
+    "updated": "2026-10-20",
+    "path": "docs/GRAPH_METADATA_API.md"
   },
   "backend": {
     "updated": "2026-10-11",
@@ -135,7 +139,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/05-ontology-governance.md"
   },
   "versioning-api-reference": {
-    "updated": "2026-10-12",
+    "updated": "2026-10-20",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-frontend-integration": {
@@ -321,7 +325,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "api-keys": {
-    "updated": "",
+    "updated": "2026-10-20",
     "path": "docs/guide/API_KEYS.md"
   },
   "versioning-change-control": {
@@ -345,7 +349,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-20",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {

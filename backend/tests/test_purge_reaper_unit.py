@@ -119,7 +119,7 @@ async def test_one_failing_data_source_does_not_stop_the_pass(monkeypatch):
     out = await purge_worker.Reaper(app_session_factory=app, graphver_session_factory=gv).run_once()
 
     assert asked == ["ds_a", "ds_b"]
-    assert out == {"queued": 1, "reaped": 0, "orphans": 0, "revived": 0}
+    assert out == {"queued": 1, "reaped": 0, "orphans": 0, "revived": 0, "rehomed": 0}
     assert deleted == []
 
 
@@ -188,7 +188,7 @@ async def test_the_reaper_queues_the_purge_of_an_expired_trashed_fork(monkeypatc
 
     assert asked[1] == {"graph_id": "f2", "workspace_id": "ws1", "actor": "reaper",
                         "require_tombstoned": True, "session_factory": gv}
-    assert out == {"queued": 1, "reaped": 0, "orphans": 0, "revived": 0}
+    assert out == {"queued": 1, "reaped": 0, "orphans": 0, "revived": 0, "rehomed": 0}
     (sql,) = [_sql(s) for s in seen if "fork_parent_graph_id IS NOT NULL" in str(s)]
     assert "deleted_at IS NOT NULL" in sql and "deleted_at <" in sql
     assert "NOT (EXISTS" in sql and "'purge'" in sql, "a fork whose purge exists is skipped"
