@@ -176,8 +176,10 @@ and never the query text.
 ## Errors
 
 Every refusal is `{"detail": {"code", "message", "requestId", "position"?}}` in
-plain words (a body that doesn't match the model — a query over 20,000
-characters, say — gets the usual `422` validation answer). None names a host, a port, a credential or a stack trace; a failure
+plain words, with two exceptions answered before the route runs: with the switch
+off, the shared feature gate's `{"detail": {"type": "feature_disabled",
+"feature", "message"}}`, and for a body that doesn't match the model — a query
+over 20,000 characters, say — the usual `422` validation answer. None names a host, a port, a credential or a stack trace; a failure
 on the server says only that it failed and quotes the request id, which finds
 the log line.
 
