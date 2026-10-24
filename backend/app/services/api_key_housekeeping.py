@@ -63,12 +63,20 @@ async def remind_once(session: AsyncSession) -> int:
         session, within=REMIND_AHEAD, batch=_BATCH,
     )
     reminded = 0
+    # Who answers for a key depends on its account and who made it, not on
+    # the key: worked out once for each, however many keys share them.
+    audiences: dict[tuple[str, Optional[str]], service_account_standing.KeyAudience] = {}
     for key in keys:
         created = _instant(key.created_at)
         expires = _instant(key.expires_at)
         if created is None or expires is None or expires - created <= REMIND_AHEAD:
             continue
-        audience = await service_account_standing.key_audience(session, key.user_id)
+        whose = (key.user_id, key.created_by)
+        if whose not in audiences:
+            audiences[whose] = await service_account_standing.key_audience(
+                session, key.user_id, maker=key.created_by,
+            )
+        audience = audiences[whose]
         await notification_repo.notify(
             session,
             user_ids=audience.user_ids,

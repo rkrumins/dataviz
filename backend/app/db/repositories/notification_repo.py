@@ -67,54 +67,54 @@ async def notify(
     ``kind`` + ``resource_id`` — a stuck source must not re-ring every hour.
 
     A service account has no inbox — nobody signs in as one — so what is said
-    to one reaches the people who answer for it: its managers in good
-    standing, or while it has none its administrators. Their copy names the
-    account and links to its page.
+    to one reaches the people who answer for it (``key_audience``). Their copy
+    names the account and links to its page; someone who answers for two of
+    the accounts told, or is told themselves too, gets each.
 
     Best-effort: a notification failure must not roll back the action it
-    describes.
+    describes — the work is done under a savepoint, so a database error here
+    is undone without aborting the caller's transaction.
     """
     wanted = {u for u in user_ids if u}
-    accounts = {u for u in wanted if is_service_account(u)}
-    # Recipient → (title, link) of the copy they get.
-    copies = {u: (title, link) for u in wanted - accounts}
     try:
-        if accounts:
-            from backend.app.services.service_account_standing import key_audience
+        async with session.begin_nested():
+            # (recipient, title) → link: one copy for each thing they are told.
+            copies: dict[tuple[str, str], Optional[str]] = {
+                (u, title): link for u in wanted if not is_service_account(u)
+            }
+            accounts = sorted(u for u in wanted if is_service_account(u))
+            if accounts:
+                from backend.app.services.service_account_standing import key_audience
 
-            for account in sorted(accounts):
-                audience = await key_audience(session, account)
-                for uid in audience.user_ids:
-                    copies.setdefault(uid, (f"For “{audience.account}”: {title}", audience.link))
-        copies.pop(actor_id, None)
-        if not copies:
-            return 0
-        if dedupe_unread and resource_id:
-            already = (await session.execute(
-                select(NotificationORM.user_id).where(
-                    NotificationORM.user_id.in_(list(copies)),
-                    NotificationORM.kind == kind,
-                    NotificationORM.resource_id == resource_id,
-                    NotificationORM.read_at.is_(None),
-                )
-            )).all()
-            for row in already:
-                copies.pop(row[0], None)
-            if not copies:
-                return 0
-        for uid, (said, where) in copies.items():
-            session.add(NotificationORM(
-                user_id=uid,
-                kind=kind,
-                title=said,
-                body=body,
-                link=where,
-                actor_id=actor_id,
-                resource_type=resource_type,
-                resource_id=resource_id,
-            ))
-        await session.flush()
-        return len(copies)
+                for account in accounts:
+                    audience = await key_audience(session, account)
+                    said = f"For “{audience.account}”: {title}"
+                    for uid in audience.user_ids:
+                        copies.setdefault((uid, said), audience.link)
+            copies = {copy: where for copy, where in copies.items() if copy[0] != actor_id}
+            if dedupe_unread and resource_id and copies:
+                already = {row[0] for row in (await session.execute(
+                    select(NotificationORM.user_id).where(
+                        NotificationORM.user_id.in_(sorted({uid for uid, _ in copies})),
+                        NotificationORM.kind == kind,
+                        NotificationORM.resource_id == resource_id,
+                        NotificationORM.read_at.is_(None),
+                    )
+                )).all()}
+                copies = {copy: where for copy, where in copies.items() if copy[0] not in already}
+            for (uid, said), where in copies.items():
+                session.add(NotificationORM(
+                    user_id=uid,
+                    kind=kind,
+                    title=said,
+                    body=body,
+                    link=where,
+                    actor_id=actor_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                ))
+            await session.flush()
+            return len(copies)
     except Exception:  # noqa: BLE001 — audit aid, never the write contract
         logger.exception("notify failed (kind=%s resource=%s)", kind, resource_id)
         return 0

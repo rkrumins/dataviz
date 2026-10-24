@@ -460,6 +460,28 @@ async def test_what_is_said_to_an_account_reaches_those_who_answer_for_it(
     ]
 
 
+async def test_who_answers_for_two_accounts_hears_of_each(test_client, db_session, people, monkeypatch):
+    one = (await _create(test_client, name="One"))["id"]
+    two = (await _create(test_client, name="Two"))["id"]
+    assert await notification_repo.notify(db_session, user_ids=[one, two], kind="both", title="hello") == 2
+    assert sorted(title for _, title, _ in await _told(db_session, "both")) == [
+        "For “One”: hello", "For “Two”: hello",
+    ]
+
+    # A notice that fails is undone alone: the caller's own work stands.
+    from backend.app.services import service_account_standing
+
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError("nobody to ask")
+
+    monkeypatch.setattr(service_account_standing, "key_audience", unavailable)
+    db_session.add(GroupORM(id="grp_kept", name="Kept"))
+    assert await notification_repo.notify(db_session, user_ids=[one], kind="failed", title="hello") == 0
+    await db_session.commit()
+    assert await db_session.get(GroupORM, "grp_kept") is not None
+    assert await _told(db_session, "failed") == []
+
+
 # ── For managers ────────────────────────────────────────────────────
 
 

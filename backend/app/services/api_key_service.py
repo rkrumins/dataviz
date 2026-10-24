@@ -188,7 +188,9 @@ async def record_rejection(
     )
     if misuse:
         title, body = _MISUSE_COPY[reason]
-        audience = await service_account_standing.key_audience(session, key.user_id)
+        audience = await service_account_standing.key_audience(
+            session, key.user_id, maker=key.created_by,
+        )
         await notification_repo.notify(
             session,
             user_ids=audience.user_ids,

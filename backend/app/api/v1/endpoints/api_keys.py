@@ -2003,7 +2003,7 @@ async def _tell_owner(
 async def _tell_revoked(
     session: AsyncSession, key: ApiKeyORM, admin_id: str, note: Optional[str],
 ) -> None:
-    audience = await service_account_standing.key_audience(session, key.user_id)
+    audience = await service_account_standing.key_audience(session, key.user_id, maker=key.created_by)
     await _tell_owner(
         session, audience, admin_id, resource_id=key.id, note=note,
         title=f"An administrator revoked one of {audience.whose} API keys",

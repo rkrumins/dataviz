@@ -176,20 +176,23 @@ class KeyAudience:
         return f"{whose} key “{key.name}” ({key.token_prefix}…)"
 
 
-async def key_audience(session: AsyncSession, owner_id: str) -> KeyAudience:
-    """Who hears about a key: its owner — or, for a service account's, the
-    people who can act for the account (managers in good standing, and the
-    members of its teams who are), and while there are none, the
-    administrators who appoint them."""
+async def key_audience(
+    session: AsyncSession, owner_id: str, *, maker: Optional[str] = None,
+) -> KeyAudience:
+    """Who hears about a key, or about the account it acts as: a person's own
+    key, its owner. A service account's: its direct managers, and whoever
+    made the key (``maker``) while they can still act for it; failing those, a
+    few members of its managing teams (``service_account_repo.who_answers``);
+    and while nobody can act for it, the administrators who appoint them."""
     if not is_service_account(owner_id):
         return KeyAudience({owner_id}, "/me/api-keys")
     found = await service_account_repo.get(session, owner_id)
     name = found[0].first_name if found else owner_id
     rules = await policy(session)
-    people = (await service_account_repo.people_who_can_act(
-        session, [owner_id], now=datetime.now(timezone.utc),
+    people = await service_account_repo.who_answers(
+        session, owner_id, maker=maker, now=datetime.now(timezone.utc),
         window_days=rules.window_days, passwords_allowed=rules.passwords_allowed,
-    ))[owner_id]
+    )
     if people:
         return KeyAudience(people, f"/me/service-accounts/{owner_id}", name)
     return KeyAudience(await binding_repo.platform_admin_user_ids(session), _admin_link(owner_id), name)

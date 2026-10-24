@@ -403,6 +403,52 @@ async def people_who_can_act(
     return out
 
 
+#: How many members of its managing teams hear about an account when nobody
+#: closer does: enough that someone acts, few enough that a team of thousands
+#: is not paged about every key.
+TEAM_AUDIENCE = 25
+
+
+async def who_answers(
+    session: AsyncSession, account_id: str, *, maker: Optional[str],
+    now: datetime, window_days: Optional[int], passwords_allowed: bool,
+) -> set[str]:
+    """Who hears about a service account: its direct managers in good standing,
+    and, about a key, whoever made it while they can still act for it. Failing
+    those, up to :data:`TEAM_AUDIENCE` members in good standing of its live
+    managing teams, the most recently active first. Empty when nobody can act
+    for it."""
+    rules = dict(now=now, window_days=window_days, passwords_allowed=passwords_allowed)
+    person = aliased(UserORM)
+    out = set((await session.execute(
+        select(person.id)
+        .join(ServiceAccountManagerORM, ServiceAccountManagerORM.user_id == person.id)
+        .where(ServiceAccountManagerORM.service_account_id == account_id, in_good_standing(person, **rules))
+    )).scalars())
+    member = aliased(UserORM)
+    in_a_team = (
+        select(member.id, member.last_active_at)
+        .select_from(ServiceAccountManagerORM)
+        .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
+        .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
+        .join(member, member.id == GroupMemberORM.user_id)
+        .where(
+            ServiceAccountManagerORM.service_account_id == account_id,
+            GroupORM.deleted_at.is_(None), in_good_standing(member, **rules),
+        )
+    )
+    if maker and maker not in out:
+        if (await session.execute(in_a_team.where(member.id == maker).limit(1))).first():
+            out.add(maker)
+    if not out:
+        out = {row.id for row in (await session.execute(
+            in_a_team.distinct()
+            .order_by(member.last_active_at.desc().nulls_last(), member.id)
+            .limit(TEAM_AUDIENCE)
+        )).all()}
+    return out
+
+
 async def add_manager(
     session: AsyncSession, account_id: str, *, user_id: Optional[str] = None,
     group_id: Optional[str] = None, added_by: Optional[str],

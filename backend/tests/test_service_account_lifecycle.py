@@ -399,6 +399,47 @@ async def test_a_role_widened_after_it_was_given_brings_the_account_none_of_it(d
     assert permission_service.has_permission(person, "workspace:admin", workspace_id="ws_a")
 
 
+async def test_a_large_team_is_not_paged_about_every_key(db_session):
+    """An account's notices go to its direct managers and whoever made the
+    key; to a few of its team, the most recently active, when nobody closer
+    can act; and to its administrators when nobody can."""
+    db_session.add_all(_account("svc_aud"))
+    db_session.add_all([_person("usr_direct"), _person("usr_root"), _person("usr_stranger")])
+    db_session.add(GroupORM(id="grp_big", name="Everyone"))
+    members = [f"usr_m{i:02d}" for i in range(30)]
+    for i, uid in enumerate(members):
+        row = _person(uid)
+        row.last_active_at = _ago(30 - i)
+        db_session.add(row)
+    await db_session.flush()
+    db_session.add_all([GroupMemberORM(group_id="grp_big", user_id=uid) for uid in members])
+    db_session.add_all([
+        ServiceAccountManagerORM(service_account_id="svc_aud", user_id="usr_direct"),
+        ServiceAccountManagerORM(service_account_id="svc_aud", group_id="grp_big"),
+        RoleBindingORM(
+            subject_type="user", subject_id="usr_root", role_name="super_admin",
+            scope_type="global", scope_id=None,
+        ),
+    ])
+    await db_session.commit()
+
+    async def told(maker=None):
+        return (await service_account_standing.key_audience(db_session, "svc_aud", maker=maker)).user_ids
+
+    assert await told() == {"usr_direct"}
+    assert await told("usr_m03") == {"usr_direct", "usr_m03"}
+    assert await told("usr_stranger") == {"usr_direct"}
+
+    (await db_session.get(UserORM, "usr_direct")).status = "suspended"
+    await db_session.commit()
+    assert await told() == set(members[-25:])
+
+    for uid in members:
+        (await db_session.get(UserORM, uid)).status = "suspended"
+    await db_session.commit()
+    assert await told() == {"usr_root"}
+
+
 # ── Never a session ─────────────────────────────────────────────────
 
 
