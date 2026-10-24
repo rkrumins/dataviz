@@ -16,21 +16,29 @@ import { Badge } from '@/components/ui/Badge'
 import { serviceAccountService, type ServiceAccount } from '@/services/serviceAccountService'
 import { SubjectPicker, type Subject } from './SubjectPicker'
 
-/** The accounts `userId`'s leaving touches, with what it involves for each;
- *  null while loading, and for nobody. */
-export function useManagedBy(userId: string | null): { accounts: ServiceAccount[] | null; error: string | null } {
-    const [answer, setAnswer] = useState<{ userId: string; accounts: ServiceAccount[] | null; error: string | null } | null>(null)
+/** How many accounts the panel lists; a hand-over and revoking cover them all. */
+const LISTED = 200
+
+/** The accounts `userId`'s leaving touches, with what it involves for each
+ *  (up to {@link LISTED} of `total`); null while loading, and for nobody. */
+export function useManagedBy(userId: string | null): { accounts: ServiceAccount[] | null; total: number; error: string | null } {
+    const [answer, setAnswer] = useState<{ userId: string; accounts: ServiceAccount[] | null; total: number; error: string | null } | null>(null)
     useEffect(() => {
         if (!userId) return
         let live = true
-        serviceAccountService.list({ managedBy: userId, limit: 200 })
-            .then((res) => { if (live) setAnswer({ userId, accounts: res.items, error: null }) })
+        serviceAccountService.list({ managedBy: userId, limit: LISTED })
+            .then((res) => { if (live) setAnswer({ userId, accounts: res.items, total: res.total, error: null }) })
             .catch((err: unknown) => {
-                if (live) setAnswer({ userId, accounts: null, error: err instanceof Error ? err.message : 'Their service accounts could not be read.' })
+                if (live) setAnswer({ userId, accounts: null, total: 0, error: err instanceof Error ? err.message : 'Their service accounts could not be read.' })
             })
         return () => { live = false }
     }, [userId])
-    return answer && answer.userId === userId ? answer : { accounts: null, error: null }
+    return answer && answer.userId === userId ? answer : { accounts: null, total: 0, error: null }
+}
+
+/** Whether a hand-over has seats to move: one listed, or more not listed. */
+export function holdsSeats(accounts: ServiceAccount[], total: number): boolean {
+    return accounts.some((a) => a.handOver?.seat) || total > accounts.length
 }
 
 function summary(name: string, accounts: ServiceAccount[]): string {
@@ -60,9 +68,11 @@ function Standing({ account }: { account: ServiceAccount }) {
     return <Badge tone="neutral" size="md">Made its keys</Badge>
 }
 
-export function HandOverPanel({ person, accounts, successor, onSuccessor, revokeKeys, onRevokeKeys }: {
+export function HandOverPanel({ person, accounts, total = accounts.length, successor, onSuccessor, revokeKeys, onRevokeKeys }: {
     person: { id: string; name: string }
     accounts: ServiceAccount[]
+    /** How many there are in all, when only some are listed. */
+    total?: number
     successor: Subject | null
     onSuccessor: (subject: Subject | null) => void
     /** Whether to revoke the keys they made, when the panel may offer it. */
@@ -70,7 +80,6 @@ export function HandOverPanel({ person, accounts, successor, onSuccessor, revoke
     /** Offers to revoke the keys they made; without it, the panel advises rotating them. */
     onRevokeKeys?: (revoke: boolean) => void
 }) {
-    const seats = accounts.filter((a) => a.handOver?.seat).length
     const throughTeams = accounts.some((a) => !a.handOver?.seat && a.handOver?.teams.length)
     const theirKeys = accounts.flatMap((a) => (a.handOver?.keysCreatedBy ?? []).map((k) => ({ ...k, account: a.name })))
     const them = theirKeys.length === 1 ? 'it' : 'them'
@@ -78,6 +87,12 @@ export function HandOverPanel({ person, accounts, successor, onSuccessor, revoke
     return (
         <div className="space-y-3">
             <p className="text-sm text-ink-secondary">{summary(person.name, accounts)}</p>
+            {total > accounts.length && (
+                <p className="text-xs text-ink-muted">
+                    The first {accounts.length} of {total} are listed. A hand-over moves every seat they hold, and
+                    revoking covers every key they made.
+                </p>
+            )}
             <ul aria-label="Service accounts they manage" className="rounded-xl border border-black/[0.08] dark:border-white/[0.10] divide-y divide-black/[0.05] dark:divide-white/[0.06]">
                 {accounts.map((a) => (
                     <li key={a.id} className="flex items-center gap-2.5 px-3 py-2">
@@ -118,7 +133,7 @@ export function HandOverPanel({ person, accounts, successor, onSuccessor, revoke
                     )}
                 </div>
             )}
-            {seats === 0 ? (
+            {!holdsSeats(accounts, total) ? (
                 <p className="text-xs text-ink-muted">They hold no seat themselves, so there is nothing to hand over.</p>
             ) : successor ? (
                 <div className="flex items-center gap-2.5 p-3 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/20">

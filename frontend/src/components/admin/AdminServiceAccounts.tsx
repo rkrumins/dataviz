@@ -21,7 +21,7 @@ import {
 
 import { KeyDialog } from '@/components/apiKeys/KeyDialog'
 import { PageContainer } from '@/components/layout/PageContainer'
-import { HandOverPanel, useManagedBy } from '@/components/serviceAccounts/HandOver'
+import { HandOverPanel, holdsSeats, useManagedBy } from '@/components/serviceAccounts/HandOver'
 import { SubjectPicker, subjectKey, type Subject } from '@/components/serviceAccounts/SubjectPicker'
 import { ManagerRow, StandingChip, standingOf } from '@/components/serviceAccounts/parts'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -355,7 +355,7 @@ function CreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
 function HandOverDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
     const { notify } = useAppNotifications()
     const [person, setPerson] = useState<Subject | null>(null)
-    const { accounts, error } = useManagedBy(person?.id ?? null)
+    const { accounts, total, error } = useManagedBy(person?.id ?? null)
     const [successor, setSuccessor] = useState<Subject | null>(null)
     const [busy, setBusy] = useState(false)
 
@@ -387,7 +387,7 @@ function HandOverDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
                         variant="primary"
                         size="sm"
                         leftIcon={ArrowRightLeft}
-                        disabled={!person || !successor || !accounts?.some((a) => a.handOver?.seat)}
+                        disabled={!person || !successor || !accounts || !holdsSeats(accounts, total)}
                         loading={busy}
                         onClick={() => void handOver()}
                     >
@@ -420,7 +420,7 @@ function HandOverDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
                     ) : accounts.length === 0 ? (
                         <p className="text-sm text-ink-muted">{person.name} manages no service account, and made no key that still works.</p>
                     ) : (
-                        <HandOverPanel person={person} accounts={accounts} successor={successor} onSuccessor={setSuccessor} />
+                        <HandOverPanel person={person} accounts={accounts} total={total} successor={successor} onSuccessor={setSuccessor} />
                     )}
                 </div>
             )}
@@ -653,20 +653,32 @@ function AccountDialog({ accountId, onClose, onChanged }: {
     )
 }
 
-/** A workspace, then a role in it that neither administers it nor lets people in. */
+/** How many workspaces the picker offers at once; more are found by name. */
+const WORKSPACES_SHOWN = 20
+
+/** A workspace, found by name, then a role in it that neither administers it nor lets people in. */
 function RoleGrant({ busy, onGrant }: { busy: boolean; onGrant: (workspaceId: string, role: string) => Promise<boolean> }) {
-    const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[] | null>(null)
-    const [workspaceId, setWorkspaceId] = useState('')
+    const [find, setFind] = useState('')
+    const search = useDebouncedValue(find.trim(), 250)
+    const [found, setFound] = useState<{ items: { id: string; name: string }[]; total: number } | null>(null)
+    const [workspace, setWorkspace] = useState<{ id: string; name: string } | null>(null)
+    const workspaceId = workspace?.id ?? ''
     const [roles, setRoles] = useState<{ workspaceId: string; roles: RequestableRole[] } | null>(null)
     const [role, setRole] = useState('')
 
     useEffect(() => {
         let live = true
-        workspaceService.list()
-            .then((list) => { if (live) setWorkspaces(list.map((w) => ({ id: w.id, name: w.name }))) })
-            .catch(() => { if (live) setWorkspaces([]) })
+        workspaceService.listPage({ limit: WORKSPACES_SHOWN, search })
+            .then((page) => {
+                if (live) setFound({ items: page.items.map((w) => ({ id: w.id, name: w.name })), total: page.totalCount })
+            })
+            .catch(() => { if (live) setFound({ items: [], total: 0 }) })
         return () => { live = false }
-    }, [])
+    }, [search])
+    // The chosen workspace stays on offer while another name is searched for.
+    const offeredWorkspaces = workspace && !found?.items.some((w) => w.id === workspace.id)
+        ? [workspace, ...(found?.items ?? [])]
+        : found?.items ?? []
     useEffect(() => {
         if (!workspaceId) return
         let live = true
@@ -680,9 +692,24 @@ function RoleGrant({ busy, onGrant }: { busy: boolean; onGrant: (workspaceId: st
     const select = 'h-9 px-2.5 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-canvas text-sm text-ink outline-none focus:border-indigo-500'
     return (
         <div className="flex flex-wrap items-center gap-2">
-            <select aria-label="Workspace" value={workspaceId} onChange={(e) => { setWorkspaceId(e.target.value); setRole('') }} className={cn(select, 'min-w-[10rem] flex-1')}>
-                <option value="">{workspaces === null ? 'Loading workspaces…' : 'Choose a workspace'}</option>
-                {(workspaces ?? []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            <input
+                type="search"
+                aria-label="Find a workspace"
+                placeholder="Find a workspace"
+                value={find}
+                onChange={(e) => setFind(e.target.value)}
+                className={cn(select, 'min-w-[9rem] flex-1')}
+            />
+            <select
+                aria-label="Workspace"
+                value={workspaceId}
+                onChange={(e) => { setWorkspace(offeredWorkspaces.find((w) => w.id === e.target.value) ?? null); setRole('') }}
+                className={cn(select, 'min-w-[10rem] flex-1')}
+            >
+                <option value="">
+                    {found === null ? 'Loading workspaces…' : found.items.length ? 'Choose a workspace' : 'No workspace by that name'}
+                </option>
+                {offeredWorkspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
             <select aria-label="Role" value={role} onChange={(e) => setRole(e.target.value)} disabled={!workspaceId} className={cn(select, 'min-w-[9rem]')}>
                 <option value="">Choose a role</option>
@@ -697,6 +724,11 @@ function RoleGrant({ busy, onGrant }: { busy: boolean; onGrant: (workspaceId: st
             >
                 Give role
             </Button>
+            {found && found.total > found.items.length && (
+                <p className="w-full text-xs text-ink-muted">
+                    Showing {found.items.length} of {found.total} workspaces — find others by name.
+                </p>
+            )}
         </div>
     )
 }

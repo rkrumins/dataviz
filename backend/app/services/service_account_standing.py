@@ -259,14 +259,17 @@ async def tell_keys_outlive(
     if not keys:
         return
     rules = await policy(session)
-    still = await service_account_repo.people_who_can_act(
-        session, {key.user_id for key in keys}, now=datetime.now(timezone.utc),
-        window_days=rules.window_days, passwords_allowed=rules.passwords_allowed,
+    standing = dict(
+        now=datetime.now(timezone.utc), window_days=rules.window_days,
+        passwords_allowed=rules.passwords_allowed,
     )
-    left: dict[tuple[str, str], list] = {}
+    made: dict[tuple[str, str], list] = {}
     for key in keys:
-        if key.created_by not in still[key.user_id]:
-            left.setdefault((key.user_id, key.created_by), []).append(key)
+        made.setdefault((key.user_id, key.created_by), []).append(key)
+    left = {
+        (account_id, maker): theirs for (account_id, maker), theirs in made.items()
+        if not await service_account_repo.can_act(session, account_id, maker, **standing)
+    }
     if not left:
         return
     names = await user_repo.get_identities_by_ids(session, sorted({maker for _account, maker in left}))

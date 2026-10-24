@@ -193,7 +193,6 @@ async def _accounts_out(
     )
     ids = [user.id for user, _account in rows]
     managers = await service_account_repo.managers(session, ids, **standing)
-    people = await service_account_repo.people_who_can_act(session, ids, **standing)
     made = (
         await service_account_repo.live_keys_created_by(session, ids, managed_by)
         if managed_by else {}
@@ -201,12 +200,15 @@ async def _accounts_out(
     teams = await service_account_repo.teams_through(session, ids, managed_by) if managed_by else {}
     out = []
     for user, account in rows:
+        # Who can act for it — at most two through each team, which tells
+        # nobody, one person and more than one apart.
+        people = set().union(*(m.acting for m in managers[user.id]))
         hand_over = None
         if managed_by:
             seat = any(m.type == "user" and m.id == managed_by for m in managers[user.id])
             hand_over = HandOverFacts(
                 seat=seat, teams=teams[user.id],
-                last_manager=(seat or bool(teams[user.id])) and not (people[user.id] - {managed_by}),
+                last_manager=(seat or bool(teams[user.id])) and not (people - {managed_by}),
                 keys_created_by=[
                     KeyBrief(id=k.id, name=k.name, prefix=k.token_prefix, last_used_at=k.last_used_at)
                     for k in made.get(user.id, [])
@@ -217,7 +219,7 @@ async def _accounts_out(
             status="active" if user.status == "active" else "disabled",
             created_at=user.created_at, created_by=account.created_by,
             managers=[ManagerOut(**m.__dict__) for m in managers[user.id]],
-            managed=bool(people[user.id]), single_manager=len(people[user.id]) == 1,
+            managed=bool(people), single_manager=len(people) == 1,
             unmanaged_since=account.unmanaged_since,
             pauses_at=_pauses_at(account.unmanaged_since, rules.grace_days),
             hand_over=hand_over,
@@ -383,7 +385,7 @@ async def list_service_accounts(
     touches — those they manage, themselves or through a team, and those they
     made a key for that still works — with what it involves."""
     rows, total = await service_account_repo.list_page(
-        session, q=q, status=status_filter, managed_by=managed_by, limit=limit, offset=offset,
+        session, q=q, status=status_filter, leaving=managed_by, limit=limit, offset=offset,
     )
     items, grace = await _accounts_out(session, rows, managed_by=managed_by)
     return ServiceAccountList(items=items, total=total, grace_days=grace)
@@ -439,8 +441,7 @@ async def hand_over(
     to_user, to_group, to_name = await _manager_subject(session, body.to)
     leaving = await user_repo.get_identities_by_ids(session, [body.from_user_id])
     from_name = (leaving.get(body.from_user_id) or {}).get("name") or body.from_user_id
-    rows, _total = await service_account_repo.list_page(session, seat_of=body.from_user_id, limit=1000)
-    names = {user.id: user.first_name for user, _account in rows}
+    names = await service_account_repo.seats_of(session, body.from_user_id)
     wanted = set(names) if body.account_ids is None else set(names) & set(body.account_ids)
     await _may_delegate(session, claims, wanted)
     for account_id in sorted(wanted):
@@ -687,18 +688,18 @@ async def revoke_role(
 
 @me_router.get("", response_model=ServiceAccountList)
 async def list_my_service_accounts(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=100_000),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """The service accounts you answer for, yourself or through a team."""
-    found = [
-        row for row in [
-            await service_account_repo.get(session, account_id)
-            for account_id in await service_account_repo.managed_accounts(session, user.id)
-        ] if row is not None
-    ]
-    items, grace = await _accounts_out(session, found)
-    return ServiceAccountList(items=items, total=len(items), grace_days=grace)
+    """The service accounts you answer for, yourself or through a team, a
+    page at a time."""
+    rows, total = await service_account_repo.list_page(
+        session, managed_by=user.id, limit=limit, offset=offset,
+    )
+    items, grace = await _accounts_out(session, rows)
+    return ServiceAccountList(items=items, total=total, grace_days=grace)
 
 
 @me_router.get("/{account_id}", response_model=ServiceAccountDetail)

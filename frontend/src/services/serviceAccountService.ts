@@ -164,9 +164,9 @@ export const serviceAccountService = {
         return authFetch(`${ADMIN}/hand-over`, { method: 'POST', body: JSON.stringify(body) })
     },
 
-    /** The accounts you manage, yourself or through a team. */
-    mine(): Promise<ServiceAccountList> {
-        return authFetch(MINE)
+    /** The accounts you manage, yourself or through a team, a page at a time. */
+    mine(params: { limit?: number; offset?: number } = {}): Promise<ServiceAccountList> {
+        return authFetch(`${MINE}${query(params)}`)
     },
 
     /** One you manage — or, holding `system:users:manage`, any. */

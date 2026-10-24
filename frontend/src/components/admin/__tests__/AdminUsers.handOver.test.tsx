@@ -168,6 +168,17 @@ describe('suspending someone who manages service accounts', () => {
         expect(handOver).not.toHaveBeenCalled()
     })
 
+    it('says when only some are listed, and still hands over what it cannot list', async () => {
+        list.mockResolvedValue({
+            items: [account({ id: 'svc_team', name: 'Through the team', handOver: { seat: false, teams: ['Data team'], lastManager: false, keysCreatedBy: [] } })],
+            total: 250, graceDays: 14,
+        })
+        await suspendDialog()
+        expect(screen.getByText(/the first 1 of 250 are listed/i)).toBeInTheDocument()
+        expect(screen.getByLabelText('Hand them over to')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Suspend without handing over' })).toBeInTheDocument()
+    })
+
     it('says so when their service accounts cannot be read', async () => {
         list.mockRejectedValue(new Error('The service could not be reached.'))
         render(<AdminUsers />)

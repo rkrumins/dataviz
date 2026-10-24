@@ -89,12 +89,18 @@ function ApiKeysContent() {
     const closeDrawer = useCallback(() => setDrawerKey(null), [])
     // The service accounts you answer for. Most people have none, and the
     // card only appears for those who do — so a failure just leaves it out.
-    const [managed, setManaged] = useState<ServiceAccount[]>([])
+    const [managed, setManaged] = useState<{ items: ServiceAccount[]; total: number }>({ items: [], total: 0 })
     useEffect(() => {
         let live = true
-        serviceAccountService.mine().then((res) => { if (live) setManaged(res.items) }).catch(() => {})
+        serviceAccountService.mine({ limit: MANAGED_PAGE })
+            .then((res) => { if (live) setManaged({ items: res.items, total: res.total }) })
+            .catch(() => {})
         return () => { live = false }
     }, [])
+    const moreManaged = useCallback(async () => {
+        const res = await serviceAccountService.mine({ limit: MANAGED_PAGE, offset: managed.items.length })
+        setManaged((was) => ({ items: [...was.items, ...res.items], total: res.total }))
+    }, [managed.items.length])
 
     useEffect(() => {
         let live = true
@@ -349,7 +355,7 @@ function ApiKeysContent() {
                 </>
             )}
 
-            {managed.length > 0 && <ManagedAccounts accounts={managed} />}
+            {managed.items.length > 0 && <ManagedAccounts accounts={managed.items} total={managed.total} onMore={moreManaged} />}
 
             <div className="flex flex-col items-start gap-2 px-1">
                 <p className="flex items-start gap-2 text-xs text-ink-muted max-w-2xl">
@@ -442,8 +448,17 @@ function Stat({ label, value, suffix, tone, children }: {
     )
 }
 
+/** How many of the service accounts you manage the card shows at a time. */
+const MANAGED_PAGE = 50
+
 /** The service accounts you manage: their keys are made on each one's page. */
-function ManagedAccounts({ accounts }: { accounts: ServiceAccount[] }) {
+function ManagedAccounts({ accounts, total, onMore }: {
+    accounts: ServiceAccount[]
+    total: number
+    onMore: () => Promise<void>
+}) {
+    const [loading, setLoading] = useState(false)
+    const left = total - accounts.length
     return (
         <AccountCard
             icon={Bot}
@@ -470,6 +485,18 @@ function ManagedAccounts({ accounts }: { accounts: ServiceAccount[] }) {
                     )
                 })}
             </ul>
+            {left > 0 && (
+                <div className="pt-3">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        loading={loading}
+                        onClick={() => { setLoading(true); void onMore().catch(() => {}).finally(() => setLoading(false)) }}
+                    >
+                        Show {Math.min(left, MANAGED_PAGE)} more of {total}
+                    </Button>
+                </div>
+            )}
         </AccountCard>
     )
 }

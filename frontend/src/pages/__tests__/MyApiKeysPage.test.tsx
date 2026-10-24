@@ -244,6 +244,20 @@ describe('service accounts you manage', () => {
         expect(within(link).getByText(/needs a manager — keys pause/i)).toBeInTheDocument()
     })
 
+    it('come a page at a time, and the rest on asking', async () => {
+        mine.mockImplementation(({ offset = 0 }: { offset?: number }) => Promise.resolve({
+            items: offset === 0 ? [ACCOUNT] : [{ ...ACCOUNT, id: 'svc_more', name: 'Nightly export' }],
+            total: 2, graceDays: 14,
+        }))
+        render(<MyApiKeysPage />)
+        const card = await screen.findByRole('list', { name: 'Service accounts you manage' })
+        expect(mine).toHaveBeenCalledWith({ limit: 50 })
+        await userEvent.click(screen.getByRole('button', { name: 'Show 1 more of 2' }))
+        expect(await within(card).findByRole('link', { name: /nightly export/i })).toBeInTheDocument()
+        expect(mine).toHaveBeenLastCalledWith({ limit: 50, offset: 1 })
+        expect(screen.queryByRole('button', { name: /more of/ })).not.toBeInTheDocument()
+    })
+
     it('are left out for someone who manages none', async () => {
         render(<MyApiKeysPage />)
         await screen.findByRole('region', { name: 'Your keys' })

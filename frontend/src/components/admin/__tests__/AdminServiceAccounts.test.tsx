@@ -11,7 +11,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { inDays } from '@/components/apiKeys/__tests__/fixtures'
 import type { ServiceAccount, ServiceAccountDetail } from '@/services/serviceAccountService'
 
-const { sa, searchDirectory, can, notify } = vi.hoisted(() => ({
+const { sa, searchDirectory, can, notify, listPage, requestableRoles } = vi.hoisted(() => ({
+    listPage: vi.fn(),
+    requestableRoles: vi.fn(),
     sa: {
         list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), disable: vi.fn(), enable: vi.fn(),
         addManager: vi.fn(), removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(), handOver: vi.fn(),
@@ -23,7 +25,8 @@ const { sa, searchDirectory, can, notify } = vi.hoisted(() => ({
 
 vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: sa }))
 vi.mock('@/services/userDirectoryService', () => ({ searchDirectory }))
-vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: () => Promise.resolve([]) } }))
+vi.mock('@/services/workspaceService', () => ({ workspaceService: { listPage } }))
+vi.mock('@/services/accessRequestsService', () => ({ accessRequestsService: { requestableRoles } }))
 vi.mock('@/store/auth', () => ({
     usePermission: (perm: string) => (perm === 'system:users:manage' ? can.mintAny : true),
 }))
@@ -60,6 +63,8 @@ beforeEach(() => {
         total: 3, graceDays: 14,
     })
     sa.get.mockResolvedValue(detail())
+    listPage.mockResolvedValue({ items: [], totalCount: 0 })
+    requestableRoles.mockResolvedValue({ roles: [{ name: 'workspace_viewer', description: null, isSystem: true }] })
     searchDirectory.mockResolvedValue({ users: [], groups: [{ id: 'grp_data', name: 'Data platform', memberCount: 4 }] })
 })
 
@@ -127,6 +132,27 @@ describe('one account', () => {
         const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
         expect(await within(dialog).findByRole('link', { name: /see them/i })).toHaveAttribute('href', '/admin/api-keys?ownerId=svc_sync')
         expect(within(dialog).queryByRole('link', { name: /make or revoke its keys/i })).not.toBeInTheDocument()
+    })
+
+    it('finds the workspace to give a role in by name, a page at a time', async () => {
+        listPage.mockImplementation(({ search }: { search?: string }) => Promise.resolve(search
+            ? { items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 }
+            : { items: Array.from({ length: 20 }, (_, n) => ({ id: `ws_${n}`, name: `Workspace ${n}` })), totalCount: 312 }))
+        sa.grantRole.mockResolvedValue({ bindingId: 'rb_1', workspaceId: 'ws_sales', role: 'workspace_viewer' })
+        render(<AdminServiceAccounts />)
+        await userEvent.click(await screen.findByText('Metadata sync'))
+        const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
+        expect(await within(dialog).findByText('Showing 20 of 312 workspaces — find others by name.')).toBeInTheDocument()
+        expect(listPage).toHaveBeenCalledWith({ limit: 20, search: '' })
+
+        await userEvent.type(within(dialog).getByLabelText('Find a workspace'), 'sales')
+        await within(dialog).findByRole('option', { name: 'Sales' })
+        expect(listPage).toHaveBeenLastCalledWith({ limit: 20, search: 'sales' })
+        await userEvent.selectOptions(within(dialog).getByLabelText('Workspace'), 'ws_sales')
+        await within(dialog).findByRole('option', { name: 'Workspace viewer' })
+        await userEvent.selectOptions(within(dialog).getByLabelText('Role'), 'workspace_viewer')
+        await userEvent.click(within(dialog).getByRole('button', { name: /give role/i }))
+        await waitFor(() => expect(sa.grantRole).toHaveBeenCalledWith('svc_sync', { workspaceId: 'ws_sales', role: 'workspace_viewer' }))
     })
 
     it('stops every key at once when disabled', async () => {

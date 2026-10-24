@@ -663,6 +663,70 @@ async def test_who_answers_for_two_accounts_hears_of_each(test_client, db_sessio
 # ── For managers ────────────────────────────────────────────────────
 
 
+async def test_a_manager_reads_their_accounts_a_page_at_a_time(test_client, db_session, people):
+    db_session.add(GroupMemberORM(group_id="grp_ops", user_id=ADMIN))
+    await db_session.commit()
+    await _create(test_client, name="Alpha", managers=({"type": "user", "id": ADMIN},))
+    for name in ("Bravo", "Charlie"):
+        await _create(test_client, name=name, managers=({"type": "group", "id": "grp_ops"},))
+    await _create(test_client, name="Delta")
+    with claims():
+        first = (await test_client.get("/api/v1/me/service-accounts", params={"limit": 2})).json()
+        rest = (await test_client.get("/api/v1/me/service-accounts", params={"limit": 2, "offset": 2})).json()
+    assert (first["total"], [i["name"] for i in first["items"]]) == (3, ["Alpha", "Bravo"])
+    assert [i["name"] for i in rest["items"]] == ["Charlie"]
+
+
+async def test_a_team_is_counted_once_a_page_and_each_person_once(test_client, db_session, people):
+    """However many accounts a team manages, its members are counted once
+    for the page; and someone who manages an account both themselves and
+    through a team is one person, not two."""
+    from backend.app.db.repositories import service_account_repo
+    from sqlalchemy import event
+
+    both = await _create(test_client, name="Both", managers=(
+        {"type": "user", "id": "usr_bea"}, {"type": "group", "id": "grp_ops"},
+    ))
+    db_session.add_all([GroupORM(id="grp_crowd", name="Crowd")])
+    await db_session.flush()
+    db_session.add_all([
+        GroupMemberORM(group_id="grp_crowd", user_id=u) for u in ("usr_ada", "usr_bea", ADMIN, "usr_cid")
+    ])
+    await db_session.commit()
+    crowd = await _create(test_client, name="Crowd", managers=({"type": "group", "id": "grp_crowd"},))
+
+    statements = []
+    engine = db_session.bind.sync_engine
+
+    def _count(*_args):
+        statements.append(1)
+
+    async def listed():
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", _count)
+        try:
+            body = (await test_client.get(BASE)).json()
+        finally:
+            event.remove(engine, "before_cursor_execute", _count)
+        return {i["name"]: i for i in body["items"]}, len(statements)
+
+    items, few = await listed()
+    assert items["Both"]["singleManager"] is True
+    team = next(m for m in items["Crowd"]["managers"] if m["type"] == "group")
+    assert (team["membersInGoodStanding"], items["Crowd"]["singleManager"]) == (3, False)
+    for n in range(6):
+        await _create(test_client, name=f"Crowd {n}", managers=({"type": "group", "id": "grp_crowd"},))
+    items, many = await listed()
+    assert len(items) == 8 and many == few
+    assert await service_account_repo.add_manager(
+        db_session, crowd["id"], group_id="grp_crowd", added_by=ADMIN,
+    ) is False
+    # The duplicate is turned away under a savepoint: the session carries on.
+    assert {m["id"] for m in (await test_client.get(f"{BASE}/{both['id']}")).json()["managers"]} == {
+        "usr_bea", "grp_ops",
+    }
+
+
 async def test_a_manager_finds_the_accounts_they_answer_for(test_client, db_session, people):
     mine = await _create(test_client, name="Mine", managers=({"type": "user", "id": ADMIN},))
     theirs = await _create(test_client, name="Theirs")

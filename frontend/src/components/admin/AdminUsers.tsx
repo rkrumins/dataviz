@@ -37,7 +37,7 @@ import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { apiKeyService } from '@/services/apiKeyService'
 import { serviceAccountService } from '@/services/serviceAccountService'
-import { HandOverPanel, useManagedBy } from '@/components/serviceAccounts/HandOver'
+import { HandOverPanel, holdsSeats, useManagedBy } from '@/components/serviceAccounts/HandOver'
 import type { Subject } from '@/components/serviceAccounts/SubjectPicker'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -417,12 +417,12 @@ export function AdminUsers() {
     // Suspending someone who manages service accounts: hand them over first,
     // so nothing is left with nobody answering for it — and revoke the keys
     // they made, which they may have kept a copy of.
-    const { accounts: managedAccounts, error: managedError } = useManagedBy(
+    const { accounts: managedAccounts, total: managedTotal, error: managedError } = useManagedBy(
         modal?.kind === 'suspend' && canHandOver ? modal.userId : null,
     )
     const [successor, setSuccessor] = useState<Subject | null>(null)
     const [revokeMade, setRevokeMade] = useState(false)
-    const seats = managedAccounts?.filter((a) => a.handOver?.seat) ?? []
+    const hasSeats = managedAccounts ? holdsSeats(managedAccounts, managedTotal) : false
 
     // Reset token display
     const [generatedToken, setGeneratedToken] = useState<{ token: string; expiresAt: string } | null>(null)
@@ -609,7 +609,7 @@ export function AdminUsers() {
     const handleSuspendConfirm = async () => {
         if (modal?.kind !== 'suspend') return
         const who = nameOf(modal.userId)
-        const to = successor && seats.length ? successor : null
+        const to = successor && hasSeats ? successor : null
         const revoke = revokeMade && canRevokeKeys && !!managedAccounts?.some((a) => a.handOver?.keysCreatedBy.length)
         await withAction(modal.userId, async () => {
             // Revoked first, so the hand-over doesn't tell the successor of keys about to go.
@@ -1378,6 +1378,7 @@ export function AdminUsers() {
                                             <HandOverPanel
                                                 person={{ id: modal.userId, name: modal.name }}
                                                 accounts={managedAccounts}
+                                                total={managedTotal}
                                                 successor={successor}
                                                 onSuccessor={setSuccessor}
                                                 revokeKeys={revokeMade}
@@ -1393,7 +1394,7 @@ export function AdminUsers() {
                                         </div>
                                     )}
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
-                                        confirmLabel={seats.length > 0
+                                        confirmLabel={hasSeats
                                             ? (successor ? 'Hand over and suspend' : 'Suspend without handing over')
                                             : 'Suspend User'}
                                         confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"

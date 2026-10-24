@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
@@ -278,15 +279,15 @@ async def list_page(
     q: Optional[str] = None,
     status: Optional[str] = None,
     managed_by: Optional[str] = None,
-    seat_of: Optional[str] = None,
+    leaving: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[tuple[UserORM, ServiceAccountORM]], int]:
     """Service accounts by name: those matching ``q`` (name or description),
-    ``active`` or ``disabled``; those a person's leaving touches
-    (``managed_by``): the ones they manage, themselves or through a live team,
-    and the ones they made a key for that still works; or those they hold a
-    seat on themselves (``seat_of``)."""
+    ``active`` or ``disabled``; those a person manages, themselves or through
+    a live team (``managed_by``); or those a person's leaving touches
+    (``leaving``): the ones they manage, and the ones they made a key for
+    that still works."""
     stmt = (
         select(UserORM, ServiceAccountORM)
         .join(ServiceAccountORM, ServiceAccountORM.user_id == UserORM.id)
@@ -306,12 +307,15 @@ async def list_page(
         stmt = stmt.where(or_(
             ServiceAccountORM.user_id.in_(_seats(managed_by)),
             ServiceAccountORM.user_id.in_(_team_seats(managed_by)),
+        ))
+    if leaving:
+        stmt = stmt.where(or_(
+            ServiceAccountORM.user_id.in_(_seats(leaving)),
+            ServiceAccountORM.user_id.in_(_team_seats(leaving)),
             ServiceAccountORM.user_id.in_(
-                select(ApiKeyORM.user_id).where(ApiKeyORM.created_by == managed_by, _in_date())
+                select(ApiKeyORM.user_id).where(ApiKeyORM.created_by == leaving, _in_date())
             ),
         ))
-    if seat_of:
-        stmt = stmt.where(ServiceAccountORM.user_id.in_(_seats(seat_of)))
     total = int((await session.execute(
         select(func.count()).select_from(stmt.subquery())
     )).scalar() or 0)
@@ -349,6 +353,10 @@ class Manager:
     members_in_good_standing: Optional[int]
     added_at: str
     added_by: Optional[str]
+    #: Who can act through it: the person, while in good standing; up to two
+    #: members of a team who are — enough to tell nobody, one person and more
+    #: than one apart, however large the team.
+    acting: frozenset = frozenset()
 
 
 async def managers(
@@ -375,61 +383,65 @@ async def managers(
             type="user", id=row.user_id, name=resolve_display_name(display, first, last),
             email=email, in_good_standing=bool(ok), members_in_good_standing=None,
             added_at=row.added_at, added_by=row.added_by,
+            acting=frozenset({row.user_id}) if ok else frozenset(),
         ))
-    member = aliased(UserORM)
-    counted = (
-        select(func.count(member.id))
-        .select_from(GroupMemberORM)
-        .join(member, member.id == GroupMemberORM.user_id)
-        .where(GroupMemberORM.group_id == ServiceAccountManagerORM.group_id, in_good_standing(member, **rules))
-        .scalar_subquery()
-    )
-    for row, name, deleted_at, count in (await session.execute(
-        select(ServiceAccountManagerORM, GroupORM.name, GroupORM.deleted_at, counted)
+    teams = (await session.execute(
+        select(ServiceAccountManagerORM, GroupORM.name, GroupORM.deleted_at)
         .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
         .where(ServiceAccountManagerORM.service_account_id.in_(wanted))
         .order_by(func.lower(GroupORM.name), GroupORM.id)
-    )).all():
-        live = deleted_at is None
+    )).all()
+    standing = await _team_standing(
+        session, {row.group_id for row, _name, deleted_at in teams if deleted_at is None}, **rules,
+    )
+    for row, name, _deleted_at in teams:
+        count, acting = standing.get(row.group_id, (0, frozenset()))
         out[row.service_account_id].append(Manager(
             type="group", id=row.group_id, name=name, email=None,
-            in_good_standing=live and bool(count), members_in_good_standing=int(count or 0) if live else 0,
-            added_at=row.added_at, added_by=row.added_by,
+            in_good_standing=bool(count), members_in_good_standing=count,
+            added_at=row.added_at, added_by=row.added_by, acting=acting,
         ))
     return out
 
 
-async def people_who_can_act(
-    session: AsyncSession, account_ids: Iterable[str], *,
+async def _team_standing(
+    session: AsyncSession, group_ids: set[str], *,
     now: datetime, window_days: Optional[int], passwords_allowed: bool,
-) -> dict[str, set[str]]:
-    """Per account, the people in good standing who answer for it: its
-    managers, and the members of its live managing teams."""
-    wanted = sorted(set(account_ids))
-    out: dict[str, set[str]] = {a: set() for a in wanted}
-    if not wanted:
-        return out
-    rules = dict(now=now, window_days=window_days, passwords_allowed=passwords_allowed)
-    person = aliased(UserORM)
-    for account_id, user_id in (await session.execute(
-        select(ServiceAccountManagerORM.service_account_id, person.id)
-        .join(person, person.id == ServiceAccountManagerORM.user_id)
-        .where(ServiceAccountManagerORM.service_account_id.in_(wanted), in_good_standing(person, **rules))
-    )).all():
-        out[account_id].add(user_id)
+) -> dict[str, tuple[int, frozenset]]:
+    """Per live team, how many of its members are in good standing, and two
+    of them — the lowest and the highest id, two people whenever there are
+    two. Each team is counted once, however many accounts it manages."""
+    if not group_ids:
+        return {}
     member = aliased(UserORM)
-    for account_id, user_id in (await session.execute(
-        select(ServiceAccountManagerORM.service_account_id, member.id)
-        .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
-        .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
-        .join(member, member.id == GroupMemberORM.user_id)
-        .where(
-            ServiceAccountManagerORM.service_account_id.in_(wanted),
-            GroupORM.deleted_at.is_(None), in_good_standing(member, **rules),
+    return {
+        group_id: (int(count), frozenset({lowest, highest}))
+        for group_id, count, lowest, highest in (await session.execute(
+            select(GroupMemberORM.group_id, func.count(member.id), func.min(member.id), func.max(member.id))
+            .join(member, member.id == GroupMemberORM.user_id)
+            .where(
+                GroupMemberORM.group_id.in_(sorted(group_ids)),
+                in_good_standing(member, now=now, window_days=window_days, passwords_allowed=passwords_allowed),
+            )
+            .group_by(GroupMemberORM.group_id)
+        )).all()
+    }
+
+
+async def can_act(
+    session: AsyncSession, account_id: str, user_id: str, *,
+    now: datetime, window_days: Optional[int], passwords_allowed: bool,
+) -> bool:
+    """Whether this person answers for the account now: in good standing,
+    and managing it themselves or through a live team."""
+    person = aliased(UserORM)
+    standing = (await session.execute(
+        select(person.id).where(
+            person.id == user_id,
+            in_good_standing(person, now=now, window_days=window_days, passwords_allowed=passwords_allowed),
         )
-    )).all():
-        out[account_id].add(user_id)
-    return out
+    )).first()
+    return standing is not None and await is_manager(session, account_id, user_id)
 
 
 #: How many members of its managing teams hear about an account when nobody
@@ -482,20 +494,16 @@ async def add_manager(
     session: AsyncSession, account_id: str, *, user_id: Optional[str] = None,
     group_id: Optional[str] = None, added_by: Optional[str],
 ) -> bool:
-    """Appoint a person or a team. Returns whether they were not one already."""
-    subject = (
-        ServiceAccountManagerORM.user_id == user_id if user_id
-        else ServiceAccountManagerORM.group_id == group_id
-    )
-    if (await session.execute(
-        select(ServiceAccountManagerORM.id)
-        .where(ServiceAccountManagerORM.service_account_id == account_id, subject)
-    )).first() is not None:
+    """Appoint a person or a team. Returns whether they were not one already —
+    also when two appoint the same manager at once: the one that loses finds
+    them there, under a savepoint, rather than failing the request."""
+    try:
+        async with session.begin_nested():
+            session.add(ServiceAccountManagerORM(
+                service_account_id=account_id, user_id=user_id, group_id=group_id, added_by=added_by,
+            ))
+    except IntegrityError:
         return False
-    session.add(ServiceAccountManagerORM(
-        service_account_id=account_id, user_id=user_id, group_id=group_id, added_by=added_by,
-    ))
-    await session.flush()
     return True
 
 
@@ -546,6 +554,15 @@ def _team_seats(user_id: str):
         .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
         .where(GroupMemberORM.user_id == user_id, GroupORM.deleted_at.is_(None))
     )
+
+
+async def seats_of(session: AsyncSession, user_id: str) -> dict[str, str]:
+    """Every live account a person holds a seat on themselves: id to name."""
+    return dict((await session.execute(
+        select(UserORM.id, UserORM.first_name)
+        .join(ServiceAccountORM, ServiceAccountORM.user_id == UserORM.id)
+        .where(UserORM.deleted_at.is_(None), UserORM.id.in_(_seats(user_id)))
+    )).all())
 
 
 async def managed_accounts(session: AsyncSession, user_id: str) -> list[str]:
