@@ -7,7 +7,7 @@ import { AlertCircle } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
-import { humanizeQueryPaths } from './errorPaths'
+import { readableSearchError } from './errorPaths'
 
 
 export function ErrorView({ message }: { message: string }) {
@@ -31,7 +31,7 @@ export function ErrorView({ message }: { message: string }) {
                             Search failed
                         </div>
                         <div className="mt-1.5 text-[12px] text-ink leading-relaxed whitespace-pre-wrap break-words">
-                            {humanizeQueryPaths(message)}
+                            {readableSearchError(message)}
                         </div>
                         <div className="mt-2 text-[10.5px] text-ink-muted leading-snug">
                             Refine the query above and click Run again.
