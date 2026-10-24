@@ -2115,3 +2115,35 @@ async def admin_revoke_all_api_keys(
         )
     await session.commit()
     return {"revoked": len(keys)}
+
+
+@admin_users_router.post("/{user_id}/api-keys/revoke-made")
+async def admin_revoke_api_keys_made(
+    user_id: str,
+    body: Optional[AdminRevokeRequest] = Body(None),
+    admin: User = Depends(requires("system:users:manage")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Revoke the keys a person made for service accounts that still work —
+    the step to take when they leave, since they may have kept a copy. Those
+    who answer for each account are told."""
+    note = ((body.note if body else None) or "").strip() or None
+    by_account: dict[str, list[ApiKeyORM]] = {}
+    for key in await service_account_repo.live_keys_made(session, by=user_id):
+        if await _revoke(session, key, by=admin.id, reason="admin", note=note):
+            by_account.setdefault(key.user_id, []).append(key)
+    found = await user_repo.get_identities_by_ids(session, [user_id])
+    who = (found.get(user_id) or {}).get("name") or "Someone"
+    for account_id, keys in by_account.items():
+        audience = await service_account_standing.key_audience(session, account_id)
+        await _tell_owner(
+            session, audience, admin.id, resource_id=account_id, note=note,
+            title=f"An administrator revoked the keys {who} made for “{audience.account}”",
+            body=(
+                ", ".join(f"“{key.name}” ({key.token_prefix}…)" for key in keys)
+                + (" no longer works" if len(keys) == 1 else " no longer work")
+                + ". Make a new key for whatever used " + ("it." if len(keys) == 1 else "them.")
+            ),
+        )
+    await session.commit()
+    return {"revoked": sum(len(keys) for keys in by_account.values())}

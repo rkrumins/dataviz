@@ -258,11 +258,15 @@ async def list_page(
     q: Optional[str] = None,
     status: Optional[str] = None,
     managed_by: Optional[str] = None,
+    seat_of: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[tuple[UserORM, ServiceAccountORM]], int]:
     """Service accounts by name: those matching ``q`` (name or description),
-    ``active`` or ``disabled``, or those a person manages directly."""
+    ``active`` or ``disabled``; those a person's leaving touches
+    (``managed_by``): the ones they manage, themselves or through a live team,
+    and the ones they made a key for that still works; or those they hold a
+    seat on themselves (``seat_of``)."""
     stmt = (
         select(UserORM, ServiceAccountORM)
         .join(ServiceAccountORM, ServiceAccountORM.user_id == UserORM.id)
@@ -279,10 +283,15 @@ async def list_page(
             func.lower(func.coalesce(ServiceAccountORM.description, "")).like(pattern),
         ))
     if managed_by:
-        stmt = stmt.where(ServiceAccountORM.user_id.in_(
-            select(ServiceAccountManagerORM.service_account_id)
-            .where(ServiceAccountManagerORM.user_id == managed_by)
+        stmt = stmt.where(or_(
+            ServiceAccountORM.user_id.in_(_seats(managed_by)),
+            ServiceAccountORM.user_id.in_(_team_seats(managed_by)),
+            ServiceAccountORM.user_id.in_(
+                select(ApiKeyORM.user_id).where(ApiKeyORM.created_by == managed_by, _in_date())
+            ),
         ))
+    if seat_of:
+        stmt = stmt.where(ServiceAccountORM.user_id.in_(_seats(seat_of)))
     total = int((await session.execute(
         select(func.count()).select_from(stmt.subquery())
     )).scalar() or 0)
@@ -502,18 +511,48 @@ async def is_manager(session: AsyncSession, account_id: str, user_id: str) -> bo
     )).first() is not None
 
 
-async def managed_accounts(session: AsyncSession, user_id: str) -> list[str]:
-    """Accounts this person manages, themselves or through a live team."""
-    direct = select(ServiceAccountManagerORM.service_account_id).where(
+def _seats(user_id: str):
+    """The accounts a person holds a seat on themselves."""
+    return select(ServiceAccountManagerORM.service_account_id).where(
         ServiceAccountManagerORM.user_id == user_id,
     )
-    through_teams = (
+
+
+def _team_seats(user_id: str):
+    """The accounts a person manages through a live team they are in."""
+    return (
         select(ServiceAccountManagerORM.service_account_id)
         .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
         .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
         .where(GroupMemberORM.user_id == user_id, GroupORM.deleted_at.is_(None))
     )
-    return sorted(set((await session.execute(direct.union(through_teams))).scalars().all()))
+
+
+async def managed_accounts(session: AsyncSession, user_id: str) -> list[str]:
+    """Accounts this person manages, themselves or through a live team."""
+    return sorted(set((await session.execute(
+        _seats(user_id).union(_team_seats(user_id))
+    )).scalars().all()))
+
+
+async def teams_through(
+    session: AsyncSession, account_ids: Iterable[str], user_id: str,
+) -> dict[str, list[str]]:
+    """Per account, the live teams through which a person manages it, by name."""
+    wanted = sorted(set(account_ids))
+    out: dict[str, list[str]] = {a: [] for a in wanted}
+    for account_id, name in (await session.execute(
+        select(ServiceAccountManagerORM.service_account_id, GroupORM.name)
+        .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
+        .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
+        .where(
+            ServiceAccountManagerORM.service_account_id.in_(wanted),
+            GroupMemberORM.user_id == user_id, GroupORM.deleted_at.is_(None),
+        )
+        .order_by(func.lower(GroupORM.name), GroupORM.id)
+    )).all() if wanted else []:
+        out[account_id].append(name)
+    return out
 
 
 async def accounts_managed_by_team(session: AsyncSession, group_id: str) -> list[str]:
@@ -523,6 +562,14 @@ async def accounts_managed_by_team(session: AsyncSession, group_id: str) -> list
     )).scalars().all())
 
 
+def _in_date():
+    """A key neither revoked nor expired."""
+    return and_(
+        ApiKeyORM.revoked_at.is_(None),
+        or_(ApiKeyORM.expires_at.is_(None), ApiKeyORM.expires_at > datetime.now(timezone.utc).isoformat()),
+    )
+
+
 async def live_keys_created_by(
     session: AsyncSession, account_ids: Iterable[str], user_id: str,
 ) -> dict[str, list[ApiKeyORM]]:
@@ -530,15 +577,28 @@ async def live_keys_created_by(
     to rotate when they leave, since they may have kept a copy."""
     wanted = sorted(set(account_ids))
     out: dict[str, list[ApiKeyORM]] = {a: [] for a in wanted}
-    if not wanted:
-        return out
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for key in (await session.execute(
-        select(ApiKeyORM).where(
-            ApiKeyORM.user_id.in_(wanted), ApiKeyORM.created_by == user_id,
-            ApiKeyORM.revoked_at.is_(None),
-            or_(ApiKeyORM.expires_at.is_(None), ApiKeyORM.expires_at > now_iso),
-        ).order_by(ApiKeyORM.created_at)
-    )).scalars().all():
+    for key in await live_keys_made(session, by=user_id, account_ids=wanted) if wanted else []:
         out[key.user_id].append(key)
     return out
+
+
+async def live_keys_made(
+    session: AsyncSession, *, by: Optional[str] = None, by_team: Optional[str] = None,
+    account_ids: Optional[Iterable[str]] = None,
+) -> list[ApiKeyORM]:
+    """Service accounts' keys still in date that a person (``by``), or anyone
+    in a team (``by_team``), made: on ``account_ids``, or on any account."""
+    makers = (
+        select(GroupMemberORM.user_id).where(GroupMemberORM.group_id == by_team) if by_team
+        else [by]
+    )
+    stmt = (
+        select(ApiKeyORM)
+        .join(ServiceAccountORM, ServiceAccountORM.user_id == ApiKeyORM.user_id)
+        .where(ApiKeyORM.created_by.in_(makers), _in_date())
+    )
+    if account_ids is not None:
+        stmt = stmt.where(ApiKeyORM.user_id.in_(sorted(set(account_ids))))
+    return list((await session.execute(
+        stmt.order_by(ApiKeyORM.user_id, ApiKeyORM.created_at, ApiKeyORM.id)
+    )).scalars().all())

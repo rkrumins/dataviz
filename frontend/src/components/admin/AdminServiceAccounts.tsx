@@ -387,7 +387,7 @@ function HandOverDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
                         variant="primary"
                         size="sm"
                         leftIcon={ArrowRightLeft}
-                        disabled={!person || !successor || !accounts?.length}
+                        disabled={!person || !successor || !accounts?.some((a) => a.handOver?.seat)}
                         loading={busy}
                         onClick={() => void handOver()}
                     >
@@ -418,7 +418,7 @@ function HandOverDialog({ onClose, onDone }: { onClose: () => void; onDone: () =
                     ) : accounts === null ? (
                         <Skeleton className="h-20 rounded-xl" />
                     ) : accounts.length === 0 ? (
-                        <p className="text-sm text-ink-muted">{person.name} manages no service account themselves.</p>
+                        <p className="text-sm text-ink-muted">{person.name} manages no service account, and made no key that still works.</p>
                     ) : (
                         <HandOverPanel person={person} accounts={accounts} successor={successor} onSuccessor={setSuccessor} />
                     )}

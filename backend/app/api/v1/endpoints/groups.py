@@ -112,12 +112,13 @@ def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
     )
 
 
-async def _restand_service_accounts(session: AsyncSession, group_id: str) -> None:
+async def _restand_service_accounts(session: AsyncSession, group_id: str) -> list[str]:
     """A team that manages service accounts answers for them through its
-    members: when they change, bring those accounts up to date now."""
-    await service_account_standing.refresh(
-        session, await service_account_repo.accounts_managed_by_team(session, group_id),
-    )
+    members: when they change, bring those accounts up to date now. Returns
+    those accounts."""
+    managed = await service_account_repo.accounts_managed_by_team(session, group_id)
+    await service_account_standing.refresh(session, managed)
+    return managed
 
 
 async def _require_super_admin_for_super_admin_group(
@@ -246,7 +247,10 @@ async def delete_group(
     deleted = await group_repo.soft_delete_group(session, group_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Group not found")
-    await _restand_service_accounts(session, group_id)
+    managed = await _restand_service_accounts(session, group_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, team=group_id, actor_id=admin.id,
+    )
 
     # Tear down every binding the group held — orphaned bindings would
     # otherwise leak access to ex-members through the resolver.
@@ -423,7 +427,10 @@ async def remove_member(
             status_code=404,
             detail="Membership not found",
         )
-    await _restand_service_accounts(session, group_id)
+    managed = await _restand_service_accounts(session, group_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, person=user_id, actor_id=admin.id,
+    )
 
     # The user just lost every binding inherited from this group.
     # Revoke their sessions so the next request re-resolves from DB

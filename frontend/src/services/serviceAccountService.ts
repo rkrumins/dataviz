@@ -40,9 +40,13 @@ export interface KeyBrief {
     lastUsedAt: string | null
 }
 
-/** For a person about to leave: what handing their seat over involves. */
+/** For a person about to leave: what their leaving involves. */
 export interface HandOverFacts {
-    /** Nobody else answers for the account without them. */
+    /** They hold a seat on the account themselves: a hand-over moves it. */
+    seat: boolean
+    /** The teams through which they manage it, by name: those keep their seats. */
+    teams: string[]
+    /** They answer for it, and nobody else does. */
     lastManager: boolean
     /** Keys still in date that they made — they may have kept a copy. */
     keysCreatedBy: KeyBrief[]
@@ -90,7 +94,9 @@ export interface ServiceAccountList {
 export interface ServiceAccountFilters {
     q?: string
     status?: 'active' | 'disabled'
-    /** The accounts one person manages themselves, with what handing them over involves. */
+    /** The accounts a person's leaving touches — those they manage, themselves or
+     *  through a team, and those they made a key for that still works — with what
+     *  it involves. */
     managedBy?: string
     limit?: number
     offset?: number

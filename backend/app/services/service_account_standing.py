@@ -28,6 +28,7 @@ from backend.app.db.repositories import (
     binding_repo,
     notification_repo,
     service_account_repo,
+    user_repo,
 )
 from backend.app.services.feature_flags import feature_flags
 from backend.common.service_accounts import DEFAULT_GRACE_DAYS, grace_days, is_service_account
@@ -191,6 +192,49 @@ async def tell_team_grew(
             body=(
                 f"They joined {team}, which manages this service account, so they can make keys "
                 "that act as it. If that wasn't meant, take them out of the team."
+            ),
+            link=audience.link, actor_id=actor_id,
+            resource_type="service_account", resource_id=account_id,
+        )
+
+
+async def tell_keys_outlive(
+    session: AsyncSession, account_ids: Iterable[str], *, person: Optional[str] = None,
+    team: Optional[str] = None, actor_id: Optional[str],
+) -> None:
+    """A person, or a team's members, may have stopped answering for these
+    accounts. The keys they made that still work, on an account they can no
+    longer act for, may have left with them in a copy: those who answer for
+    the account hear of each, to rotate it."""
+    wanted = sorted(set(account_ids))
+    if not wanted:
+        return
+    keys = await service_account_repo.live_keys_made(session, by=person, by_team=team, account_ids=wanted)
+    if not keys:
+        return
+    rules = await policy(session)
+    still = await service_account_repo.people_who_can_act(
+        session, {key.user_id for key in keys}, now=datetime.now(timezone.utc),
+        window_days=rules.window_days, passwords_allowed=rules.passwords_allowed,
+    )
+    left: dict[tuple[str, str], list] = {}
+    for key in keys:
+        if key.created_by not in still[key.user_id]:
+            left.setdefault((key.user_id, key.created_by), []).append(key)
+    if not left:
+        return
+    names = await user_repo.get_identities_by_ids(session, sorted({maker for _account, maker in left}))
+    for (account_id, maker), made in sorted(left.items()):
+        audience = await key_audience(session, account_id)
+        who = (names.get(maker) or {}).get("name") or "Someone"
+        them = "it" if len(made) == 1 else "them"
+        await notification_repo.notify(
+            session, user_ids=audience.user_ids - {maker}, kind="service_account_maker_left",
+            title=f"Keys {who} made for “{audience.account}” still work",
+            body=(
+                f"{who} no longer answers for this service account, and may have kept a copy of "
+                + ", ".join(f"“{key.name}” ({key.token_prefix}…)" for key in made)
+                + f". Rotate {them}, or revoke {them} if nothing uses {them} any more."
             ),
             link=audience.link, actor_id=actor_id,
             resource_type="service_account", resource_id=account_id,

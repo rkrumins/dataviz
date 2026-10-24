@@ -402,6 +402,13 @@ export const apiKeyService = {
         })
     },
 
+    /** The keys a person made for service accounts that still work. */
+    adminRevokeMade(userId: string, note?: string): Promise<{ revoked: number }> {
+        return call(`/api/v1/admin/users/${encodeURIComponent(userId)}/api-keys/revoke-made`, {
+            method: 'POST', body: noteBody(note),
+        })
+    },
+
     /** The inventory as CSV, with the same filters and order — for a plain link. */
     adminExportUrl(filters: AdminKeyFilters): string {
         return `${ADMIN}/export.csv?${query(filters)}`

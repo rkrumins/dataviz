@@ -1,29 +1,35 @@
 /**
  * Suspending someone who manages service accounts: the dialog lists them —
- * flagging those nobody else manages, and the keys the person made — and
- * offers to hand them over to a successor first, so no integration is left
- * with nobody answering for it.
+ * flagging those nobody else manages, those they manage through a team, and
+ * the keys the person made — and offers to hand their seats over to a
+ * successor first, so no integration is left with nobody answering for it,
+ * and to revoke the keys they made, which they may have kept a copy of.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { list, handOver, searchDirectory, can } = vi.hoisted(() => ({
+const { list, handOver, adminRevokeMade, searchDirectory, can } = vi.hoisted(() => ({
     list: vi.fn(),
     handOver: vi.fn(),
+    adminRevokeMade: vi.fn(),
     searchDirectory: vi.fn(),
-    can: { handOver: true },
+    can: { handOver: true, revokeKeys: true },
 }))
 
 vi.mock('@/services/adminUserService', () => ({
     adminUserService: { listUsers: vi.fn(), getStats: vi.fn(), suspendUser: vi.fn() },
 }))
 vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: { list, handOver } }))
+vi.mock('@/services/apiKeyService', () => ({ apiKeyService: { adminRevokeMade, adminStats: vi.fn() } }))
 vi.mock('@/services/userDirectoryService', () => ({ searchDirectory }))
 vi.mock('@/services/permissionsService', () => ({ permissionsService: { getUserAccess: vi.fn() } }))
 vi.mock('@/store/features', () => ({ useFeature: () => false }))
 vi.mock('@/store/auth', () => ({
-    usePermission: (perm: string) => (perm === 'system:service-accounts:manage' ? can.handOver : true),
+    usePermission: (perm: string) => (
+        perm === 'system:service-accounts:manage' ? can.handOver
+            : perm === 'system:users:manage' ? can.revokeKeys : true
+    ),
 }))
 vi.mock('../AdminInvites', () => ({ AdminInvites: () => null }))
 vi.mock('../InviteWizard', () => ({ InviteWizard: () => null }))
@@ -49,7 +55,10 @@ function account(over: Partial<ServiceAccount>): ServiceAccount {
         id: 'svc_sync', name: 'Metadata sync', description: null, status: 'active',
         createdAt: '2026-10-01T00:00:00+00:00', createdBy: null, managers: [], managed: true,
         singleManager: true, unmanagedSince: null, pausesAt: null,
-        handOver: { lastManager: true, keysCreatedBy: [{ id: 'apk_1', name: 'nightly', prefix: 'nxsat_Ab', lastUsedAt: null }] },
+        handOver: {
+            seat: true, teams: [], lastManager: true,
+            keysCreatedBy: [{ id: 'apk_1', name: 'nightly', prefix: 'nxsat_Ab', lastUsedAt: null }],
+        },
         ...over,
     }
 }
@@ -57,6 +66,7 @@ function account(over: Partial<ServiceAccount>): ServiceAccount {
 beforeEach(() => {
     vi.clearAllMocks()
     can.handOver = true
+    can.revokeKeys = true
     window.history.replaceState({}, '', '/admin/users')
     vi.mocked(adminUserService.listUsers).mockResolvedValue({ items: [ADA], total: 1 })
     vi.mocked(adminUserService.getStats).mockResolvedValue({
@@ -64,10 +74,14 @@ beforeEach(() => {
     })
     vi.mocked(adminUserService.suspendUser).mockResolvedValue(undefined as never)
     list.mockResolvedValue({
-        items: [account({}), account({ id: 'svc_report', name: 'Reporting', handOver: { lastManager: false, keysCreatedBy: [] } })],
+        items: [
+            account({}),
+            account({ id: 'svc_report', name: 'Reporting', handOver: { seat: true, teams: [], lastManager: false, keysCreatedBy: [] } }),
+        ],
         total: 2, graceDays: 14,
     })
     handOver.mockResolvedValue({ handedOver: ['svc_report', 'svc_sync'] })
+    adminRevokeMade.mockResolvedValue({ revoked: 1 })
     searchDirectory.mockResolvedValue({ users: [], groups: [{ id: 'grp_data', name: 'Data platform', memberCount: 4 }] })
 })
 
@@ -97,6 +111,69 @@ describe('suspending someone who manages service accounts', () => {
         expect(handOver).toHaveBeenCalledWith({ fromUserId: 'usr_ada', to: { type: 'group', id: 'grp_data' } })
         expect(handOver.mock.invocationCallOrder[0]).toBeLessThan(
             vi.mocked(adminUserService.suspendUser).mock.invocationCallOrder[0],
+        )
+    })
+
+    it('revokes the keys they made, then hands over, then suspends', async () => {
+        await suspendDialog()
+        await userEvent.click(screen.getByRole('checkbox', { name: /revoke the key they made/i }))
+        await userEvent.type(screen.getByLabelText('Hand them over to'), 'data')
+        await userEvent.click(await screen.findByRole('button', { name: /data platform/i }))
+        await userEvent.click(screen.getByRole('button', { name: 'Hand over and suspend' }))
+        await waitFor(() => expect(adminUserService.suspendUser).toHaveBeenCalledWith('usr_ada'))
+        expect(adminRevokeMade).toHaveBeenCalledWith('usr_ada')
+        const order = [adminRevokeMade, handOver, vi.mocked(adminUserService.suspendUser)]
+            .map((fn) => fn.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+    })
+
+    it('leaves the keys alone unless asked', async () => {
+        await suspendDialog()
+        await userEvent.click(screen.getByRole('button', { name: 'Suspend without handing over' }))
+        await waitFor(() => expect(adminUserService.suspendUser).toHaveBeenCalledWith('usr_ada'))
+        expect(adminRevokeMade).not.toHaveBeenCalled()
+        expect(handOver).not.toHaveBeenCalled()
+    })
+
+    it('says to rotate them where revoking is not theirs to do', async () => {
+        can.revokeKeys = false
+        await suspendDialog()
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+        expect(screen.getByText(/rotate it once they have gone/)).toBeInTheDocument()
+    })
+
+    it('lists what they manage through a team and the keys they made elsewhere, and hands over only their seats', async () => {
+        list.mockResolvedValue({
+            items: [
+                account({ id: 'svc_team', name: 'Through the team', handOver: { seat: false, teams: ['Data team'], lastManager: true, keysCreatedBy: [] } }),
+                account({
+                    id: 'svc_made', name: 'Made elsewhere',
+                    handOver: { seat: false, teams: [], lastManager: false, keysCreatedBy: [{ id: 'apk_2', name: 'export', prefix: 'nxsat_Cd', lastUsedAt: null }] },
+                }),
+            ],
+            total: 2, graceDays: 14,
+        })
+        const accounts = await suspendDialog()
+        expect(screen.getByText('Ada Lovelace manages 1 service account — nobody else does. They also made keys that still work for 1 more.')).toBeInTheDocument()
+        expect(within(accounts).getByText('Through the team').closest('li')).toHaveTextContent('Through Data team')
+        expect(within(accounts).getByText('Made elsewhere').closest('li')).toHaveTextContent('Made its keys')
+        expect(screen.getByText(/nothing to hand over/)).toBeInTheDocument()
+        expect(screen.queryByLabelText('Hand them over to')).not.toBeInTheDocument()
+        // Still left with nobody, whoever the successor would have been.
+        expect(screen.getByText(/leave service accounts nobody manages/i)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('checkbox', { name: /revoke the key they made/i }))
+        await userEvent.click(screen.getByRole('button', { name: 'Suspend User' }))
+        await waitFor(() => expect(adminUserService.suspendUser).toHaveBeenCalledWith('usr_ada'))
+        expect(adminRevokeMade).toHaveBeenCalledWith('usr_ada')
+        expect(handOver).not.toHaveBeenCalled()
+    })
+
+    it('says so when their service accounts cannot be read', async () => {
+        list.mockRejectedValue(new Error('The service could not be reached.'))
+        render(<AdminUsers />)
+        await userEvent.click(await screen.findByTitle('Suspend user'))
+        expect(await screen.findByRole('alert')).toHaveTextContent(
+            'The service could not be reached. Suspending them may leave service accounts nobody manages.',
         )
     })
 

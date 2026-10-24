@@ -867,13 +867,13 @@ async def change_user_role(
 
 # ── Suspend ───────────────────────────────────────────────────────────
 
-async def _restand_service_accounts(session: AsyncSession, user_id: str) -> None:
+async def _restand_service_accounts(session: AsyncSession, user_id: str) -> list[str]:
     """Whether someone can still sign in decides whether the service accounts
     they manage still have a manager: bring those up to date now, not at the
-    next hourly sweep."""
-    await service_account_standing.refresh(
-        session, await service_account_repo.managed_accounts(session, user_id),
-    )
+    next hourly sweep. Returns those accounts."""
+    managed = await service_account_repo.managed_accounts(session, user_id)
+    await service_account_standing.refresh(session, managed)
+    return managed
 
 
 @admin_router.post("/{user_id}/suspend", status_code=status.HTTP_200_OK)
@@ -891,7 +891,10 @@ async def suspend_user(
         raise HTTPException(status_code=409, detail="User is already suspended")
 
     await user_repo.update_user_status(session, user_id, "suspended")
-    await _restand_service_accounts(session, user_id)
+    managed = await _restand_service_accounts(session, user_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, person=user_id, actor_id=admin.id,
+    )
 
     # ``validate_session`` re-reads ``status`` per request, so a
     # suspension already bites on the next call. Revoke anyway, for the
@@ -1033,7 +1036,11 @@ async def set_system_account(
                     )
 
     await user_repo.set_system_account(session, user_id, body.is_system_account)
-    await _restand_service_accounts(session, user_id)
+    managed = await _restand_service_accounts(session, user_id)
+    if body.is_system_account:
+        await service_account_standing.tell_keys_outlive(
+            session, managed, person=user_id, actor_id=admin.id,
+        )
     await user_repo.create_outbox_event(
         session,
         event_type="user.system_account_changed",

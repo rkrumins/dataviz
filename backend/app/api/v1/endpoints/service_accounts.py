@@ -91,8 +91,12 @@ class KeyBrief(_Model):
 
 
 class HandOverFacts(_Model):
-    """For a person about to leave: whether anyone answers for the account
-    without them, and the keys they made, which they may have kept."""
+    """For a person about to leave: the seat they hold on the account
+    themselves, which a hand-over moves; the teams through which they manage
+    it, which keep theirs; whether anyone answers for it without them; and the
+    keys they made that still work, which they may have kept."""
+    seat: bool
+    teams: List[str]
     last_manager: bool = Field(alias="lastManager")
     keys_created_by: List[KeyBrief] = Field(alias="keysCreatedBy")
 
@@ -120,7 +124,7 @@ class ServiceAccountOut(_Model):
     #: When it was found with no manager; its keys pause at ``pausesAt``.
     unmanaged_since: Optional[str] = Field(None, alias="unmanagedSince")
     pauses_at: Optional[str] = Field(None, alias="pausesAt")
-    #: With ``managedBy``: what handing that person's seat over involves.
+    #: With ``managedBy``: what that person's leaving involves.
     hand_over: Optional[HandOverFacts] = Field(None, alias="handOver")
 
 
@@ -194,12 +198,15 @@ async def _accounts_out(
         await service_account_repo.live_keys_created_by(session, ids, managed_by)
         if managed_by else {}
     )
+    teams = await service_account_repo.teams_through(session, ids, managed_by) if managed_by else {}
     out = []
     for user, account in rows:
         hand_over = None
         if managed_by:
+            seat = any(m.type == "user" and m.id == managed_by for m in managers[user.id])
             hand_over = HandOverFacts(
-                last_manager=not (people[user.id] - {managed_by}),
+                seat=seat, teams=teams[user.id],
+                last_manager=(seat or bool(teams[user.id])) and not (people[user.id] - {managed_by}),
                 keys_created_by=[
                     KeyBrief(id=k.id, name=k.name, prefix=k.token_prefix, last_used_at=k.last_used_at)
                     for k in made.get(user.id, [])
@@ -353,6 +360,9 @@ async def _dismiss(
             manager_type="user" if user_id else "group", manager_id=user_id or group_id,
             manager_name=manager_name, via=via,
         )
+        await service_account_standing.tell_keys_outlive(
+            session, [account_id], person=user_id, team=group_id, actor_id=actor_id,
+        )
     return removed
 
 
@@ -369,8 +379,9 @@ async def list_service_accounts(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Every service account, with who answers for each and whether its keys
-    are about to pause. ``managedBy`` lists the accounts one person manages,
-    with what handing them over involves."""
+    are about to pause. ``managedBy`` lists the accounts a person's leaving
+    touches — those they manage, themselves or through a team, and those they
+    made a key for that still works — with what it involves."""
     rows, total = await service_account_repo.list_page(
         session, q=q, status=status_filter, managed_by=managed_by, limit=limit, offset=offset,
     )
@@ -428,7 +439,7 @@ async def hand_over(
     to_user, to_group, to_name = await _manager_subject(session, body.to)
     leaving = await user_repo.get_identities_by_ids(session, [body.from_user_id])
     from_name = (leaving.get(body.from_user_id) or {}).get("name") or body.from_user_id
-    rows, _total = await service_account_repo.list_page(session, managed_by=body.from_user_id, limit=1000)
+    rows, _total = await service_account_repo.list_page(session, seat_of=body.from_user_id, limit=1000)
     names = {user.id: user.first_name for user, _account in rows}
     wanted = set(names) if body.account_ids is None else set(names) & set(body.account_ids)
     await _may_delegate(session, claims, wanted)
