@@ -1,12 +1,14 @@
 /**
- * DataHealthTab — the manager-only "Data health" surface in the versioning slide-over.
+ * DataHealthTab — the "Data health" surface in the versioning slide-over. Everyone sees the status
+ * and where the graph lives (ProjectionHealthCard); only managers get the check and the rebuild.
  *
  * Business-plain throughout. The one place the two stores are named is the hero's sync rows —
  * "System of record" (Postgres, where every published change is saved first) and "Graph"
  * (FalkorDB, the fast read layer projected from it) — because "is it saved, and has the graph
  * caught up?" is the question after every publish. Three calm
  * cards: (1) a status hero deriving ONE plain-language state from the full watermark (in sync /
- * catching up / rebuilding with live progress / attention needed with the recorded reason),
+ * catching up / rebuilding with live progress / reseeding after an administrator's reset /
+ * attention needed with the recorded reason),
  * (2) an on-demand sync check with a drift breakdown, and (3) a confirmed rebuild that always
  * converges to a terminal state — done (auto-verified) or failed (reason + Retry) — instead of
  * spinning forever. Driven by the two projection mutations plus the watermark poll (forced
@@ -25,6 +27,7 @@ import type { DriftReport, Watermark } from '@/services/versioningApiService'
 import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
 import { useSyncStatus } from '@/features/sync-status/useSyncStatus'
 import { deriveSync, type SyncLane } from '@/features/sync-status/deriveSync'
+import { ProjectionHealthCard } from './ProjectionHealthCard'
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
@@ -43,12 +46,16 @@ function relativeTime(iso: string): string {
   return `${Math.round(mins / 60)}h ago`
 }
 
-type HeroState = 'loading' | 'inSync' | 'catchingUp' | 'rebuilding' | 'failed' | 'behind'
+type HeroState = 'loading' | 'inSync' | 'catchingUp' | 'rebuilding' | 'reseeding' | 'evicted' | 'failed' | 'behind'
 
 function heroState(wm: Watermark | undefined): HeroState {
   if (!wm) return 'loading'
   if (wm.status === 'rebuilding') return 'rebuilding'
+  // A platform administrator reset the watermark (after a graph store restore); a reseed is queued.
+  if (wm.status === 'reseeding') return 'reseeding'
   if (wm.status === 'projecting') return 'catchingUp'
+  // Eviction drops the key and zeroes the watermark on purpose — unloaded, not behind.
+  if (wm.status === 'evicted') return 'evicted'
   if (wm.fresh) return 'inSync'
   return wm.lastError ? 'failed' : 'behind'
 }
@@ -70,7 +77,9 @@ function SyncRows({ wm, state, progressPct, summaries }: {
     : state === 'inSync' ? { tone: 'ok', text: committed > 0 ? `In sync · version #${wm!.projected}` : 'In sync' }
     : state === 'catchingUp' ? { tone: 'busy', text: behind > 0 ? `Catching up · ${versions(behind)} behind` : 'Catching up…' }
     : state === 'rebuilding' ? { tone: 'busy', text: progressPct !== null ? `Rebuilding · ${progressPct}%` : 'Rebuilding…' }
+    : state === 'reseeding' ? { tone: 'busy', text: 'Reseeding…' }
     : state === 'behind' ? { tone: 'warn', text: `${versions(behind)} behind` }
+    : state === 'evicted' ? { tone: 'idle', text: 'Unloaded' }
     : { tone: 'bad', text: behind > 0 ? `Out of sync · ${versions(behind)} behind` : 'Out of sync' }
   const updated = wm?.lastProjectedAt && state === 'inSync' ? ` · updated ${relativeTime(wm.lastProjectedAt)}` : ''
   return (
@@ -118,7 +127,9 @@ function SyncRow({ label, tech, tone, text }: {
   )
 }
 
-export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; graphId: string; dataSourceId?: string | null }) {
+export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
+  wsId: string; graphId: string; dataSourceId?: string | null; canManage: boolean
+}) {
   const { notify } = useAppNotifications()
   // The same reading the header's sync chip shows — here for the lineage summaries' automation:
   // whether a rebuild is queued or running, so nothing asks the user to do what is already in hand.
@@ -154,7 +165,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
   // "idle & behind & no reason" polls would only ever count one grace tick.
   useEffect(() => {
     if (rebuildPhase !== 'running' || !wm) return
-    const isActive = wm.status === 'projecting' || wm.status === 'rebuilding'
+    const isActive = wm.status === 'projecting' || wm.status === 'rebuilding' || wm.status === 'reseeding'
     if (isActive || wm.fresh === false) sawProgress.current = true
     if (isActive) {
       idleTicks.current = 0
@@ -244,7 +255,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
           state === 'inSync' && 'border-emerald-500/30 bg-emerald-500/[0.05]',
           state === 'failed' && 'border-red-500/30 bg-red-500/[0.05]',
           state === 'behind' && 'border-amber-500/30 bg-amber-500/[0.05]',
-          (state === 'loading' || state === 'catchingUp' || state === 'rebuilding') &&
+          (state === 'loading' || state === 'catchingUp' || state === 'rebuilding' || state === 'reseeding' || state === 'evicted') &&
             'border-glass-border bg-canvas-elevated/40',
         )}
       >
@@ -255,7 +266,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
               state === 'inSync' && 'bg-emerald-500/10 border-emerald-500/20',
               state === 'failed' && 'bg-red-500/10 border-red-500/20',
               state === 'behind' && 'bg-amber-500/10 border-amber-500/20',
-              (state === 'loading' || state === 'catchingUp' || state === 'rebuilding') &&
+              (state === 'loading' || state === 'catchingUp' || state === 'rebuilding' || state === 'reseeding' || state === 'evicted') &&
                 'bg-canvas-overlay/60 border-glass-border',
             )}
           >
@@ -265,6 +276,8 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
               <AlertTriangle className="w-4.5 h-4.5 text-red-600 dark:text-red-400" />
             ) : state === 'behind' ? (
               <AlertTriangle className="w-4.5 h-4.5 text-amber-600 dark:text-amber-400" />
+            ) : state === 'evicted' ? (
+              <Info className="w-4.5 h-4.5 text-ink-muted" />
             ) : (
               <Loader2 className="w-4.5 h-4.5 animate-spin text-ink-muted" />
             )}
@@ -276,7 +289,9 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
               {state === 'inSync' && 'Everything is in sync'}
               {state === 'catchingUp' && 'Catching up…'}
               {state === 'rebuilding' && 'Rebuilding the fast read layer…'}
+              {state === 'reseeding' && 'Reseeding from the system of record…'}
               {state === 'behind' && 'The fast read layer is behind'}
+              {state === 'evicted' && 'Unloaded to free memory'}
               {state === 'failed' && 'Attention needed'}
             </h3>
             <p className="mt-1 text-[12px] text-ink-muted leading-relaxed">
@@ -287,7 +302,9 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
               {state === 'rebuilding' && (progressPct !== null
                 ? `${progressDone.toLocaleString()} of ${progressTotal.toLocaleString()} items rebuilt.`
                 : 'Replaying everything from the source of truth. Large models can take a few minutes.')}
+              {state === 'reseeding' && 'A platform administrator asked for the fast read layer to be rebuilt from the source of truth, usually after the graph store was restored. Reads use the source of truth until it is done.'}
               {state === 'behind' && 'Reads fall back to the source of truth (slower but always correct). Rebuild to restore fast reads.'}
+              {state === 'evicted' && 'The graph store unloaded this graph to make room. Reads use the source of truth (slower but always correct) until it is loaded again.'}
               {state === 'failed' && 'The last refresh could not finish. Your data is safe in the source of truth — rebuild to repair fast reads.'}
               {state === 'loading' && ' '}
             </p>
@@ -322,6 +339,10 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
         </div>
       </section>
 
+      <ProjectionHealthCard wsId={wsId} graphId={graphId} />
+
+      {/* Managers only: the card stays read-only here, these two sections are its actions. */}
+      {canManage && (<>
       {/* 2 — Check sync */}
       <section className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-4">
         <div className="flex items-start justify-between gap-3">
@@ -541,6 +562,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
           </div>
         )}
       </section>
+      </>)}
 
       <Backdrop open={confirmRebuild} onClick={() => setConfirmRebuild(false)} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
       {confirmRebuild && (

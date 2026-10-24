@@ -73,7 +73,7 @@ async def _run() -> None:
 
     # ── poll backstop catches up every lagging graph ─────────────────────
     gids = [await _seed_graph(svc) for _ in range(2)]
-    assert [await _watermark(g) for g in gids] == [0, 0]        # projected lags target
+    assert [await _watermark(g) for g in gids] == [1, 1]        # parked at genesis, lags the head
     await worker.reconcile_once()
     assert [await _watermark(g) for g in gids] == [2, 2]        # all caught up to head
 
@@ -86,17 +86,23 @@ async def _run() -> None:
     # ── inline-nudge → Redis stream → project (skipped if no broker) ─────
     if await _redis_ok():
         await ensure_consumer_group()
-        gid = await _seed_graph(svc)                            # projected=0, target=2
+        gid = await _seed_graph(svc)                            # projected=1, head=2
         await nudge_projection(gid)                             # XADD wake-up
         client = get_broker_redis()
-        resp = await client.xreadgroup(CONSUMER_GROUP, "test", {PROJECTION_STREAM: ">"}, count=20, block=1000)
         hit = False
-        for _stream, msgs in resp or []:
-            for msg_id, fields in msgs:
-                if (fields or {}).get("graph_id") == gid:
-                    await worker._project_one(gid)
-                    hit = True
-                await client.xack(PROJECTION_STREAM, CONSUMER_GROUP, msg_id)
+        # Earlier tests in the same run leave nudges of their own on the shared stream: read on
+        # until ours turns up or the stream runs dry.
+        while not hit:
+            resp = await client.xreadgroup(CONSUMER_GROUP, "test", {PROJECTION_STREAM: ">"},
+                                           count=200, block=1000)
+            if not resp or not any(msgs for _stream, msgs in resp):
+                break
+            for _stream, msgs in resp:
+                for msg_id, fields in msgs:
+                    if (fields or {}).get("graph_id") == gid:
+                        await worker._project_one(gid)
+                        hit = True
+                    await client.xack(PROJECTION_STREAM, CONSUMER_GROUP, msg_id)
         assert hit, "nudge did not land on the stream"
         assert await _watermark(gid) == 2
         # nudge is best-effort even on a bad id — never raises

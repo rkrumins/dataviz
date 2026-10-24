@@ -38,7 +38,7 @@ async def _run() -> None:
         _n("DOM", "Domain", etype="Domain"), _n("T1", "T1name"), _e("e_d1", "DOM", "T1", "CONTAINS")])
 
     draft = await svc.open_draft(graph_id=gid, owner="u")
-    prov = VersionedBranchProvider(svc, graph_id=gid, branch_id=draft, actor="editor")
+    prov = VersionedBranchProvider(svc, graph_id=gid, branch_id=draft, actor="u")
     main_prov = VersionedBranchProvider(svc, graph_id=gid, branch_id=main, actor="u")
 
     # create a node on the draft (under DOM via a containment edge), then a lineage edge — the

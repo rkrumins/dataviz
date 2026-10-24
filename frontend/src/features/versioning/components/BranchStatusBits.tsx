@@ -43,6 +43,15 @@ export function DraftStatusPill({ status, className }: { status: DraftStatus; cl
   )
 }
 
+/** A draft whose publish is running: still listed, and closed to edits until the publish ends. */
+export function PublishingBadge({ className }: { className?: string }) {
+  return (
+    <span className={cn('shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold text-indigo-500 bg-indigo-500/10', className)}>
+      Publishing…
+    </span>
+  )
+}
+
 // Deterministic premium gradient per owner — stable across renders, varied across people.
 const AVATAR_TONES = [
   'bg-gradient-to-br from-indigo-500 to-violet-600',

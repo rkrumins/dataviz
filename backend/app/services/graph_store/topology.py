@@ -68,6 +68,7 @@ from .schemas import (
     ProviderRef,
     ReplicationFinding,
     ReplicationHealth,
+    VersionedOnShard,
 )
 
 logger = logging.getLogger(__name__)
@@ -319,6 +320,43 @@ async def _expected_graphs(
             if projection_key and projection_key != source_key:
                 out.setdefault((pid, projection_key), []).append(("projection", ref))
     return out
+
+
+async def _versioned_graphs(
+    provider_ids: Sequence[str],
+) -> Optional[Dict[Tuple[str, str], VersionedOnShard]]:
+    """``(provider_id, graph_key)`` → the live versioned graph projecting there.
+
+    Every ``projection_state`` key, not only the ones a data source names: a
+    fork's key belongs to no data source, and without this it reads as
+    unregistered on a store that is serving it. Read from the versioning
+    store, so a store that cannot be read costs the overlay, never the page:
+    None then, which the snapshot reports, never an empty overlay.
+    """
+    from backend.app.services.system_status.probes import _projection_rows
+    from backend.app.services.versioning.db import graphver_session
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    if not provider_ids:
+        return {}
+    rows, _lag, _buckets = _projection_rows()
+    try:
+        async with graphver_session() as session:
+            found = (await session.execute(rows.where(
+                GraphORM.deleted_at.is_(None),
+                ProjectionStateORM.falkor_provider.in_(list(provider_ids)),
+                ProjectionStateORM.falkor_graph_name.isnot(None),
+            ))).all()
+    except Exception as exc:                          # noqa: BLE001 — the overlay is optional
+        logger.info("graph store: versioned graphs not read: %s", _err(exc))
+        return None
+    return {
+        (r.falkor_provider, r.falkor_graph_name): VersionedOnShard(
+            graph_id=r.id, kind="fork" if r.fork_parent_graph_id else "main",
+            owned=bool(r.owns_falkor_graph), status=r.status, lag=r.lag,
+        )
+        for r in found
+    }
 
 
 # ── Adapters ─────────────────────────────────────────────────────────────
@@ -852,6 +890,8 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         provider_ids = [p.id for slot in pending for p in slot.providers]
         expected = await _expected_graphs(session, provider_ids)
         limits = effective_limits(await _stored_tuning(session))
+    overlay = await _versioned_graphs(provider_ids)
+    versioned = overlay if overlay is not None else {}
 
     # Seeds, best first: what THIS process saw last, then what ANY process
     # last saw (the memory outside the process, which is the only thing a
@@ -882,8 +922,9 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     measure_by_instance: Dict[int, List[str]] = {}
     for idx, (slot, _raw) in enumerate(paired):
         keys: List[Tuple[int, str]] = []
-        for (pid, key), owners in expected.items():
+        for pid, key in {*expected, *versioned}:
             if any(p.id == pid for p in slot.providers):
+                owners = expected.get((pid, key)) or []
                 keys.append((max((ref.edge_count for _role, ref in owners), default=0), key))
         measure_by_instance[idx] = [
             k for _edges, k in sorted(keys, key=lambda t: (-t[0], t[1]))
@@ -907,7 +948,10 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     for idxs, instance in merged:
         _attach_graphs(
             instance, idxs, reads, _expected_here(expected, instance), bytes_per_edge,
+            _expected_here(versioned, instance),
         )
+        if overlay is not None:
+            _count_versioned(instance, versioned)
         for shard in instance.shards:
             shard.capacity = shard_row(reading_of(shard.master), limits)
         instance.totals = _totals(instance)
@@ -958,7 +1002,10 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         summary=_summarize(instances),
         limits=limits,
         measured_at=_now_iso(),
-        ttl_s=_ttl_s(),
+        # Without the overlay the reading is incomplete: kept only until the
+        # next try, like a failed sweep, not for the whole TTL.
+        ttl_s=_ttl_s() if overlay is not None else _FAILURE_BACKOFF_S,
+        versioned_unread=overlay is None,
     )
 
 
@@ -1202,9 +1249,9 @@ def _instance_findings(
 
 
 def _expected_here(
-    expected: Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]],
+    expected: Dict[Tuple[str, str], Any],
     instance: GraphStoreInstance,
-) -> Dict[str, List[Tuple[str, DataSourceRef]]]:
+) -> Dict[str, Any]:
     """Every graph key THIS store's rows expect, so a registered graph that
     is not on its node still shows up (with ``present`` false) instead of
     vanishing — and so a graph belonging to the second row on a shared
@@ -1228,6 +1275,7 @@ def _attach_graphs(
     reads: Dict[Tuple[int, str], Dict[str, Any]],
     expected_here: Dict[str, List[Tuple[str, DataSourceRef]]],
     bytes_per_edge: int,
+    versioned_here: Dict[str, VersionedOnShard],
 ) -> None:
     """Every graph on the shard it is really on.
 
@@ -1249,12 +1297,13 @@ def _attach_graphs(
         shard, slot = (on_shard, key_slot(key)) if on_shard is not None \
             else place(instance, key)
         owners = expected_here.get(key) or []
-        role = "unregistered" if not owners else owners[0][0]
+        versioned = versioned_here.get(key)
+        role = owners[0][0] if owners else "versioned" if versioned else "unregistered"
         refs = [ref for _role, ref in owners]
         edges = max((ref.edge_count for ref in refs), default=0)
         row = GraphOnShard(
             key=key, slot=slot, present=present, role=role, data_sources=refs,
-            edge_count=edges,
+            versioned=versioned, edge_count=edges,
             estimated_bytes=edges * bytes_per_edge if edges else None,
             measured_bytes=(measured or {}).get("bytes"),
             measured_detail=(measured or {}).get("detail"),
@@ -1284,7 +1333,7 @@ def _attach_graphs(
         shard.inventory_read = answered
         for key in listed:
             _add(key, True, measured.get(key), on_shard=shard)
-    for key in expected_here:
+    for key in {**expected_here, **versioned_here}:
         # A graph the catalogue expects on a shard whose contents were never
         # read is not evidence of absence. The node has not contradicted the
         # catalogue; it has not spoken. Take the catalogue's word and mark the
@@ -1320,6 +1369,20 @@ def _attach_graphs(
         # The cap bounds what the PAGE renders, never what the snapshot
         # knows: placement is looked up here.
         shard.rows_by_key = {g.key: g for g in rows}
+
+
+def _count_versioned(
+    instance: GraphStoreInstance,
+    versioned: Dict[Tuple[str, str], VersionedOnShard],
+) -> None:
+    """Each provider's versioned graphs on this store, and what their keys take."""
+    rows = {key: row for shard in instance.shards for key, row in shard.rows_by_key.items()}
+    for provider in instance.providers:
+        keys = [key for pid, key in versioned if pid == provider.id]
+        sizes = [size for key in keys if key in rows
+                 if (size := rows[key].measured_bytes or rows[key].estimated_bytes)]
+        provider.versioned_graphs = len(keys)
+        provider.versioned_bytes = sum(sizes) if sizes else None
 
 
 def _totals(instance: GraphStoreInstance) -> InstanceTotals:
@@ -1404,13 +1467,13 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
     global _cache, _last_error, _retry_not_before
 
     now = time.monotonic()
-    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
+    if not fresh and _cache is not None and now - _cache[0] < _cache[1].ttl_s:
         return _with_age(_cache[1], _cache[0])
     if _cache is not None and now < _retry_not_before:
         return _with_age(_cache[1], _cache[0], stale=True)
     entered = time.monotonic()
     async with _build_lock():
-        if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
+        if not fresh and _cache is not None and time.monotonic() - _cache[0] < _cache[1].ttl_s:
             return _with_age(_cache[1], _cache[0])
         if _cache is not None and _cache[0] >= entered:
             # Someone swept while we waited; theirs is as fresh as ours.
@@ -1435,7 +1498,8 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
         _last_error = None
         _retry_not_before = 0.0
         _cache = (time.monotonic(), snapshot)
-        await _shared_remember(snapshot)
+        if not snapshot.versioned_unread:     # an incomplete reading stays in this process
+            await _shared_remember(snapshot)
         return _with_age(snapshot, _cache[0])
 
 
@@ -1469,7 +1533,7 @@ def cached_summary() -> Optional[Dict[str, Any]]:
     out: Dict[str, Any] = {
         "measured_at": snapshot.measured_at,
         "age_s": round(time.monotonic() - cached_at, 1),
-        "stale": time.monotonic() - cached_at >= _ttl_s(),
+        "stale": time.monotonic() - cached_at >= snapshot.ttl_s,
         "instances": {},
     }
     for inst in snapshot.instances:
@@ -1521,7 +1585,7 @@ async def snapshot_for_request(
     Returns ``(snapshot or None, refreshing)``.
     """
     now = time.monotonic()
-    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
+    if not fresh and _cache is not None and now - _cache[0] < _cache[1].ttl_s:
         return _with_age(_cache[1], _cache[0]), False
 
     task = request_refresh(fresh=fresh)
@@ -1537,7 +1601,7 @@ async def snapshot_for_request(
     refreshing = not task.done()
     if _cache is None:
         return None, refreshing
-    stale = time.monotonic() - _cache[0] >= _ttl_s()
+    stale = time.monotonic() - _cache[0] >= _cache[1].ttl_s
     return _with_age(_cache[1], _cache[0], stale=stale and _last_error is not None), refreshing
 
 

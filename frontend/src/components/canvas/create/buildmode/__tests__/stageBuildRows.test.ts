@@ -8,7 +8,8 @@
  *     update: `changes.length === N` after a single call.
  * (c) `useStageBuildRows` commits the whole plan with exactly one
  *     `addNodes`/`addEdges`/`stageMany` call (the O(n) win over per-row
- *     staging) and fires `onRowStaged` once per row.
+ *     staging) and fires `onRowStaged` once per row. With no draft open it
+ *     stages nothing, so nothing lands on main.
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -23,8 +24,9 @@ vi.mock('@/hooks/useViewSchema', () => ({
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
 vi.mock('@/features/versioning/model/ensureDraftOpen', () => ({
-  ensureDraftOpen: async () => 'branch-1',
+  ensureDraftOpen: vi.fn(async () => 'branch-1'),
 }))
+import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 
 import { planBuildStaging, useStageBuildRows } from '../stageBuildRows'
 
@@ -219,5 +221,21 @@ describe('useStageBuildRows', () => {
       const after = change.after as { properties?: Record<string, unknown> }
       expect(after.properties?.layerAssignment).toBeUndefined()
     }
+  })
+
+  it('stages nothing when no draft can be opened (editing paused), so nothing lands on main', async () => {
+    vi.mocked(ensureDraftOpen).mockResolvedValueOnce(null)
+    const { result } = renderHook(() => useStageBuildRows())
+    const onRowStaged = vi.fn()
+
+    let rowUrn: Map<string, string> = new Map([['x', 'y']])
+    await act(async () => {
+      rowUrn = await result.current.stageBuildRows(threeLevelRows(), { rootParentUrn: null, onRowStaged })
+    })
+
+    expect(rowUrn.size).toBe(0)
+    expect(useCanvasStore.getState().nodes).toHaveLength(0)
+    expect(useStagedChangesStore.getState().changes).toHaveLength(0)
+    expect(onRowStaged).not.toHaveBeenCalled()
   })
 })

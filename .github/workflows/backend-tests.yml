@@ -3,11 +3,15 @@
 # connectivity/provider suite never ran, and 34 of its tests were failing on
 # main without anything going red.
 #
-# Two jobs:
+# Jobs:
 #   * connectivity-suite — REQUIRED. The FalkorDB/Redis/provider domain
 #     (connection factory, preflight, warmup, breakers, bus/cache roles,
 #     provider endpoints, aggregation/insights consumers). Green as of the
 #     falkordb-redis-connectivity hardening branch; keep it green.
+#   * live-engine — informational. Provider-level suites against a real FalkorDB.
+#   * versioning-e2e — informational. The GRAPHVER_E2E versioned-graph suite
+#     against real Postgres + FalkorDB + Redis; promote it to required once it
+#     has a green track record.
 #   * full-suite — informational (continue-on-error). Surfaces the remaining
 #     repo-wide test debt (golden scenarios, RBAC, ontology, nav) without
 #     blocking merges; promote it to required once that debt is paid down.
@@ -81,9 +85,9 @@ jobs:
     # it has a track record turns an engine hiccup into a blocked merge. Watch
     # it, then promote it to required.
     #
-    # Scoped deliberately to the provider-level suite. The rest of
-    # `tests/integration/` wants dev Postgres and a live viz-service
-    # (`GRAPHVER_E2E`), and a broad red job teaches nobody anything.
+    # Scoped deliberately to the provider-level suite. The GRAPHVER_E2E
+    # versioned-graph suite, which also needs Postgres, runs in
+    # `versioning-e2e`.
     name: Live FalkorDB pipeline (informational)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -142,6 +146,97 @@ jobs:
             tests/integration/test_search_engine_live.py \
             tests/integration/test_raw_properties_live.py \
             tests/integration/test_search_export_live.py -q
+
+  versioning-e2e:
+    # The versioned graph against real Postgres, FalkorDB and Redis.
+    #
+    # About a hundred GRAPHVER_E2E files hold the only proof of the versioned
+    # graph's guarantees: no lost update, OCC, rebase, publish, projection and
+    # the bootstrap of a customer's graph. Until this job existed every other
+    # job skipped them, so a change could break any of them with a green build.
+    #
+    # The files are named in tests/ci-versioning-e2e-files.txt, and
+    # tests/test_ci_required_list.py fails if a GRAPHVER_E2E file is neither
+    # listed there nor excused. A test that fails because of a known defect is
+    # marked xfail(strict=True) with its finding id, so the fix turns it red
+    # until the marker goes.
+    #
+    # Informational until it has a track record, like live-engine.
+    name: Versioned graph against Postgres + FalkorDB (informational)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:16.14-alpine
+        env:
+          POSTGRES_USER: synodic
+          POSTGRES_PASSWORD: synodic
+          POSTGRES_DB: synodic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U synodic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      falkordb:
+        image: falkordb/falkordb:v4.18.11
+        env:
+          # The image's own FALKORDB_ARGS less its RESULTSET_SIZE 10000, which cuts every
+          # reply at 10,000 rows without an error. Every FALKORDB_ARGS this repo deploys
+          # leaves it unlimited, and the bootstrap refuses a capped server.
+          FALKORDB_ARGS: MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE -1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        # The coordination bus. Its default port is 6380, because 6379 is
+        # FalkorDB here (redis_endpoint.py).
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GRAPHVER_E2E: "1"
+      RUN_FALKOR_LIVE: "1"
+      MANAGEMENT_DB_URL: postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
+      FALKORDB_HOST: localhost
+      FALKORDB_PORT: "6379"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      - name: Build the management and graphver schemas
+        # Most E2E files create the graphver schema themselves; building it
+        # once here keeps the few that do not from depending on test order.
+        # The app's own caller is backend/app/services/versioning/__main__.py.
+        run: |
+          python -m backend.scripts.upgrade upgrade
+          python -c "import asyncio; from backend.app.services.versioning import models; asyncio.run(models.create_schema_and_partitions())"
+      - name: Run the versioned-graph suite
+        working-directory: backend
+        run: |
+          python -m pytest -q -ra $(grep -vE '^\s*(#|$)' tests/ci-versioning-e2e-files.txt)
 
   full-suite:
     name: Full backend suite (informational)

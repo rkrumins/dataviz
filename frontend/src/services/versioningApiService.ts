@@ -43,6 +43,16 @@ export interface ResolveResponse {
   /** The in-flight (or failed) "enable version control" job — present only while the
    *  graph is still at genesis, so a reload lands back on live progress. */
   bootstrap?: BootstrapJob | null
+  /** 'frozen' while editing is paused: every save, publish and import is refused. */
+  lifecycleState?: 'live' | 'frozen'
+  /** Names the state a pause or resume expects to change (`setGraphFrozen`). */
+  lifecycleRev?: number
+}
+
+export interface GraphLifecycle {
+  graphId: string
+  state: 'live' | 'frozen'
+  rev: number
 }
 
 /** Result of provisioning a blank lineage model (data source + genesis graph). */
@@ -72,6 +82,8 @@ export interface Branch {
   updatedAt: string
   /** owner/createdBy id → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** The caller's role on the draft (the branch list sets it); null when they hold none. */
+  myRole?: 'owner' | DraftRole | null
 }
 
 export interface Graph {
@@ -87,6 +99,15 @@ export interface Graph {
   createdAt: string
   /** createdBy id → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+}
+
+/** One of a graph's forks, live or in the trash (`deletedAt` set). `purging`: its purge is queued,
+ *  so it can no longer be restored; `purgeAfter`: the end of its undo window. */
+export interface ForkSummary extends Graph {
+  deletedAt?: string | null
+  deletedBy?: string | null
+  purging: boolean
+  purgeAfter?: string | null
 }
 
 /** One normalized op for the staging buffer — `entityKind`/`entityId` mirror the wire. */
@@ -118,7 +139,7 @@ export interface Watermark {
   committed: number
   projected: number
   fresh: boolean
-  status?: string   // idle | projecting | rebuilding | evicted — only projecting/rebuilding = actively catching up
+  status?: string   // idle | projecting | rebuilding | evicted | reseeding (an operator reset; a reseed is queued) — only projecting/rebuilding = actively catching up
   /** Seq the projection is catching up TO (0 when no projection state exists). */
   target?: number
   /** Why the last projection pass stopped — `idle && !fresh && lastError` = it FAILED
@@ -128,6 +149,21 @@ export interface Watermark {
   /** Live full-rebuild progress (items applied / total); null unless a full seed is running. */
   progressDone?: number | null
   progressTotal?: number | null
+  /** Where the projection lives: its FalkorDB key and the provider hosting it (null = the
+   *  default instance). `owned` = the platform minted the key; false = the customer's own graph. */
+  projectionKey?: string | null
+  providerId?: string | null
+  providerName?: string | null
+  owned?: boolean
+  /** Fencing epoch and the poll's backoff: failed passes in a row and when it may retry. */
+  epoch?: number
+  failedAttempts?: number
+  nextRetryAt?: string | null
+  /** Why the last liveness check lowered the watermark (the key lost what it held), else null. */
+  livenessError?: string | null
+  /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
+   *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
+  readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
@@ -382,6 +418,8 @@ export interface PullRequest {
   sourceBranchId: string
   sourceBranchOwner?: string | null   // owner of the source draft (only on the single-PR read)
   sourceBranchName?: string | null
+  /** The source draft's head now: Approve sends it back, so the approval is of what was reviewed. */
+  headCommitId?: string | null
   originatingViewId?: string | null   // the view the source draft belongs to — for "back to view" nav
   targetGraphId: string
   targetBranch: string
@@ -395,6 +433,8 @@ export interface PullRequest {
   resultingCommitId?: string | null
   reviewers?: string[] | null
   approvedBy?: string[] | null
+  /** Reviewers whose approval went stale (the draft changed since): they must approve again. */
+  staleApprovedBy?: string[] | null
   approvalStatus?: string | null
   checksStatus?: Record<string, unknown> | null
   actor?: string | null          // who raised it
@@ -484,11 +524,111 @@ export class PullRequestExistsError extends Error {
   }
 }
 
+/** The server would not delete or restore a fork. The message says what to do instead. */
+export class ForkRefusedError extends Error {
+  readonly type: string
+  constructor(detail: { type: string; reason?: string; limit?: number; message?: string }) {
+    super(detail.type === 'live_forks'
+      ? 'Forks were made from this fork. Delete its forks first.'
+      : detail.type === 'not_a_fork'
+      ? 'This graph belongs to a data source and goes with its data source.'
+      : detail.type === 'fork_limit'
+      ? `This graph already has ${detail.limit} forks. Delete one first.`
+      : detail.reason === 'purging'
+      ? 'This fork is being deleted and can no longer be restored.'
+      : detail.reason === 'parent_deleted'
+      ? 'The graph it was forked from is in the trash. Restore that first.'
+      : detail.message || 'This fork cannot be restored.')
+    this.name = 'ForkRefusedError'
+    this.type = detail.type
+  }
+}
+
+/** The draft closed under the save — published, being published, or discarded — so it takes no
+ *  more changes. Nothing was written; the staged edits can be copied to a new draft. */
+export class BranchClosedError extends Error {
+  status?: string
+  branchId?: string
+  constructor(detail: { status?: string; branchId?: string }) {
+    super(detail.status === 'merged'
+      ? 'This draft has been published, so it can’t take more changes.'
+      : detail.status === 'publishing'
+      ? 'This draft is being published, so it can’t take more changes.'
+      : 'This draft was discarded, so it can’t take more changes.')
+    this.name = 'BranchClosedError'
+    this.status = detail.status
+    this.branchId = detail.branchId
+  }
+}
+
+/** The draft is someone else's private draft: only its owner saves to it. Nothing was written; the
+ *  staged edits can be copied to a new draft of the caller's own. */
+export class NotDraftOwnerError extends Error {
+  owner?: string
+  branchId?: string
+  constructor(detail: { owner?: string; branchId?: string }) {
+    super('This draft belongs to someone else, so only they can save to it.')
+    this.name = 'NotDraftOwnerError'
+    this.owner = detail.owner
+    this.branchId = detail.branchId
+  }
+}
+
+/** A shared draft's owner or members refused the caller: the change needs `required` (`editor` to
+ *  change the draft, `maintainer` to manage it) and the caller holds less. Nothing was written. */
+export class DraftRoleRequiredError extends Error {
+  required?: string
+  branchId?: string
+  constructor(detail: { required?: string; branchId?: string }) {
+    super(detail.required === 'maintainer'
+      ? 'Only the owner or a maintainer of this shared draft can do that.'
+      : 'Only the owner and editors of this shared draft can change it.')
+    this.name = 'DraftRoleRequiredError'
+    this.required = detail.required
+    this.branchId = detail.branchId
+  }
+}
+
+/** An approval named the draft head the reviewer saw, and the draft has moved on since: what they
+ *  approved is not what would merge. `headCommitId` is the head now. Nothing was approved. */
+export class HeadMovedError extends Error {
+  headCommitId?: string | null
+  constructor(detail: { headCommitId?: string | null }) {
+    super('This draft changed since you loaded it. Review the latest changes, then approve again.')
+    this.name = 'HeadMovedError'
+    this.headCommitId = detail.headCommitId
+  }
+}
+
+/** The save named Published itself; edits reach it only through a draft. */
+export class MainWriteForbiddenError extends Error {
+  constructor() {
+    super('Published can’t be changed directly — open a draft to save these changes.')
+    this.name = 'MainWriteForbiddenError'
+  }
+}
+
+/** Editing is paused on the graph: nothing was written, and no draft opens until a publisher resumes
+ *  it. The message is the server's, which says who can. */
+export class GraphNotWritableError extends Error {
+  constructor(message?: string) {
+    super(message ?? 'Editing is paused on this graph.')
+    this.name = 'GraphNotWritableError'
+  }
+}
+
 // ============================================
 // Fetch helper — JSON + structured domain errors
 // ============================================
 
 async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const res = await vfetchResponse(url, init)
+  if (res.status === 204) return undefined as T
+  return readJsonLossless<T>(res)
+}
+
+/** {@link vfetch} up to a successful response, for callers that read its headers too. */
+async function vfetchResponse(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<Response> {
   let res: Response
   try {
     res = await fetchWithTimeout(url, init)
@@ -506,8 +646,7 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     }
     throw versioningError(res.status, body?.detail, text || res.statusText)
   }
-  if (res.status === 204) return undefined as T
-  return readJsonLossless<T>(res)
+  return res
 }
 
 /** A refusal's `detail`: a message, or an object whose `type` names the refusal. */
@@ -519,10 +658,23 @@ type RefusalDetail = string | {
   current?: Record<string, unknown>
   violations?: Array<Record<string, unknown>>
   branchId?: string
+  /** A closed draft's status (`branch_closed`). */
+  status?: string
+  /** Which refusal an `access_denied` is, e.g. `not_draft_owner`. */
+  code?: string
+  owner?: string
+  /** The role a `not_owner_or_member` refusal needs. */
+  required?: string
   behindBy?: number
   prId?: string
   title?: string | null
   suggestion?: string | null
+  /** Why a fork cannot be restored (`fork_not_restorable`). */
+  reason?: string
+  /** The fork cap (`fork_limit`). */
+  limit?: number
+  /** The draft's head now (`head_moved`). */
+  headCommitId?: string | null
 } | null | undefined
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
@@ -541,8 +693,30 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   if (status === 409 && d?.type === 'not_up_to_date') {
     return new NotUpToDateError(d)
   }
+  if (status === 409 && d?.type === 'branch_closed') {
+    return new BranchClosedError(d)
+  }
+  if (status === 403 && d?.type === 'access_denied' && d.code === 'not_draft_owner') {
+    return new NotDraftOwnerError(d)
+  }
+  if (status === 403 && d?.type === 'access_denied' && d.code === 'not_owner_or_member') {
+    return new DraftRoleRequiredError(d)
+  }
+  if (status === 409 && d?.type === 'head_moved') {
+    return new HeadMovedError(d)
+  }
+  if (status === 409 && d?.type === 'main_write_forbidden') {
+    return new MainWriteForbiddenError()
+  }
+  if (status === 409 && d?.type === 'graph_not_writable') {
+    return new GraphNotWritableError(d.message)
+  }
   if (status === 409 && d?.type === 'pull_request_exists') {
     return new PullRequestExistsError(d as { prId: string })
+  }
+  if (status === 409 && (d?.type === 'live_forks' || d?.type === 'not_a_fork'
+    || d?.type === 'fork_limit' || d?.type === 'fork_not_restorable')) {
+    return new ForkRefusedError({ ...d, type: d.type })
   }
   if (status === 422 && d?.type === 'graph_name_unavailable') {
     return new GraphNameUnavailableError(
@@ -562,7 +736,8 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
       : d
       ? JSON.stringify(d)
       : fallback
-  return new Error(msg)
+  // The status rides along: a 4xx is an answer (the request was not applied), a 5xx may not be.
+  return Object.assign(new Error(msg), { status })
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
@@ -643,6 +818,15 @@ export function resolveAndOpenDraft(
 
 export function getGraph(wsId: string, graphId: string): Promise<Graph> {
   return vfetch<Graph>(`${base(wsId)}/graphs/${graphId}`)
+}
+
+/** Pause (or resume) editing of a graph; needs publish and manage. `expectedRev` is the
+ *  `lifecycleRev` the caller saw: 409 version_conflict if it has moved on. */
+export function setGraphFrozen(
+  wsId: string, graphId: string, frozen: boolean, expectedRev: number,
+): Promise<GraphLifecycle> {
+  return vfetch<GraphLifecycle>(
+    `${base(wsId)}/graphs/${graphId}/lifecycle/${frozen ? 'freeze' : 'unfreeze'}`, jsonBody({ expectedRev }))
 }
 
 export interface BootstrapResult {
@@ -856,17 +1040,30 @@ export function decideBootstrapDuplicates(
 // Branches / drafts
 // ============================================
 
-/** Branches on a graph. Graph-wide (every view — the Data-Source rollup) by DEFAULT; pass
- *  `viewId` to get only that Context View's own branches (branch-per-view). The backend also
- *  scopes a non-manager to their own + shared drafts, so the switcher lists what the user owns
- *  or was invited to — not everyone's private drafts. */
-export function listBranches(
-  wsId: string, graphId: string, opts: { viewId?: string | null } = {},
+export type BranchStatusFilter = 'open' | 'publishing' | 'merged' | 'abandoned' | 'all'
+
+/** Branches on a graph, `main` first, then drafts newest first. Graph-wide (every view — the
+ *  Data-Source rollup) by DEFAULT; pass `viewId` to get only that Context View's own branches
+ *  (branch-per-view). `status` keeps those statuses; without it the server keeps open and
+ *  publishing drafts. The backend also scopes a non-manager to the drafts they may read, so the
+ *  switcher lists what the user owns or was invited to — not everyone's private drafts. Reads
+ *  every page (`X-Next-Cursor`). */
+export async function listBranches(
+  wsId: string, graphId: string,
+  opts: { viewId?: string | null; status?: BranchStatusFilter[] } = {},
 ): Promise<Branch[]> {
-  const q = new URLSearchParams()
-  if (opts.viewId) q.set('viewId', opts.viewId)
-  const qs = q.toString()
-  return vfetch<Branch[]>(`${base(wsId)}/graphs/${graphId}/branches${qs ? `?${qs}` : ''}`)
+  const out: Branch[] = []
+  let cursor: string | null = null
+  do {
+    const q = new URLSearchParams({ limit: '500' })
+    if (opts.viewId) q.set('viewId', opts.viewId)
+    for (const st of opts.status ?? []) q.append('status', st)
+    if (cursor) q.set('cursor', cursor)
+    const res = await vfetchResponse(`${base(wsId)}/graphs/${graphId}/branches?${q}`)
+    out.push(...await readJsonLossless<Branch[]>(res))
+    cursor = res.headers.get('X-Next-Cursor')
+  } while (cursor)
+  return out
 }
 
 export function openDraft(
@@ -901,12 +1098,31 @@ export interface BranchFreshness {
   behindBy: number
   mainHeadCommitSeq: number
   baseCommitSeq: number
+  /** The draft's own status — how a client learns it was published or discarded. */
+  status: string
 }
 
 /** Live "is this draft behind main?" — O(1), safe to poll while editing so a branch owner learns a
  *  teammate published RIGHT AWAY (not at merge). */
 export function getBranchFreshness(wsId: string, graphId: string, branchId: string): Promise<BranchFreshness> {
   return vfetch<BranchFreshness>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/freshness`)
+}
+
+/** A graph's direct forks, newest first, those in the trash included. */
+export function listForks(wsId: string, graphId: string): Promise<ForkSummary[]> {
+  return vfetch<ForkSummary[]>(`${base(wsId)}/graphs/${graphId}/forks`)
+}
+
+/** Move a fork to the trash, restorable until its purge is queued. 409 {@link ForkRefusedError}
+ *  while it has forks of its own, or {@link PullRequestExistsError} while its PR is open. */
+export function deleteFork(wsId: string, graphId: string, opts?: ActivityOpts): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/graphs/${graphId}`, withReason({ method: 'DELETE' }, opts?.reason))
+}
+
+/** Bring a trashed fork back; a live one is left as it is. 409 {@link ForkRefusedError} once its
+ *  purge is queued, while its parent is in the trash, or at the parent's fork cap. */
+export function restoreFork(wsId: string, graphId: string, opts?: ActivityOpts): Promise<void> {
+  return vfetch<void>(`${base(wsId)}/graphs/${graphId}/restore`, withReason({ method: 'POST' }, opts?.reason))
 }
 
 /** Rebuild the fast read layer from the source of truth (full background replay). 409 when the graph
@@ -947,6 +1163,46 @@ export function updateBranch(
     method: 'PATCH',
     body: JSON.stringify(data),
   })
+}
+
+export type DraftRole = 'viewer' | 'editor' | 'maintainer'
+
+export interface BranchMember {
+  subjectType: 'user' | 'group'
+  subjectId: string
+  role: DraftRole
+  /** The user's or group's display name; null when it no longer resolves. */
+  name?: string | null
+}
+
+export interface BranchMembersResponse {
+  /** Empty for a private draft. */
+  members: BranchMember[]
+  /** The caller's own role on the draft; null when they hold none. */
+  myRole: 'owner' | DraftRole | null
+}
+
+export function listBranchMembers(wsId: string, graphId: string, branchId: string): Promise<BranchMembersResponse> {
+  return vfetch<BranchMembersResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/members`)
+}
+
+/** Add a member, or change an existing member's role. The first member makes a private draft shared. */
+export function addBranchMember(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  data: { subjectType: 'user' | 'group'; subjectId: string; role: DraftRole },
+): Promise<BranchMember> {
+  return vfetch<BranchMember>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/members`, jsonBody(data))
+}
+
+export function removeBranchMember(
+  wsId: string, graphId: string, branchId: string, subjectType: 'user' | 'group', subjectId: string,
+): Promise<{ removed: boolean }> {
+  return vfetch<{ removed: boolean }>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/members/${subjectType}/${encodeURIComponent(subjectId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 // ============================================
@@ -1009,6 +1265,8 @@ export interface GraphChangesResult {
  * The unified draft-save path: apply a batch of canvas edits to a draft as ONE atomic,
  * server-merged commit (create/update/delete, nodes + edges). On the *graph* route
  * because it edits graph entities; `update` ops send only changed fields.
+ * `idempotencyKey`: a retry sent with the first attempt's key gets that attempt's result back
+ * instead of applying the batch twice.
  */
 export function applyGraphChanges(
   wsId: string,
@@ -1016,11 +1274,15 @@ export function applyGraphChanges(
   branchId: string,
   ops: GraphChangeOp[],
   message?: string,
+  idempotencyKey?: string,
 ): Promise<GraphChangesResult> {
   const qs = `dataSourceId=${encodeURIComponent(dataSourceId)}&branchId=${encodeURIComponent(branchId)}`
   return vfetch<GraphChangesResult>(`/api/v1/${wsId}/graph/changes?${qs}`, {
     method: 'POST',
     body: JSON.stringify({ ops, message }),
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    // Outlasts the 120s /graph tier, so the server's answer always lands.
+    timeoutMs: 150_000,
   })
 }
 
@@ -1402,6 +1664,17 @@ export function openMergeRequest(
   )
 }
 
+/** Someone who can be asked to review: a workspace member who can approve (never the caller). */
+export interface ReviewerCandidate {
+  userId: string
+  displayName?: string | null
+  email?: string | null
+}
+
+export function listReviewerCandidates(wsId: string): Promise<ReviewerCandidate[]> {
+  return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers`)
+}
+
 export function listMergeRequests(wsId: string, graphId: string): Promise<PullRequest[]> {
   return vfetch<PullRequest[]>(`${base(wsId)}/graphs/${graphId}/merge-requests`)
 }
@@ -1414,8 +1687,12 @@ export function previewMergeRequest(wsId: string, prId: string): Promise<MergePr
   return vfetch<MergePreviewResponse>(`${base(wsId)}/merge-requests/${prId}/preview`)
 }
 
-export function approveMergeRequest(wsId: string, prId: string): Promise<PullRequest> {
-  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/approve`, jsonBody({}))
+/** Approve a merge request at `expectedHeadCommitId`, the draft head the reviewer saw
+ *  ({@link HeadMovedError} when the draft has moved on since). */
+export function approveMergeRequest(
+  wsId: string, prId: string, expectedHeadCommitId?: string | null,
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/approve`, jsonBody({ expectedHeadCommitId }))
 }
 
 export function closeMergeRequest(wsId: string, prId: string): Promise<PullRequest> {

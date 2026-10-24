@@ -156,6 +156,20 @@ def _build_app():
     return app
 
 
+async def _seed_data_source(ds: str, ws: str = "ws1") -> None:
+    """A live data source row in the path workspace: GET /resolve 404s any other."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+
+    async with get_async_session() as s:
+        if await s.get(WorkspaceORM, ws) is None:
+            s.add(WorkspaceORM(id=ws, name=ws))
+        s.add(ProviderORM(id=f"prov_{ds}", name=f"prov_{ds}", provider_type="falkordb"))
+        await s.flush()
+        s.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id=f"prov_{ds}", label=ds))
+        await s.commit()
+
+
 async def _run_http() -> None:
     from httpx import ASGITransport, AsyncClient
 
@@ -165,6 +179,7 @@ async def _run_http() -> None:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         ds = "ds_" + os.urandom(4).hex()
+        await _seed_data_source(ds)
         gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
 
         # ---- (a) GET /resolve threads viewId: v1 opens its own draft; v2's READ must NOT
@@ -188,7 +203,7 @@ async def _run_http() -> None:
 
         # v1's draft gets one checkpoint commit attributed to v1.
         await c.post(f"{ws1}/graphs/{gid}/branches/{b1}/changes", json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "N_v1", "payload": {"displayName": "N_v1"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "N_v1", "payload": {"entityType": "Dataset", "displayName": "N_v1"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{b1}/commit", json={})
         pr_v1 = (await c.post(f"{ws1}/graphs/{gid}/branches/{b1}/merge-requests", json={})).json()["prId"]
 
@@ -197,7 +212,7 @@ async def _run_http() -> None:
                            json={"dataSourceId": ds, "originatingViewId": "v2"})).json()["myDraft"]["branchId"]
         assert b2 != b1
         await c.post(f"{ws1}/graphs/{gid}/branches/{b2}/changes", json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "N_v2", "payload": {"displayName": "N_v2"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "N_v2", "payload": {"entityType": "Dataset", "displayName": "N_v2"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{b2}/commit", json={})
         pr_v2 = (await c.post(f"{ws1}/graphs/{gid}/branches/{b2}/merge-requests", json={})).json()["prId"]
 
@@ -232,7 +247,7 @@ async def _run_http() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_branch_per_view_http_e2e():
+def test_versioning_branch_per_view_http_e2e(data_sources):
     asyncio.run(_run_http())
 
 

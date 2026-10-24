@@ -62,9 +62,9 @@ async def _run() -> None:
     assert len(await svc.commit_log(graph_id=gid, branch_id=main, viewer=bob)) >= 1
 
     # ── list_branches is filtered: bob sees only main; alice + manager see the draft ──
-    assert dA not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
-    assert dA in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=alice)]
-    assert dA in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=mgr)]
+    assert dA not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
+    assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=alice))[0]]
+    assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=mgr))[0]]
 
     # ── submit a PR with a reviewer; the source-branch owner is surfaced on the single-PR read ──
     mr = await svc.open_draft_mr(graph_id=gid, branch_id=dA, actor="alice", reviewers=["rev"])

@@ -2523,6 +2523,32 @@ async def _versioning_not_enabled_handler(request, exc: _VersioningNotEnabled):
     )
 
 
+from backend.app.services.versioning.errors import HTTP_MAPPED as _VERSIONING_HTTP_MAPPED
+from backend.app.services.versioning.errors import AccessDenied as _AccessDenied
+
+
+async def _versioning_error_handler(request, exc):
+    """Versioning errors that name their own answer (a closed draft, a busy graph, an
+    active job): routes outside the versioning router reach the client with the same
+    status and detail as routes inside it."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                        headers=exc.headers)
+
+
+for _cls in _VERSIONING_HTTP_MAPPED:
+    app.add_exception_handler(_cls, _versioning_error_handler)
+
+
+@app.exception_handler(_AccessDenied)
+async def _access_denied_handler(request, exc: _AccessDenied):
+    """Backstop: a draft-access refusal no route mapped is a 403, never a 500. The mapped
+    subclasses above keep their own answers (the most specific handler wins)."""
+    return JSONResponse(
+        status_code=403,
+        content={"detail": {"type": "access_denied", "message": str(exc)}},
+    )
+
+
 # Fallback handlers for raw connectivity errors that bypass the breaker
 # (e.g. errors raised during provider instantiation, before the proxy is in
 # place). In steady state these should be rare because every cached provider
@@ -3052,9 +3078,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     # ``X-Activity-Reason`` carries the optional "why" a person gives for a
     # manual operation into the activity ledger (``common/activity_context``).
+    # ``Idempotency-Key`` lets a canvas save be retried without landing twice.
     allow_headers=[
         "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
-        "X-Activity-Reason",
+        "X-Activity-Reason", "Idempotency-Key",
     ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
@@ -3067,8 +3094,9 @@ app.add_middleware(
     #
     # The view-file export (``/views/transfer/export``) names its download and proves its
     # content in headers: the filename, and the hashes the Export dialog shows.
+    # ``X-Next-Cursor`` pages the versioning branch list, whose body stays a bare list.
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
-                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

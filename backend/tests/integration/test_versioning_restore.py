@@ -118,8 +118,7 @@ async def _run() -> None:
     F = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
     fg = F["graph_id"]
     await _edit_publish(svc, fg, "alice", [_n("A", f=1), _n("P")], "seed")
-    fork = await svc.fork_graph(parent_graph_id=fg, data_source_id=ds(), actor="carol",
-                                workspace_id="ws1")
+    fork = await svc.fork_graph(parent_graph_id=fg, actor="carol", workspace_id="ws1")
     fkg, fkmain = fork["graph_id"], fork["main_branch_id"]
     fc1 = await _edit_publish(svc, fkg, "carol", [_upd("A", f=5)], "fork edit 1")
     await _edit_publish(svc, fkg, "carol", [_upd("A", f=9), _n("Z")], "fork edit 2")

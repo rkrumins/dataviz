@@ -13,9 +13,13 @@ external system becomes the **base layer** — the graph is periodically **re-sy
 commits** — and human curation moves to an **overlay** of drafts merged *on top* via 3-way merge.
 The key property, already implemented: **an authoritative re-sync never clobbers a human edit** — a
 field the source and a user both changed *conflicts* (or the source wins only if you say
-`external_wins`). The seam for this — provider capabilities, `source_mode`, graph `kind`, the
-`sync_ingest` merge path, and external-type mapping — is **built**; DataHub-specific scheduling,
-write-back, and an OpenMetadata connector are **not yet wired**.
+`external_wins`). **Known limitation:** the merge base is `main` as it stood at the last sync, so
+human edits published before that sync would read as the source's old values on the next one. Until
+the source's own snapshot becomes the base, such a sync is refused with `409 curation_at_risk`
+unless a workspace admin passes `force` ([06 · API Reference](/docs/versioning-api-reference)).
+The seam for this — provider capabilities, `source_mode`, graph `kind`, the `sync_ingest` merge
+path, and external-type mapping — is **built**; DataHub-specific scheduling, write-back, and an
+OpenMetadata connector are **not yet wired**.
 
 ---
 

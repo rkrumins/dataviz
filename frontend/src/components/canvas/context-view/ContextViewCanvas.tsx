@@ -32,8 +32,9 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { BranchClosedError, DraftRoleRequiredError, IntegrityError, MergeConflictError, NotDraftOwnerError, OntologyViolationError, type Branch } from '@/services/versioningApiService'
 import { markConflicts } from '@/features/versioning/model/mapConflicts'
+import { copyStagedToNewDraft } from '@/features/versioning/model/copyStagedToNewDraft'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -1609,6 +1610,8 @@ export function ContextViewCanvas({
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       const isMod = e.metaKey || e.ctrlKey
       if (!isMod) return
+      // Nothing is undone under a save in flight: it already carries the change.
+      if (useStagedChangesStore.getState().applyStatus === 'applying') return
       const key = e.key.toLowerCase()
       if (key === 'z' && !e.shiftKey) {
         e.preventDefault()
@@ -6345,8 +6348,9 @@ export function ContextViewCanvas({
                 },
                 message: `Canvas edits (${stagedChangeList.length})`,
               })
-              // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
-              useStagedChangesStore.setState({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
+              // Clear only what this save carried (a change staged while it ran stays); no discard
+              // hooks run, so the optimistic canvas is kept.
+              useStagedChangesStore.getState().clearSaved(stagedChangeList.map(c => c.id))
               // A save creates a new draft commit that every versioning surface must reflect — the
               // cumulative branch diff (Changes tab), the commit log (Commits tab), and per-entity
               // history. Invalidate the whole versioning namespace so saved changes appear at once
@@ -6396,6 +6400,27 @@ export function ContextViewCanvas({
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
               } else if (e instanceof IntegrityError) {
                 notify('error', `Nothing was saved. ${e.message}`)
+              } else if (e instanceof BranchClosedError || e instanceof NotDraftOwnerError || e instanceof DraftRoleRequiredError) {
+                // The draft closed under the save, is someone else's private draft, or is a shared
+                // draft the user no longer edits. Keep the staged edits; they can go to a new draft.
+                const fromBranchId = bs.currentBranchId
+                const ownerName = e instanceof NotDraftOwnerError && e.owner
+                  ? queryClient.getQueriesData<Branch[]>({ queryKey: [...VERSIONING_KEYS.all, 'branches'] })
+                      .flatMap(([, branches]) => branches ?? [])
+                      .find(b => b.branchId === fromBranchId)?.userNames?.[e.owner]
+                  : undefined
+                const why = e instanceof NotDraftOwnerError
+                  ? `This draft belongs to ${ownerName ?? 'someone else'} — copy your edits to a new draft.`
+                  : e instanceof DraftRoleRequiredError
+                  ? 'You’re no longer an editor of this shared draft.'
+                  : e.message
+                notify('error', `Nothing was saved. ${why} Your changes are still here.`, {
+                  label: 'Copy to a new draft',
+                  onClick: () => {
+                    void copyStagedToNewDraft(fromBranchId, activeView?.id ?? null)
+                      .catch(err => notify('error', (err as Error).message))
+                  },
+                })
               } else {
                 notify('error', (e as Error).message)
               }

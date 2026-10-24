@@ -22,6 +22,7 @@ from backend.app.services.versioning.bootstrap_worker import (
     BootstrapRunner,
     _is_transient,
 )
+from backend.app.services.versioning.errors import ContentionExhausted, LockBusy
 from backend.app.services.versioning.job_lease import Draining, Lease, Superseded
 from backend.app.services.versioning.purge_worker import PurgeRefused, PurgeRunner
 
@@ -43,6 +44,8 @@ class _Boom(Exception):
      "FalkorDB is replaying its RDB after a restart — it WILL come back"),
     (_Boom("CLUSTERDOWN the cluster is down"),   True,  "a rotation in progress"),
     (OperationalError("conn", "p", "o"),         True,  "Postgres failed over"),
+    (LockBusy("graph g1 is busy"),               True,  "another writer holds the graph: it lets go"),
+    (ContentionExhausted("graph g1 is busy"),    True,  "every retry lost a race: the writers thin out"),
     (_Boom("Query timed out"),                   False,
      "the server killed OUR query: shrink the window, waiting changes nothing"),
     (IntegrityError("dup key", "p", "o"),        False,

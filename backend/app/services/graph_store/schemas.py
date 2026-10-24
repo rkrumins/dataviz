@@ -153,18 +153,33 @@ class DataSourceRef(_Base):
     edge_count: int = Field(0, alias="edgeCount")
 
 
+class VersionedOnShard(_Base):
+    """The versioned graph that projects into a key (its ``projection_state`` row)."""
+    graph_id: str = Field(alias="graphId")
+    #: "fork" for a fork's own key, else "main".
+    kind: Literal["main", "fork"] = "main"
+    #: The platform minted the key and may delete it; else it is the customer's graph.
+    owned: bool = False
+    status: str = "idle"
+    #: Commits on main not yet projected.
+    lag: int = 0
+
+
 class GraphOnShard(_Base):
     """One graph key on one shard, and who owns it.
 
-    ``present`` False means the key is registered to a data source but the
-    node does not hold it (never rebuilt, or dropped) — the row stays, so a
-    missing graph is visible instead of silently absent.
+    ``present`` False means the key is registered to a data source or a
+    versioned graph but the node does not hold it (never rebuilt, or
+    dropped) — the row stays, so a missing graph is visible instead of
+    silently absent. ``role`` is "versioned" for a key only a versioned
+    graph claims (a fork's, or one whose data source is gone).
     """
     key: str
     slot: int
     present: bool = True
-    role: Literal["source", "projection", "unregistered"] = "source"
+    role: Literal["source", "projection", "versioned", "unregistered"] = "source"
     data_sources: List[DataSourceRef] = Field(default_factory=list, alias="dataSources")
+    versioned: Optional[VersionedOnShard] = None
     edge_count: int = Field(0, alias="edgeCount")
     estimated_bytes: Optional[int] = Field(None, alias="estimatedBytes")
     measured_bytes: Optional[int] = Field(None, alias="measuredBytes")
@@ -224,6 +239,11 @@ class ProviderRef(_Base):
     id: str
     name: Optional[str] = None
     is_active: bool = Field(True, alias="isActive")
+    #: Versioned graphs projecting into this provider, and the size of their
+    #: keys (measured, else estimated; None when no key's size is known).
+    #: Both None when the versioning store could not be read.
+    versioned_graphs: Optional[int] = Field(None, alias="versionedGraphs")
+    versioned_bytes: Optional[int] = Field(None, alias="versionedBytes")
 
 
 class InstanceTotals(_Base):
@@ -304,6 +324,10 @@ class GraphStoreTopologyResponse(_Base):
     #: first reading of a store the page has never seen; with instances, it
     #: is a refresh behind figures that are already on screen.
     refreshing: bool = False
+    #: The versioning store could not be read: no key is attributed to a
+    #: versioned graph, so a fork's key reads as unregistered and no provider
+    #: has a versioned-graph count.
+    versioned_unread: bool = Field(False, alias="versionedUnread")
 
 
 class ReadRouting(_Base):

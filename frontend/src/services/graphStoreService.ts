@@ -115,13 +115,26 @@ export interface DataSourceRef {
     edgeCount: number
 }
 
+/** The versioned graph that projects into a key. */
+export interface VersionedOnShard {
+    graphId: string
+    kind: 'main' | 'fork'
+    /** The platform minted the key; else it is the customer's own graph. */
+    owned: boolean
+    status: string
+    /** Commits on main not yet projected. */
+    lag: number
+}
+
 export interface GraphOnShard {
     key: string
     slot: number
-    /** False: registered to a data source, but the node does not hold it. */
+    /** False: registered to a data source or a versioned graph, but the node does not hold it. */
     present: boolean
-    role: 'source' | 'projection' | 'unregistered'
+    /** 'versioned': only a versioned graph claims the key (a fork's, or one whose data source is gone). */
+    role: 'source' | 'projection' | 'versioned' | 'unregistered'
     dataSources: DataSourceRef[]
+    versioned?: VersionedOnShard | null
     edgeCount: number
     estimatedBytes?: number | null
     measuredBytes?: number | null
@@ -168,6 +181,8 @@ export interface ProviderRef {
     id: string
     name?: string | null
     isActive: boolean
+    versionedGraphs?: number
+    versionedBytes?: number | null
 }
 
 export interface InstanceTotals {
@@ -283,6 +298,9 @@ export interface GraphStoreTopologyResponse {
      *  first reading of a store the page has never seen; with instances it
      *  is a refresh behind figures already on screen. */
     refreshing?: boolean
+    /** The versioning store could not be read: a fork's key reads as
+     *  unregistered and no provider has a versioned-graph count. */
+    versionedUnread?: boolean
 }
 
 export interface ReadRouting {
@@ -407,6 +425,13 @@ export const graphStoreService = {
     async getPlacement(dataSourceId: string): Promise<GraphPlacementResponse> {
         return authFetch<GraphPlacementResponse>(
             `${BASE}/placement?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+        )
+    },
+
+    /** Where one versioned graph's projection lives — by graph id, so a fork's own key is placed. */
+    async getPlacementByGraph(graphId: string): Promise<GraphPlacementResponse> {
+        return authFetch<GraphPlacementResponse>(
+            `${BASE}/placement?graphId=${encodeURIComponent(graphId)}`,
         )
     },
 

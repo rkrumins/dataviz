@@ -83,7 +83,8 @@ async def _run() -> None:
 
     async def fake_claims(request: Request):
         ws = request.path_params.get("ws_id") or "ws1"
-        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M)})
+        # bulk-ingest writes main, so a person needs publish as well
+        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M, "workspace:datasource:publish")})
 
     app = FastAPI()
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")

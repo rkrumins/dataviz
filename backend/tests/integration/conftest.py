@@ -61,9 +61,48 @@ def _fresh_graphver_engine():
     module-level cache whose pooled connections belong to the loop that opened them. A test
     that fails before its own ``dispose_engine()`` would hand the next test connections on a
     closed loop ("attached to a different loop"), failing it for no reason of its own.
+    The management engines, the broker client and the process-wide FalkorDB client
+    cache are cached the same way, so they are reset too.
     """
+    from backend.app.db import engine as mgmt_engine
+    from backend.app.providers import falkordb_connection
     from backend.app.services.versioning import db as gvdb
+    from backend.app.services.versioning import messaging
 
     gvdb._engine = None
     gvdb._session_factory = None
+    mgmt_engine._engines.clear()
+    mgmt_engine._session_factories.clear()
+    messaging._client = None
+    falkordb_connection._GRAPH_CLIENTS = falkordb_connection.TopologyGraphClients()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _keep_revocation_service():
+    """Some harnesses stub ``get_revocation_service`` in place (no Redis here) and never put it
+    back. Restore it after each test, so a later test in the same run that authenticates for real
+    still gets a revocation check it can await."""
+    from backend.app.auth import dependencies as deps
+
+    original = deps.get_revocation_service
+    yield
+    deps.get_revocation_service = original
+
+
+@pytest.fixture
+def data_sources(monkeypatch):
+    """POST /graphs resolves its data source in the management DB and pins the new graph to that
+    data source's FalkorDB graph. The harnesses post ids that exist nowhere: here every id answers
+    as a data source in ``ws1``, pinned to the graph name this dict maps it to (unpinned if none)."""
+    from types import SimpleNamespace
+    from backend.app.db.repositories import data_source_repo
+
+    pins: dict = {}
+
+    async def get_data_source_orm(session, data_source_id, **_kw):
+        return SimpleNamespace(id=data_source_id, workspace_id="ws1",
+                               graph_name=pins.get(data_source_id), provider_id=None)
+
+    monkeypatch.setattr(data_source_repo, "get_data_source_orm", get_data_source_orm)
+    return pins

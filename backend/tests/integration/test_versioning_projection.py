@@ -44,6 +44,7 @@ class FakeGraph:
         self._ids: dict = {}    # urn -> internal node id (FalkorDB's id(n)), never reused
         self._property_keys: set = set()   # db.propertyKeys() — registered, never freed
         self._next_id = 0
+        self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -213,6 +214,10 @@ class FakeGraph:
                 if n is not None and n.get("entityId") == p["eid"]:
                     self._drop_node(p["urn"])
             return None
+        # The pass marker every publishing pass writes last (``projection._write_marker``).
+        if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
+            self.proj_meta = dict(params)
+            return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
     def _id_of(self, urn: str) -> int:
@@ -233,6 +238,7 @@ class FakeGraph:
         self.nodes.clear()
         self.edges.clear()
         self._ids.clear()
+        self.proj_meta = {}
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}
@@ -298,7 +304,7 @@ async def _run() -> None:
     # ── seed + first projection (pinned target: unpinned graphs are no longer projected) ──
     first_name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=first_name)
+                               actor="alice", falkor_graph_name=first_name, owns_falkor_graph=True)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A",
@@ -357,14 +363,17 @@ async def _run() -> None:
     assert fg.entity_ids() == {"A", "C"} and set(fg.edges) == {"E2"}   # inherited base, nothing copied
     assert "__fork_" in await _graph_name(F["graph_id"])               # fork has its own graph name
 
-    # ── self-healing re-point: ensure_projection_target re-points a graph to the data source's
-    # real graph and resets the watermark; the next projection REBUILDS that graph clean — a stale
-    # row main no longer has must be gone (the additive seed alone would leave it: the reported
-    # "deletes still show on Main").
-    real_name = "real_ds_graph"
+    # ── self-healing re-point: ensure_projection_target re-points a graph still on the gv_<id>
+    # placeholder to the data source's real graph and resets the watermark; the next projection
+    # REBUILDS that graph clean — a stale row main no longer has must be gone (the additive seed
+    # alone would leave it: the reported "deletes still show on Main").
+    placeholder = FalkorProjector.default_graph_name(gid)
+    async with db.graphver_session() as s:
+        (await s.get(ProjectionStateORM, gid)).falkor_graph_name = placeholder
+    real_name = "real_ds_graph_" + os.urandom(3).hex()      # one versioned graph per key (uq_ps_key)
     fake(real_name).nodes["gv:STALE"] = {"urn": "gv:STALE", "entityId": "STALE", "displayName": "stale"}
     old = await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=real_name)
-    assert old == first_name, old                                      # returns the now-orphaned name to drop
+    assert old == placeholder, old                                     # returns the now-orphaned name to drop
     assert await _graph_name(gid) == real_name                         # re-pointed to the real graph
     assert await _watermark(gid) == 0                                  # reset → next projection is a full reseed
     assert (await proj.project_graph(gid))["projected"] == 4
@@ -372,6 +381,15 @@ async def _run() -> None:
     assert "STALE" not in rg.entity_ids(), rg.entity_ids()             # clean rebuild dropped the stale node
     assert rg.entity_ids() == {"A", "C"} and set(rg.edges) == {"E2"}   # == materialized main
     assert (await proj.project_graph(gid))["noop"] is True             # caught up; no churn on the next call
+
+    # a pinned graph is never re-pointed: its key changes only through move_projection.
+    async with db.graphver_session() as s:
+        epoch = (await s.get(ProjectionStateORM, gid)).epoch
+    other = "other_" + os.urandom(3).hex()
+    assert await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=other) is None
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert (ps.falkor_graph_name, ps.epoch) == (real_name, epoch)
 
     # a fork is left untouched — it legitimately owns its __fork_ graph (no re-point, returns None).
     assert await svc.ensure_projection_target(graph_id=F["graph_id"], falkor_graph_name=real_name) is None
@@ -415,7 +433,7 @@ async def _run_target_resolver() -> None:
     await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=orphan_name)
 
     # The worker's projector carries a target_resolver pinning the data source's REAL graph.
-    real_name = "real_ds_graph_b1"
+    real_name = "real_ds_graph_b1_" + os.urandom(3).hex()
 
     async def resolver(s, graph_id):                 # same contract as repair_projection_target(svc, gid)
         return await s.ensure_projection_target(graph_id=graph_id, falkor_graph_name=real_name)
@@ -485,9 +503,10 @@ class _DropFailGraph(FakeGraph):
 
 async def _seed_pinned_graph(svc, name: str) -> str:
     """Create + publish a two-node graph pinned to ``name`` (a real FalkorDB target), left at
-    watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path."""
+    watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path. The
+    platform owns the key: a key it did not mint starts parked, and is never full-replayed over."""
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},

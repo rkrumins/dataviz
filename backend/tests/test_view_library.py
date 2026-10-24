@@ -191,7 +191,7 @@ async def test_a_view_holds_a_bounded_number_of_rules(test_client: AsyncClient, 
     assert (await test_client.put(f"{base}/a", json=_rule("a", "A2"))).status_code == 200
 
 
-async def test_a_drafts_rules_stay_on_the_draft(test_client: AsyncClient):
+async def test_a_drafts_rules_stay_on_the_draft(test_client: AsyncClient, any_open_draft):
     view_id = await _view(test_client)
     base = f"/api/v1/views/{view_id}/library/rules"
     await test_client.put(f"{base}/r1", json=_rule("r1", "Published"))
@@ -203,7 +203,7 @@ async def test_a_drafts_rules_stay_on_the_draft(test_client: AsyncClient):
     assert _names((await _library(test_client, view_id))["displayRules"]) == ["Published"]
 
 
-async def test_promote_keeps_rules_added_on_both_sides(test_client: AsyncClient, db_session):
+async def test_promote_keeps_rules_added_on_both_sides(test_client: AsyncClient, db_session, any_open_draft):
     view_id = await _view(test_client)
     base = f"/api/v1/views/{view_id}/library/rules"
     await test_client.put(f"{base}/r1", json=_rule("r1", "Shared"))
@@ -236,7 +236,7 @@ async def test_saved_queries_are_kept_named_ordered_and_removed(test_client: Asy
     assert _names((await _library(test_client, view_id))["savedQueries"]) == ["Every table"]
 
 
-async def test_saved_queries_belong_to_the_view_on_every_branch(test_client: AsyncClient):
+async def test_saved_queries_belong_to_the_view_on_every_branch(test_client: AsyncClient, any_open_draft):
     view_id = await _view(test_client)
     await test_client.put(f"/api/v1/views/{view_id}/library/queries/q1", json=_query("Tables"))
     assert _names((await _library(test_client, view_id, "br_any"))["savedQueries"]) == ["Tables"]

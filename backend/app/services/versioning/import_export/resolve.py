@@ -189,11 +189,13 @@ def resolve_rows(
 
     # ---- pass 1: nodes ----
     for row in node_rows:
-        if row.get("op") == "invalid":
-            resolutions.append(_resolution(row, "invalid", None, reasons=[row.get("op_error") or "invalid row"]))
-            continue
         matched_eid, ambiguous = _match_node(row, urn_to_eid, qname_to_eid, node_eids,
                                              created_from, qname_from)
+        if row.get("op") == "invalid":
+            # Still names what it matched: a replace must not read that entity as absent.
+            resolutions.append(_resolution(row, "invalid", None if ambiguous else matched_eid,
+                                           reasons=[row.get("op_error") or "invalid row"]))
+            continue
         if ambiguous:
             if row.get("qualifiedName") and not row.get("urn"):
                 qname_to_eid[row["qualifiedName"]] = None   # two items carry it: it names neither
@@ -207,7 +209,7 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete target not found"]))
             continue
         if node_types is not None and row.get("entityType") and str(row["entityType"]).strip().lower() not in node_types:
-            resolutions.append(_resolution(row, "invalid", None,
+            resolutions.append(_resolution(row, "invalid", matched_eid,
                 reasons=[f"'{row['entityType']}' is not a valid entity type in this ontology"]))
             continue
         if matched_eid:

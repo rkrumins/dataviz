@@ -157,7 +157,7 @@ async def test_restore_of_a_missing_version_is_404(test_client: AsyncClient):
     assert (await test_client.get(f"/api/v1/views/{vid}/versions/9")).status_code == 404
 
 
-async def test_a_draft_write_is_never_a_version(test_client: AsyncClient, db_session):
+async def test_a_draft_write_is_never_a_version(test_client: AsyncClient, db_session, any_open_draft):
     ws = await _workspace(test_client)
     vid = await _view(test_client, ws)
     resp = await test_client.put(
@@ -177,7 +177,7 @@ async def test_a_client_cannot_claim_a_server_source(test_client: AsyncClient):
     assert resp.status_code == 422
 
 
-async def test_promoting_a_draft_records_a_version(test_client: AsyncClient, db_session):
+async def test_promoting_a_draft_records_a_version(test_client: AsyncClient, db_session, any_open_draft):
     ws = await _workspace(test_client)
     vid = await _view(test_client, ws)
     await test_client.put(f"/api/v1/views/{vid}/layout", json=_layout(checkpoint={"source": "create"}))

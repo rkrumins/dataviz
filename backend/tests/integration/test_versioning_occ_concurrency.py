@@ -15,6 +15,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.errors import ContentionExhausted
 from backend.app.services.versioning.service import (
     GraphVersioningService, MergeConflict, NotUpToDate, ConcurrencyError,
 )
@@ -50,9 +51,9 @@ async def _run() -> None:
     await svc.apply_ops(graph_id=gid, branch_id=d, actor="bot", ops=[_node(A, displayName="v0")])
     tok = await _head_hash(svc, gid, d, A)
     res = await asyncio.gather(
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="alice",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, displayName="alice"), "base_version": tok}]),
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="bob",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, displayName="bob"), "base_version": tok}]),
         return_exceptions=True)
     assert sum(isinstance(r, MergeConflict) for r in res) == 1, res
@@ -66,9 +67,9 @@ async def _run() -> None:
                         ops=[_node(A, displayName="v0", description="d0")])
     tok = await _head_hash(svc, gid, d, A)
     await asyncio.gather(
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="alice",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, displayName="alice"), "base_version": tok}]),
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="bob",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, description="bob"), "base_version": tok}]))
     v = await svc.entity_value(graph_id=gid, entity_id=A, branch_id=d)
     assert v["displayName"] == "alice" and v["description"] == "bob", v
@@ -86,9 +87,9 @@ async def _run() -> None:
                                          containment_edge_types=[])
     assert node and node.get("version"), node
     res = await asyncio.gather(
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="x",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, displayName="x"), "base_version": node["version"]}]),
-        svc.apply_ops(graph_id=gid, branch_id=d, actor="y",
+        svc.apply_ops(graph_id=gid, branch_id=d, actor="bot",
                       ops=[{**_upd(A, displayName="y"), "base_version": node["version"]}]),
         return_exceptions=True)
     assert sum(isinstance(r, MergeConflict) for r in res) == 1, res
@@ -158,7 +159,8 @@ async def _run() -> None:
         svc.rebase_draft(graph_id=gid, branch_id=d, actor="bot"),
         return_exceptions=True)
     for r in res:
-        assert not isinstance(r, Exception) or isinstance(r, (ConcurrencyError, MergeConflict)), r
+        assert not isinstance(r, Exception) or isinstance(
+            r, (ConcurrencyError, MergeConflict, ContentionExhausted)), r
 
     await db.dispose_engine()
 

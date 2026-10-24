@@ -430,7 +430,8 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     # missing, a role holding the four legacy leaves would still
     # collapse to ``workspace:view:*``, and the wildcard expansion in
     # ``has_permission`` would silently satisfy publish checks for
-    # every workspace_member.
+    # every workspace_member. The same holds for
+    # ``workspace:datasource:publish``: read+manage must not collapse.
     "workspace:view": frozenset({
         "workspace:view:create",
         "workspace:view:edit",
@@ -440,6 +441,7 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     }),
     "workspace:datasource": frozenset({
         "workspace:datasource:manage",
+        "workspace:datasource:publish",
         "workspace:datasource:read",
     }),
     # Phase 18: read+manage split for ontology / catalog; provider
@@ -474,6 +476,7 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
 _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
+    "workspace:datasource:publish",
     "workspace:datasource:read",
     # Answering access requests and adding people: a workspace admin can do
     # whatever a Workspace steward can.
@@ -716,6 +719,19 @@ class KeyScope:
     #: rather than read-only (``system:org-viewer``) — whether catalogue
     #: visibility is filtered at all, exactly as it is for the owner.
     org_unrestricted: bool = False
+    #: Where the OWNER holds ``workspace:datasource:publish`` — their own
+    #: grants, not narrowed to the key, which can never hold it: everywhere
+    #: through an organisation-wide role, or in these workspaces. A key may
+    #: write a versioned graph's main directly only where its owner could
+    #: (``versioning_gate.require_publish_for_main``).
+    owner_publishes_everywhere: bool = False
+    owner_publish_workspaces: frozenset[str] = frozenset()
+
+    def owner_publishes(self, workspace_id: Optional[str]) -> bool:
+        return (
+            self.owner_publishes_everywhere
+            or workspace_id in self.owner_publish_workspaces
+        )
 
     @property
     def view_permissions(self) -> frozenset[str]:
@@ -929,6 +945,13 @@ async def resolve_for_api_key(
         org_perms=org_perms,
         org_unrestricted=scope.all_resources and bool(
             {"system:admin", "system:org-admin"} & set(owner.global_perms)
+        ),
+        owner_publishes_everywhere=has_permission(
+            owner, "workspace:datasource:publish", workspace_id=_EVERY_WORKSPACE,
+        ),
+        owner_publish_workspaces=frozenset(
+            ws for ws in owner.ws_perms
+            if has_permission(owner, "workspace:datasource:publish", workspace_id=ws)
         ),
     )
     return PermissionClaims(

@@ -18,6 +18,7 @@ from .endpoints import (
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
     versioning,
+    versioning_admin,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -107,6 +108,11 @@ api_router.include_router(
 api_router.include_router(
     features.router, prefix="/admin/features", tags=["admin:features"],
     dependencies=[Depends(requires("system:admin"))],
+)
+# Disaster recovery and the fleet inventory of the versioned graphs' FalkorDB projections; each
+# route needs system:admin.
+api_router.include_router(
+    versioning_admin.router, prefix="/admin/versioning", tags=["admin:versioning"],
 )
 # Public read-only flag values — the app shell needs them before/without a
 # session (mirrors branding.public_router). Values only, never admin metadata.

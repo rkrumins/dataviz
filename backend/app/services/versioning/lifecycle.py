@@ -104,6 +104,11 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
 
         ps = await s.get(ProjectionStateORM, gid)
 
+        # Forks live in the same workspace and move with the graph.
+        forks = await s.scalar(
+            select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None))) or 0
+
     return {
         "versioned": True,
         "commits": int(commits),
@@ -117,6 +122,7 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
             for d in drafts
         ],
         "openReviews": int(reviews),
+        "forks": int(forks),
         "curatedEntities": int(curated),
         "storageBytes": int(rows) * _BYTES_PER_VERSION_ROW,
         # THE REASSURANCE. `owns_falkor_graph` is a recorded fact, set at creation — we own the
@@ -137,6 +143,9 @@ async def relocation_facts(data_source_id: str) -> Optional[dict]:
 
     Looked up by data source alone: the graph's own ``workspace_id`` is exactly what a move
     rewrites, and a copy left stale by an earlier move must not hide the graph from this one.
+    The graph moves with every fork of it, at any depth and those in the trash too
+    (``GraphVersioningService.move_graph_workspace``), so jobs are counted on all of them —
+    nothing moves while one runs — and drafts, reviews and forks on the live ones.
     """
     async with graphver_session() as s:
         graph = (await s.execute(
@@ -147,11 +156,19 @@ async def relocation_facts(data_source_id: str) -> Optional[dict]:
         if graph is None:
             return None
         gid = graph.id
+        tree, live, level = [gid], [gid], [gid]
+        while level:
+            rows = (await s.execute(select(GraphORM.id, GraphORM.deleted_at).where(
+                GraphORM.fork_parent_graph_id.in_(level)))).all()
+            level = [r[0] for r in rows]
+            tree += level
+            live += [r[0] for r in rows if r[1] is None]
         active = (await s.execute(
-            select(JobORM.job_type).where(JobORM.graph_id == gid, JobORM.status.in_(_ACTIVE_JOB))
+            select(JobORM.job_type).where(JobORM.graph_id.in_(tree),
+                                          JobORM.status.in_(_ACTIVE_JOB))
         )).scalars().all()
         # A failed "turn on version control" waits to be resumed or cancelled; until then the
-        # move waits too (``purge_worker._why_graph_stays``).
+        # move waits too (``GraphVersioningService.move_graph_workspace``).
         unfinished = await s.scalar(
             select(func.count()).select_from(JobORM).where(
                 JobORM.graph_id == gid, JobORM.job_type == "bootstrap", JobORM.status == "failed"))
@@ -160,17 +177,14 @@ async def relocation_facts(data_source_id: str) -> Optional[dict]:
         # Open drafts only: a merged or abandoned draft is history, not someone's work in flight.
         drafts = (await s.execute(
             select(BranchORM.id, BranchORM.name, BranchORM.owner).where(
-                BranchORM.graph_id == gid,
+                BranchORM.graph_id.in_(live),
                 BranchORM.kind == "draft",
                 BranchORM.status.in_(("open", "publishing")),
             ))).all()
         reviews = await s.scalar(
             select(func.count()).select_from(MergeRequestORM).where(
-                MergeRequestORM.target_graph_id == gid,
+                MergeRequestORM.target_graph_id.in_(live),
                 MergeRequestORM.status.notin_(("merged", "closed")))) or 0
-        forks = await s.scalar(
-            select(func.count()).select_from(GraphORM).where(
-                GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None))) or 0
     return {
         "graphId": gid,
         "activeJobs": sorted(set(active)),
@@ -179,5 +193,5 @@ async def relocation_facts(data_source_id: str) -> Optional[dict]:
         "openDrafts": [{"id": d[0], "name": d[1] or "Untitled draft", "owner": d[2] or ""}
                        for d in drafts],
         "openReviews": int(reviews),
-        "forks": int(forks),
+        "forks": len(live) - 1,
     }

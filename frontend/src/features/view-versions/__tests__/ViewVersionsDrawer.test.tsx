@@ -5,6 +5,7 @@
  *   - comparing shows what changed;
  *   - restoring explains itself (a NEW version, unsaved work kept first, graph data untouched)
  *     and asks the server for exactly that version;
+ *   - on a draft, a restore hands the canvas the draft as it now reads, never the restored base;
  *   - a reader sees the history but no way to save or restore;
  *   - Escape closes the drawer, or only the restore question when that is open.
  */
@@ -18,6 +19,9 @@ const statusMock = vi.fn()
 const compareMock = vi.fn()
 const restoreMock = vi.fn()
 const saveMock = vi.fn()
+const getViewMock = vi.fn()
+const addOrUpdateViewMock = vi.fn()
+const branchState = { viewId: null as string | null, currentBranchId: null as string | null }
 
 vi.mock('@/services/viewVersionsApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewVersionsApiService')>()
@@ -32,10 +36,13 @@ vi.mock('@/services/viewVersionsApiService', async (importOriginal) => {
 })
 vi.mock('@/services/viewApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewApiService')>()
-  return { ...actual, viewToViewConfig: (v: unknown) => v }
+  return { ...actual, viewToViewConfig: (v: unknown) => v, getView: (...a: unknown[]) => getViewMock(...a) }
 })
 vi.mock('@/store/schema', () => ({
-  useSchemaStore: Object.assign(() => undefined, { getState: () => ({ addOrUpdateView: vi.fn() }) }),
+  useSchemaStore: Object.assign(() => undefined, { getState: () => ({ addOrUpdateView: addOrUpdateViewMock }) }),
+}))
+vi.mock('@/store/branchStore', () => ({
+  useBranchStore: Object.assign(() => undefined, { getState: () => branchState }),
 }))
 
 import { ViewVersionsDrawer } from '../ViewVersionsDrawer'
@@ -85,6 +92,8 @@ function renderDrawer(canEdit = true, onClose = vi.fn()) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  branchState.viewId = null
+  branchState.currentBranchId = null
   listMock.mockResolvedValue(page())
   statusMock.mockResolvedValue({ headVersion: 3, headHash: 'h', workingHash: 'x', designChanged: true, labelChanged: false, dirty: true, origin: null })
 })
@@ -138,6 +147,22 @@ describe('ViewVersionsDrawer', () => {
     expect(screen.getByText(/saved first, as v4/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Restore v2' }))
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith('view_1', 2))
+    await waitFor(() => expect(addOrUpdateViewMock).toHaveBeenCalledWith({ id: 'view_1' }))
+    expect(getViewMock).not.toHaveBeenCalled()
+  })
+
+  it('on a draft, hands the canvas the draft as it now reads, not the restored base', async () => {
+    branchState.viewId = 'view_1'
+    branchState.currentBranchId = 'br_1'
+    getViewMock.mockResolvedValue({ id: 'view_1', name: 'draft' })
+    restoreMock.mockResolvedValue({ view: { id: 'view_1', name: 'base' }, version: version(5, { source: 'restore' }), snapshot: version(4, { source: 'snapshot' }) })
+    renderDrawer()
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Restore' }))[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Restore v2' }))
+    await waitFor(() => expect(addOrUpdateViewMock).toHaveBeenCalled())
+    expect(getViewMock).toHaveBeenCalledWith('view_1', 'br_1')
+    expect(addOrUpdateViewMock).toHaveBeenCalledTimes(1)
+    expect(addOrUpdateViewMock).toHaveBeenCalledWith({ id: 'view_1', name: 'draft' })
   })
 
   it('closes on Escape, or closes only the restore question when that is open', async () => {

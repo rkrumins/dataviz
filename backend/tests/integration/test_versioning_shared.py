@@ -3,14 +3,15 @@
 A shared draft field-merges concurrent edits from different collaborators:
 disjoint fields union, a same-field clash raises MergeConflict (settled via
 `resolutions`). A single actor's sequential edits keep last-writer-wins, and a
-private draft is unaffected.
+private draft is written only by its owner. Making a shared draft private removes
+its members, and an edit one of them left staged is withdrawn, never folded.
 """
 import asyncio
 import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import db, models, service
 from backend.app.services.versioning.service import (
     AccessDenied,
     GraphVersioningService,
@@ -92,18 +93,41 @@ async def _run() -> None:
         await svc.stage_changes(graph_id=gid, branch_id=d, actor="erin", ops=[_upd("E", "erin", x=33, y=2)])
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="erin", actor_groups=["eng"],
                             ops=[_upd("E", "erin", x=33, y=2)])
-    await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice", actor_groups=())
+    real = service._load_actor_groups
+
+    async def in_eng(actor):                                           # folding checks erin is still in it
+        return ("eng",) if actor == "erin" else ()
+    service._load_actor_groups = in_eng
+    try:
+        await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice", actor_groups=())
+    finally:
+        service._load_actor_groups = real
     assert (await _x(svc, gid, d))["x"] == 33
     assert await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="ship")  # owner/maintainer
 
-    # ── private draft is unaffected (clobber, no conflict) ───────────────
+    # ── un-share with a member's edit staged: it goes, and so does the edit ─
+    u = await svc.open_draft(graph_id=gid, owner="alice", shared=True)
+    await svc.add_branch_member(graph_id=gid, branch_id=u, subject_type="user",
+                                subject_id="bob", role="editor", actor="alice")
+    await svc.stage_changes(graph_id=gid, branch_id=u, actor="bob", ops=[_upd("E", "bob", x=9, y=2)])
+    await svc.update_branch(graph_id=gid, branch_id=u, actor="alice", is_shared=False)
+    assert await svc.list_branch_members(graph_id=gid, branch_id=u) == []
+    await svc.apply_ops(graph_id=gid, branch_id=u, actor="alice", ops=[_upd("E", "alice", x=5, y=2)])
+    assert await svc.checkpoint(graph_id=gid, branch_id=u, actor="alice") is None   # not a silent x=9
+    assert (await _x(svc, gid, u))["x"] == 5
+    async with db.graphver_session() as s:
+        assert await svc._pending_count(s, gid, u) == 0
+
+    # ── private draft: only its owner writes it; her own edits stay last-writer-wins ─
     p = await svc.open_draft(graph_id=gid, owner="alice", shared=False)
     await _seed(svc, gid, p, x=0, y=0)
     await svc.stage_changes(graph_id=gid, branch_id=p, actor="alice", ops=[_upd("E", "alice", x=1, y=0)])
-    await svc.stage_changes(graph_id=gid, branch_id=p, actor="bob",   ops=[_upd("E", "bob",   x=0, y=2)])
+    with pytest.raises(AccessDenied):                                  # bob is not its owner
+        await svc.stage_changes(graph_id=gid, branch_id=p, actor="bob", ops=[_upd("E", "bob", x=0, y=2)])
+    await svc.stage_changes(graph_id=gid, branch_id=p, actor="alice", ops=[_upd("E", "alice", x=0, y=2)])
     await svc.checkpoint(graph_id=gid, branch_id=p, actor="alice")     # no raise
     clob = await _x(svc, gid, p)
-    assert (clob["x"], clob["y"]) == (0, 2), clob                      # bob (last) clobbered
+    assert (clob["x"], clob["y"]) == (0, 2), clob                      # her last edit wins
 
     await db.dispose_engine()
 

@@ -29,6 +29,10 @@ set costs one indexed scan and removes any dependence on the caller's candidate
 list. A source becomes versioned once and stays versioned, so the result is
 cached generously.
 
+:func:`physical_key` answers a third question for the provider manager: which key a
+versioned source's reads go to, since a moved graph projects into a key the management DB does
+not name.
+
 :func:`projector_health` is the sibling that answers the *other* half of
 the question — not "who masters this source" but "and is that mastering
 currently working". It reads the same control plane and is cached for
@@ -56,9 +60,10 @@ CACHE_TTL_SECS = 600
 # the store stayed down each one waited out a fresh connection attempt.
 FAILURE_BACKOFF_SECS = 30
 
-_cache: Optional[FrozenSet[str]] = None
-_cache_at: float = 0.0
-_refresh_failed_at: Optional[float] = None
+# Keyed by ``include_trashed``: the two sets are cached apart.
+_cache: Dict[bool, FrozenSet[str]] = {}
+_cache_at: Dict[bool, float] = {}
+_refresh_failed_at: Dict[bool, float] = {}
 
 
 class VersionedLookupUnavailable(RuntimeError):
@@ -72,25 +77,26 @@ class VersionedLookupUnavailable(RuntimeError):
 
 
 async def versioned_data_source_ids(
-    *, ttl_secs: int = CACHE_TTL_SECS,
+    *, ttl_secs: int = CACHE_TTL_SECS, include_trashed: bool = False,
 ) -> FrozenSet[str]:
-    """Every data source with a live versioned graph.
+    """Every data source with a live versioned graph, or, with
+    ``include_trashed``, with any versioned graph, trashed ones included.
 
     Serves the cache while it is fresh, and keeps serving it if a refresh
     fails — a blip must not flip the fleet's classification. Raises
     :class:`VersionedLookupUnavailable` only on a cold failure, i.e. when there
     is no previous answer to stand on.
     """
-    global _cache, _cache_at, _refresh_failed_at
-
     now = time.monotonic()
-    if _cache is not None and (now - _cache_at) < ttl_secs:
-        return _cache
+    cached = _cache.get(include_trashed)
+    if cached is not None and (now - _cache_at[include_trashed]) < ttl_secs:
+        return cached
+    failed_at = _refresh_failed_at.get(include_trashed)
     if (
-        _cache is not None and _refresh_failed_at is not None
-        and (now - _refresh_failed_at) < FAILURE_BACKOFF_SECS
+        cached is not None and failed_at is not None
+        and (now - failed_at) < FAILURE_BACKOFF_SECS
     ):
-        return _cache
+        return cached
 
     try:
         from sqlalchemy import select
@@ -98,37 +104,38 @@ async def versioned_data_source_ids(
         from backend.app.services.versioning.db import get_session_factory
         from backend.app.services.versioning.models import GraphORM
 
+        stmt = select(GraphORM.data_source_id)
+        if not include_trashed:
+            stmt = stmt.where(GraphORM.deleted_at.is_(None))
         async with get_session_factory()() as session:
-            rows = await session.execute(
-                select(GraphORM.data_source_id).where(
-                    GraphORM.deleted_at.is_(None)
-                )
-            )
+            rows = await session.execute(stmt)
         found = frozenset(r[0] for r in rows.all() if r[0])
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if _cache is not None:
+        if cached is not None:
             # Serve the previous answer. The set changes only when a source is
             # versioned or unversioned, so a stale read is very nearly always
             # still correct.
-            _refresh_failed_at = now
+            _refresh_failed_at[include_trashed] = now
             logger.warning(
                 "versioned data-source lookup failed, reusing the cached set "
-                "(%d entries): %s", len(_cache), exc,
+                "(%d entries): %s", len(cached), exc,
             )
-            return _cache
+            return cached
         raise VersionedLookupUnavailable(str(exc)) from exc
 
-    _cache, _cache_at, _refresh_failed_at = found, now, None
+    _cache[include_trashed], _cache_at[include_trashed] = found, now
+    _refresh_failed_at.pop(include_trashed, None)
     return found
 
 
 def reset_cache() -> None:
-    """Drop the cached set — used by tests, and after a deliberate
+    """Drop the cached sets — used by tests, and after a deliberate
     bootstrap/unversion when the TTL is too long to wait out."""
-    global _cache, _cache_at, _refresh_failed_at
-    _cache, _cache_at, _refresh_failed_at = None, 0.0, None
+    _cache.clear()
+    _cache_at.clear()
+    _refresh_failed_at.clear()
 
 
 @dataclass(frozen=True)
@@ -176,6 +183,105 @@ async def versioned_graph_rows(*, timeout_secs: float = 3.0) -> list[VersionedGr
         )
         for r in rows if r[0]
     ]
+
+
+@dataclass(frozen=True)
+class PinnedGraph:
+    """A versioned graph whose FalkorDB projection lives on a given provider."""
+
+    graph_id: str
+    falkor_graph_name: Optional[str]
+    trashed: bool
+    bootstrapping: bool = False
+
+
+async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
+    """Every versioned graph projected into provider ``provider_id``, or with an old key there a
+    move left waiting to be dropped (``retired_keys``), by graph id.
+
+    The provider guards ask this: deleting a provider strands these graphs, and moving it to
+    another server leaves their watermarks describing keys that server does not hold. Trashed
+    graphs are included and marked, since a restore or a purge still needs the provider, and so
+    are graphs whose version control is still being enabled, which a move cannot reseed. Forks
+    and blank models are found here although no catalog item names the provider. Uncached and
+    unbounded in time: a guard must not answer from a stale or missing read, so any failure
+    raises."""
+    from sqlalchemy import or_, select
+
+    from backend.app.services.versioning.db import get_session_factory
+    from backend.app.services.versioning.models import GraphORM, JobORM, ProjectionStateORM
+    from backend.app.services.versioning.service import bootstrap_unfinished
+
+    async with get_session_factory()() as session:
+        rows = (await session.execute(
+            select(GraphORM.id, ProjectionStateORM.falkor_graph_name, GraphORM.deleted_at,
+                   select(JobORM.id).where(*bootstrap_unfinished(GraphORM.id))
+                   .correlate(GraphORM).exists())
+            .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+            .where(or_(ProjectionStateORM.falkor_provider == provider_id,
+                       ProjectionStateORM.retired_keys.contains([{"provider": provider_id}])))
+            .order_by(GraphORM.id)
+        )).all()
+    return [PinnedGraph(graph_id=r[0], falkor_graph_name=r[1], trashed=r[2] is not None,
+                        bootstrapping=bool(r[3]))
+            for r in rows]
+
+
+async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) -> tuple:
+    """The (provider, FalkorDB key) a data source's reads and rollups go to (doc 14 §6, phase 1).
+
+    The management DB keeps naming the data source's logical key; a versioned graph's projection
+    pin is where its content actually is once the graph has been moved. A source that is not
+    versioned, or whose graph is unpinned (NULL, or the ``gv_<id>`` placeholder nothing reads),
+    keeps its own key. A pin on the default provider keeps the data source's provider.
+
+    Whether the source is versioned comes from the cached set, trashed graphs included: a graph
+    stays versioned through the trash, so its restore is routed to the pin at once rather than
+    to a key a move may have dropped. A graph versioned since the set was cached reads its own
+    key until the next refresh, which comes before a move can drop that key
+    (``RETIRE_GRACE_SECS`` > ``CACHE_TTL_SECS``). With no set at all (graphver down and nothing
+    cached) the source reads its own key. The pin read is uncached, and a failure raises."""
+    try:
+        versioned = ds_id in await versioned_data_source_ids(include_trashed=True)
+    except VersionedLookupUnavailable as exc:
+        logger.warning("versioned set unavailable, reading ds=%s from its own key: %s", ds_id, exc)
+        return provider_id, graph_name
+    if not versioned:
+        return provider_id, graph_name
+
+    from sqlalchemy import select
+
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
+    from backend.app.services.versioning.db import get_session_factory
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    async with get_session_factory()() as session:
+        row = (await session.execute(
+            select(GraphORM.id, ProjectionStateORM.falkor_provider,
+                   ProjectionStateORM.falkor_graph_name)
+            .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+            .where(GraphORM.data_source_id == ds_id, GraphORM.deleted_at.is_(None))
+        )).first()
+    if row is None or row[2] in (None, f"gv_{row[0]}"):
+        return provider_id, graph_name
+    pin_provider = row[1] if row[1] not in (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id
+    return pin_provider, row[2]
+
+
+def serves_pin(served, pin_provider: Optional[str], pin_name: Optional[str],
+               graph_id: str) -> bool:
+    """Whether a provider built for ``served`` = (provider, key) reads the graph's pinned key.
+
+    ContextEngine counts main as fresh only when it does: a move can commit, and its new key
+    publish, between ``get_provider`` resolving the old key and the watermark read. A provider
+    the manager did not build (no key), an unpinned graph, and a pin on the default provider
+    (compared by name only) all count as serving."""
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
+
+    if served is None or pin_name in (None, f"gv_{graph_id}"):
+        return True
+    return served[1] == pin_name and (pin_provider in (None, "", DEFAULT_FALKOR_PROVIDER)
+                                      or served[0] == pin_provider)
 
 
 def _iso(value) -> Optional[str]:

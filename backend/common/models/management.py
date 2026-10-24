@@ -1598,6 +1598,8 @@ class ProviderImpactResponse(BaseModel):
     catalogItems: List[ImpactedEntity] = []
     workspaces: List[ImpactedEntity] = []
     views: List[ImpactedEntity] = []
+    # Versioned graphs projected into the provider (type "versioned_graph", named by key).
+    versionedGraphs: List[ImpactedEntity] = []
 
 
 class DraftImpact(BaseModel):
@@ -1626,6 +1628,7 @@ class VersioningImpact(BaseModel):
     commits: int = 0
     openDrafts: List[DraftImpact] = []         # WHO has work in flight — the forgotten casualty
     openReviews: int = 0
+    forks: int = 0                             # live forks; they move with the graph
     curatedEntities: int = 0                   # entities a HUMAN edited: the irreplaceable part
     storageBytes: int = 0
 
@@ -1653,9 +1656,14 @@ class DeletedDataSource(BaseModel):
     deletedBy: str = "someone"
     daysLeft: int = 0
     restoreWindowDays: int = 30
-    # A purge has been queued: it is being dismantled and there is nothing left to restore.
+    # A purge is queued or running: it is being dismantled and there is nothing left to restore.
     purging: bool = False
     restorable: bool = True
+    # none | queued | failed | blocked (live forks read its history, so it is never purged).
+    purgeState: str = "none"
+    # Why a purge failed, or what blocks it.
+    purgeReason: Optional[str] = None
+    liveForks: int = 0
 
     class Config:
         populate_by_name = True

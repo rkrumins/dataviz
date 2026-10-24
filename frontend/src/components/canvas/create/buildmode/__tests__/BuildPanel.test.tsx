@@ -2,9 +2,10 @@
  * BuildPanel — flag-on, it hands the canvas's contractRowLayer (Apply's own call for a top-level
  * row) to the Grid and the Paste preview, so they agree with where Apply puts a row. Its footer
  * asks it for every row, so a nested row its own rule sends to another column stops it naming one.
- * Grid and Paste are reduced to the prop.
+ * Grid and Paste are reduced to the prop. An Apply that staged nothing (no draft could be opened)
+ * keeps the rows and the panel.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useBuildRowsStore } from '../buildRowsStore'
@@ -17,6 +18,11 @@ vi.mock('../BuildGrid', () => ({
 vi.mock('../BuildPaste', () => ({
   BuildPaste: (p: { contractRowLayer?: unknown }) => { seen.paste = p.contractRowLayer; return null },
 }))
+
+const stageBuildRows = vi.hoisted(() => vi.fn())
+vi.mock('../stageBuildRows', () => ({ useStageBuildRows: () => ({ stageBuildRows }) }))
+// Every row is stageable here: Apply's own staging is what is under test, not the ontology checks.
+vi.mock('../applyBuild', () => ({ filterStageableRows: (rows: unknown[]) => rows }))
 
 import { BuildPanel } from '../BuildPanel'
 
@@ -55,5 +61,18 @@ describe('BuildPanel', () => {
     render(<BuildPanel onClose={() => {}} typeLayerMap={new Map([['dataset', 'a']])}
       contractRowLayer={(row) => (row.name.startsWith('raw') ? 'b' : 'a')} />)
     expect(screen.getByText('Top-level entities go to their column; nested items stay under their parent.')).toBeInTheDocument()
+  })
+
+  it('keeps the rows and the panel when Apply staged nothing (no draft could be opened)', async () => {
+    stageBuildRows.mockResolvedValue(new Map())
+    const rows = [makeRow({ id: 'r', name: 'orders', typeId: 'dataset' })]
+    useBuildRowsStore.getState().setRows(rows)
+    const onClose = vi.fn()
+    render(<BuildPanel onClose={onClose} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(stageBuildRows).toHaveBeenCalledTimes(1))
+    await act(async () => {})
+    expect(useBuildRowsStore.getState().rows).toHaveLength(1)
+    expect(onClose).not.toHaveBeenCalled()
   })
 })

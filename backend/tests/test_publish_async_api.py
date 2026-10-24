@@ -38,6 +38,7 @@ class _Versioning:
 class _Jobs:
     def __init__(self):
         self.created, self.started = [], []
+        self.refusal = None
         self.jobs = {
             "vjob_done": {"jobId": "vjob_done", "jobType": "publish", "graphId": "g1",
                           "status": "completed", "summary": {"commitId": "cmt_9"}},
@@ -49,6 +50,8 @@ class _Jobs:
         }
 
     async def create_publish_job(self, **kw):
+        if self.refusal is not None:
+            raise self.refusal
         self.created.append(kw)
         return {"job_id": "vjob_new"}
 
@@ -101,6 +104,23 @@ async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services
     assert (created["graph_id"], created["branch_id"], created["merge_request_id"]) == ("g1", "br_big", "mr_1")
 
 
+@pytest.mark.parametrize("path", ["/graphs/g1/branches/br_big/publish", "/merge-requests/mr_1/merge"])
+async def test_a_publish_that_cannot_be_queued_answers_like_one_in_the_request(test_client, services, path):
+    """Queuing takes the draft (``publishing``), so it is refused as a publish is: a draft that is
+    not open is 409 branch_closed, an unknown one 404 — not a 500."""
+    from backend.app.services.versioning.errors import BranchNotOpen
+
+    _svc, jobs = services
+    jobs.refusal = BranchNotOpen("br_big", "publishing")
+    r = await test_client.post(f"{BASE}{path}", json={"message": "m"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["type"] == "branch_closed"
+    jobs.refusal = ValueError("unknown branch")
+    r = await test_client.post(f"{BASE}{path}", json={"message": "m"})
+    assert r.status_code == 404, r.text
+    assert jobs.started == []
+
+
 async def test_a_publish_job_says_what_the_request_would_have(test_client, services):
     done = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_done")
     assert done.status_code == 200, done.text
@@ -148,3 +168,38 @@ async def test_a_refused_publish_job_keeps_a_bounded_refusal(monkeypatch):
     detail = out["error"]["detail"]
     assert detail["type"] == "ontology_violation" and detail["total"] == 250
     assert [v["reason"] for v in detail["violations"]] == [f"bad {i}" for i in range(100)]
+
+
+async def test_a_queued_publish_on_a_deleted_graph_is_refused(monkeypatch):
+    """A graph trashed (or being purged) after its publish was queued: the job answers 404, as
+    the route would, rather than publish into it with no ontology to check against."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.api.v1.endpoints import versioning as ep
+
+    published = []
+
+    class _Gone:
+        async def get_graph(self, graph_id):
+            return None
+
+        async def publish(self, **kw):
+            published.append(kw)
+            return "c1"
+
+    @asynccontextmanager
+    async def _session():
+        yield None
+
+    async def _nothing(*_args):
+        return None
+
+    monkeypatch.setattr(ep, "get_versioning_service", lambda: _Gone())
+    monkeypatch.setattr("backend.app.db.engine.get_async_session", _session)
+    for name in ("_live_containment_types", "_rules_for_meta", "_bump_main_cache",
+                 "_touch_views_data_updated", "_promote_view_layout_overlay", "nudge_projection"):
+        monkeypatch.setattr(ep, name, _nothing)
+    out = await ep._publish_from_job({"graphId": "g1", "branchId": "br_small", "actor": "a",
+                                      "workspaceId": "ws1", "message": "m"})
+    assert out["error"]["status"] == 404
+    assert published == []

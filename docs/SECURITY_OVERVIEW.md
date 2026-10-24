@@ -438,7 +438,7 @@ addresses see the real client.
 **How it works.** The backend checks the caller's permissions on every request — through the
 permission a route declares, or through an object-level rule such as who may open a view.
 Permissions come in two kinds: `system:*` permissions apply across the platform, and
-`workspace:*` permissions apply inside one workspace. Seven roles are built in:
+`workspace:*` permissions apply inside one workspace. Eight roles are built in:
 
 | Role (on screen) | Internal name | Applies to | In short |
 |---|---|---|---|
@@ -446,8 +446,9 @@ Permissions come in two kinds: `system:*` permissions apply across the platform,
 | Org Admin | `org_admin` | Platform | Every workspace, creating workspaces, and groups — not user accounts or SSO |
 | Org Auditor | `org_auditor` | Platform | Read-only across every workspace, plus the audit log and role bindings |
 | Workspace Admin | `workspace_admin` | One workspace | Everything in the workspace, including its members |
-| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing |
+| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing views to everyone |
 | Member | `workspace_member` | One workspace | Views and data sources |
+| Publisher | `workspace_publisher` | One workspace | A member who may also advance a versioned data source's Published version (not checked until ACCESS R3) |
 | Viewer | `workspace_viewer` | One workspace | Read-only |
 
 Everyone else has the default `user` tier: no platform permissions, and access only to the

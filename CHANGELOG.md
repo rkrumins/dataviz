@@ -9,6 +9,473 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning Stage 2: people stop overwriting each other
+
+### Added
+
+**See which versioned graph writes into which FalkorDB key.** Admin → Infrastructure has a
+Versioned graphs table (`GET /api/v1/admin/versioning/graphs`, `system:admin`): every live
+versioned graph, forks and orphans included, with its provider, key, whether the platform owns the
+key, its projection status and lag, and the old keys a move is still retiring. It filters by
+provider, status, workspace, kind (`main`, `fork`, `orphan`) and a search over ids, keys and
+labels, and pages with `nextCursor`. Each row has Rebuild and Check sync; a data source's own
+graph has Open source, a fork has Delete, and a platform copy whose data source still exists has
+Move…. The Graph store page marks each key a versioned
+graph writes into as Versioned or Fork, Platform copy or Customer graph, with its status and lag,
+instead of listing a fork's key as unregistered, and says so when the versioning store could not
+be read. Each FalkorDB provider card on Admin → Infrastructure counts the versioned graphs it hosts
+and their size.
+
+**Every viewer sees where a graph lives and how its projection is doing.** `GET
+…/graphs/{gid}/watermark` adds `projectionKey`, `providerId`, `providerName`, `owned`, `epoch`,
+`failedAttempts`, `nextRetryAt`, `livenessError` and `readRoute`. A projection card on the data
+source's Version control tab and in Data health shows the provider, the key, Platform copy or
+Customer graph, the node, shard and memory, and the retry backoff; Data health is open to every
+viewer, with Check sync and Rebuild for managers. `GET /api/v1/admin/graph-store/placement` and
+`/placements` take `graphId` / `graphIds`, so a fork's own key is placed. The canvas says when
+Published is read from Postgres (catching up, retrying a failed pass, or unloaded); on a draft it
+always says which store serves it, with the draft overlay.
+
+**Reseed a provider, and move a graph, from Admin → Infrastructure.** Each FalkorDB provider card
+has Reseed from Postgres; its confirm first asks `POST /api/v1/admin/versioning/watermarks/reset`
+with `dryRun: true` how many graphs it would reseed (`graphsToReset`; not recorded). A reset graph
+reads `reseeding`, a new projection `status`, instead of failed until its next pass. The Move…
+dialog lists the active FalkorDB providers, says what a move costs before it runs, takes an
+optional key, moves a graph back onto a key it is still retiring in one click, and turns each
+refusal into what to do about it.
+
+**Pause editing of a graph.** The Version control tab turns amber and says "Editing is paused"
+while a graph is frozen, and gives people with publish and manage a Pause editing / Resume editing
+button (see Upgrading for the routes). On the canvas, a save refused because editing is paused
+keeps its staged edits and is not resent later on its own, and starting to build on a paused graph
+says editing is paused instead of doing nothing.
+
+**Say why a data source is stuck in the trash.** Recently deleted shows "Blocked: N live forks" or
+"Failed: <reason>" in place of the countdown, from the new `purgeState` (`none`, `queued`,
+`failed`, `blocked`), `purgeReason` and `liveForks` on `GET …/data-sources/deleted`, where
+`purging` now means queued or running only. A blocked row does not offer Delete permanently.
+
+**Draft members and the review inbox.** A draft's settings list its members and their roles; its
+owner and maintainers add, change and remove them, and only its owner switches it between Private
+and Shared, after being told who will lose access. The review inbox lists every open review of
+each data source, however many newer ones are merged or closed, and names a data source whose
+reviews could not be read.
+
+### Changed
+
+**A private draft is written only by its owner.** Workspace managers can still open and read someone
+else's private draft, but a save, stage, checkpoint, pull, import, publish or merge request on it
+answers **403 `access_denied`** with code `not_draft_owner` `{branchId, owner}`, and discarding it,
+renaming it or adding and removing its members answers 403 too. A shared draft keeps its members'
+roles. Merging a review someone raised from their draft is unchanged. The canvas offers to copy the
+refused edits to a new draft of your own.
+
+**A shared draft is written by its members, and only its owner shares or un-shares it.** Its editors
+write it, its maintainers also publish, abandon and manage its members, and a member through a group
+now counts over HTTP, in the branch list too; a deleted group grants its ex-members nothing. Anyone
+else, workspace managers included, is refused with **403 `access_denied`**, code
+`not_owner_or_member` and the `required` role, where before some routes answered 500. When a group
+decides and the groups can't be looked up, the answer is **503 `groups_unavailable`** (retry), never
+a refusal; the branch list instead leaves out the drafts only a group would show. Making a draft
+private removes its members, and sharing it again starts from none; an edit someone left staged and
+may no longer make (removed, un-shared, out of the group) is withdrawn at the next checkpoint, so
+the owner never commits or publishes it. Adding a member checks that they exist and can work in the
+workspace (**422 `ineligible_member`**), and `GET …/members` now gives each member's `name` and your
+own `myRole`.
+
+**A draft is read only by the people it is for:** its owner, workspace managers, members of a
+shared draft, and the author and requested reviewers of any pull request raised from it, merged
+or closed ones included. To anyone else, every read of it answers **404**,
+exactly as for a branch that doesn't exist: a graph read with `?branchId=` naming it, its neighbors,
+freshness, members, state, diffs, commit log, entity history, merge preview, view changes and
+exports, where some of these answered 403 before. Imports into it are left out of the import list,
+and the import job and its preview answer 404.
+
+**Advancing the Published version needs `workspace:datasource:publish`.** Publishing a draft,
+merging a review (draft or fork), reverting or restoring `main`, and a sync or `/graph/resync` now
+need publish on top of manage, or answer **403** `{error: "missing_permission", permission}`
+(an API key gets **403 `api_key_not_allowed`**, see Upgrading). `workspace_publisher`,
+`workspace_data_engineer` and the admins hold it; `workspace_member` does not. The canvas disables
+Publish now, Merge and the rollback actions for people without it, and says why.
+
+**An approval is of what the reviewer saw.** Each approval records the draft's head. A content commit
+on the draft after it makes it stale: the merge answers **409 `approval_required`** with that
+reviewer in the new `stale` list, and the review shows them as still to approve. A pull that rewrote
+none of the draft's own edits keeps approvals. The PR read gives the draft's head now
+(`headCommitId`), and `POST …/approve` takes an optional `{expectedHeadCommitId}` and answers **409
+`head_moved`** `{headCommitId}` when the draft has moved on. The review sends the head it loaded, and
+on `head_moved` reloads and says the draft changed. A checkpoint that lands while an approval is
+recorded is no longer counted as approved. The approval check now runs before the merge is computed,
+and a merge large enough to run as a job is refused with `approval_required` before it is queued,
+instead of closing the draft as publishing until the job fails. A PR's author and its draft's owner
+can't approve it: **403 `access_denied`** with code `self_review`, and the review does not offer
+them Approve.
+
+**Reviewers can be asked when a draft goes for review, and after.** "Submit for review" has a
+reviewer picker listing the workspace members who can approve (`GET …/versioning/reviewers`).
+`PATCH …/merge-requests/{pr}` and `PATCH …/pulls/{pr}` take `reviewers` and re-judge the approval.
+The review shows each reviewer as approved, stale (the new `staleApprovedBy`) or still to approve,
+and offers Approve to the requested reviewers only. The server also records an approval from
+another manager who is neither the author nor the draft's owner, but only requested reviewers'
+approvals count toward the merge. Approving a merged or closed review, or changing its reviewers,
+answers 404. Two reviewers approving at the same moment are both recorded; before, one approval
+could overwrite the other. An approval or edit of a review that another change holds past
+`GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` answers **503 `lock_busy`**.
+
+**The idle-draft sweep leaves drafts that are still in use.** After `GRAPHVER_DRAFT_TTL_DAYS` idle,
+a draft is abandoned only if it has no open review, no staged edits waiting for a checkpoint, and
+its graph is not deleted or paused; the idle time starts again when editing resumes. Before, it
+abandoned those too, closing the draft under its review and dropping the staged edits.
+
+**Moving a graph provider to another server reseeds its versioned graphs, or says it did not.** Only
+a change of server counts as a move: host, port, FalkorDB mode, sentinel master or nodes, cluster
+nodes; new credentials, TLS settings, timeouts or a rename do not. A move that would reseed
+versioned graphs on the provider answers **409 `versioned_graphs_pinned`** with those `graphs`, and
+goes ahead when sent again with `?confirmReseed=true`. While a versioned graph on it is still being
+enabled it answers **409 `versioned_graphs_bootstrapping`**, confirmed or not. Before, the edit
+moved the graphs without a word, and their watermarks still described keys the new server did not
+hold. The move also stops a full reseed already running on the old server from marking its graph
+fresh. If the graphs still cannot be set to reseed after retries, the edit stays applied, the
+request answers **503** telling the admin to run **Reseed from Postgres** on the provider (Admin →
+Infrastructure), and the activity log records `reseedFailed`. Before, it answered 500, and sending
+the edit again reseeded nothing.
+
+**A provider that versioned graphs live on can't be deleted.** `DELETE /api/v1/admin/providers/{id}`
+answers 409 while any versioned graph, trashed ones included, projects into the provider or a
+projection move is still retiring a key on it, and while a data source uses it directly, as a blank
+model's does; before, those did not count, and the delete took the blank model's data source with
+it. The impact report lists those versioned graphs in `versionedGraphs` (trashed ones marked
+"(in trash)"), and counts a blank model's workspace and views.
+
+**One import per draft, and a publish waits for it.** An import onto a draft whose import is still
+pending or running answers **409 `job_active`** `{jobId}` naming it, and so does retrying a failed
+import while another runs on its draft; before, two imports interleaved their windows, and a
+replace among them deleted what the other wrote. Publishing or merging a draft while an import is
+pending or running on it answers the same 409, in the request or before a large one is queued,
+and a queued publish checks again when it runs; before, it could squash a partial import onto the
+Published version. An import that will never run holds nothing: one whose upload broke off over an
+hour ago, or one no worker took within `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS`.
+
+**A save lands once, on an open draft, and never directly in FalkorDB.** A save, stage, checkpoint,
+pull or publish on a merged or abandoned draft answers **409 `branch_closed`** `{status, branchId}`,
+where it answered 404 or landed on a draft that could never reach `main`. A save (`POST
+/graph/changes`) or an import that names `main`, as `main` or by its id, answers **409
+`main_write_forbidden`**; so does a write through a view route with `branchId=main`. A draft's
+writers take turns, so a save during a pull or checkpoint is no longer reverted or overwritten by
+it. While a large draft's publish is queued the draft reads `publishing` and refuses every other
+write (`branch_closed`), so no save is left behind on a merged draft; a job that does not land hands
+the draft back, at once after a refusal and within about a minute otherwise. `POST /graph/changes`
+takes an `Idempotency-Key` header: a retry with the same key answers with the first save's commit
+and lands nothing twice. Canvas and graph-route writes to a versioned graph commit to Postgres only,
+and the projector carries them to FalkorDB; until it has, reads come from Postgres.
+
+### Upgrading
+
+- Run the migrations this release adds, in this order (the first follows
+  `20261020_1000_ds_transfers`; the head is `20261018_1200_gv_lifecycle`):
+  `20261017_1000_datasource_publish` on the management tables (the `workspace:datasource:publish`
+  permission and the `workspace_publisher` role), then on the `graphver` schema
+  `20261017_1500_gv_ps_keys` (one graph per FalkorDB key: a trashed graph that does not own a
+  shared key loses its pin, logged; if graphs that are live or own the key still share one, it
+  stops and names them: clear `projection_state.falkor_graph_name` on all but one of each, then run
+  it again), `20261017_1550_gv_ps_fencing`, `20261017_1900_gv_commits_idem`,
+  `20261017_1950_gv_ingest_active` (fails imports nothing will run, and a queued import that never
+  started behind another on its draft; if two imports are still running on one draft it stops and
+  names them: let them finish, or fail the stale ones, then run it again),
+  `20261017_2000_gv_ps_reseeding`, `20261018_1000_gv_mr_approvals`,
+  `20261018_1100_gv_ps_retired` and `20261018_1200_gv_lifecycle`. Each `gv_` one waits at most 5 s
+  for a lock. Alembic runs them all against the management database; with a separate
+  `GRAPHVER_DB_URL` the `gv_` ones find no graphver tables there and do nothing, and the versioning
+  worker applies them to the graphver database when it starts. So start the versioning workers on
+  this release before rolling the API pods: they select the new graphver columns
+  (`graphs.lifecycle_*`, `merge_requests.approvals`, `projection_state.epoch`/`retired_keys`) on
+  nearly every versioning request, reads included, and fail until those columns exist.
+- With a separate `GRAPHVER_DB_URL`, each schema step at versioning-worker start waits at most 5 s
+  for a lock. A step the code needs — the job type check, the projection fencing columns, the
+  `reseeding` status, `merge_requests.approvals`, `projection_state.retired_keys` and the graph
+  lifecycle columns — stops the worker when it fails, and its restart tries again; before, the
+  worker started without it, and the writes or reads that need it failed until a restart. The
+  lifecycle step tries ten times for half a second each, so the graph reads queued behind it wait
+  about half a second, not five. The other steps (the `import_rows` indexes, `uq_ps_key`,
+  `uq_commits_idem`, `uq_jobs_ingest_active`) are skipped when they fail (a busy table, for one),
+  logged, and tried again at the next start, as are `uq_ps_key` while graphs share a key and
+  `uq_jobs_ingest_active` while two imports run on one draft. One import per draft holds without
+  that index.
+- A script or API key that writes into a teammate's private draft now gets 403. Have the owner share
+  the draft and add the caller as an editor, or write into a draft the caller owns.
+- A script or API key that reads a teammate's private draft without workspace manage now gets 404.
+- Approvals given before `20261018_1000_gv_mr_approvals` have no recorded head and count as stale:
+  their reviewers approve again before the merge.
+- Members who published or merged with `workspace_member` now get 403. Grant them
+  `workspace_publisher` (or `workspace_data_engineer`), or have them submit drafts for review.
+- Sessions signed in before the upgrade may still publish until their access token refreshes (at
+  most the access-token TTL); end those sessions if that matters. A custom role already named
+  `workspace_publisher` keeps its grants and gains publish: rename it before upgrading.
+- People without `workspace:datasource:publish` can no longer edit a versioned graph's `main`
+  directly. The graph writes with no `branchId` (or `main`) — `POST /graph/nodes/create`,
+  `POST /graph/edges`, `PATCH`/`DELETE /graph/edges/{id}`, `/graph/commands/batch`, `/graph/save` —
+  and `POST …/bulk-ingest` answer **403** `{type: "access_denied", code: "publish_required",
+  required: "workspace:datasource:publish"}` and write nothing. Edit in a draft (pass its
+  `branchId`) and publish it or send it for review. An API key follows the person who owns it:
+  existing keys owned by people without publish lose these direct writes to `main` and get the same
+  403. Grant the owner `workspace_publisher`, or have the script write to a draft. Drafts, and data
+  sources without version control, are unaffected.
+- A draft's maintainers can no longer change `isShared` (403 `not_draft_owner`); only its owner can.
+- Making a draft private now removes its members. Member rows left on a private draft by an earlier
+  un-share no longer grant anything, and are removed the next time the draft is shared.
+- A refusal on a shared draft is now 403 `{code: "not_owner_or_member", required}`. A client that
+  read only `message` keeps working.
+- `POST …/members` checks who is added (422 `ineligible_member`), and a bad `role` or `subjectType`
+  is now a 422 validation error, not a 404.
+- An editor's queued publish of a shared draft is refused at request time (403, `required:
+  "maintainer"`) instead of after its 202.
+- API keys cannot hold `workspace:datasource:publish`, so a key can no longer publish, merge, revert,
+  restore or sync: those routes are off the key surface and answer **403 `api_key_not_allowed`**. A
+  key can still edit drafts and open reviews; a person with publish lands them. The routes this
+  release adds for reviewers (`GET …/reviewers`), forks (list, delete, restore) and pausing editing
+  are not open to keys either.
+- A versioned graph pinned to a FalkorDB key now stays on it. The projection self-heal (after a
+  publish, Rebuild, and the projection worker) re-points only a graph with no key or with the
+  `gv_<id>` placeholder; before, it put any graph whose key differed from its data source's
+  `graph_name` back on that name. A pinned key changes only by a projection move.
+- Reads and rollups of a versioned data source now go to the FalkorDB key its graph projects into
+  (`graphver.projection_state`), not the key the data source names. Nothing changes for a graph
+  pinned to its data source's own key. A fork bound to a real data source now reads the fork's key,
+  which the projector writes, instead of the data source's key, which it does not. A graph counts
+  as versioned through the trash, so a moved graph that is trashed and restored reads its key again
+  at once. Each read of a versioned source costs one more graphver lookup, and fails as unavailable
+  if graphver is down (but see Known limitations).
+- A platform admin can move a versioned graph's projection to another FalkorDB provider or key:
+  `POST /api/v1/admin/versioning/graphs/{graphId}/projection/move {providerId, key?}`
+  (`system:admin`; not open to API keys). Only keys the platform owns move: a graph still projecting
+  into the customer's own graph answers **409 `projection_not_adopted`** with `reason:
+  "customer_key"`. Reads come from Postgres
+  until the new key catches up. The old key is dropped by the versioning worker's next pass once
+  the new key has caught up to the head at the move and at least 15 minutes have passed since the
+  move; until then a move back onto it is cheap. Deploy this release to every web and worker pod
+  before using it: an older pod puts a moved graph back on its old key, or keeps reading the old
+  key.
+- The projection move also answers **409 `projection_not_adopted`** with `reason: "unpinned"` (the
+  graph has no key of its own yet) or `"shared"` (`sharedWith` other data sources read the key);
+  **409 `job_active`** while a rollup rebuild runs for the data source; **409 `graph_key_in_use`**
+  when the target key already exists on the provider or another graph pins it; **409
+  `bootstrapping`** while enabling version control is unfinished (running, or failed and not yet
+  resumed or cancelled); **422 `invalid_target_key`** for a `key` that is none of: one of the
+  graph's own platform keys, a key it is still retiring on that provider, or its current key;
+  **422 `projection_mode_unsupported`** for a data source with a dedicated rollup graph; **422
+  `provider_unsupported`** or **`provider_unreachable`**, or 403, for a provider the workspace can't
+  use; **503 `provider_unreachable`** when the provider's keys can't be listed; and **503
+  `lock_busy`**. Without a `key`, a move of a graph already on one of its own platform keys on that
+  provider answers 200 with `changed: false`.
+- An old key that a move left and that holds no marker of the projector's passes is dropped only
+  if it is one of the graph's own `gvp_` keys (a reseed cut short). Any other such key is kept: the
+  versioning worker logs "holds no projection marker of ours; kept" for it on every pass, the
+  Versioned graphs inventory keeps showing it under the graph's key, and its provider can't be
+  deleted. Check that nothing needs the key, then delete it on that provider (`GRAPH.DELETE <key>`);
+  the next pass forgets it. Moving the graph back onto the key also clears it.
+- A write to a versioned graph in the trash, or being purged, now answers **409
+  `graph_not_writable`** `{state: "trashed" | "purging", reason, retryable: false}` instead of
+  landing: saves (`/graph/changes`, node and edge writes, `/commands/batch` until one command has
+  landed), opening, staging, checkpointing, pulling, publishing and merging a draft, revert, restore,
+  bulk import, sync and resync, forking it, and creating an import or publish job. A queued publish
+  fails and hands its draft back; a running import fails after its last committed window and
+  resumes from there when retried after a restore. A save that already landed still answers with
+  its commit. The same 409 with `state: "frozen"` refuses every such write to a graph whose editing
+  is paused; it holds only once every web and versioning-worker pod runs this release.
+- A publisher (`workspace:datasource:publish` and `manage`) pauses editing of a versioned graph with
+  `POST …/graphs/{gid}/lifecycle/freeze` and resumes it with `…/lifecycle/unfreeze`, both
+  `{expectedRev}` → `{graphId, state, rev}`. An `expectedRev` that is no longer the graph's
+  `lifecycleRev` (on `/resolve`) answers **409 `version_conflict`** `{resource: "lifecycle",
+  currentVersion}`; repeating the state the graph is in answers 200 and changes nothing. A freeze
+  works while version control is turned off; an unfreeze does not. A freeze while the graph's
+  version control is still being enabled answers **409 `integrity`** (let the enablement finish, or
+  resume or cancel it, first). A freeze or unfreeze that can't get past the writes in flight within
+  `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` answers **503 `lock_busy`**; draft saves queue behind it rather
+  than hold it off. A `lifecycle_state` this release does not know answers **409
+  `graph_not_writable`** to every write, freeze and unfreeze included, and is never overwritten.
+  Downgrading `20261018_1200_gv_lifecycle` resumes editing on every paused graph (it logs how many).
+- Moving a data source to the trash, or restoring it, takes the same turn as a freeze: when the
+  saves in flight on its graph keep it waiting past `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` it answers
+  **503 `lock_busy`** and changes nothing. Retry.
+- A data source whose purge has completed can no longer be restored:
+  `POST …/data-sources/{dsId}/restore` answers 409 and the trash lists it as not restorable; before,
+  the restore answered 200 and handed back a data source whose version history was gone. A refused
+  restore's 409 now names the failed purge's reason.
+- `POST …/versioning/graphs/{gid}/forks` now needs `workspace:datasource:manage` (a reader gets
+  403) and ignores a `dataSourceId` in the body: a fork always gets its own data source id. A graph
+  has at most `GRAPHVER_MAX_FORKS_PER_GRAPH` (default `10`) live forks; one more, or restoring a fork
+  past that, answers **409 `fork_limit`** `{limit}`. Forks in the trash do not count.
+- Moving a data source to another workspace — directly, by accepting a transfer request, or by
+  undoing a move (see "Move a data source to another workspace, with its views" below) — moves
+  its versioned graph, its forks at any depth (those in the trash too) and their jobs with it,
+  open drafts and review requests included; before, the history stayed in the old workspace and
+  answered 404 in the new one. It changes nothing and answers **409** while any of their jobs is
+  pending or running, or while turning on version control for the source failed and waits to be
+  resumed or cancelled: `blocked`, naming it as the preview does, or `graph_busy` when it began
+  after that check or a publish, sync or bulk ingest holds one of the graphs past
+  `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS`. When the version store can't be reached it answers
+  **503 `version_store_unavailable`**, also with nothing changed. Enabling version control,
+  forking or starting a job during a move waits for it, then answers 404 if the graph has left
+  the workspace.
+- Starting an import or publish job waits for a freeze, trash, restore or purge being queued on
+  the graph, and starting any import, export or publish job waits for a data-source move; past
+  `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` it answers **503 `lock_busy`** and creates nothing. A long
+  publish, sync or bulk ingest does not hold a job start up.
+- An import with no `branchId` opens its draft only when the import is accepted, so a refused one
+  leaves no empty draft; the package import (`/packages/{id}/data`) opens its draft the same way.
+  `POST …/imports` with an `idempotencyKey` it has already seen answers with the import it created,
+  with no second draft or job.
+- Scripts that save or import into drafts: expect **409 `branch_closed`** `{status, branchId}` for a
+  merged, abandoned or publishing draft, **409 `main_write_forbidden`** for `main` (by name or id)
+  on `POST /graph/changes`, an import, or a view route's `branchId`, and 404 for an import onto
+  another graph's branch. View, layout and library writes with a `branchId` answer the same 409s
+  (and 403 for a draft you may not edit, 404 for one you cannot read or on another graph), where
+  before they took any `branchId`; `PUT /views/{id}` keeps the stored layout and entity scope, so a
+  draft's layout no longer reaches Published through it. Send an `Idempotency-Key` (at most 128
+  characters) with `POST /graph/changes` and reuse it only to retry the same save: a reused key
+  answers with the first save's result whatever the body, even after the draft has closed or editing
+  was paused. CORS allows the header.
+- `POST …/branches/{bid}/changes`, `…/commit` and `…/rebase` given `main`'s id answer **409
+  `main_write_forbidden`**. Before, anyone with manage could stage and checkpoint on `main`: the
+  commit skipped the publish permission and the graph lock, and `main`'s head did not count it; a
+  pull of `main` answered 404. Scripts that staged on `main` write a draft and publish it, or, with
+  publish, write `main` through the graph routes with no `branchId`.
+- A write that waits longer than `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (default `5000`) for its graph,
+  draft, lifecycle or move lock, or that loses every retry to concurrent writers, answers **503
+  `lock_busy`** `{retryable: true}` with `Retry-After`; out of retries it answered 409 `integrity`
+  before.
+  Revert, restore, sync and bulk ingest now take the graph lock too. Node and edge writes answer the
+  503, and the other refusals that carry their own status (403 draft roles, 409
+  `graph_not_writable`, `branch_closed`, …), instead of `success: false`; an unfinished enablement,
+  an ontology violation or a source without version control still answer `success: false`.
+  `/graph/resync` answers an unfinished enablement or a merge conflict with 409 instead of 500.
+- `/graph/commands/batch` answers 503 `lock_busy`, or 409 `graph_not_writable`, only while none of
+  its commands has landed, so retrying the whole batch is safe then. Once one has, it answers 200:
+  the busy command's result is `success: false` with a `lock_busy (retryable)` error, and every
+  later command is skipped with "Skipped: graph busy; retry only the commands that did not
+  succeed", even with `fail_fast: false`. Resend only those.
+- A queued publish or merge that is refused when it runs (the graph busy, an import on the draft,
+  groups that can't be read) fails with the answer the request would have given:
+  `GET …/publish-jobs/{jobId}` answers 200 with `status: "failed"` and `error: {status: 503,
+  detail: {type: "lock_busy" | "groups_unavailable", …}}` (or `{status: 409, detail: {type:
+  "job_active", …}}`), and the draft is open again at once, to be published again.
+- `POST …/bulk-ingest` seeds only an empty graph: on one with entities it answers **409
+  `integrity`**. Use sync to update it.
+- A graph write that omits `dataSourceId` now goes to the workspace's primary data source as an
+  explicit one does. When the primary is versioned it commits to its versioned graph (`main`, or
+  the draft named by `branchId`, which was ignored before) and needs publish for `main`, instead of
+  writing FalkorDB directly. When the primary has no version control the write is refused ("Version
+  control isn't enabled for this data source yet"), as with an explicit `dataSourceId`, unless
+  `GRAPHVER_VERSIONED_WRITES=0`.
+- Writes to a versioned graph never reach FalkorDB directly, so `GRAPHVER_VERSIONED_WRITES=0` now
+  opts out only data sources without version control. An edge the graph's history does not hold is
+  not found: `PATCH /graph/edges/{id}` answers `success: false` and `DELETE` answers 404.
+- `GET …/graphs/{gid}/branches` lists open and publishing drafts by default; pass `status`
+  (repeatable: `open`, `publishing`, `merged`, `abandoned`, `all`) for the closed ones. It lists
+  `main` first, then drafts newest first, and pages with `cursor` instead of `offset` (an `offset`
+  is now ignored, so a script paging with it reads the first page again): the next page's cursor
+  comes in the `X-Next-Cursor` header, and a malformed one answers 422. A non-manager's page holds
+  only the drafts they may read, filtered before the limit, so drafts they cannot see no longer push
+  theirs off it. Each row carries `myRole`.
+- `status=open` on the pull-request lists of a data source or view now means every review not yet
+  merged or closed; before, it matched nothing.
+- A provider edit that changes the server of a provider versioned graphs project into needs
+  `?confirmReseed=true` (see Changed). `POST …/versioning/graphs` refuses a data source whose
+  provider is not FalkorDB with **422 `provider_unsupported`**.
+- A failed projection pass retries with backoff (`GRAPHVER_PROJECTION_RETRY_BASE_SECS`, default
+  `5`, doubling to `GRAPHVER_PROJECTION_RETRY_MAX_SECS`, `900`). With
+  `GRAPHVER_PROJECTION_WAIT_REPLICAS` (default `0`; the production-cluster overlay sets `1`) a pass
+  counts only once that many replicas confirm it within `GRAPHVER_PROJECTION_WAIT_MS` (`2000`).
+  Every `GRAPHVER_LIVENESS_SECS` (`60`, `0` turns it off) the projection lane checks each idle
+  graph's key and reseeds one that was lost or restored behind its watermark.
+- A replace import now refuses a file with rows it cannot apply (before any delete), and a
+  view-scoped replace whose scope can't be read fails instead of deleting across the data source;
+  rows of bare delimiters in a CSV are ignored.
+- Enabling version control onto a FalkorDB key another versioned graph already uses answers **409
+  `graph_key_in_use`**. Eviction unloads only keys the platform created, never a customer's own
+  graph.
+- Enabling version control now fails at its first step, before reading anything, on a FalkorDB
+  server whose `RESULTSET_SIZE` is set. That setting drops every row past it without an error,
+  and the stock `falkordb/falkordb` image ships it at `10000`. Through it, the copy missed items
+  and failed as "the source changed", and a duplicate collapse could delete relationships it
+  never saw. The job's error says so. Set `RESULTSET_SIZE -1` in the server's `FALKORDB_ARGS`
+  (every compose, k8s and Helm file here already leaves it unlimited), then resume the job.
+
+### Known limitations
+
+- Deleting a fork does not queue behind the draft saves on it as a freeze or trash does: under a
+  steady stream of saves it answers **503 `lock_busy`**. Restoring a fork waits for its parent's
+  graph lock, so a publish, sync or bulk ingest on the parent that runs past
+  `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` makes it answer **503 `lock_busy`**. Retry.
+- Deleting a data source permanently while its graph is busy answers 503 "The version store is
+  unavailable, so this cannot be permanently deleted right now", not `lock_busy`. Retry.
+- A web or worker process that has not read graphver's list of versioned sources since it started
+  reads a versioned source from the data source's own key while graphver is down, which after a
+  projection move is not where the graph's content is.
+
+---
+
+## [Unreleased] — Versioning Stage 1: a re-sync can no longer quietly undo people's work
+
+### Added
+
+**Delete a fork, and bring it back.** `DELETE …/versioning/graphs/{forkId}` moves a fork to the
+trash and `POST …/versioning/graphs/{forkId}/restore` brings it back, both for anyone who may
+manage the workspace's data sources. Its drafts and pull requests come back with it. A fork whose
+pull request into its parent is open, or that has live forks of its own, is not deleted (**409**
+`pull_request_exists`, `live_forks`), and a fork is not restored once its purge is queued or while
+its parent is in the trash (**409** `fork_not_restorable`). `GET …/versioning/graphs/{graphId}/forks`
+lists a graph's forks, those in the trash included, with when each one's undo window ends
+(`GRAPHVER_PURGE_GRACE_DAYS`, 30 days). Once that window ends the reaper purges the fork, dropping
+its own FalkorDB key and never its parent's. A data source's own graph is still deleted with its
+data source (**409** `not_a_fork`). A data source's Versioning tab lists its graph's forks, with
+Delete and Restore for those who may manage it, and the Versioned graphs inventory on Admin →
+Infrastructure has Delete on each fork's row.
+
+### Changed
+
+**A re-sync refuses to undo curation.** A sync's merge base is `main` as it stood at the last import
+or sync, so edits people published before that sync read, on the next one, as the source's old
+values: the sync reverted them and deleted what people had created, without a conflict. Until the
+source's own snapshot becomes the base, `POST …/versioning/graphs/{graphId}/sync` and
+`POST /{ws}/graph/resync` answer **409 `curation_at_risk`** in that case, naming the newest such
+commit in `lastHumanCommit`. A sync right after people's edits is still allowed, since those edits
+are not yet in the base; the refusal starts with the sync after it.
+
+**A re-sync refuses to delete most of a graph.** A sync deletes whatever its snapshot leaves out, so
+a snapshot missing rows deletes them. A sync that would delete more than 500 entities and more than
+5% of the graph answers **409 `mass_delete_blocked`** `{deletes, live, limit}` and changes nothing.
+
+**Only a workspace admin can override.** `?force=true` passes the curation check and
+`?allowMassDelete=true` the delete limit; each overrides only its own. The override is named in the
+commit message, in the answer's `overrides` and, for `/graph/resync`, in the activity record.
+Anyone else gets **403 `access_denied`** with code `needs_admin`, or 503 when the workspace's
+grants can't be read.
+
+### Upgrading
+
+- A script that re-syncs a curated graph on a schedule now gets 409 from its second run on. API keys
+  cannot hold `workspace:admin`, so a key cannot override: a workspace admin has to run that sync.
+- The delete limit is set by `GRAPHVER_SYNC_DELETE_MAX_ABS` (default `500`) and
+  `GRAPHVER_SYNC_DELETE_MAX_FRACTION` (default `0.05`, a fraction, not a percent).
+- A fork in the trash no longer blocks its parent's permanent delete, unless forks of its own still
+  read through it: it is purged with the parent, and can no longer be restored from then on. A purge
+  that was refused for live forks is retried by the reaper once those forks are deleted. A parent's
+  purge that meets the reaper already purging a fork under it waits for that purge instead of
+  failing.
+
+### Known limitations
+
+- Once one sync has landed after any edit on `main`, every later sync of that graph needs a
+  workspace admin's `force`, until the source snapshot becomes the merge base.
+- On graphs under about 10,000 entities the 500-entity floor decides, so a truncated snapshot that
+  deletes fewer than 500 entities still lands. A real removal of a large subtree needs
+  `allowMassDelete`.
+- A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
+  key as unregistered meanwhile, as it does for a data source in the trash.
+
+---
+
 ## [Unreleased] — Move a data source to another workspace, with its views
 
 ### Added
@@ -16,17 +483,18 @@ limitations** — a changelog that only lists good news is not worth reading.
 **Move a data source, and everything built on it.** **Move to another workspace…** on a data
 source's **⋯** menu opens a guided move. Its views go with it — including those in the trash, and
 those with no source of their own that read it as the workspace's default — together with their
-history, its version history, open drafts and reviews, and its aggregation state and stats. Nothing
-is rebuilt. The steps:
+history, its version history and its forks, open drafts and reviews, and its aggregation state
+and stats. Nothing is rebuilt. The steps:
 
 - **Destination** says, for each workspace you can see, whether you can move the source there now,
   ask its admins, or why not.
 - **What moves** counts the views by visibility and shows the version history, then lists what to
-  resolve first (an aggregation run or a version-history job in progress, or a failed attempt to
-  turn on version control) and what to know (the workspace's last source leaving, its primary
-  source, views published to everyone, requests to publish, layout templates that stay behind,
-  open drafts whose owners can't reach the new workspace, a restricted source going to a
-  workspace open to everyone).
+  resolve first (an aggregation run, or a version-history job in progress on it or one of its
+  forks, or a failed attempt to turn on version control) and what to know (the workspace's last
+  source leaving, its primary source, views published to everyone, requests to publish, layout
+  templates that stay behind, the forks of its version history, which move with it, open drafts
+  whose owners can't reach the new workspace, a restricted source going to a workspace open to
+  everyone).
 - **Access** shows who keeps access, who gains it and who loses it. The new workspace's own
   members, groups and identity-provider mappings decide who reads the moved views, so the people
   and groups who read them only through the old workspace lose them — each listed with where their
@@ -64,11 +532,11 @@ where it went.
   and returns the move's record rather than the data source.
 - **A move re-files everything that named the old workspace**, including for a source with no
   views: each moved view's activity and the aggregation state now go with the versioned graph,
-  which moves with its source since the release below. The graph moves first, so a refusal from
-  version control changes nothing.
-- **Open drafts and review requests no longer hold a move back**, as they did since the release
-  below: they go with the source, and the preview names any draft whose owner can't open the new
-  workspace. A move still waits while version control is busy with the source, or while a failed
+  which moves with its source since the release below. The graph and its forks move first, so a
+  refusal from version control changes nothing.
+- **Open drafts and review requests don't hold a move back**: they go with the source, its forks'
+  too, and the preview names any draft whose owner can't open the new workspace. A move still
+  waits while version control is busy with the source or a fork of it, or while a failed
   attempt to turn it on waits to be resumed or cancelled — which the preview now says up front.
 - **Both workspaces' activity records a move**, as `workspace.data_source.moved`; it was filed
   only under the destination. It names the versioned graph that moved (`graphId`), as
@@ -96,11 +564,15 @@ where it went.
 
 - A retried move, request, answer or undo whose first try went through (its response lost) gets
   that result for ten minutes, instead of an error; so does a second click queued behind the first.
-- The version store is written first and put back if the rest of a move fails. If putting it back
-  fails too, the reaper re-files the graph under its source's workspace — as it does for graphs
-  left behind by moves made before graphs moved with their sources. A source being moved is
-  skipped and looked at next time.
+- The version store is written first and put back if the rest of a move fails; a move whose
+  commit landed, though its answer was lost, leaves it where the source now is. If putting it back
+  fails too, the reaper re-files the graph, with its forks, under its source's workspace — as it
+  does for graphs left behind by moves made before graphs moved with their sources — once no job
+  runs on them. A source being moved is skipped and looked at next time.
 - Answering a request and expiring it never race: whoever holds the request decides it, once.
+- Deleting a source while a move, undo or accepted request of it is in flight waits for that,
+  then finds the source gone from the old workspace (404), instead of trashing or destroying it
+  where it went and leaving its graph live there.
 
 ### Performance
 
@@ -120,7 +592,6 @@ where it went.
 
 ### Known limitations
 
-- Forks of a source's version history stay in the old workspace.
 - File uploads in progress for the source when it moves have to be started again.
 - API keys limited to the old workspace no longer reach the moved views; keys that name the source
   or a view follow it.
@@ -170,9 +641,8 @@ step.
   while its purge ran. It now answers `404` until its data source is restored.
 - Moving a versioned data source left its version history behind: the source read as external in
   its new workspace, and deleting it later left its graph standing for good. The history now moves
-  with it. A move waits (`409`, with the reason) while version control is busy with the source,
-  while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
-  drafts or review requests.
+  with it, forks included; when a move waits, and what it answers, is under Versioning Stage 2 →
+  Upgrading.
 
 ### Security
 
@@ -183,8 +653,9 @@ step.
 ### Upgrading
 
 - Nothing to run. When the versioning worker's bootstrap lane starts, and every 15 minutes after
-  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind under
-  its data source's workspace — and puts it in the trash if its source is there.
+  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind, with
+  its forks, under its data source's workspace — and puts it in the trash if its source is there.
+  A graph a job is still pending or running on is filed on a later pass, once the job ends.
 
 ### Known limitations
 

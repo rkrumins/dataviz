@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -32,15 +33,21 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, N
                     Sequence, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
-                        text, update, or_, tuple_)
+                        literal, text, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import aliased
 
-from . import config, db
+from . import config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
+from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
+                     DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
+                     GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
+                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, ProjectionKeyInUse,
+                     ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview, VersionConflict)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -63,6 +70,8 @@ from .models import (
     WorkingChangeORM,
     _now,
 )
+from .import_export.runner import never_runs
+from .purge_worker import PURGE_JOB_TYPE, MoveBlocked
 # Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
 # flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
 from backend.app.providers.falkordb_provider import _sanitize_node_properties
@@ -195,13 +204,15 @@ _UPSERT_HEADS = text(
     "entity_kind = EXCLUDED.entity_kind, updated_at = EXCLUDED.updated_at").bindparams(*_head_arrays())
 # Add the heads of entities that have none on the branch yet; returns the ones added.
 _ADD_HEADS = text(_INSERT_HEADS + "DO NOTHING RETURNING entity_id").bindparams(*_head_arrays())
-# Advance the heads still at their pre-image (the CAS); returns the ones advanced.
+# Advance the heads still at their pre-image (the CAS); returns the ones advanced. A head whose
+# payload is {} reads as absent, so the pre-image of "absent" (:absent) matches it too.
 _ADVANCE_HEADS = text(
     f"UPDATE {EntityHeadORM.__table__.fullname} AS h SET head_version_id = v.vid, "
     "content_hash = v.hash, is_tombstone = v.tomb, entity_kind = v.kind, updated_at = :now "
     "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds, :pres) AS v(entity_id, vid, hash, tomb, kind, pre) "
     "WHERE h.graph_id = :graph_id AND h.branch_id = :branch_id AND h.entity_id = v.entity_id "
-    "AND h.content_hash = v.pre RETURNING h.entity_id",
+    "AND (h.content_hash = v.pre OR (v.pre = :absent AND h.content_hash = :empty)) "
+    "RETURNING h.entity_id",
 ).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
 
 
@@ -224,6 +235,8 @@ def _copy_versions_sql(model, columns: str) -> "TextClause":
 _COPY_NODE_VERSIONS = _copy_versions_sql(NodeVersionORM, "urn, entity_type, display_name, qualified_name")
 _COPY_EDGE_VERSIONS = _copy_versions_sql(
     EdgeVersionORM, "source_entity_id, target_entity_id, edge_type, confidence, discriminator")
+# SET LOCAL lock_timeout with a bound value (set_config's third argument, is_local).
+_SET_LOCK_TIMEOUT = text("SELECT set_config('lock_timeout', :ms, true)")
 
 
 class _StaleHead(Exception):
@@ -279,17 +292,15 @@ class OntologyViolation(RuntimeError):
         self.violations = violations
 
 
-class AccessDenied(RuntimeError):
-    """Actor lacks the branch role required for an operation on a shared draft."""
-
-
 class ApprovalRequired(RuntimeError):
-    """A PR's required reviewers haven't all approved yet — merge is blocked."""
+    """A PR's required reviewers haven't all approved yet — merge is blocked. ``stale`` are those
+    of them whose approval was of an earlier version of the PR."""
 
-    def __init__(self, pr_id: str, pending):
+    def __init__(self, pr_id: str, pending, stale=()):
         super().__init__(f"pr {pr_id} needs approval from {pending}")
         self.pr_id = pr_id
         self.pending = list(pending)
+        self.stale = list(stale)
 
 
 # Peak bytes of RSS `sync_ingest` costs per entity, MEASURED — not guessed. A 478,430-entity
@@ -388,9 +399,13 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
 
+# Commit kinds a machine writes; every other kind on main is a person's work. The same split
+# lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
+_MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
+
 # An "enable version control" job in one of these states means its graph isn't a graph yet: the
 # head is parked at genesis and the import is half-written. A failed job counts — it must be
-# resumed or cancelled, never written around (_assert_not_bootstrapping).
+# resumed or cancelled, never written around (bootstrap_unfinished, main_heads).
 _UNFINISHED_ENABLEMENT = ("pending", "running", "failed")
 
 # The "nothing came in" answer for a pull that was already up to date (see _incoming_from_main).
@@ -401,6 +416,14 @@ _EMPTY_INCOMING: Dict[str, object] = {
 }
 
 
+def bootstrap_unfinished(graph_id) -> tuple:
+    """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
+    (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a
+    column, so the same test correlates into a query over many graphs."""
+    return (JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
+            JobORM.status.in_(_UNFINISHED_ENABLEMENT))
+
+
 @dataclass(frozen=True)
 class Viewer:
     """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
@@ -408,6 +431,23 @@ class Viewer:
     when a read is called without a Viewer (internal callers / tests) no scoping is applied."""
     actor: str
     can_manage: bool = False
+
+
+async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
+    """The live group ids *actor* belongs to, from the management DB (READONLY pool, so it never waits
+    on a second WEB-pool connection while the request holds one). A deleted group keeps its member
+    rows and the drafts' rows for it, so it is left out here. A failed lookup is
+    :class:`GroupsUnavailable`, never "no groups": that would refuse a member."""
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.db.models import GroupMemberORM, GroupORM
+    try:
+        async with get_readonly_session() as ms:
+            return tuple((await ms.execute(
+                select(GroupMemberORM.group_id).join(GroupORM, GroupORM.id == GroupMemberORM.group_id)
+                .where(GroupMemberORM.user_id == actor, GroupORM.deleted_at.is_(None))
+            )).scalars().all())
+    except Exception as exc:
+        raise GroupsUnavailable() from exc
 
 
 class GraphVersioningService:
@@ -458,6 +498,9 @@ class GraphVersioningService:
         Pass ``session`` to compose with a following ingest in one transaction (the
         atomic bootstrap), so a seed failure also rolls back the graph creation."""
         async with self._session_scope(session) as s:
+            if falkor_graph_name:
+                await self._claim_projection_key(s, falkor_graph_name, falkor_provider,
+                                                 data_source_id=data_source_id)
             graph = GraphORM(
                 data_source_id=data_source_id,
                 workspace_id=workspace_id,
@@ -491,9 +534,13 @@ class GraphVersioningService:
             s.add(genesis)
             await s.flush()                      # materialise genesis.id before linking
             main.head_commit_id = genesis.id
+            # A key we did not mint holds data the log does not: a genesis-only graph must never
+            # full-seed into it, so it starts parked and its first projection is the first
+            # commit's window.
+            parked = bool(falkor_graph_name) and not owns_falkor_graph
             s.add(
                 ProjectionStateORM(
-                    graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1,
+                    graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
@@ -579,9 +626,7 @@ class GraphVersioningService:
         must be resumed or abandoned, never edited around. One indexed lookup
         (``ix_jobs_graph_status``)."""
         unfinished = await s.scalar(select(JobORM.status).where(
-            JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
-            JobORM.status.in_(_UNFINISHED_ENABLEMENT),
-        ).limit(1))
+            *bootstrap_unfinished(graph_id)).limit(1))
         if unfinished == "failed":
             raise ConcurrencyError(
                 "enabling version control for this data source didn't finish — resume it "
@@ -590,6 +635,58 @@ class GraphVersioningService:
             raise ConcurrencyError(
                 "version control is still being enabled for this data source — "
                 "try again once it finishes")
+
+    async def _assert_writable(self, s, graph_id: str) -> None:
+        """Refuse a content write to a graph that is not live (:class:`GraphNotWritable`):
+        editing is paused (``frozen``), it is in the trash (``trashed``), or a purge of it exists
+        (``purging``, the rule restore uses). An unknown graph passes, for the caller's own 404.
+
+        The row is read FOR KEY SHARE and held to the end of the write (doc 15 §8, position 6:
+        after ``_lock_graph``, before a draft's row). It waits only for a row lock taken FOR
+        UPDATE — :meth:`set_frozen`, a restore, a purge being queued, a trash — so a freeze waits
+        for the writes in flight, and a write after it sees it: a draft writer has taken the
+        lifecycle key shared first (:meth:`_lock_lifecycle`), so it cannot overtake one. A wait
+        that runs out is :class:`LockBusy`, which ``_retry_seq`` retries."""
+        row = (await self._bounded_lock(s, select(GraphORM.lifecycle_state, GraphORM.deleted_at)
+               .where(GraphORM.id == graph_id).with_for_update(read=True, key_share=True),
+               f"graph {graph_id}")).first()
+        if row is None:
+            return
+        if row.deleted_at is not None:
+            purging = await s.scalar(select(JobORM.id).where(
+                JobORM.job_type == PURGE_JOB_TYPE, JobORM.graph_id == graph_id).limit(1))
+            raise GraphNotWritable("purging" if purging else "trashed")
+        if row.lifecycle_state != "live":
+            raise GraphNotWritable(row.lifecycle_state)
+
+    async def _claim_projection_key(self, s, name: str, provider: Optional[str], *,
+                                    exclude_graph_id: Optional[str] = None,
+                                    data_source_id: Optional[str] = None) -> None:
+        """Take FalkorDB graph ``name`` on ``provider`` as one versioned graph's projection target.
+
+        Two versioned graphs projecting into one key would each reconcile the other's entities
+        away. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
+        the ``20261017_1500_gv_ps_keys`` migration does); any other holder refuses the claim
+        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check.
+
+        A holder that is ``data_source_id``'s own graph is not a rival: the caller lost a
+        concurrent create for that data source, and ``uq_graphs_data_source`` refuses it."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        key = [func.coalesce(ProjectionStateORM.falkor_provider, default) == (provider or default),
+               ProjectionStateORM.falkor_graph_name == name]
+        if exclude_graph_id is not None:
+            key.append(ProjectionStateORM.graph_id != exclude_graph_id)
+        await s.execute(update(ProjectionStateORM).where(
+            *key, ProjectionStateORM.owns_falkor_graph.is_(False),
+            ProjectionStateORM.graph_id.in_(
+                select(GraphORM.id).where(GraphORM.deleted_at.isnot(None))),
+        ).values(falkor_graph_name=None).execution_options(synchronize_session=False))
+        if data_source_id is not None:
+            key.append(ProjectionStateORM.graph_id.not_in(
+                select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))
+        if await s.scalar(select(ProjectionStateORM.graph_id).where(*key).limit(1)):
+            raise ConcurrencyError(
+                "another versioned data source already projects into this FalkorDB graph")
 
     async def open_draft(
         self,
@@ -606,24 +703,32 @@ class GraphVersioningService:
         :meth:`add_branch_member` can edit it, and checkpoints field-merge
         concurrent edits (raising on same-field clashes) instead of clobbering."""
         async with self._session() as s:
-            graph = await s.get(GraphORM, graph_id)
-            if graph is None:
-                raise ValueError(f"unknown graph {graph_id}")
-            await self._assert_not_bootstrapping(s, graph_id)
-            draft = BranchORM(
-                graph_id=graph_id,
-                kind="draft",
-                name=name,
-                owner=owner,
-                is_shared=shared,
-                base_commit_seq=graph.main_head_commit_seq,
-                base_ontology_version_id=graph.base_ontology_version_id,
-                originating_view_id=originating_view_id,
-                created_by=owner,
-            )
-            s.add(draft)
-            await s.flush()
-            return draft.id
+            return await self._add_draft(s, graph_id=graph_id, owner=owner, name=name,
+                                         originating_view_id=originating_view_id, shared=shared)
+
+    async def _add_draft(self, s, *, graph_id: str, owner: str, name: Optional[str] = None,
+                         originating_view_id: Optional[str] = None, shared: bool = False) -> str:
+        """:meth:`open_draft` in the caller's transaction ``s``; returns the new draft's id."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None:
+            raise ValueError(f"unknown graph {graph_id}")
+        await self._assert_not_bootstrapping(s, graph_id)
+        await self._lock_lifecycle(s, graph_id, shared=True)
+        await self._assert_writable(s, graph_id)
+        draft = BranchORM(
+            graph_id=graph_id,
+            kind="draft",
+            name=name,
+            owner=owner,
+            is_shared=shared,
+            base_commit_seq=graph.main_head_commit_seq,
+            base_ontology_version_id=graph.base_ontology_version_id,
+            originating_view_id=originating_view_id,
+            created_by=owner,
+        )
+        s.add(draft)
+        await s.flush()
+        return draft.id
 
     # ------------------------------------------------------------------ #
     # Shared-draft membership (plan §8)                                   #
@@ -631,16 +736,24 @@ class GraphVersioningService:
     async def add_branch_member(
         self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
         role: str, actor: str, actor_groups: Sequence[str] = (),
+        check_eligible: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> dict:
         """Grant a user/group a role on a draft (maintainer/owner only). Adding a
-        member marks the draft shared; re-adding an existing subject updates role."""
+        member marks the draft shared; re-adding an existing subject updates role.
+        ``check_eligible`` (raising :class:`IneligibleMember`) runs only once the actor
+        is authorized, under the draft's lock."""
         if role not in ROLE_RANK:
             raise ValueError(f"unknown role {role!r}")
         if subject_type not in ("user", "group"):
             raise ValueError(f"unknown subject_type {subject_type!r}")
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             await self._require_manage(s, branch, actor, actor_groups)
+            if subject_type == "user" and subject_id == branch.owner:
+                raise IneligibleMember(subject_id, "owner")
+            if check_eligible:
+                await check_eligible()
+            await self._set_shared(s, branch, True)      # before the select: sharing drops old rows
             row = (await s.execute(select(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id,
                 BranchMemberORM.subject_type == subject_type,
@@ -651,8 +764,6 @@ class GraphVersioningService:
                                       subject_id=subject_id, role=role))
             else:
                 row.role = role
-            if not branch.is_shared:
-                branch.is_shared = True
             return {"subjectType": subject_type, "subjectId": subject_id, "role": role}
 
     async def remove_branch_member(
@@ -660,7 +771,7 @@ class GraphVersioningService:
         actor: str, actor_groups: Sequence[str] = (),
     ) -> None:
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             await self._require_manage(s, branch, actor, actor_groups)
             await s.execute(delete(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id,
@@ -669,13 +780,33 @@ class GraphVersioningService:
             ))
 
     async def list_branch_members(self, *, graph_id: str, branch_id: str) -> List[dict]:
+        """A private draft has none: rows left on it grant nothing."""
         async with self._session() as s:
-            await self._get_branch(s, graph_id, branch_id)
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if not branch.is_shared:
+                return []
             rows = (await s.execute(select(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id
             ).order_by(BranchMemberORM.created_at))).scalars().all()
             return [{"subjectType": r.subject_type, "subjectId": r.subject_id, "role": r.role}
                     for r in rows]
+
+    async def my_branch_role(self, *, graph_id: str, branch_id: str, actor: str) -> Optional[str]:
+        """*actor*'s role on the draft: ``'owner'``, a member role, or ``None``."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.owner == actor:
+                return "owner"
+            return await self._branch_role(s, branch, actor)
+
+    @staticmethod
+    async def _set_shared(s, branch: BranchORM, shared: bool) -> None:
+        """The one place a draft's visibility changes. Every change starts it from no members:
+        going private removes them, and sharing again never revives rows left behind. The
+        caller holds the branch lock."""
+        if branch.is_shared != shared:
+            await s.execute(delete(BranchMemberORM).where(BranchMemberORM.branch_id == branch.id))
+            branch.is_shared = shared
 
     # ------------------------------------------------------------------ #
     # Staging + checkpoint                                                #
@@ -703,7 +834,11 @@ class GraphVersioningService:
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._lock_lifecycle(s, graph_id, shared=True)
+            await self._assert_writable(s, graph_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)   # serializes the seq allocation
+            if branch.kind == "main":
+                raise MainWriteForbidden()
             self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
             graph = await s.get(GraphORM, graph_id)
@@ -789,6 +924,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold uncommitted working changes into a draft commit, retrying on a
         ``commit_seq`` collision so two collaborators checkpointing the SAME shared
@@ -799,7 +935,7 @@ class GraphVersioningService:
                 graph_id=graph_id, branch_id=branch_id, actor=actor, message=message,
                 resolutions=resolutions, actor_groups=actor_groups,
                 containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, publishing_ok=publishing_ok),
         )
 
     async def _checkpoint_once(
@@ -813,6 +949,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -821,10 +958,12 @@ class GraphVersioningService:
         field-merged; a same-field clash raises :class:`MergeConflict` unless a
         ``resolutions`` payload (``{entity_id: payload|None}``) settles it."""
         async with self._session() as s:
-            branch = await s.get(BranchORM, branch_id)
-            if branch is None or branch.graph_id != graph_id:
-                raise ValueError("unknown branch")
-            self._require_open(branch)
+            await self._lock_lifecycle(s, graph_id, shared=True)
+            await self._assert_writable(s, graph_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._require_open(branch, publishing_ok=publishing_ok)
             await self._require_edit(s, branch, actor, actor_groups)
 
             changes = (
@@ -838,6 +977,18 @@ class GraphVersioningService:
                     .order_by(WorkingChangeORM.seq)
                 )
             ).scalars().all()
+            # Staged by someone who may no longer write the draft (removed, un-shared, out of the
+            # group): withdrawn, never folded into this commit, and so never published.
+            barred = set()
+            for who in {c.actor for c in changes} - {actor}:
+                try:
+                    await self._require_edit(s, branch, who, ())
+                except AccessDenied:
+                    barred.add(who)
+            for c in changes:
+                if c.actor in barred:
+                    await s.delete(c)
+            changes = [c for c in changes if c.actor not in barred]
             if not changes:
                 return None
 
@@ -937,10 +1088,7 @@ class GraphVersioningService:
                 s, graph_id, branch_id, commit, deltas, kind_by_entity, actor
             )
 
-            # Merkle root over the branch's full effective live state — for main only: nothing
-            # reads a draft's fingerprint, and building it composes the whole graph again.
-            commit.merkle_root = (await self._merkle_root(s, graph_id, branch_id)
-                                  if branch.kind == "main" else None)
+            commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             commit.stats = _delta_stats(deltas)
 
             for c in changes:
@@ -954,6 +1102,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        publishing_ok: bool = False,
     ) -> Optional[str]:
         """Fold any staged-but-uncommitted ``working_changes`` on a draft into a
         checkpoint commit. Publish/merge read the draft side from committed heads
@@ -962,21 +1111,26 @@ class GraphVersioningService:
         silently drop those edits. Returns the new commit id, or ``None`` if there
         was nothing pending."""
         async with self._session() as s:
-            pending = (await s.execute(
-                select(func.count()).select_from(WorkingChangeORM).where(
-                    WorkingChangeORM.graph_id == graph_id,
-                    WorkingChangeORM.branch_id == branch_id,
-                    WorkingChangeORM.committed_into_commit_id.is_(None),
-                )
-            )).scalar_one()
+            pending = await self._pending_count(s, graph_id, branch_id)
         if not pending:
             return None
         return await self.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=actor,
             message="auto-checkpoint pending changes before merge",
             actor_groups=actor_groups, containment_edge_types=containment_edge_types,
-            ontology_rules=ontology_rules,
+            ontology_rules=ontology_rules, publishing_ok=publishing_ok,
         )
+
+    @staticmethod
+    async def _pending_count(s, graph_id: str, branch_id: str) -> int:
+        """How many of the draft's staged ``working_changes`` no checkpoint has folded yet."""
+        return (await s.execute(
+            select(func.count()).select_from(WorkingChangeORM).where(
+                WorkingChangeORM.graph_id == graph_id,
+                WorkingChangeORM.branch_id == branch_id,
+                WorkingChangeORM.committed_into_commit_id.is_(None),
+            )
+        )).scalar_one()
 
     # ------------------------------------------------------------------ #
     # Publish (squash draft → main)                                       #
@@ -992,6 +1146,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        queued: bool = False,
     ) -> str:
         """Squash an UP-TO-DATE draft into a single ``main`` commit (plan §8) — the
         ungated path (admin / no review). The reviewed path is :meth:`open_draft_mr`
@@ -1003,24 +1158,30 @@ class GraphVersioningService:
         exactly what the user reviewed. Once up-to-date (base == current head) the squash
         reduces to the draft's own delta; a residual clash still raises
         :class:`MergeConflict`.
-        """
-        # Fold any staged-but-uncommitted edits first, so a publish never silently
-        # drops working changes that were staged but not checkpointed.
-        await self._flush_pending_changes(
-            graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
-            ontology_rules=ontology_rules,
-        )
 
+        ``queued``: the draft's publish job runs this, and the job set the draft ``publishing``.
+        """
         async def _once():
+            # Fold any staged-but-uncommitted edits first, so a publish never silently
+            # drops working changes that were staged but not checkpointed.
+            await self._flush_pending_changes(
+                graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
+                ontology_rules=ontology_rules, publishing_ok=queued,
+            )
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)       # serialize same-graph merges (see _lock_graph)
                 graph = await s.get(GraphORM, graph_id)
-                draft = await s.get(BranchORM, branch_id)
-                if graph is None or draft is None or draft.graph_id != graph_id:
+                if graph is None:
                     raise ValueError("unknown graph/branch")
-                self._require_open(draft)
-                if draft.is_shared:                       # publishing a shared draft → maintainer
-                    await self._require_manage(s, draft, actor, actor_groups)
+                await self._assert_writable(s, graph_id)
+                # The draft's lock: a save in flight is published with the draft, a later one finds
+                # it merged. An edit staged after the fold above is folded by the retry.
+                draft = await self._lock_branch(s, graph_id, branch_id)
+                self._require_open(draft, publishing_ok=queued)
+                await self._require_no_import(s, branch_id)
+                if await self._pending_count(s, graph_id, branch_id):
+                    raise _StaleHead()
+                await self._require_publish(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
                 # Require-up-to-date gate (Git "update branch before merging"): a draft that is BEHIND
                 # main must explicitly pull latest (rebase_draft) before it can publish, so the user
@@ -1377,13 +1538,16 @@ class GraphVersioningService:
         """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
         collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
-            graph = await s.get(GraphORM, graph_id)
-            draft = await s.get(BranchORM, branch_id)
-            if graph is None or draft is None or draft.graph_id != graph_id:
-                raise ValueError("unknown graph/branch")
-            self._require_open(draft)
+            await self._lock_lifecycle(s, graph_id, shared=True)
+            await self._assert_writable(s, graph_id)
+            # The draft's lock first, so main's head is read after any save, checkpoint or pull of
+            # this draft that held it has committed.
+            draft = await self._lock_branch(s, graph_id, branch_id)
             if draft.kind == "main":
-                raise ValueError("main has no base to rebase")
+                raise MainWriteForbidden()
+            self._require_open(draft)
+            await self._require_edit(s, draft, actor, ())
+            graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             from_seq = draft.base_commit_seq or 0
             to_seq = graph.main_head_commit_seq
@@ -1392,8 +1556,10 @@ class GraphVersioningService:
                         "incoming": _EMPTY_INCOMING, "base_commit_seq": draft.base_commit_seq,
                         "already_up_to_date": True}
 
+            # The draft's own edits, read once: the merge and the rewrite below use the same read.
+            own = await self._branch_own_payloads(s, graph_id, draft.id)
             merged_state, conflicts, _theirs = await self._compute_merge(
-                s, graph_id, graph, draft, main_id, dict(resolutions or {})
+                s, graph_id, graph, draft, main_id, dict(resolutions or {}), own=own
             )
             if conflicts:
                 # The draft's own value of each conflicting entity, to resolve from — just those.
@@ -1408,7 +1574,6 @@ class GraphVersioningService:
             # head — entities the draft never touched come from the advanced base automatically.
             self._cascade_incident_edges(merged_state)
             self._assert_referential_integrity(merged_state)
-            own = await self._branch_own_payloads(s, graph_id, draft.id)
             deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
 
             # ALWAYS commit. The version rows written are still only the draft's own rebased edits
@@ -1433,7 +1598,8 @@ class GraphVersioningService:
             )
             s.add(commit)
             await s.flush()
-            await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
+            await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor,
+                                     occ_guard=True)
             commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             # `stats` describes what CAME IN, not the rewrite to your own edits — it's what the user
             # means by "what did I just pull". The rebase of your edits is reported separately as
@@ -1544,17 +1710,16 @@ class GraphVersioningService:
     ) -> dict:
         """Mark an open draft ``abandoned`` (plan §17 #8): it becomes inert — no
         further stage/checkpoint/publish. Re-abandoning is idempotent; ``main`` and
-        already-merged drafts cannot be abandoned. A shared draft needs a maintainer.
-        Staged rows are left in place for audit (the branch is simply unreachable)."""
+        already-merged drafts cannot be abandoned. The owner abandons it, or a maintainer of
+        a shared draft. Staged rows are left in place for audit (the branch is simply unreachable)."""
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise ValueError("cannot abandon main")
             if branch.status == "abandoned":
                 return self._branch_meta(branch)          # idempotent
             self._require_open(branch)                    # merged/publishing → reject
-            if branch.is_shared:
-                await self._require_manage(s, branch, actor, actor_groups)
+            await self._require_manage(s, branch, actor, actor_groups)
             branch.status = "abandoned"
             branch.updated_at = _now()
             return self._branch_meta(branch)
@@ -1565,12 +1730,14 @@ class GraphVersioningService:
         is_shared: Optional[bool] = None,
     ) -> dict:
         """Edit a draft's metadata — display ``name``, optional ``description``, and shared/private
-        visibility. The owner may always edit their own draft; otherwise maintainer access is
-        required (workspace managers + maintainers of a shared draft). ``main`` is immutable and a
-        terminal (merged/abandoned) branch is read-only. Only the fields passed are changed (``None``
-        = leave as-is; pass ``""`` to clear name/description). Returns the updated branch meta."""
+        visibility. The owner may always edit their own draft; maintainers of a shared draft may edit
+        its name and description. Visibility is the owner's alone (:class:`NotDraftOwner` for anyone
+        else; an unchanged value is ignored), and any change of it removes every member. ``main`` is
+        immutable and a terminal (merged/abandoned) branch is read-only. Only the fields passed are
+        changed (``None`` = leave as-is; pass ``""`` to clear name/description). Returns the updated
+        branch meta."""
         async with self._session() as s:
-            branch = await self._get_branch(s, graph_id, branch_id)
+            branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise ValueError("cannot edit the main branch")
             self._require_open(branch)
@@ -1580,8 +1747,10 @@ class GraphVersioningService:
                 branch.name = name.strip() or None
             if description is not None:
                 branch.description = description.strip() or None
-            if is_shared is not None:
-                branch.is_shared = bool(is_shared)
+            if is_shared is not None and bool(is_shared) != branch.is_shared:
+                if branch.owner != actor:
+                    raise NotDraftOwner(branch.id, branch.owner)
+                await self._set_shared(s, branch, bool(is_shared))
             branch.updated_at = _now()
             return self._branch_meta(branch)
 
@@ -1591,9 +1760,21 @@ class GraphVersioningService:
         """Auto-abandon open drafts idle past the TTL (plan §17 #8) and return the
         ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic. Only ``open``
         drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
-        ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon)."""
+        ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon).
+        An idle draft still in use is kept: one with a live PR, staged (uncheckpointed)
+        work, or on a deleted graph (its purge owns it). A ``publishing`` draft is not open.
+        Nor is a frozen graph's draft touched — nobody can edit it — and its clock restarts at
+        the unfreeze (``lifecycle_changed_at``), so a freeze never costs a draft."""
         ttl = config.DRAFT_TTL_DAYS if ttl_days is None else ttl_days
         cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl)).isoformat()
+        live_pr = select(1).where(MergeRequestORM.source_branch_id == BranchORM.id,
+                                  MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
+        staged = select(1).where(WorkingChangeORM.graph_id == BranchORM.graph_id,
+                                 WorkingChangeORM.branch_id == BranchORM.id,
+                                 WorkingChangeORM.committed_into_commit_id.is_(None))
+        held = select(1).where(GraphORM.id == BranchORM.graph_id, or_(
+            GraphORM.deleted_at.isnot(None), GraphORM.lifecycle_state != "live",
+            GraphORM.lifecycle_changed_at >= cutoff))
         async with self._session() as s:
             swept = (await s.execute(
                 update(BranchORM)
@@ -1601,11 +1782,72 @@ class GraphVersioningService:
                     BranchORM.kind.in_(("draft", "fork_draft")),
                     BranchORM.status == "open",
                     BranchORM.updated_at < cutoff,
+                    ~live_pr.exists(), ~staged.exists(), ~held.exists(),
                 )
                 .values(status="abandoned", updated_at=_now())
                 .returning(BranchORM.id)
             )).scalars().all()
             return list(swept)
+
+    async def release_publishing(
+        self, *, graph_id: Optional[str] = None, branch_id: Optional[str] = None,
+    ) -> List[str]:
+        """Reopen the ``publishing`` drafts whose publish job ended without landing — refused,
+        failed, poisoned or timed out — and return their ids. Its lease makes a pending or running
+        job the whole definition of a live one, so no clock is read here. A draft whose row is
+        locked is skipped, not waited on: after the wait this statement would not see the job a
+        concurrent ``create_publish_job`` just queued, and would reopen its draft. Never waiting on a
+        branch, it cannot invert the branch-before-job lock order, whatever its caller holds."""
+        b = aliased(BranchORM)
+        live_job = select(JobORM.id).where(
+            JobORM.job_type == "publish", JobORM.branch_id == b.id,
+            JobORM.status.in_(("pending", "running")))
+        stuck = select(b.id).where(b.status == "publishing", ~live_job.exists())
+        if graph_id is not None:
+            stuck = stuck.where(b.graph_id == graph_id)
+        if branch_id is not None:
+            stuck = stuck.where(b.id == branch_id)
+        async with self._session() as s:
+            return list((await s.execute(
+                update(BranchORM)
+                .where(BranchORM.id.in_(stuck.with_for_update(key_share=True, skip_locked=True)))
+                .values(status="open", updated_at=_now())
+                .returning(BranchORM.id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all())
+
+    async def set_frozen(self, *, graph_id: str, frozen: bool, expected_rev: int) -> Dict[str, object]:
+        """Pause (``frozen``) or resume editing of a graph: every content write is refused while
+        it is frozen (:meth:`_assert_writable`); reads, exports and projection go on.
+
+        A compare-and-set on ``lifecycle_rev``, under the graph lock and the row FOR UPDATE (doc 15
+        §7), so it waits for the writes in flight. A graph already in the asked state answers
+        ``changed: False`` whatever ``expected_rev`` says, so a retried freeze is not a conflict;
+        otherwise a stale ``expected_rev`` is :class:`VersionConflict`. A trashed or unknown graph
+        is ``ValueError``. Not retried: a busy graph is :class:`LockBusy`, for the person to retry.
+        A graph in any other state (one a later schema stores) is :class:`GraphNotWritable`, and one
+        whose enablement has not finished is not frozen (:class:`ConcurrencyError`): its import
+        commit still lands on main."""
+        to = "frozen" if frozen else "live"
+        async with self._session() as s:
+            await self._lock_lifecycle(s, graph_id)
+            await self._lock_graph(s, graph_id)
+            g = (await self._bounded_lock(s, select(GraphORM).where(GraphORM.id == graph_id)
+                 .with_for_update().execution_options(populate_existing=True),
+                 f"graph {graph_id}")).scalar_one_or_none()
+            if g is None or g.deleted_at is not None:
+                raise ValueError(f"unknown graph {graph_id}")
+            if g.lifecycle_state not in ("live", "frozen"):
+                raise GraphNotWritable(g.lifecycle_state)
+            if frozen:
+                await self._assert_not_bootstrapping(s, graph_id)
+            changed = g.lifecycle_state != to
+            if changed:
+                if g.lifecycle_rev != expected_rev:
+                    raise VersionConflict("lifecycle", g.lifecycle_rev)
+                g.lifecycle_state, g.lifecycle_rev, g.lifecycle_changed_at = to, g.lifecycle_rev + 1, _now()
+            return {"graph_id": graph_id, "state": g.lifecycle_state, "rev": g.lifecycle_rev,
+                    "changed": changed}
 
     async def preview_merge(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """Dry-run the publish merge: report conflicts + change counts without
@@ -1633,10 +1875,22 @@ class GraphVersioningService:
         pre-commit state. If a later commit also changed one of those entities the
         revert can't apply cleanly and raises :class:`MergeConflict`. Deleting a
         node on revert cascades to its incident edges, same as publish."""
+        return await self._retry_seq(
+            f"revert {commit_id}",
+            lambda: self._revert_commit_once(
+                graph_id=graph_id, commit_id=commit_id, actor=actor, message=message))
+
+    async def _revert_commit_once(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str],
+    ) -> str:
+        """One attempt at :meth:`revert_commit`, under the graph lock."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
+            await self._assert_writable(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
@@ -1750,10 +2004,22 @@ class GraphVersioningService:
         well-defined "empty the graph". Ontology rules are deliberately not
         applied (administrative path, same as revert — must be able to restore
         pre-ontology states)."""
+        return await self._retry_seq(
+            f"restore to {commit_id}",
+            lambda: self._restore_to_commit_once(
+                graph_id=graph_id, commit_id=commit_id, actor=actor, message=message))
+
+    async def _restore_to_commit_once(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str],
+    ) -> str:
+        """One attempt at :meth:`restore_to_commit`, under the graph lock."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
+            await self._assert_writable(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
@@ -1857,27 +2123,51 @@ class GraphVersioningService:
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
     # ------------------------------------------------------------------ #
+    async def _fork_slot(self, s, parent_graph_id: str) -> Optional[GraphORM]:
+        """The live parent a new fork may read, or None when it is missing or trashed. Its row
+        is read FOR KEY SHARE, so a purge being queued (FOR UPDATE) finishes first and is seen,
+        or waits and counts the fork. At most ``config.MAX_FORKS_PER_GRAPH`` live forks
+        (:class:`ForkLimit`); the caller holds the parent's graph lock, so the count and the
+        insert are one step."""
+        parent = (await self._bounded_lock(s, select(GraphORM).where(
+            GraphORM.id == parent_graph_id).with_for_update(read=True, key_share=True)
+            .execution_options(populate_existing=True), f"graph {parent_graph_id}")
+        ).scalar_one_or_none()
+        if parent is None or parent.deleted_at is not None:
+            return None
+        live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
+            GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
+        if live_forks >= config.MAX_FORKS_PER_GRAPH:
+            raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+        return parent
+
     async def fork_graph(
         self,
         *,
         parent_graph_id: str,
         workspace_id: str,
         actor: str,
-        data_source_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """Copy-on-write fork: a new graph whose ``main`` inherits the parent's
         state at its current head **without copying any rows**.  Divergence accrues
         only as the fork's own commits; reads compose parent@fork_base + own (plan
-        §8 cross-team flow)."""
+        §8 cross-team flow).
+
+        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`), and
+        none of a trashed parent (:meth:`_fork_slot`)."""
         async with self._session() as s:
-            parent = await s.get(GraphORM, parent_graph_id)
-            if parent is None:
+            await self._lock_graph(s, parent_graph_id)
+            parent = await self._fork_slot(s, parent_graph_id)
+            # Read under the lock a move takes: a parent moved out of the workspace since the
+            # route found it is not forked into the old one.
+            if parent is None or parent.workspace_id != workspace_id:
                 raise ValueError(f"unknown parent graph {parent_graph_id}")
+            await self._assert_writable(s, parent_graph_id)    # only a live graph is forked
             base_seq = parent.main_head_commit_seq
             parent_main = await self._main_branch_id(s, parent_graph_id)
             fork = GraphORM(
-                data_source_id=data_source_id or prefixed_id("dsfork"),
+                data_source_id=prefixed_id("dsfork"),
                 workspace_id=workspace_id,
                 tenant_id=tenant_id,
                 kind=parent.kind,
@@ -1934,8 +2224,12 @@ class GraphVersioningService:
         ``reviewers`` makes approval a merge precondition: every listed reviewer
         must :meth:`approve_pr` before the PR can merge (plan §17 #5)."""
         async with self._session() as s:
-            fork = await s.get(GraphORM, source_graph_id)
-            if fork is None or not fork.fork_parent_graph_id:
+            # FOR KEY SHARE (15 §8): a delete_fork holding the row sees this PR, or we see its
+            # tombstone; the fork's own publishes do not wait.
+            fork = (await self._bounded_lock(s, select(GraphORM).where(
+                GraphORM.id == source_graph_id).with_for_update(read=True, key_share=True),
+                f"graph {source_graph_id}")).scalar_one_or_none()
+            if fork is None or fork.deleted_at is not None or not fork.fork_parent_graph_id:
                 raise ValueError("source graph is not a fork")
             fork_main = await self._main_branch_id(s, source_graph_id)
             await self._assert_no_live_pr(s, fork_main)
@@ -1959,22 +2253,121 @@ class GraphVersioningService:
             await s.flush()
             return pr.id
 
-    async def approve_pr(self, *, pr_id: str, actor: str) -> dict:
-        """Record ``actor``'s approval of a PR. The author can't approve their own
-        PR; once every requested reviewer has approved, ``approval_status`` flips
-        to ``approved`` (and an otherwise-mergeable PR to status ``approved``)."""
+    @staticmethod
+    def _assert_minted_fork(g: GraphORM) -> None:
+        """Only a fork :meth:`fork_graph` minted (its ``dsfork_`` id) is trashed and restored on
+        its own; any other graph goes with its data source (:class:`NotAFork`)."""
+        if not g.fork_parent_graph_id or not (g.data_source_id or "").startswith("dsfork_"):
+            raise NotAFork(g.id)
+
+    async def delete_fork(self, *, graph_id: str, workspace_id: str, actor: str) -> str:
+        """Move a fork to the trash; returns its parent's id. Its drafts and pull requests are
+        kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: by
+        the reaper once ``config.PURGE_GRACE_DAYS`` have passed, or by its parent's purge, which
+        takes it along. Refused while its pull request into the parent is live
+        (:class:`PullRequestExists`) or forks of its own are (:class:`LiveForks`). The row is
+        held FOR UPDATE, so an open_pr or fork_graph on it (FOR KEY SHARE) is seen or sees us."""
         async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
+            fork = (await self._bounded_lock(s, select(GraphORM).where(
+                GraphORM.id == graph_id, GraphORM.workspace_id == workspace_id)
+                .with_for_update(), f"graph {graph_id}")).scalar_one_or_none()
+            if fork is None or fork.deleted_at is not None:
+                raise ValueError("graph not found in workspace")
+            self._assert_minted_fork(fork)
+            await self._assert_no_live_pr(s, await self._main_branch_id(s, graph_id))
+            live = await s.scalar(select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == graph_id, GraphORM.deleted_at.is_(None)))
+            if live:
+                raise LiveForks(graph_id, live)
+            fork.deleted_at, fork.deleted_by = _now(), actor
+            return fork.fork_parent_graph_id
+
+    async def restore_fork(self, *, graph_id: str, workspace_id: str) -> Optional[str]:
+        """Bring a trashed fork back; returns its parent's id, or None when it was not trashed.
+        Refused once a purge of it exists (:class:`ForkNotRestorable` ``purging``), while its
+        parent is missing or trashed (``parent_deleted``), and at the parent's fork cap
+        (:class:`ForkLimit`), counted under the parent's graph lock as fork_graph counts."""
+        async with self._session() as s:
+            f = await s.get(GraphORM, graph_id)
+            if f is None or f.workspace_id != workspace_id:
+                raise ValueError("graph not found in workspace")
+            self._assert_minted_fork(f)
+            if f.deleted_at is None:
+                return None
+            parent_id = f.fork_parent_graph_id
+            await self._lock_graph(s, parent_id)
+            if await self._fork_slot(s, parent_id) is None:
+                raise ForkNotRestorable(graph_id, "parent_deleted")
+            f = (await self._bounded_lock(s, select(GraphORM).where(GraphORM.id == graph_id)
+                 .with_for_update().execution_options(populate_existing=True),
+                 f"graph {graph_id}")).scalar_one_or_none()
+            if f is None or f.workspace_id != workspace_id:
+                raise ValueError("graph not found in workspace")
+            if f.deleted_at is None:
+                return None
+            if await s.scalar(select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                                      JobORM.graph_id == graph_id).limit(1)):
+                raise ForkNotRestorable(graph_id, "purging")
+            f.deleted_at = f.deleted_by = None
+            return parent_id
+
+    async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
+        """A graph's direct forks, newest first, live and trashed: when a trashed one was
+        deleted and by whom, whether its purge is queued (no undo then), and when its undo
+        window (``config.PURGE_GRACE_DAYS``) ends."""
+        purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
+                                          JobORM.graph_id == GraphORM.id).exists()
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(GraphORM, purging.label("purging")).where(
+                    GraphORM.fork_parent_graph_id == graph_id,
+                    GraphORM.workspace_id == workspace_id)
+                .order_by(GraphORM.created_at.desc(), GraphORM.id.desc()).limit(limit))).all()
+        return [{
+            **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
+            "purging": bool(p),
+            "purge_after": (datetime.fromisoformat(g.deleted_at)
+                            + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
+            if g.deleted_at else None,
+        } for g, p in rows]
+
+    async def approve_pr(
+        self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
+    ) -> dict:
+        """Record ``actor``'s approval of a PR. Its author and its source draft's owner can't
+        approve it (:class:`SelfReview`); once every requested reviewer has approved,
+        ``approval_status`` flips to ``approved`` (and an otherwise-mergeable PR to status
+        ``approved``).
+
+        The approval is of the source branch's head now, and records that commit's seq, never
+        a later commit's: a content commit after it makes it stale (:meth:`_approvals`).
+        ``expected_head_commit_id`` is the head the reviewer saw; :class:`HeadMoved` when the
+        branch has moved on since.
+
+        The PR row is locked for the transaction, so a second reviewer approving at the same
+        moment waits and adds to this approval rather than writing over it."""
+        async with self._session() as s:
+            pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status in ("merged", "closed"):
                 raise ValueError(f"pr {pr_id} is {pr.status}")
-            if actor == pr.actor:
-                raise AccessDenied("author cannot approve their own PR")
+            src = await s.get(BranchORM, pr.source_branch_id)
+            if actor == pr.actor or (src is not None and actor == src.owner):
+                raise SelfReview(pr_id)
+            head = src.head_commit_id if src else None
+            if expected_head_commit_id is not None and expected_head_commit_id != head:
+                raise HeadMoved(pr_id, head)
+            # The head's own seq: a checkpoint committed since the head was read is after it.
+            head_seq = (await s.scalar(select(CommitORM.commit_seq).where(
+                CommitORM.graph_id == pr.graph_id, CommitORM.id == head))) if head else 0
             approved = list(dict.fromkeys((pr.approved_by or []) + [actor]))
             pr.approved_by = approved
+            pr.approvals = {**(pr.approvals or {}), actor: {
+                "headCommitId": head, "at": _now(), "headSeq": head_seq}}
+            standing, _stale = await self._approvals(s, pr)
             reviewers = set(pr.reviewers or [])
-            pr.approval_status = "approved" if reviewers <= set(approved) else "pending"
+            pr.approval_status = "approved" if reviewers <= set(standing) else "pending"
             if pr.approval_status == "approved" and pr.status == "mergeable":
                 pr.status = "approved"
             pr.updated_at = _now()
@@ -1997,20 +2390,45 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
+    @staticmethod
+    async def _lock_pr(s, pr_id: str) -> Optional[MergeRequestORM]:
+        """Take a PR's row lock for the transaction and return the row as committed (bounded wait,
+        :meth:`_bounded_lock`): the read-modify-writes of its review state serialize here."""
+        return (await GraphVersioningService._bounded_lock(
+            s,
+            select(MergeRequestORM).where(MergeRequestORM.id == pr_id)
+            .with_for_update().execution_options(populate_existing=True),
+            f"pr {pr_id}",
+        )).scalar_one_or_none()
+
     async def update_pr(
         self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
+        reviewers: Optional[Sequence[str]] = None,
     ) -> dict:
-        """Edit a PR's human title + description (review metadata only — does not touch the
-        merge or status). PATCH semantics: a field left ``None`` is untouched, an empty
-        string clears it."""
+        """Edit a PR's human title + description, and who must review it. PATCH semantics: a
+        field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
+        re-judge ``approval_status`` from the approvals that still stand (:meth:`_approvals`);
+        a merged or closed PR's reviewers are settled."""
         async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
+            pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if title is not None:
                 pr.title = title.strip() or None
             if description is not None:
                 pr.description = description.strip() or None
+            if reviewers is not None:
+                if pr.status in ("merged", "closed"):
+                    raise ValueError(f"pr {pr_id} is {pr.status}")
+                pr.reviewers = list(dict.fromkeys(reviewers)) or None
+                pr.approval_status = None
+                if pr.reviewers:
+                    standing, _stale = await self._approvals(s, pr)
+                    pr.approval_status = "approved" if set(pr.reviewers) <= set(standing) else "pending"
+                if pr.approval_status == "approved" and pr.status == "mergeable":
+                    pr.status = "approved"
+                elif pr.approval_status != "approved" and pr.status == "approved":
+                    pr.status = "mergeable"
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
@@ -2066,10 +2484,11 @@ class GraphVersioningService:
                     raise ValueError(f"pr {pr_id} is {pr.status}")
                 fork = await s.get(GraphORM, pr.graph_id)
                 parent = await s.get(GraphORM, pr.target_graph_id)
-                if fork is None or parent is None:
+                if fork is None or parent is None or fork.deleted_at is not None:
                     raise ValueError("pr endpoints missing")
                 await self._lock_graph(s, parent.id)      # serialize merges into this parent's main
                 await s.refresh(parent)                   # head may have advanced before the lock
+                await self._assert_writable(s, parent.id)   # the target; a frozen fork may propose
                 parent_main = await self._main_branch_id(s, parent.id)
                 fork_main = await self._main_branch_id(s, fork.id)
 
@@ -2106,9 +2525,7 @@ class GraphVersioningService:
                     kind_by_entity, containment_edge_types=containment_edge_types or [],
                     ontology_rules=ontology_rules,
                     strict=parent.ontology_enforcement == "strict", known=merged)
-                reviewers = set(pr.reviewers or [])
-                if reviewers and pr.approval_status != "approved":
-                    raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
+                await self._require_approvals(s, pr)
 
                 new_seq = parent.main_head_commit_seq + 1
                 contributors = await self._branch_contributors(s, fork.id, fork_main)
@@ -2165,7 +2582,7 @@ class GraphVersioningService:
         Raises ``ValueError`` for an unknown or closed draft and :class:`AccessDenied` for someone
         else's."""
         async with self._session() as s:
-            draft = await self._get_branch(s, graph_id, branch_id)
+            draft = await self._lock_branch(s, graph_id, branch_id)
             if draft.kind != "draft":
                 raise ValueError("not a draft")
             self._require_open(draft)
@@ -2238,6 +2655,7 @@ class GraphVersioningService:
             if draft.kind == "main":
                 raise ValueError("cannot open a merge request for main")
             self._require_open(draft)
+            await self._require_edit(s, draft, actor, ())
             await self._assert_no_live_pr(s, branch_id)
             main_id = await self._main_branch_id(s, graph_id)
             _merged, conflicts, _theirs = await self._compute_merge(
@@ -2351,11 +2769,13 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        queued: bool = False,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
         (main may have advanced under continued editing), enforces the
-        reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`."""
+        reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`.
+        ``queued`` as for :meth:`publish`."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, mr_id)
             if pr is None:
@@ -2369,24 +2789,30 @@ class GraphVersioningService:
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions
             )
-        # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
-        # so the merge never silently drops working changes that were never checkpointed.
-        await self._flush_pending_changes(
-            graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
-            ontology_rules=ontology_rules,
-        )
-
         async def _once():
+            # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
+            # so the merge never silently drops working changes that were never checkpointed.
+            await self._flush_pending_changes(
+                graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
+                ontology_rules=ontology_rules, publishing_ok=queued,
+            )
             async with self._session() as s:
                 await self._lock_graph(s, flush_gid)      # serialize merges into this graph's main
                 pr = await s.get(MergeRequestORM, mr_id)
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"merge request {mr_id} is {pr.status}")
                 graph = await s.get(GraphORM, pr.target_graph_id)
-                draft = await s.get(BranchORM, pr.source_branch_id)
-                if graph is None or draft is None:
+                if graph is None:
                     raise ValueError("merge request endpoints missing")
-                self._require_open(draft)
+                await self._assert_writable(s, graph.id)
+                draft = await self._lock_branch(s, graph.id, pr.source_branch_id)   # as in publish
+                self._require_open(draft, publishing_ok=queued)
+                await self._require_no_import(s, pr.source_branch_id)
+                if await self._pending_count(s, graph.id, pr.source_branch_id):
+                    raise _StaleHead()
+                # The approval gate (plan §17 #5), ahead of the merge computation: a refusal costs
+                # one indexed read, never a 3-way merge of the draft.
+                await self._require_approvals(s, pr)
                 main_id = await self._main_branch_id(s, graph.id)
                 # Require-up-to-date gate (see publish / docs 03 §3.13): a PR whose source draft is
                 # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
@@ -2401,9 +2827,6 @@ class GraphVersioningService:
                     )
                     if conflicts:
                         raise MergeConflict(conflicts)
-                reviewers = set(pr.reviewers or [])          # approval gate (plan §17 #5)
-                if reviewers and pr.approval_status != "approved":
-                    raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
                 if narrow:
                     commit_id = await self._squash_up_to_date(
                         s, graph, draft, main_id, actor, message,
@@ -2421,6 +2844,45 @@ class GraphVersioningService:
                 pr.updated_at = _now()
                 return commit_id
         return await self._retry_seq(f"merge_mr {mr_id}", _once)
+
+    async def _approvals(self, s, pr: MergeRequestORM) -> Tuple[List[str], List[str]]:
+        """``(standing, stale)``: who approved ``pr``, split by whether the approval still holds
+        (doc 13 'Staleness').
+
+        An approval records the source branch's head when it was given (:meth:`approve_pr`) and
+        holds until a content commit lands on the branch after it. A pull that rewrote none of
+        the draft's own edits (``stats.rebased`` all zero) is not content, so it keeps approvals.
+        An approval with no recorded head was given before approvals were bound to one: stale.
+        Past 1000 later commits, an approval older than all of them counts as stale too."""
+        approved = list(pr.approved_by or [])
+        seqs = {a: v["headSeq"] for a, v in (pr.approvals or {}).items() if a in approved}
+        last_content = 0
+        if seqs:
+            rows = (await s.execute(
+                select(CommitORM.commit_seq, CommitORM.kind, CommitORM.stats)
+                .where(CommitORM.graph_id == pr.graph_id, CommitORM.branch_id == pr.source_branch_id,
+                       CommitORM.commit_seq > min(seqs.values()))
+                .order_by(CommitORM.commit_seq.desc()).limit(1001))).all()
+            for seq, kind, stats in rows:
+                rebased = (stats or {}).get("rebased")
+                if kind != "pull" or rebased is None or any(rebased.values()):
+                    last_content = seq
+                    break
+            else:
+                if len(rows) > 1000:
+                    last_content = rows[-1].commit_seq
+        standing = [a for a in approved if a in seqs and seqs[a] >= last_content]
+        return standing, [a for a in approved if a not in standing]
+
+    async def _require_approvals(self, s, pr: MergeRequestORM) -> None:
+        """The approval gate (plan §17 #5): every requested reviewer's approval must still hold.
+        A PR with no requested reviewers needs none."""
+        if not pr.reviewers:
+            return
+        standing, stale = await self._approvals(s, pr)
+        pending = sorted(set(pr.reviewers) - set(standing))
+        if pending:
+            raise ApprovalRequired(pr.id, pending, stale=sorted(set(pending) & set(stale)))
 
     async def _compute_fork_merge(self, s, fork, resolutions):
         """3-way merge a fork's divergence into its parent's current main.
@@ -2545,25 +3007,46 @@ class GraphVersioningService:
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": projected >= committed,
+                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
+                # while the projection holds the head, else Postgres; a draft always overlays
+                # whatever serves main.
+                "read_route": {"main": "falkordb" if projected >= committed else "postgres",
+                               "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,
                 "last_projected_at": ps.last_projected_at if ps else None,
                 "progress_done": ps.progress_done if ps else None,
                 "progress_total": ps.progress_total if ps else None,
+                # Whose key it is, the fencing epoch, and the poll's backoff — so a graph backing
+                # off can be told from a wedged one. A liveness reset records its reason in
+                # last_error with this prefix (FalkorProjector.check_liveness).
+                "owns_falkor_graph": bool(ps.owns_falkor_graph) if ps else False,
+                "epoch": ps.epoch if ps else 0,
+                "failed_attempts": ps.failed_attempts if ps else 0,
+                "next_retry_at": ps.next_retry_at if ps else None,
+                "liveness_error": (ps.last_error if ps and (ps.last_error or "").startswith("liveness:")
+                                   else None),
+                # Old platform keys a move left, waiting to be dropped (move_projection).
+                "retired_keys": list(ps.retired_keys or []) if ps else [],
             }
 
     async def ensure_projection_target(
         self, *, graph_id: str, falkor_graph_name: str,
     ) -> Optional[str]:
-        """Pin a graph's FalkorDB projection to ``falkor_graph_name`` (the data source's real graph —
-        the one the canvas reads). Self-healing: graphs auto-created before the name was injected are
-        pinned to an orphan ``gv_<id>`` that nothing reads, so merged main state never surfaces.
+        """Pin an UNPINNED graph's FalkorDB projection to ``falkor_graph_name`` (the data source's
+        real graph — the one the canvas reads). Self-healing: graphs auto-created before the name was
+        injected have no pin, or the orphan ``gv_<id>`` that nothing reads, so merged main state never
+        surfaces. A graph pinned to any other key keeps it: ``projection_state`` is authoritative and
+        a pinned key changes only through :meth:`move_projection`.
         Re-pointing here and resetting ``projected_commit_seq`` to 0 makes the next projection replay
         the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
         MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
         Returns the OLD name when it changed (so the caller can drop the now-orphaned graph), else
-        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph."""
+        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
+
+        Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
+        unfinished, and when another versioned graph already projects into ``falkor_graph_name``."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.fork_parent_graph_id is not None:
@@ -2571,9 +3054,17 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is None or ps.falkor_graph_name == falkor_graph_name:
                 return None
+            await self._assert_not_bootstrapping(s, graph_id)
+            # projection_state is authoritative: only an unpinned graph (NULL, or the gv_<id>
+            # placeholder nothing reads) is healed; a pinned key changes only through move_projection.
+            if ps.falkor_graph_name not in (None, f"gv_{graph_id}"):
+                return None
+            await self._claim_projection_key(s, falkor_graph_name, ps.falkor_provider,
+                                             exclude_graph_id=graph_id)
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
+            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
             return old
 
     async def request_projection_rebuild(self, graph_id: str) -> bool:
@@ -2606,7 +3097,139 @@ class GraphVersioningService:
             ps.target_commit_seq = graph.main_head_commit_seq
             ps.status = "rebuilding"
             ps.last_error = None
+            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+            ps.failed_attempts = 0
+            ps.next_retry_at = None
             return True
+
+    async def move_projection(self, *, graph_id: str, provider: str, key: str, actor: str,
+                              shard_map: dict) -> Dict[str, object]:
+        """Move a graph's projection to FalkorDB key ``key`` on ``provider`` (doc 14 §6
+        KeyMigration, phase 1: a reseed move). Swaps the pin, bumps the epoch so a pass in flight
+        cannot publish over it, and lowers the watermark to 0 (``reseeding``), so the next pass
+        reconciles all of committed main into the new key while reads fall back to Postgres. The
+        old key is appended to ``retired_keys``, to be dropped once the new key has caught up and
+        ``RETIRE_GRACE_SECS`` have passed; until then a move back onto it is allowed, and takes it
+        off that list.
+
+        Only keys the platform owns move: an unpinned graph and a graph still projecting into the
+        customer's own key are refused (:class:`ProjectionNotAdopted`), and nothing is written. The
+        target must be this graph's own platform key or one of its retired keys
+        (:class:`ProjectionKeyInvalid`), and no other graph's pin (:class:`ProjectionKeyInUse`).
+        Moving to the current pin changes nothing (``changed: False``). Refused
+        (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
+        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None or graph.deleted_at is not None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                await self._assert_not_bootstrapping(s, graph_id)
+                ps = (await s.execute(
+                    select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                    .with_for_update().execution_options(populate_existing=True)
+                )).scalar_one_or_none()
+                if ps is None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
+                tgt = {"providerId": provider, "key": key}
+                if cur == tgt:
+                    return {"changed": False, "from": cur, "to": tgt, "retiring": None}
+                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                    raise ProjectionNotAdopted(
+                        "unpinned", "this graph has no FalkorDB key yet; nothing to move")
+                if not ps.owns_falkor_graph:
+                    raise ProjectionNotAdopted(
+                        "customer_key", "this graph projects into the customer's own FalkorDB "
+                        "graph; only platform keys can be moved")
+                retired = list(ps.retired_keys or [])
+                own = [e for e in retired
+                       if ((e.get("provider") or default), e["name"]) == (provider, key)]
+                if not (own or keymigrate.is_owned_key(graph_id, key)):
+                    raise ProjectionKeyInvalid(key)
+                try:
+                    await self._claim_projection_key(s, key, provider, exclude_graph_id=graph_id)
+                except ConcurrencyError:
+                    raise ProjectionKeyInUse(provider, key) from None
+                entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                         "retireAfter": (datetime.now(timezone.utc)
+                                         + timedelta(seconds=config.RETIRE_GRACE_SECS)).isoformat(),
+                         "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
+                ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
+                ps.projected_commit_seq = 0
+                ps.target_commit_seq = graph.main_head_commit_seq
+                ps.status = "reseeding"
+                ps.last_error = None
+                ps.failed_attempts = 0
+                ps.next_retry_at = None
+                ps.progress_done = ps.progress_total = None
+                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+                ps.retired_keys = [e for e in retired if e not in own] + [entry]
+                ps.shard_map = shard_map
+        except IntegrityError:
+            raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
+        return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+
+    async def reset_projection_watermarks(self, *, provider: str, actor: str,
+                                          dry_run: bool = False) -> List[str]:
+        """Disaster recovery: make the projector reseed every live graph on FalkorDB ``provider``
+        (``'default'`` for the env instance) — after a restore, a shard rebuild or a region loss,
+        when the keys may hold less than their watermarks say and graphs without a pass marker
+        cannot tell. Lowers each projected watermark to 0, marks it ``reseeding`` (not an error:
+        nothing failed) and bumps its epoch, so a pass in flight cannot publish over it; the poll
+        then reseeds each key in place, writing only what differs. Graphs the poll does not
+        project (unpinned, tombstoned, still being enabled for version control) are left alone,
+        as are graphs parked at genesis on their data source's own key. Returns the ids reset;
+        ``dry_run`` returns the ids it would reset and changes nothing."""
+        ps = ProjectionStateORM
+        resettable = (
+            func.coalesce(func.nullif(ps.falkor_provider, ""),
+                          config.DEFAULT_FALKOR_PROVIDER) == provider,
+            ps.projected_commit_seq > 0,
+            # Parked at genesis on a key we did not mint: the key is the data source's own
+            # graph, and a reseed from genesis would empty it (liveness's and eviction's rule).
+            or_(ps.owns_falkor_graph.is_(True), ps.projected_commit_seq > 1),
+            ps.falkor_graph_name.isnot(None),
+            ps.falkor_graph_name != literal("gv_").concat(ps.graph_id),
+            select(1).where(GraphORM.id == ps.graph_id, GraphORM.deleted_at.is_(None))
+            .correlate(ps).exists(),
+            ~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists(),
+        )
+        if dry_run:
+            async with self._session() as s:
+                return list((await s.execute(
+                    select(ps.graph_id).where(*resettable).order_by(ps.graph_id)
+                )).scalars().all())
+        async with self._session() as s:
+            ids = (await s.execute(
+                update(ps)
+                .where(*resettable)
+                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
+                        last_error=None,
+                        failed_attempts=0, next_retry_at=None, updated_at=_now())
+                .returning(ps.graph_id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all()
+        logger.warning("%s reset the projection watermarks of %d graph(s) on FalkorDB provider %s",
+                       actor, len(ids), provider)
+        return list(ids)
+
+    async def fence_projection_passes(self, *, provider: str) -> None:
+        """FalkorDB ``provider`` moved to another server: bump the epoch of its graphs at
+        watermark 0, so a full replay in flight — bound to the old server, and skipped by
+        :meth:`reset_projection_watermarks` — cannot publish; the next pass reseeds on the new
+        server. Harmless for a row at 0 with no pass: its next claim reads the new epoch."""
+        ps = ProjectionStateORM
+        async with self._session() as s:
+            await s.execute(
+                update(ps)
+                .where(func.coalesce(func.nullif(ps.falkor_provider, ""),
+                                     config.DEFAULT_FALKOR_PROVIDER) == provider,
+                       ps.projected_commit_seq == 0)
+                .values(epoch=ps.epoch + 1)
+                .execution_options(synchronize_session=False))
 
     async def neighbors_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
@@ -4429,10 +5052,13 @@ class GraphVersioningService:
         return out
 
     async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
-        """Graph metadata (or ``None``) — also the API's tenant-isolation guard."""
+        """Graph metadata (or ``None``) — also the API's tenant-isolation guard.
+
+        Soft-deleted graphs are invisible here, as in :meth:`get_graph_by_data_source`: a graph
+        in the trash, or being purged, is no graph to any route."""
         async with self._session() as s:
             g = await s.get(GraphORM, graph_id)
-            return None if g is None else self._graph_meta(g)
+            return None if g is None or g.deleted_at is not None else self._graph_meta(g)
 
     async def get_graph_by_data_source(self, data_source_id: str) -> Optional[Dict[str, object]]:
         """Reverse lookup: the versioned graph backing a data source (1:1 via the
@@ -4446,6 +5072,93 @@ class GraphVersioningService:
                                        GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
             return None if g is None else self._graph_meta(g)
+
+    async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str, *,
+                                   from_workspace_id: str, refuse_failed_enable: bool = True,
+                                   refuse_active_jobs: bool = True,
+                                   tombstone_by: Optional[str] = None) -> List[str]:
+        """Re-home a data source's versioned graph, and every fork of it, from
+        ``from_workspace_id`` into ``new_workspace_id`` — the graphver half of moving the data
+        source. Returns the moved graph ids, root first; ``[]`` when the source is not versioned.
+
+        Each graph is locked before its forks are read: a fork is created under its graph's
+        lock, and a job under its move lock (:meth:`_lock_move`), in the workspace it reads
+        there, so none appears unseen or in the old workspace. A graph found already in
+        ``new_workspace_id`` moves again (a retry that finishes a move); one in any other
+        workspace was moved by another request (:class:`GraphMoved`). Nothing moves while any of
+        them has a pending or running job (:class:`JobActive`), because a job runs in the
+        workspace it was queued in; the finished ones move with their graph, so lookups scoped by
+        workspace still find them. ``refuse_active_jobs=False`` waives that, for putting the graph
+        back after its source failed to commit: the source never left, so its graph, and any job
+        started on it meanwhile, belong where it is.
+
+        Open drafts and review requests move with their graph: each graph row is held FOR UPDATE
+        first, so one being opened, a restore or a trash in flight finishes and moves along.
+        Taking the graph out of ``from_workspace_id`` is refused (:class:`MoveBlocked`) while an
+        enable that failed waits to be resumed or cancelled where it was started.
+        ``refuse_failed_enable=False`` waives that — putting the graph back after its source
+        failed to commit, and the reaper re-filing a graph whose source already lives elsewhere —
+        and ``tombstone_by`` also trashes a still-live graph, as that actor, in this transaction
+        (after its lifecycle key, as the trash takes it)."""
+        async with self._session() as s:
+            root = await s.scalar(
+                select(GraphORM.id).where(GraphORM.data_source_id == data_source_id))
+            if root is None:
+                return []
+            if tombstone_by:
+                await self._lock_lifecycle(s, root)
+            ids, todo = [], [root]
+            while todo:
+                gid = todo.pop(0)
+                await self._lock_graph(s, gid)
+                await self._lock_move(s, gid)
+                if gid == root:
+                    at = await s.scalar(select(GraphORM.workspace_id).where(GraphORM.id == root))
+                    if at not in (from_workspace_id, new_workspace_id):
+                        raise GraphMoved(root)
+                ids.append(gid)
+                todo += sorted((await s.execute(select(GraphORM.id).where(
+                    GraphORM.fork_parent_graph_id == gid))).scalars().all())
+            active = None if not refuse_active_jobs else await s.scalar(select(JobORM.id).where(
+                JobORM.graph_id.in_(ids), JobORM.status.in_(("pending", "running"))).limit(1))
+            if active is not None:
+                raise JobActive(active, "Version control is busy with this data source — turning "
+                                        "it on, an import, an export or a publish. Try again once "
+                                        "that finishes.")
+            for gid in ids:         # parent before child: what is opening on one finishes first
+                await self._bounded_lock(s, select(GraphORM.id).where(GraphORM.id == gid)
+                                         .with_for_update(), f"graph {gid}")
+            if (refuse_failed_enable and at == from_workspace_id and await s.scalar(
+                    select(JobORM.id).where(*bootstrap_unfinished(root)).limit(1)) is not None):
+                raise MoveBlocked("Turning on version control for this data source didn't "
+                                  "finish. Resume or cancel it first.")
+            await s.execute(update(GraphORM).where(GraphORM.id.in_(ids))
+                            .values(workspace_id=new_workspace_id))
+            await s.execute(update(JobORM).where(JobORM.graph_id.in_(ids))
+                            .values(workspace_id=new_workspace_id))
+            if tombstone_by:
+                await s.execute(update(GraphORM).where(GraphORM.id == root,
+                                                       GraphORM.deleted_at.is_(None))
+                                .values(deleted_at=_now(), deleted_by=tombstone_by))
+            return ids
+
+    async def projection_placements(self, graph_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
+        """Where each live graph projects, for the placement routes: its workspace (their gate),
+        data source, and the FalkorDB key and provider from ``projection_state`` — the key the
+        projector writes, which for a fork or a blank model is not its data source's
+        ``graph_name``. Soft-deleted and unknown ids are absent; one query."""
+        if not graph_ids:
+            return {}
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(GraphORM.id, GraphORM.workspace_id, GraphORM.data_source_id,
+                       ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider)
+                .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+                .where(GraphORM.id.in_(list(graph_ids)), GraphORM.deleted_at.is_(None))
+            )).all()
+        return {r.id: {"workspace_id": r.workspace_id, "data_source_id": r.data_source_id,
+                       "falkor_graph_name": r.falkor_graph_name, "falkor_provider": r.falkor_provider}
+                for r in rows}
 
     async def main_heads(
         self, *, workspace_id: str, data_source_ids: Sequence[str],
@@ -4512,8 +5225,8 @@ class GraphVersioningService:
         open_draft_if_absent: bool = True, originating_view_id: Optional[str] = None,
     ) -> Optional[Dict[str, object]]:
         """Resolve a data source to its versioned graph plus the caller's editing
-        draft — the UI's boot lookup. Returns the graph's ``main`` head and the
-        actor's newest open draft (opening one when absent if requested), or ``None``
+        draft — the UI's boot lookup. Returns the graph's ``main`` head, its lifecycle state and
+        rev, and the actor's newest open draft (opening one when absent if requested), or ``None``
         when no versioned graph backs the data source (optionally scoped to a
         workspace for tenant isolation)."""
         async with self._session() as s:
@@ -4524,6 +5237,7 @@ class GraphVersioningService:
             if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
                 return None
             graph_id, main_head, graph_kind = g.id, g.main_head_commit_seq, g.kind
+            lifecycle_state, lifecycle_rev = g.lifecycle_state, g.lifecycle_rev
             main_id = await self._main_branch_id(s, graph_id)
             draft_q = select(BranchORM).where(
                 BranchORM.graph_id == graph_id, BranchORM.owner == actor,
@@ -4560,37 +5274,108 @@ class GraphVersioningService:
         return {
             "graph_id": graph_id, "main_branch_id": main_id,
             "main_head_commit_seq": main_head, "my_draft": my_draft,
-            "kind": graph_kind,
+            "kind": graph_kind, "lifecycle_state": lifecycle_state, "lifecycle_rev": lifecycle_rev,
         }
 
     async def list_branches(
-        self, *, graph_id: str, limit: int = 100, offset: int = 0,
+        self, *, graph_id: str, limit: int = 100, cursor: Optional[str] = None,
+        status: Sequence[str] = ("open", "publishing"),
         viewer: Optional[Viewer] = None, originating_view_id: Optional[str] = None,
-    ) -> List[dict]:
-        """Branches of a graph (``main`` + drafts/forks), oldest first — graph-keyed by
-        DEFAULT (every view's branches, the Data-Source rollup). Optional
-        ``originating_view_id`` narrows to that view's own branches (``main`` carries no
-        view, so it drops out of a view-scoped slice). With a ``viewer`` who isn't a
-        manager, only ``main`` + the caller's own or shared drafts are returned — others'
-        private drafts aren't browsable (so the switcher won't list them)."""
+    ) -> Tuple[List[dict], Optional[str]]:
+        """A page of a graph's branches (``main`` + drafts/forks) and the cursor of the next page
+        (``None`` on the last). ``main`` comes first, then drafts newest first. Graph-keyed by
+        DEFAULT (every view's branches, the Data-Source rollup); ``originating_view_id`` narrows
+        to that view's own branches (``main`` carries no view, so it drops out). ``status`` keeps
+        those statuses (``"all"`` keeps every one). A ``viewer`` who isn't a manager gets only the
+        branches :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so
+        others' private drafts can't crowd theirs off a page. With a ``viewer`` each row carries
+        ``my_role``: theirs on it, as :meth:`my_branch_role` answers (``None`` on ``main``), so a
+        client offers changes only on the drafts that take them. ``ValueError`` on a malformed cursor."""
+        rank = case((BranchORM.kind == "main", 0), else_=1)       # main first
+        stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
+        if originating_view_id is not None:
+            stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
+        if "all" not in status:
+            stmt = stmt.where(BranchORM.status.in_(status))
+        if cursor is not None:
+            after_rank, after_at, after_id = cursor.split("|", 2)
+            stmt = stmt.where(or_(
+                rank > int(after_rank),
+                and_(rank == int(after_rank),
+                     tuple_(BranchORM.created_at, BranchORM.id) < tuple_(after_at, after_id))))
         async with self._session() as s:
-            stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
-            if originating_view_id is not None:
-                stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
-            rows = (await s.execute(
-                stmt.order_by(BranchORM.created_at).limit(limit).offset(offset)
-            )).scalars().all()
+            groups = None
             if viewer is not None and not viewer.can_manage:
-                member_ids = set((await s.execute(
-                    select(BranchMemberORM.branch_id)
-                    .join(BranchORM, BranchORM.id == BranchMemberORM.branch_id)
-                    .where(BranchORM.graph_id == graph_id,
-                           BranchMemberORM.subject_type == "user",
-                           BranchMemberORM.subject_id == viewer.actor)
-                )).scalars().all())
-                rows = [b for b in rows
-                        if b.kind == "main" or b.owner == viewer.actor or b.id in member_ids]
-            return [self._branch_meta(b) for b in rows]
+                actor = viewer.actor
+                member = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == actor)
+                # A member through a group reads the draft too. Their groups are looked up once, and
+                # only when a shared draft of the graph has a group row; a failed lookup keeps their
+                # own rows, as in _my_roles.
+                if await s.scalar(select(BranchMemberORM.branch_id).join(
+                        BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
+                        BranchORM.graph_id == graph_id, BranchORM.is_shared,
+                        BranchMemberORM.subject_type == "group").limit(1)):
+                    try:
+                        groups = set(await _load_actor_groups(actor))
+                    except GroupsUnavailable:
+                        groups = set()
+                if groups:
+                    member = or_(member, and_(BranchMemberORM.subject_type == "group",
+                                              BranchMemberORM.subject_id.in_(groups)))
+                stmt = stmt.where(or_(
+                    BranchORM.kind == "main",
+                    BranchORM.owner == actor,
+                    and_(BranchORM.is_shared, BranchORM.id.in_(select(BranchMemberORM.branch_id).where(member))),
+                    BranchORM.id.in_(
+                        select(MergeRequestORM.source_branch_id).where(
+                            MergeRequestORM.graph_id == graph_id,
+                            or_(MergeRequestORM.actor == actor,
+                                MergeRequestORM.reviewers.contains([actor])))),
+                ))
+            rows = (await s.execute(
+                stmt.order_by(rank, BranchORM.created_at.desc(), BranchORM.id.desc()).limit(limit + 1)
+            )).scalars().all()
+            out = [self._branch_meta(b) for b in rows[:limit]]
+            if viewer is not None:
+                roles = await self._my_roles(s, rows[:limit], viewer.actor, groups)
+                for m in out:
+                    m["my_role"] = roles.get(m["branch_id"])
+        nxt = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            nxt = f"{0 if last.kind == 'main' else 1}|{last.created_at}|{last.id}"
+        return out, nxt
+
+    @staticmethod
+    async def _my_roles(s, branches: Sequence[BranchORM], actor: str,
+                        groups: Optional[set] = None) -> Dict[str, str]:
+        """*actor*'s role on each of *branches* that gives one — :meth:`_branch_role` for a page,
+        in one query for the shared drafts' member rows. The actor's groups are ``groups`` when
+        already loaded, else looked up once, and only when a group row could raise a role; when that
+        lookup fails a row keeps its user role, so a groups outage never takes the whole list down."""
+        roles = {b.id: "owner" for b in branches if b.kind != "main" and b.owner == actor}
+        shared = [b.id for b in branches if b.is_shared and b.id not in roles]
+        if not shared:
+            return roles
+        rows = (await s.execute(select(BranchMemberORM).where(
+            BranchMemberORM.branch_id.in_(shared)))).scalars().all()
+        for bid in shared:
+            mine = [r for r in rows if r.branch_id == bid]
+            best = max((r.role for r in mine if r.subject_type == "user" and r.subject_id == actor),
+                       key=ROLE_RANK.__getitem__, default=None)
+            higher = [r for r in mine if r.subject_type == "group"
+                      and ROLE_RANK[r.role] > ROLE_RANK.get(best, 0)]
+            if higher:
+                if groups is None:
+                    try:
+                        groups = set(await _load_actor_groups(actor))
+                    except GroupsUnavailable:
+                        groups = set()
+                best = max([r.role for r in higher if r.subject_id in groups] + ([best] if best else []),
+                           key=ROLE_RANK.__getitem__, default=None)
+            if best:
+                roles[bid] = best
+        return roles
 
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:
@@ -4614,8 +5399,10 @@ class GraphVersioningService:
         ``data_source_id`` joins the target graph (all PRs on a data source & its views);
         ``originating_view_id`` joins the source branch (PRs raised from one view) — both stay
         within the versioning store, so the join is local. ``active_only`` drops the terminal
-        (merged/closed) PRs — the "still needs attention" set the indicator counts. A non-manager
-        ``viewer`` only sees PRs they authored or are a reviewer on (the inbox is scoped)."""
+        (merged/closed) PRs — the "still needs attention" set the indicator counts. ``status``
+        "open" means the same set (a PR is stored as mergeable/conflicts/approved, never plain
+        "open"); any other ``status`` is an exact match. A non-manager ``viewer`` only sees PRs
+        they authored or are a reviewer on (the inbox is scoped)."""
         if data_source_id is not None:
             stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
                 GraphORM.data_source_id == data_source_id)
@@ -4624,7 +5411,9 @@ class GraphVersioningService:
         if originating_view_id is not None:
             stmt = stmt.join(BranchORM, BranchORM.id == MergeRequestORM.source_branch_id).where(
                 BranchORM.originating_view_id == originating_view_id)
-        if status is not None:
+        if status == "open":
+            active_only = True
+        elif status is not None:
             stmt = stmt.where(MergeRequestORM.status == status)
         if active_only:
             stmt = stmt.where(MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS))
@@ -4710,6 +5499,7 @@ class GraphVersioningService:
                 "behind_by": behind_by,
                 "main_head_commit_seq": main_head,
                 "base_commit_seq": base,
+                "status": branch.status,      # a closed draft says so without listing every draft
             }
 
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
@@ -4725,22 +5515,34 @@ class GraphVersioningService:
         # merged (re-pulling short-circuits as already_up_to_date). This now mirrors the gate
         # merge_mr actually enforces (it reads draft.base_commit_seq), so UI and server agree.
         behind = behind_by = None
+        src = await s.get(BranchORM, pr.source_branch_id)
         if self._is_draft_mr(pr):
             graph = await s.get(GraphORM, pr.target_graph_id)
-            src = await s.get(BranchORM, pr.source_branch_id)
             base = (src.base_commit_seq if src else pr.base_commit_seq) or 0
             behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
             behind = behind_by > 0
+        # A live PR shows only the approvals that still hold, so a reviewer whose approval went
+        # stale is asked again, and the PR is no longer shown as approved. ``stale`` names them.
+        status, approved_by, approval_status = pr.status, pr.approved_by, pr.approval_status
+        stale: List[str] = []
+        if approved_by and status not in ("merged", "closed"):
+            approved_by, stale = await self._approvals(s, pr)
+            if pr.reviewers:
+                approval_status = "approved" if set(pr.reviewers) <= set(approved_by) else "pending"
+                if status == "approved" and approval_status != "approved":
+                    status = "mergeable"
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
             "source_branch_id": pr.source_branch_id,
+            # The source's head now: what an approval is of (``approve_pr``'s expected head).
+            "head_commit_id": src.head_commit_id if src else None,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
-            "base_commit_seq": pr.base_commit_seq, "status": pr.status,
+            "base_commit_seq": pr.base_commit_seq, "status": status,
             "behind": behind, "behind_by": behind_by,
             "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
-            "reviewers": pr.reviewers, "approved_by": pr.approved_by,
-            "approval_status": pr.approval_status, "checks_status": pr.checks_status,
+            "reviewers": pr.reviewers, "approved_by": approved_by, "stale_approved_by": stale,
+            "approval_status": approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
             "merged_at": pr.merged_at, "merged_by": pr.merged_by, "merged_via": pr.merged_via,
             "closed_at": pr.closed_at, "closed_by": pr.closed_by,
@@ -4764,41 +5566,82 @@ class GraphVersioningService:
             raise ValueError("unknown branch")
         return b
 
-    async def _branch_role(self, s, branch: BranchORM, actor: str, groups: Sequence[str] = ()):
+    async def _branch_role(self, s, branch: BranchORM, actor: str, groups: Sequence[str] = (),
+                           need: Optional[str] = None):
         """Effective role of *actor* on *branch*: the owner is an implicit
-        maintainer; otherwise the highest role from matching user/group members
-        (group resolution depends on the caller supplying ``groups``)."""
+        maintainer; on a private draft nobody else has one (member rows left on it
+        grant nothing); otherwise the highest role from matching user/group members.
+        The actor's groups are ``groups`` when given, else looked up
+        (:func:`_load_actor_groups`) only when a group row could decide the answer:
+        one that ranks above the actor's own row and meets ``need``."""
         if branch.owner == actor:
             return "maintainer"
+        if not branch.is_shared:
+            return None
         rows = (await s.execute(select(BranchMemberORM).where(
             BranchMemberORM.branch_id == branch.id
         ))).scalars().all()
         best = None
         for r in rows:
-            if (r.subject_type == "user" and r.subject_id == actor) or \
-               (r.subject_type == "group" and r.subject_id in groups):
+            if r.subject_type == "user" and r.subject_id == actor:
                 if best is None or ROLE_RANK[r.role] > ROLE_RANK[best]:
+                    best = r.role
+        if need and best and ROLE_RANK[best] >= ROLE_RANK[need]:
+            return best
+        floor = max(ROLE_RANK.get(best, 0) + 1, ROLE_RANK[need] if need else 0)
+        cand = [r for r in rows if r.subject_type == "group" and ROLE_RANK[r.role] >= floor]
+        if cand:
+            mine = set(groups) if groups else set(await _load_actor_groups(actor))
+            for r in cand:
+                if r.subject_id in mine and (best is None or ROLE_RANK[r.role] > ROLE_RANK[best]):
                     best = r.role
         return best
 
     @staticmethod
-    def _require_open(branch: BranchORM) -> None:
+    def _require_open(branch: BranchORM, *, publishing_ok: bool = False) -> None:
         """Edits/checkpoints/publish need an ``open`` draft. Merged or abandoned
-        drafts are inert (plan §17 #8); ``main`` stays open for its lifetime."""
-        if branch.status != "open":
-            raise ValueError(f"branch {branch.id} is {branch.status}")
+        drafts are inert (plan §17 #8); ``main`` stays open for its lifetime. A draft
+        being published by a job is closed to everyone but that job (``publishing_ok``)."""
+        if branch.status != "open" and not (publishing_ok and branch.status == "publishing"):
+            raise BranchNotOpen(branch.id, branch.status)
+
+    @staticmethod
+    async def _require_no_import(s, branch_id: str) -> None:
+        """A draft is not published while an import is pending or running on it
+        (:class:`JobActive`): main would get the windows it has written so far, and the import
+        fail on the closed draft. Under the draft's lock, so no import window lands in between.
+        A pending one the transfer lane's reaper will fail (:func:`never_runs`) does not count."""
+        active = await s.scalar(select(JobORM.id).where(
+            JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+            JobORM.status.in_(("pending", "running")),
+            # IS NOT TRUE: a phase that is NULL makes the queued rule NULL, not false.
+            and_(JobORM.status == "pending", or_(*never_runs())).is_not(True)).limit(1))
+        if active is not None:
+            raise JobActive(active, f"An import is still running on this draft (job {active}). "
+                                    "Publish once it has finished.")
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
-        if not branch.is_shared:                          # private draft → workspace RBAC governs
+        if not branch.is_shared:                          # a private draft is its owner's alone (D4)
+            if branch.kind != "main" and branch.owner != actor:
+                raise NotDraftOwner(branch.id, branch.owner)
             return
-        role = await self._branch_role(s, branch, actor, groups)
+        role = await self._branch_role(s, branch, actor, groups, need="editor")
         if role is None or ROLE_RANK[role] < ROLE_RANK["editor"]:
-            raise AccessDenied(f"{actor} lacks editor access to draft {branch.id}")
+            raise DraftRoleRequired(branch.id, "editor")
 
     async def _require_manage(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
-        role = await self._branch_role(s, branch, actor, groups)
+        role = await self._branch_role(s, branch, actor, groups, need="maintainer")
         if role != "maintainer":
-            raise AccessDenied(f"{actor} lacks maintainer access to draft {branch.id}")
+            if not branch.is_shared:
+                raise NotDraftOwner(branch.id, branch.owner)
+            raise DraftRoleRequired(branch.id, "maintainer")
+
+    async def _require_publish(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
+        """Publishing a shared draft needs maintainer; any other draft, edit."""
+        if branch.is_shared:
+            await self._require_manage(s, branch, actor, groups)
+        else:
+            await self._require_edit(s, branch, actor, groups)
 
     # ── Read visibility (draft privacy + PR scoping) ──────────────────────────
     async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str) -> bool:
@@ -4822,20 +5665,40 @@ class GraphVersioningService:
             return True
         if viewer.can_manage or branch.owner == viewer.actor:
             return True
-        if branch.is_shared and await self._branch_role(s, branch, viewer.actor) is not None:
+        if branch.is_shared and await self._branch_role(s, branch, viewer.actor, need="viewer") is not None:
             return True
         return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
 
     async def _assert_branch_readable(self, s, branch: BranchORM, viewer: Optional["Viewer"]) -> None:
         """No-op when ``viewer`` is None (internal/test callers); else raise on a private draft."""
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
-            raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
+            raise DraftNotReadable(f"{viewer.actor} cannot view branch {branch.id}")
 
     async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
         """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
         ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+
+    async def check_view_branch(self, *, data_source_id: Optional[str], branch_id: str, viewer: "Viewer",
+                                write: bool) -> None:
+        """The gate for a view route's ``branchId`` (VIEWS-5). ``ValueError`` (404) unless the
+        branch is on the live graph of ``data_source_id`` and ``viewer`` may read it. Main reads
+        as the published view; a write to it is ``MainWriteForbidden``. A draft write needs the
+        draft open (``BranchNotOpen``) and ``_require_edit`` (``AccessDenied``). Reads of a merged
+        or abandoned draft pass: a tab still on it must load."""
+        async with self._session() as s:
+            branch = await s.get(BranchORM, branch_id)
+            graph = await s.get(GraphORM, branch.graph_id) if branch is not None else None
+            if (graph is None or graph.deleted_at is not None or graph.data_source_id != data_source_id
+                    or not await self._branch_readable(s, branch, viewer)):
+                raise ValueError("unknown branch")
+            if not write:
+                return
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._require_open(branch)
+            await self._require_edit(s, branch, viewer.actor, ())
 
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
@@ -4969,18 +5832,18 @@ class GraphVersioningService:
             out[eid] = payload_by_vid.get(vid)
         return out
 
-    async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions):
+    async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions, own=None):
         """3-way merge a draft onto current main.
 
         base   = main state at the draft's branch point (common ancestor)
-        ours   = base + the draft's own changes
+        ours   = base + the draft's own changes (``own``, when the caller already read them)
         theirs = current main state
         Returns ``(merged_state, conflicts, theirs_state)``.
         """
         base = await self._state_as_of(s, graph_id, main_id, draft.base_commit_seq or 0)
         theirs = await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
         ours = dict(base)
-        ours.update(await self._branch_own_payloads(s, graph_id, draft.id))
+        ours.update(own if own is not None else await self._branch_own_payloads(s, graph_id, draft.id))
 
         set_fields = frozenset(config.SET_FIELDS)
         merged: Dict[str, Optional[dict]] = {}
@@ -5180,8 +6043,30 @@ class GraphVersioningService:
         ATOMIC: the whole import (every insert chunk + the Merkle update + the commit
         row) runs in one transaction — any chunk failing rolls the entire commit back,
         so a graph is never left partially seeded. Pass ``session`` to fold this into a
-        larger transaction (e.g. create-graph + seed as one unit)."""
+        larger transaction (e.g. create-graph + seed as one unit).
+
+        Without ``session`` (the API path) it runs under the graph lock, is retried, and seeds
+        only an EMPTY graph: every row becomes a ``create`` with no prior, so on a graph that has
+        entities it would write versions that ignore what main holds. Updating one is a sync."""
+        rows = list(rows)        # every attempt reads it
+
+        async def once():
+            return await self._bulk_ingest_once(
+                graph_id=graph_id, rows=rows, actor=actor, idempotency_key=idempotency_key,
+                message=message, session=session)
+        if session is not None:  # seeding a graph made in this transaction: no one else sees it
+            return await once()
+        return await self._retry_seq(f"bulk import into {graph_id}", once)
+
+    async def _bulk_ingest_once(
+        self, *, graph_id: str, rows, actor: str, idempotency_key: Optional[str],
+        message: str, session,
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`bulk_ingest`."""
         async with self._session_scope(session) as s:
+            if session is None:
+                await self._lock_graph(s, graph_id)
+                await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -5197,6 +6082,13 @@ class GraphVersioningService:
                     return {"commit_id": prior.id, "commit_seq": prior.commit_seq,
                             "ingested": st.get("nodes", 0) + st.get("edges", 0),
                             "rejected": [], "idempotent_replay": True}
+            if session is None:              # after the replay: an import that landed still answers
+                await self._assert_writable(s, graph_id)
+            if session is None and await s.scalar(select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.is_tombstone.is_(False)).limit(1)) is not None:
+                raise ConcurrencyError("bulk import only seeds an empty graph — this one already "
+                                       "has entities; use sync to update it")
 
             rejected: List[dict] = []
             node_deltas: List[Delta] = []
@@ -5266,6 +6158,7 @@ class GraphVersioningService:
         self, *, graph_id: str, provider, actor: str, source: str = "provider",
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None, batch: int = 2000,
+        allow_curation_risk: bool = False, allow_mass_delete: bool = False,
     ) -> Dict[str, object]:
         """Re-synchronize a versioned graph from its provider's CURRENT state, on demand —
         runnable at any time for any versioned graph (requirement: on-demand sync). Pages
@@ -5281,12 +6174,24 @@ class GraphVersioningService:
         # transaction. (sync_ingest checks too: it is O(graph) for its OWN callers regardless
         # of how many rows they hand it.)
         await self._assert_syncable(graph_id)
+        async with self._session() as s:      # nor for a graph that is not writable
+            await self._assert_writable(s, graph_id)
+        # A sync refused for curation at risk is refused whatever the provider holds, so ask
+        # first. sync_ingest asks again under the lock.
+        if not allow_curation_risk:
+            async with self._session() as s:
+                main_id = await self._main_branch_id(s, graph_id)
+                human = await self._human_commit_in_sync_base(
+                    s, graph_id, main_id, await self._last_sync_seq(s, graph_id, main_id))
+            if human is not None:
+                raise _curation_at_risk(human)
         from backend.app.providers.versioned_bootstrap import collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
-            containment_edge_types=containment_edge_types, message="resync from provider")
+            containment_edge_types=containment_edge_types, message="resync from provider",
+            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete)
 
     async def _assert_syncable(self, graph_id: str) -> None:
         """Refuse a sync the machine cannot survive, with the number that proves it.
@@ -5299,17 +6204,42 @@ class GraphVersioningService:
             return                                      # explicitly disabled by an operator
         async with self._session() as s:
             main_id = await self._main_branch_id(s, graph_id)
-            entities = await s.scalar(
-                select(func.count()).select_from(EntityHeadORM).where(
-                    EntityHeadORM.graph_id == graph_id,
-                    EntityHeadORM.branch_id == main_id,
-                    EntityHeadORM.is_tombstone.is_(False),
-                )) or 0
+            entities = await self._main_live_count(s, graph_id, main_id)
         if entities > limit:
             logger.warning(
                 "refusing sync for graph %s: %d entities exceeds the %d limit (~%.1f GB)",
                 graph_id, entities, limit, entities * _SYNC_BYTES_PER_ENTITY / 1_073_741_824)
             raise GraphTooLargeToSync(entities, limit)
+
+    async def _main_live_count(self, s, graph_id: str, main_id: str) -> int:
+        return await s.scalar(
+            select(func.count()).select_from(EntityHeadORM).where(
+                EntityHeadORM.graph_id == graph_id,
+                EntityHeadORM.branch_id == main_id,
+                EntityHeadORM.is_tombstone.is_(False),
+            )) or 0
+
+    async def _last_sync_seq(self, s, graph_id: str, main_id: str) -> int:
+        """Main's newest import or sync commit: the seq a sync's merge base is read at."""
+        return await s.scalar(select(CommitORM.commit_seq).where(
+            CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+            CommitORM.kind.in_(("import", "sync")),
+        ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+
+    async def _human_commit_in_sync_base(self, s, graph_id: str, main_id: str, last_seq: int):
+        """The newest human commit on main OLDER than the last import or sync, or None.
+
+        Not "any human commit since the last sync": those are outside the merge base, so the
+        3-way merge keeps them as ours. The ones before it are IN the base, so a sync reads
+        them as the source's old values and reverts them, and deletes what people created
+        (AUTOVSHUMAN-01). Stop-gap until INGEST S1's source shadow becomes the base."""
+        return (await s.execute(
+            select(CommitORM.id, CommitORM.commit_seq, CommitORM.kind, CommitORM.actor,
+                   CommitORM.created_at).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq < last_seq,
+                CommitORM.kind.notin_(_MACHINE_COMMIT_KINDS),
+            ).order_by(CommitORM.commit_seq.desc()).limit(1))).first()
 
     async def edge_payload_health(
         self, graph_id: str, *, sample_limit: int = 20
@@ -5362,6 +6292,7 @@ class GraphVersioningService:
         idempotency_key: Optional[str] = None, message: str = "external sync",
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
+        allow_curation_risk: bool = False, allow_mass_delete: bool = False,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -5375,9 +6306,36 @@ class GraphVersioningService:
         merged, plus the urn/edge match indexes), so it is O(graph) for EVERY caller — no
         matter how few rows they pass. Pushing a SINGLE row into a 7.7M-entity graph asks for
         ~30 GB just as surely as a full re-sync does. That is why the guard lives here and not
-        only on the resync path. See :class:`GraphTooLargeToSync`."""
+        only on the resync path. See :class:`GraphTooLargeToSync`.
+
+        Two stop-gap refusals, each with an admin override that is named in the commit message
+        and in the report's ``overrides``: :class:`CurationAtRisk` when main holds a human commit
+        older than the last import or sync (``allow_curation_risk``), and
+        :class:`MassDeleteBlocked` when the sync would delete more than
+        max(``SYNC_DELETE_MAX_ABS``, ``SYNC_DELETE_MAX_FRACTION`` x live) entities
+        (``allow_mass_delete``)."""
         await self._assert_syncable(graph_id)
+        rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
+        return await self._retry_seq(
+            f"sync {graph_id}",
+            lambda: self._sync_ingest_once(
+                graph_id=graph_id, rows=rows, actor=actor, source=source,
+                idempotency_key=idempotency_key, message=message, strategy=strategy,
+                resolutions=resolutions, containment_edge_types=containment_edge_types,
+                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete))
+
+    async def _sync_ingest_once(
+        self, *, graph_id: str, rows, actor: str, source: str,
+        idempotency_key: Optional[str], message: str, strategy: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]],
+        containment_edge_types: Optional[Sequence[str]],
+        allow_curation_risk: bool, allow_mass_delete: bool,
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
+        last sync and main's head are all read with main held still."""
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -5393,11 +6351,16 @@ class GraphVersioningService:
                     return {"commit_id": prior.id, "commit_seq": prior.commit_seq,
                             "applied": st.get("nodes", 0) + st.get("edges", 0),
                             "rejected": [], "idempotent_replay": True}
+            await self._assert_writable(s, graph_id)     # after the replay, as for bulk
 
-            last_seq = await s.scalar(select(CommitORM.commit_seq).where(
-                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
-                CommitORM.kind.in_(("import", "sync")),
-            ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+            last_seq = await self._last_sync_seq(s, graph_id, main_id)
+            # After the replay, so a retried key still answers; before any O(graph) work.
+            overrides: List[str] = []
+            human = await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq)
+            if human is not None:
+                if not allow_curation_risk:
+                    raise _curation_at_risk(human)
+                overrides.append("curation_at_risk")
 
             # BOUNDED. This used to be two full `_state_as_of` replays plus an `_external_state`
             # that indexed the whole of `ours` — six whole-graph structures resident at once, and
@@ -5475,7 +6438,26 @@ class GraphVersioningService:
                         "applied": 0, "rejected": rejected, "idempotent_replay": False,
                         # WHICH user edits the source overruled. Overwriting a
                         # person's work is allowed; doing it silently is not.
-                        "overridden": overridden[:200]}
+                        "overridden": overridden[:200], "overrides": overrides}
+
+            # Counts the cascaded deletes too: that is what lands.
+            deletes = sum(1 for d in deltas if d.op == "delete")
+            if deletes > config.SYNC_DELETE_MAX_ABS:
+                live = await self._main_live_count(s, graph_id, main_id)
+                limit = max(config.SYNC_DELETE_MAX_ABS, int(config.SYNC_DELETE_MAX_FRACTION * live))
+                if deletes > limit:
+                    if not allow_mass_delete:
+                        raise MassDeleteBlocked(
+                            deletes, limit,
+                            f"this sync would delete {deletes:,} of {live:,} entities (limit "
+                            f"{limit:,}). A snapshot that is missing rows reads as 'the source "
+                            "deleted them'. A workspace admin can re-run with allowMassDelete.",
+                            live=live)
+                    overrides.append("mass_delete")
+            if overrides:
+                message = f"{message} (admin override: {', '.join(overrides)})"
+                logger.warning("sync on graph %s by %s proceeded under admin override: %s",
+                               graph_id, actor, overrides)
 
             kind_by_entity = {eid: ("edge" if _is_edge_payload(p) else "node")
                               for eid, p in ours.items() if p is not None}
@@ -5504,7 +6486,7 @@ class GraphVersioningService:
                     "applied": len(deltas), "rejected": rejected, "idempotent_replay": False,
                         # WHICH user edits the source overruled. Overwriting a
                         # person's work is allowed; doing it silently is not.
-                        "overridden": overridden[:200]}
+                        "overridden": overridden[:200], "overrides": overrides}
 
     async def _external_state_bounded(self, s, graph_id: str, main_id: str, rows):
         """`_external_state`, without holding the graph.
@@ -5728,36 +6710,102 @@ class GraphVersioningService:
 
     async def _retry_seq(self, label: str, fn):
         """Run ``fn`` — an async thunk that opens its OWN session, RE-FETCHES state, and
-        commits — retrying on a ``commit_seq`` unique-constraint collision with bounded
-        backoff. Because the whole body re-runs on each attempt, the write is always
-        recomputed against the current head: this fixes both the crash (unhandled
-        ``IntegrityError``) AND the read-stale-then-write race where a merge computed
-        against a stale ``main`` would otherwise silently drop intervening edits."""
+        commits — retrying with bounded, full-jitter backoff when it lost to a concurrent
+        writer: a ``commit_seq`` unique-constraint collision, a head CAS miss, or a lock not
+        granted within ``GRAPH_LOCK_TIMEOUT_MS`` (:class:`LockBusy`). Because the whole body
+        re-runs on each attempt, the write is always recomputed against the current head: this
+        fixes both the crash (unhandled ``IntegrityError``) AND the read-stale-then-write race
+        where a merge computed against a stale ``main`` would otherwise silently drop
+        intervening edits. Raises :class:`ContentionExhausted` (503, retryable) when every
+        attempt lost."""
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await fn()
-            except (IntegrityError, _StaleHead) as exc:
+            except (IntegrityError, _StaleHead, LockBusy) as exc:
+                if isinstance(exc, ContentionExhausted):   # an inner retry gave up: not again
+                    raise
                 # Only a unique-key race is "the branch moved": any other integrity error (a
                 # check or a not-null) fails the same way every time, and re-running a large
                 # import window or publish for it only multiplies the work.
                 state = getattr(getattr(exc, "orig", None), "sqlstate", None)
                 if isinstance(exc, IntegrityError) and state not in (None, "23505"):
                     raise
-                # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss. Both
-                # mean "the branch moved under us" — re-run the thunk, which re-reads current state
-                # and recomputes (auto-rebase / 3-way merge) against the new head.
+                # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss;
+                # LockBusy = another writer still holds the lock. All mean "the branch moved (or is
+                # moving) under us" — re-run the thunk, which re-reads current state and recomputes
+                # (auto-rebase / 3-way merge) against the new head.
                 if attempt + 1 >= config.COMMIT_MAX_RETRIES:
-                    raise ConcurrencyError(f"{label} commit-seq contention")
-                await asyncio.sleep(0.02 * (2 ** attempt))
+                    raise ContentionExhausted(f"{label}: every attempt lost to a concurrent "
+                                              "writer; try again") from exc
+                # Full jitter: writers that collided once do not collide again in lockstep.
+                await asyncio.sleep(random.uniform(0, min(2.0, 0.02 * (2 ** attempt))))
+
+    @staticmethod
+    async def _bounded_lock(s, stmt, what: str):
+        """Execute the lock-taking ``stmt``, waiting at most ``GRAPH_LOCK_TIMEOUT_MS`` for the
+        lock: a wait that runs out (SQLSTATE 55P03) is :class:`LockBusy`, which ``_retry_seq``
+        retries. The timeout is ``SET LOCAL`` (``set_config(..., true)``), so it holds for the
+        rest of the transaction and ends with it."""
+        ms = config.GRAPH_LOCK_TIMEOUT_MS
+        await s.execute(_SET_LOCK_TIMEOUT, {"ms": str(ms)})
+        try:
+            return await s.execute(stmt)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "55P03":
+                raise
+            raise LockBusy(f"{what} is busy with another change; try again shortly",
+                           retry_after=max(1, ms // 1000)) from exc
 
     @staticmethod
     async def _lock_graph(s, graph_id: str) -> None:
-        """Serialize same-graph main-advancing writes (publish/merge/revert/sync) with a
-        transaction-scoped Postgres advisory lock (auto-released at commit/rollback).
-        Acquire it BEFORE reading ``main`` head/state so the merge composes against the
-        current main; different graphs never contend, so this adds no cross-graph
-        latency and makes the commit-seq retry converge in ~1 attempt."""
-        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph_id))))
+        """Serialize same-graph main-advancing writes (publish, merge, revert, restore, sync,
+        bulk import, and apply_ops on main) with a transaction-scoped Postgres advisory lock
+        (auto-released at commit/rollback). Acquire it BEFORE reading ``main`` head/state so the
+        write composes against the current main; different graphs never contend, so this adds no
+        cross-graph latency and makes the commit-seq retry converge in ~1 attempt. The wait is
+        bounded (:meth:`_bounded_lock`)."""
+        await GraphVersioningService._bounded_lock(
+            s, select(func.pg_advisory_xact_lock(func.hashtext(graph_id))), f"graph {graph_id}")
+
+    @staticmethod
+    async def _lock_lifecycle(s, graph_id: str, *, shared: bool = False) -> None:
+        """Take the graph's lifecycle key for the transaction: ``shared`` for a draft writer,
+        before :meth:`_assert_writable`; exclusive for a transition (freeze, trash, restore, a purge
+        queued), before :meth:`_lock_graph` and the row. Row locks let each new FOR KEY SHARE past a
+        waiting FOR UPDATE, so overlapping draft saves could hold a transition off for ever; this
+        key's queue is fair, so the saves that ask after a transition wait for it. Main writers do
+        not take it: they hold the graph lock, which a transition takes after this key. The wait is
+        bounded (:meth:`_bounded_lock`)."""
+        take = func.pg_advisory_xact_lock_shared if shared else func.pg_advisory_xact_lock
+        await GraphVersioningService._bounded_lock(
+            s, select(take(func.hashtext(f"gvlifecycle:{graph_id}"))), f"graph {graph_id}")
+
+    @staticmethod
+    async def _lock_move(s, graph_id: str, *, shared: bool = False) -> None:
+        """The lock a move of the graph's data source holds (exclusive, after :meth:`_lock_graph`)
+        and a job's creation takes ``shared``: jobs fence against a move without waiting on main
+        writers or on each other. The wait is bounded (:meth:`_bounded_lock`)."""
+        lock = func.pg_advisory_xact_lock_shared if shared else func.pg_advisory_xact_lock
+        await GraphVersioningService._bounded_lock(
+            s, select(lock(func.hashtext(f"gvmove:{graph_id}"))), f"graph {graph_id}")
+
+    @staticmethod
+    async def _lock_branch(s, graph_id: str, branch_id: str) -> BranchORM:
+        """Take a branch's row lock for the transaction and return the row as committed. Every
+        writer of one draft (apply_ops, stage, checkpoint, pull, claim, abandon) serializes here,
+        so a writer that waited sees what the holder committed, a closed status included. FOR NO
+        KEY UPDATE: inserts that reference the branch (its members) do not wait on it. Scoped to
+        the graph, so another graph's draft is unknown here. The wait is bounded
+        (:meth:`_bounded_lock`)."""
+        branch = (await GraphVersioningService._bounded_lock(
+            s,
+            select(BranchORM).where(BranchORM.id == branch_id, BranchORM.graph_id == graph_id)
+            .with_for_update(key_share=True).execution_options(populate_existing=True),
+            f"draft {branch_id}",
+        )).scalar_one_or_none()
+        if branch is None:
+            raise ValueError("unknown branch")
+        return branch
 
     async def apply_ops(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
@@ -5765,6 +6813,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -5779,7 +6828,7 @@ class GraphVersioningService:
 
         Concurrent writers to the same branch race for the next ``commit_seq``; on the
         unique-constraint collision this retries (bounded backoff) before giving up with
-        :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
+        :class:`ContentionExhausted`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
 
         ``on_commit(session)``, when given, is awaited at the end of the batch's transaction, in
@@ -5787,11 +6836,16 @@ class GraphVersioningService:
         so what the caller records with it lands or rolls back WITH the batch: an import window's
         row resolutions and its job checkpoint. A retry re-runs it with the batch; anything it
         raises rolls the batch back and propagates.
+
+        A ``branch_id`` that names main (its id or ``'main'``) raises :class:`MainWriteForbidden`
+        unless ``allow_main``: a caller that writes drafts must never be handed main. A draft that
+        is not open raises :class:`BranchNotOpen`, and someone else's private draft
+        :class:`NotDraftOwner`.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-            on_commit=on_commit)
+            on_commit=on_commit, allow_main=allow_main)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -5800,14 +6854,22 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> ApplyResult:
-        """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
+        """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
+
+        With ``idempotency_key``, a batch whose commit on the branch already carries the key is
+        not applied again: the answer is that commit, with the addressed entities' current values.
+        A replay runs no ``on_commit``, so the two never go together."""
+        assert not (idempotency_key and on_commit), "a replay would skip on_commit"
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules, on_commit=on_commit),
+                ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
+                idempotency_key=idempotency_key),
         )
 
     async def _apply_ops_once(
@@ -5816,24 +6878,63 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        allow_main: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
-            bid = branch_id or await self._main_branch_id(s, graph_id)
-            branch = await s.get(BranchORM, bid)
+            main_id = await self._main_branch_id(s, graph_id)
+            bid = main_id if branch_id in (None, "main") else branch_id
 
             # Serialize main-advancing writes on this graph BEFORE reading the head, so a
             # write-through composes against — and advances — the current main atomically
             # (head read → commit → head advance): the same lock publish/merge/revert take,
             # without which a write-through racing a merge reads a stale head and spuriously
-            # trips NotUpToDate / flaps the projection target. Drafts stay lock-free — their
-            # append races are resolved by the unique commit_seq constraint + _retry_seq head
-            # CAS. Xact-scoped, so _retry_seq re-takes it on each fresh-session attempt.
-            if branch.kind == "main":
+            # trips NotUpToDate / flaps the projection target. The graph row was loaded before
+            # the lock, and the holder may have moved main since: re-read it, or every read of
+            # main below (values, skeletons, cascades) is at the old head. A draft write takes
+            # the draft's row lock instead, then checks the draft is still open: its writers
+            # serialize, and none lands on a merged or abandoned draft. Both are xact-scoped, so
+            # _retry_seq re-takes them on each fresh-session attempt. The graph's row is checked in
+            # between (after the graph lock, before the draft's); a refusal waits for the replay.
+            if bid == main_id:
+                if branch_id is not None and not allow_main:
+                    raise MainWriteForbidden()
                 await self._lock_graph(s, graph_id)
+                await s.refresh(graph)
+            else:
+                await self._lock_lifecycle(s, graph_id, shared=True)
+            refusal = None
+            try:
+                await self._assert_writable(s, graph_id)
+            except GraphNotWritable as exc:
+                refusal = exc
+            branch = (await s.get(BranchORM, bid) if bid == main_id
+                      else await self._lock_branch(s, graph_id, bid))
+
+            # A retry of a save that already landed answers with its commit. After the lock, so a
+            # retry racing its first attempt waits for it and then finds it (uq_commits_idem, which
+            # _retry_seq retries on, is the backstop); before the open check, so a save that
+            # landed on a draft closed since still reports what it did.
+            if idempotency_key:
+                prior = await s.scalar(select(CommitORM.id).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
+                    CommitORM.idempotency_key == idempotency_key))
+                if prior is not None:
+                    kinds = {o["entity_id"]: o.get("entity_kind", "node") for o in ops}
+                    cur = await self._current_values(s, graph_id, bid, list(kinds))
+                    return ApplyResult(
+                        prior, {eid: (k, cur.get(eid)) for eid, k in kinds.items()},
+                        {eid: (v.get("urn") or eid) for eid, v in cur.items()
+                         if v is not None and not _is_edge_payload(v)})
+            if refusal is not None:
+                raise refusal
+            if bid != main_id:
+                self._require_open(branch)
+                await self._require_edit(s, branch, actor, ())
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
@@ -5990,6 +7091,7 @@ class GraphVersioningService:
                 # Attribute to the draft's view (NULL on main write-throughs) so the
                 # per-view history filter sees interactive canvas saves too.
                 originating_view_id=branch.originating_view_id,
+                idempotency_key=idempotency_key,
             )
             s.add(commit)
             await s.flush()
@@ -6171,7 +7273,8 @@ class GraphVersioningService:
             await s.execute(_UPSERT_HEADS, {**arrays, **scalars})
             return
         advanced = set((await s.execute(
-            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads]})).scalars())
+            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads],
+                             "absent": _HASH_NONE, "empty": _HASH_EMPTY})).scalars())
         fresh = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
         if fresh:
             rest = {k: [v[i] for i in fresh] for k, v in arrays.items()}
@@ -6729,6 +7832,14 @@ class GraphVersioningService:
                 return eid
         return None
 
+    async def entity_recorded(self, *, graph_id: str, entity_id: str) -> bool:
+        """Whether main holds any version of the entity, live OR deleted — how the write-through
+        tells a node versioning never saw from one main deleted. This graph's rows only (not
+        fork-aware)."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            return entity_id in await self._current_skeletons(s, graph_id, main_id, [entity_id])
+
     async def entity_value(
         self, *, graph_id: str, entity_id: str, branch_id: Optional[str] = None,
     ) -> Optional[dict]:
@@ -6957,6 +8068,16 @@ def _is_edge_payload(payload: Mapping) -> bool:
     has_src = "sourceEntityId" in payload or "source_entity_id" in payload
     has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
     return has_src and has_tgt
+
+
+def _curation_at_risk(human) -> CurationAtRisk:
+    """The refusal for :meth:`GraphVersioningService._human_commit_in_sync_base`'s row."""
+    commit_id, seq, kind, actor, created_at = human
+    return CurationAtRisk(
+        f"main has human changes from before the last sync (latest: {kind} commit {commit_id} "
+        f"by {actor}); a sync would treat them as source data and could silently revert or "
+        "delete them. A workspace admin can re-run with force to proceed.",
+        {"id": commit_id, "seq": seq, "kind": kind, "actor": actor, "createdAt": created_at})
 
 
 def _collapse_empty_payloads(state: Dict[str, Optional[dict]]) -> Dict[str, Optional[dict]]:

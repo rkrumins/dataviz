@@ -8,7 +8,8 @@
  * The countdown is the honest part. A data source is restorable for a fixed window and then it is
  * genuinely gone, so each row says how long is left and turns amber when it runs low. And once
  * the purge has actually started, `restorable` goes false and Restore is not offered at all —
- * showing a button that would 409 is worse than showing none.
+ * showing a button that would 409 is worse than showing none. A purge that cannot finish says
+ * why instead: the live forks that block it, or the reason it failed.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { RotateCcw, Trash2, History, Loader2 } from 'lucide-react'
@@ -90,6 +91,17 @@ export function DeletedDataSources({
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     Being deleted
                                 </span>
+                            ) : r.purgeState === 'blocked' || r.purgeState === 'failed' ? (
+                                // It will not finish on its own. Say what is in the way.
+                                <span
+                                    className="shrink-0 max-w-[16rem] truncate text-xs font-medium rounded-full
+                                               px-2.5 py-1 text-amber-700 dark:text-amber-300 bg-amber-500/10"
+                                    title={r.purgeReason ?? undefined}
+                                >
+                                    {r.purgeState === 'blocked'
+                                        ? `Blocked: ${r.liveForks} live ${r.liveForks === 1 ? 'fork' : 'forks'}`
+                                        : `Failed: ${r.purgeReason ?? 'unknown error'}`}
+                                </span>
                             ) : (
                                 <span
                                     className={cn(
@@ -123,7 +135,7 @@ export function DeletedDataSources({
                                             Restore
                                         </button>
                                     )}
-                                    {!r.purging && (
+                                    {r.restorable && r.purgeState !== 'blocked' && (
                                         <button
                                             onClick={() => onDeletePermanently(r.id, r.label)}
                                             title="Delete permanently"

@@ -31,6 +31,11 @@ _VIEW_PUBLISH_MIGRATION_PATH = _VERSIONS_DIR / "20260731_1300_view_publish.py"
 # Analytics added system:analytics:read — the dedicated platform privilege for
 # the Analytics section. Same pattern again.
 _ANALYTICS_PERM_MIGRATION_PATH = _VERSIONS_DIR / "20260823_1200_analytics_perm.py"
+# ACCESS R0 added workspace:datasource:publish (advances a versioned data
+# source's Published version) and the workspace_publisher role.
+_DATASOURCE_PUBLISH_MIGRATION_PATH = (
+    _VERSIONS_DIR / "20261017_1000_datasource_publish.py"
+)
 # Layout templates added system:templates:manage — curating organization
 # templates and hiding built-ins. Seeded by the layout-templates revision.
 _TEMPLATES_MIGRATION_PATH = _VERSIONS_DIR / "20261018_1200_layout_templates.py"
@@ -119,7 +124,9 @@ def test_seed_leaves_match_catalogue(migration_module, ws_reads_migration_module
     The catalogue is seeded across more than one migration: the Phase-1
     schema migration plus the Phase-18 workspace-reads migration (which
     owns the ontology / catalog / provider leaves) plus the view-publish
-    migration (which owns ``workspace:view:publish``)."""
+    migration (which owns ``workspace:view:publish``) plus the
+    datasource-publish migration (which owns
+    ``workspace:datasource:publish``)."""
     from backend.app.services.permission_service import _SEED_LEAVES
 
     assert _VIEW_PUBLISH_MIGRATION_PATH.exists(), (
@@ -132,6 +139,11 @@ def test_seed_leaves_match_catalogue(migration_module, ws_reads_migration_module
     perm_ids = {p[0] for p in migration_module._PERMISSIONS}
     perm_ids |= {p[0] for p in ws_reads_migration_module._NEW_PERMISSIONS}
     perm_ids |= {p[0] for p in view_publish_module._NEW_PERMISSIONS}
+    perm_ids |= {
+        p[0] for p in _load_migration(
+            _DATASOURCE_PUBLISH_MIGRATION_PATH, "_rbac_ds_publish_migration"
+        )._NEW_PERMISSIONS
+    }
     for prefix, leaves in _SEED_LEAVES.items():
         expected = {p for p in perm_ids if p.startswith(prefix + ":")}
         assert leaves == expected, (
@@ -187,6 +199,157 @@ def test_view_publish_seed_convergence():
     # publish for plain members), and workspace:admin must auto-imply it.
     assert perm in _SEED_LEAVES["workspace:view"]
     assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_datasource_publish_seed_convergence():
+    """``workspace:datasource:publish`` and ``workspace_publisher`` must
+    land the same in both seed paths — the migration chain and the
+    fresh-install seed — and in ``SYSTEM_ROLE_DEFAULTS``, which "Reset to
+    default" re-applies. The resolver must know the new leaf, or every
+    member's read+manage pair collapses to ``workspace:datasource:*`` and
+    satisfies publish."""
+    import json
+
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import (
+        _SEED_LEAVES,
+        _WORKSPACE_CATEGORY_LEAVES,
+    )
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm, role = "workspace:datasource:publish", "workspace_publisher"
+    assert _DATASOURCE_PUBLISH_MIGRATION_PATH.exists(), (
+        f"missing migration: {_DATASOURCE_PUBLISH_MIGRATION_PATH}"
+    )
+    mod = _load_migration(
+        _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
+    )
+    assert (mod.revision, mod.down_revision) == (
+        "20261017_1000_datasource_publish", "20261020_1000_ds_transfers",
+    )
+
+    # Permission row: the same text in both paths.
+    assert [p[0] for p in mod._NEW_PERMISSIONS] == [perm]
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert (seed_perm["category"], seed_perm["description"]) == (
+        mod._NEW_PERMISSIONS[0][1], mod._NEW_PERMISSIONS[0][2],
+    )
+    assert seed_perm["long_description"] == mod._NEW_LONG_DESCRIPTIONS[perm]
+    assert json.loads(seed_perm["examples"]) == mod._NEW_EXAMPLES[perm]
+
+    # Role row: one description in the migration, the seed and the defaults.
+    [(name, description, scope_type)] = mod._NEW_ROLES
+    seed_role = next(r for r in rbac_seed.SYSTEM_ROLES if r["name"] == role)
+    assert name == role
+    assert (seed_role["description"], seed_role["scope_type"]) == (
+        description, scope_type,
+    )
+    assert SYSTEM_ROLE_DEFAULTS[role].description == description
+
+    # Grants: the migration adds exactly what the seed holds for them.
+    seed_grants = set(rbac_seed.ROLE_GRANTS)
+    assert set(mod._NEW_ROLE_PERMISSIONS) == {
+        (r, p) for r, p in seed_grants if p == perm or r == role
+    }
+    holders = {r for r, p in seed_grants if p == perm}
+    assert holders == {
+        "org_admin", "super_admin", "workspace_data_engineer", role,
+    }
+    member = {p for r, p in seed_grants if r == "workspace_member"}
+    assert {p for r, p in seed_grants if r == role} == member | {perm}
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == member | {perm}
+    assert {
+        n for n, d in SYSTEM_ROLE_DEFAULTS.items() if perm in d.permissions
+    } == holders
+
+    assert perm in _SEED_LEAVES["workspace:datasource"]
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_every_workspace_template_role_reads_as_a_word():
+    """Inbox messages name a workspace role through ``role_label``
+    ("Your Publisher access ends…"), never its raw name."""
+    from backend.common.roles import WORKSPACE_TEMPLATE_ROLES, role_label
+
+    assert {r for r in WORKSPACE_TEMPLATE_ROLES if role_label(r) == r} == set()
+    assert role_label("workspace_publisher") == "Publisher"
+
+
+def test_datasource_publish_migration_runs_and_reverts():
+    """Upgrade twice (chain-replay over a seeded database is a no-op),
+    then downgrade: the permission and its grants go, and the role goes
+    only once nothing binds it — a bound publisher keeps member access."""
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    from backend.app.db.models import (
+        Base,
+        PermissionORM,
+        RoleBindingORM,
+        RoleORM,
+        RolePermissionORM,
+    )
+
+    perm, role = "workspace:datasource:publish", "workspace_publisher"
+    mod = _load_migration(
+        _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration_run"
+    )
+
+    def run(conn, step):
+        with Operations.context(MigrationContext.configure(conn)):
+            getattr(mod, step)()
+
+    def grants(conn):
+        return set(conn.execute(sa.text(
+            "SELECT role_name, permission_id FROM role_permissions"
+        )).all())
+
+    def roles(conn):
+        return set(conn.execute(sa.text("SELECT name FROM roles")).scalars())
+
+    with sa.create_engine("sqlite://").connect() as conn:
+        Base.metadata.create_all(conn, tables=[
+            PermissionORM.__table__, RoleORM.__table__,
+            RolePermissionORM.__table__, RoleBindingORM.__table__,
+        ])
+        before = {"org_admin", "super_admin", "workspace_data_engineer",
+                  "workspace_member"}
+        for name in sorted(before):
+            conn.execute(sa.text(
+                "INSERT INTO roles (name, scope_type, is_system, created_at,"
+                " updated_at) VALUES (:n, 'global', TRUE, 'now', 'now')"
+            ), {"n": name})
+
+        run(conn, "upgrade")
+        run(conn, "upgrade")
+        assert conn.execute(sa.text(
+            "SELECT id FROM permissions"
+        )).scalars().all() == [perm]
+        assert conn.execute(sa.text(
+            "SELECT is_system FROM roles WHERE name = :n"
+        ), {"n": role}).scalar() in (True, 1)
+        assert grants(conn) == set(mod._NEW_ROLE_PERMISSIONS)
+
+        conn.execute(sa.text(
+            "INSERT INTO role_bindings (id, subject_type, subject_id,"
+            " role_name, scope_type, scope_id, granted_at, source)"
+            " VALUES ('bnd_1', 'user', 'usr_1', :n, 'workspace', 'ws_1',"
+            " 'now', 'local')"
+        ), {"n": role})
+        run(conn, "downgrade")
+        assert conn.execute(sa.text("SELECT id FROM permissions")).all() == []
+        assert roles(conn) == before | {role}
+        assert grants(conn) == {
+            (r, p) for r, p in mod._NEW_ROLE_PERMISSIONS
+            if r == role and p != perm
+        }
+
+        conn.execute(sa.text("DELETE FROM role_bindings"))
+        run(conn, "upgrade")
+        run(conn, "downgrade")
+        assert roles(conn) == before
+        assert grants(conn) == set()
 
 
 def test_phase_1_role_enum_matches_repo_validation():

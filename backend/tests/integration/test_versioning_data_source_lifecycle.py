@@ -6,18 +6,20 @@ each with the head of ``main``. A source that is absent is not versioned there.
 
 A graph in the trash answers none of its routes, and answers them again once restored.
 
-Moving a data source files its graph — and the graph's jobs — under the new workspace, open
-drafts and reviews included, unless version control is busy with it; and the reaper files a graph
-left behind by an earlier move under its source's workspace, trashing it if the source is in the
-trash, without ever removing a source row whose graph still stands.
+Moving a data source files its graph — and the graph's forks and jobs — under the new workspace,
+open drafts and reviews included, unless version control is busy with it; and the reaper files a
+graph left behind by an earlier move, with its forks, under its source's workspace, trashing it if
+the source is in the trash, without ever removing a source row whose graph still stands. A graph a
+job still runs on is re-filed once the job ends.
 """
 import asyncio
 import os
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
-from backend.app.services.versioning import db, models, purge_worker
+from backend.app.services.versioning import db, lifecycle, models, purge_worker
+from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.service import GraphVersioningService
 
 
@@ -115,7 +117,8 @@ async def _trashed_graph_answers_nothing() -> None:
         assert (await c.get(graph)).status_code == 404
         assert (await c.get(f"{graph}/watermark")).status_code == 404
 
-        assert await purge_worker.restore_graphs_for_data_source(data_source_id=ds, workspace_id="ws_a")
+        assert not (await purge_worker.restore_graphs_for_data_source(
+            data_source_id=ds, workspace_id="ws_a")).final
         assert (await c.get(graph)).status_code == 200
 
 
@@ -143,10 +146,13 @@ async def _a_move_carries_the_graph() -> None:
         busy = models.JobORM(job_type="export", graph_id=gid, workspace_id="ws_a",
                              data_source_id=ds, status="running")
         s.add(busy)
+    with pytest.raises(JobActive, match="busy"):
+        await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a")
     with pytest.raises(purge_worker.MoveBlocked, match="busy"):
         await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
     assert (await _graph(gid))[0] == "ws_a"
-    # ...but not putting back what a failed move changed, nor the reaper: the source is where it is
+    # ...but not putting back what a failed move changed: the source is where it is. (The
+    # reaper, which moves through move_graph_workspace as above, waits for the job.)
     assert await purge_worker.rehome_graph_for_data_source(
         data_source_id=ds, to_workspace_id="ws_b", refuse_busy=False) == gid
     assert await purge_worker.rehome_graph_for_data_source(
@@ -163,6 +169,7 @@ async def _a_move_carries_the_graph() -> None:
     async with db.graphver_session() as s:
         assert (await s.get(models.BranchORM, draft)).status == "open"
     assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == gid
+    assert await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a") == [gid]
 
     # its history answers where it went, and only there
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as c:
@@ -172,7 +179,33 @@ async def _a_move_carries_the_graph() -> None:
     assert await svc.main_heads(workspace_id="ws_a", data_source_ids=[ds]) == {}
 
     # an external source has nothing to move
-    assert await purge_worker.rehome_graph_for_data_source(data_source_id=_ds(), to_workspace_id="ws_b") is None
+    assert await svc.move_graph_workspace(_ds(), "ws_b", from_workspace_id="ws_a") == []
+    assert await purge_worker.rehome_graph_for_data_source(
+        data_source_id=_ds(), to_workspace_id="ws_b") is None
+
+    # what a move takes, and what holds it back, is every fork too, at any depth: the preview
+    # sees what the move refuses
+    ds = _ds()
+    root = (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+    fork = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws_a", actor="alice"))["graph_id"]
+    deeper = (await svc.fork_graph(parent_graph_id=fork, workspace_id="ws_a",
+                                   actor="alice"))["graph_id"]
+    await svc.open_draft(graph_id=deeper, owner="carol")
+    async with db.graphver_session() as s:
+        busy = models.JobORM(job_type="export", graph_id=deeper, workspace_id="ws_a",
+                             data_source_id=ds, status="running")
+        s.add(busy)
+    facts = await lifecycle.relocation_facts(ds)
+    assert (facts["forks"], facts["activeJobs"]) == (2, ["export"])
+    assert [d["owner"] for d in facts["openDrafts"]] == ["carol"]
+    with pytest.raises(purge_worker.MoveBlocked, match="busy"):
+        await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
+    assert {(await _graph(g))[0] for g in (root, fork, deeper)} == {"ws_a"}
+    async with db.graphver_session() as s:
+        (await s.get(models.JobORM, busy.id)).status = "completed"
+    assert (await lifecycle.relocation_facts(ds))["activeJobs"] == []
+    assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == root
+    assert {(await _graph(g))[0] for g in (root, fork, deeper)} == {"ws_b"}
 
 
 async def _the_reaper_refiles_graphs_left_behind() -> None:
@@ -188,29 +221,37 @@ async def _the_reaper_refiles_graphs_left_behind() -> None:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
     svc = GraphVersioningService()
-    moved, trashed, home, expired = _ds(), _ds(), _ds(), _ds()
+    moved, trashed, home, expired, busy = _ds(), _ds(), _ds(), _ds(), _ds()
     gids = {ds: (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
-            for ds in (moved, trashed, home, expired)}
+            for ds in (moved, trashed, home, expired, busy)}
+    fork = (await svc.fork_graph(parent_graph_id=gids[moved], workspace_id="ws_a",
+                                 actor="alice"))["graph_id"]
+    async with db.graphver_session() as s:
+        job = models.JobORM(job_type="export", graph_id=gids[busy], workspace_id="ws_a",
+                            data_source_id=busy, status="running")
+        held = models.JobORM(job_type="export", graph_id=gids[expired], workspace_id="ws_a",
+                             data_source_id=expired, status="running")
+        s.add_all([job, held])
+    # work open on a graph and its fork moves with them: the source already lives elsewhere
+    await svc.open_draft(graph_id=gids[moved], owner="bob")
+    await svc.open_pr(source_graph_id=fork, actor="bob")
     async with sessions() as s:
         s.add_all([
             DS(id=moved, workspace_id="ws_b", provider_id="prov_a", graph_name=moved),
+            DS(id=busy, workspace_id="ws_b", provider_id="prov_a", graph_name=busy),
             DS(id=trashed, workspace_id="ws_b", provider_id="prov_a", graph_name=trashed,
                deleted_at="2026-10-19T00:00:00+00:00"),
             DS(id=home, workspace_id="ws_a", provider_id="prov_a", graph_name=home),
-            # past its grace period, its graph touched just now — so not yet re-filed
+            # past its grace period, its graph busy with a job — so not yet re-filed
             DS(id=expired, workspace_id="ws_b", provider_id="prov_a", graph_name=expired,
                deleted_at="2026-01-01T00:00:00+00:00"),
         ])
         await s.commit()
-    async with db.graphver_session() as s:     # settled: untouched for longer than the window
-        await s.execute(update(models.GraphORM).where(
-            models.GraphORM.id.in_([gids[moved], gids[trashed], gids[home]]))
-            .values(updated_at="2026-01-01T00:00:00+00:00"))
-
     result = await purge_worker.Reaper(app_session_factory=sessions).run_once()
     assert result["rehomed"] >= 2
 
     assert (await _graph(gids[moved]))[:3] == ("ws_b", None, None)
+    assert (await _graph(fork))[:3] == ("ws_b", None, None)     # a fork goes with its graph
     workspace, deleted_at, deleted_by, _jobs = await _graph(gids[trashed])
     assert (workspace, deleted_by) == ("ws_b", "reaper") and deleted_at is not None
     assert (await _graph(gids[home]))[:2] == ("ws_a", None)
@@ -219,6 +260,15 @@ async def _the_reaper_refiles_graphs_left_behind() -> None:
     assert (await _graph(gids[expired]))[0] == "ws_a"
     async with sessions() as s:
         assert await s.get(DS, expired) is not None
+
+    # a graph a job runs on stays, job and all, until the job ends; then it is re-filed
+    assert await _graph(gids[busy]) == ("ws_a", None, None, {"ws_a"})
+    async with db.graphver_session() as s:
+        (await s.get(models.JobORM, job.id)).status = "completed"
+    await purge_worker.Reaper(app_session_factory=sessions).run_once()
+    assert await _graph(gids[busy]) == ("ws_b", None, None, {"ws_b"})
+    async with db.graphver_session() as s:
+        (await s.get(models.JobORM, held.id)).status = "cancelled"
     await engine.dispose()
 
 

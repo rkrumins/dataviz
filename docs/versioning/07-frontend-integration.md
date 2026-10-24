@@ -231,7 +231,7 @@ for every canvas (mounted once in `CanvasRouter`). It renders **nothing** for a 
 source, and an **"Enable version control"** empty state when `needsSeed` (no graph, or a genesis-only
 non-blank graph — managers only; a `kind === 'blank'` model is excluded because it's genesis-only by
 design) (`CanvasVersioningBar.tsx:98-132`). On a draft it shows an amber strip: `BranchSwitcher`,
-`RefreshingBadge`, `AggregationSyncChip`, the committed `ChangeCountChips` + an *"N unsaved"* staged
+`RefreshingBadge`, `ReadRouteChip` (the watermark's `readRoute`: "Serving from FalkorDB · provider" or "Serving from Postgres (catching up)", plus "· draft overlay"; on main it shows only while Postgres serves), `AggregationSyncChip`, the committed `ChangeCountChips` + an *"N unsaved"* staged
 hint (`:162-185`), `ViewPrIndicator`, a **Reviews** button, the committed-diff `ChangeHighlightControl`
 (toggles `committedDiffHidden`), **Publish** (`CommitDialog`), and **Discard** (`useAbandonDraft`). A
 `PullBeforeMergeBanner` appears when the draft is `behindMain` (`:84-87, 228-236`).
@@ -245,7 +245,9 @@ not durable state.
 ### `ViewVersioningPanel` — the review hub
 `frontend/src/features/versioning/components/ViewVersioningPanel.tsx` is a slide-over with tabs
 (`ViewVersioningPanel.tsx:24-31`): **Changes**, **Commits**, **Pull Requests**, and **Data health**
-(manager-only — filtered out for everyone else, `:88`). The Changes tab shows `PendingChanges`
+(everyone sees its status and `ProjectionHealthCard` — provider, key, platform copy or customer
+graph, node/shard/slot, epoch, backoff, liveness; only managers get Check sync and Rebuild). The same
+card, with those two actions for managers, sits on the data source's `DataSourceVersioningTab`. The Changes tab shows `PendingChanges`
 (unsaved staged edits with a "Review & Save" action, `:35-62`) above the cumulative committed tree, so
 after you save, work moves from *Pending* to *Committed* in the same view rather than vanishing. It
 requests up to **1000** top-level diff groups so "all branch changes" is genuinely complete (`:92`).

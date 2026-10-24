@@ -15,7 +15,7 @@ import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { CommitDialog, type CommitDialogProps } from './CommitDialog'
 
 export function PublishDraftDialog({
-  wsId, graphId, branchId, onClose, onLeave, onPublished,
+  wsId, graphId, branchId, onClose, onLeave, onPublished, canPublishDraft,
 }: {
   wsId: string
   graphId: string
@@ -23,6 +23,7 @@ export function PublishDraftDialog({
   onClose: () => void
   onLeave?: CommitDialogProps['onLeave']
   onPublished?: CommitDialogProps['onPublished']
+  canPublishDraft?: CommitDialogProps['canPublishDraft']
 }) {
   const diffQ = useDiffVsMain(wsId, graphId, branchId, { slim: true })
   const changeSet = useMemo(
@@ -51,6 +52,7 @@ export function PublishDraftDialog({
       onClose={onClose}
       onLeave={onLeave}
       onPublished={onPublished}
+      canPublishDraft={canPublishDraft}
     />,
     document.body,
   )

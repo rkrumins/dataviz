@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -7,7 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Body, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
@@ -42,7 +43,8 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import require_versioning_enabled
+from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
+                                                require_versioning_enabled, sync_override_gate)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -85,9 +87,11 @@ from backend.app.auth.dependencies import (
     get_optional_user,
     get_permission_claims,
 )
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.auth_service.interface import User
 from backend.app.services.top_level_cache import try_serve_top_level
+from backend.app.services.versioning.errors import GraphNotWritable, LockBusy
+from backend.app.services.versioning.service import Viewer
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
@@ -106,6 +110,7 @@ router = APIRouter(route_class=RawPathSegmentRoute)
 # write routes additionally require ``workspace:datasource:manage`` so a
 # read-only workspace member cannot mutate the graph.
 require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
+require_ws_publish = requires("workspace:datasource:publish", workspace="ws_id")
 
 # The server half of two admin toggles that, until now, toggled nothing. A flag that only hides
 # a button is a lie — the endpoint is still there and anyone who knows the URL still has the
@@ -160,6 +165,7 @@ async def get_context_engine(
     # engine._db_session for writes), so NOT the READONLY pool.
     session: AsyncSession = Depends(get_graph_read_db_session),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> ContextEngine:
     """
     FastAPI dependency that resolves the appropriate ContextEngine.
@@ -174,12 +180,17 @@ async def get_context_engine(
     all provider connectivity errors to ProviderUnavailable, which the
     global exception handler at main.py converts to HTTP 503 with
     Retry-After. KeyError (data source not found) becomes HTTP 404.
+    A draft the caller can't read is a 404 too, like an unknown branch: the
+    viewer is built as ``versioning.viewer_ctx`` builds it (under an API key,
+    the key's owner with the key's narrowed claims).
     """
     try:
         if ws_id:
+            viewer = Viewer(actor=user.id if user else "",
+                            can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id))
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
-                actor=(user.id if user else None), branch_id=branchId,
+                actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)
@@ -190,6 +201,18 @@ async def get_context_engine(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
     )
+
+
+async def require_main_writer(
+    ws_id: Optional[str] = None,
+    engine: ContextEngine = Depends(get_context_engine),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> None:
+    """A write with no draft on a versioned data source commits to its main, and a person needs
+    publish for that (``require_publish_for_main``). A draft write, and any write to a data source
+    without version control, is left to the route's other gates."""
+    if engine._writes_main:
+        require_publish_for_main(claims, ws_id)
 
 
 async def get_engine_session(
@@ -461,9 +484,13 @@ async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, 
     ABANDON — i.e. delete — B's versioned graph. The versioning router gets the same
     guarantee from its ``graph_in_workspace`` dependency; these routes live on the graph
     router and must do it themselves. 404, not 403: existence isn't leaked across tenants.
+
+    The row is read FOR SHARE and held to the end of the request, so enabling version control
+    and a move of the data source wait for each other: the graph and job an enable creates are
+    committed before the move looks for them, or the enable finds the source moved away.
     """
     from backend.app.db.repositories import data_source_repo
-    ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    ds = await data_source_repo.get_data_source_orm(session, data_source_id, lock="share")
     if ds is None or getattr(ds, "workspace_id", None) != ws_id:
         raise HTTPException(status_code=404, detail="unknown data source")
     return ds
@@ -525,14 +552,19 @@ async def resync_versioned_graph_endpoint(
     # Tightening is deliberate and is a breaking change for any caller relying on read-only
     # access — which is precisely the access that should never have worked.
     _perm=Depends(require_ws_manage),
+    _publish=Depends(require_ws_publish),          # a sync advances main
     user=Depends(get_optional_user),
+    # Before `engine`: dependencies resolve in order, so a refused override never builds a provider.
+    overrides: SyncOverrides = Depends(sync_override_gate),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
 ):
     """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
     any time for any versioned graph. 3-way merge preserves user edits (a field both the
     source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
-    source). 404 if the data source isn't versioned yet (enable it first)."""
+    source). 404 if the data source isn't versioned yet (enable it first). 409
+    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
+    ``allowMassDelete``."""
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
@@ -540,12 +572,19 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
-    result = await svc.resync_from_provider(
-        graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
-    await _record_versioning(
-        session, "workspace.versioning.resynced", dataSourceId,
-        {"strategy": strategy, "commitId": (result or {}).get("commit_id")},
-    )
+    from backend.app.services.versioning.service import ConcurrencyError, MergeConflict
+    try:
+        result = await svc.resync_from_provider(
+            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy,
+            allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete)
+    except MergeConflict as exc:
+        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+    except ConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    details = {"strategy": strategy, "commitId": (result or {}).get("commit_id")}
+    if (result or {}).get("overrides"):
+        details["overrides"] = result["overrides"]       # an admin overrode a sync safety check
+    await _record_versioning(session, "workspace.versioning.resynced", dataSourceId, details)
     return result
 
 
@@ -2373,6 +2412,7 @@ async def search_export_download(
     # The session the route's gate read the data source with (the same one, per request).
     gate: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
     """A complete export, streamed as the file it is — for the person it
     was exported for, for an hour after (``downloadToken``)."""
@@ -2389,7 +2429,7 @@ async def search_export_download(
         raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
     engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
                                       branchId=branchId, _admission=None, session=session,
-                                      user=user)
+                                      user=user, claims=claims)
     svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
                                 data_source_id=dataSourceId, branch_id=branchId)
     try:
@@ -3239,6 +3279,7 @@ async def save_graph(
     request: SaveGraphRequest,
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Save custom graph nodes and edges."""
     success = await engine.save_custom_graph(request.nodes, request.edges)
@@ -3673,6 +3714,7 @@ async def create_node(
     request: CreateNodeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Create a new node with optional containment edge.
@@ -3691,6 +3733,7 @@ async def create_edge(
     request: CreateEdgeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Create a directed edge between two existing nodes.
@@ -3709,6 +3752,7 @@ async def update_edge(
     request: UpdateEdgeRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Update mutable properties of an existing edge — a PATCH: ``properties`` sets the
     named keys, ``unsetProperties`` removes keys, the rest are kept. Edge type is immutable."""
@@ -3725,6 +3769,7 @@ async def delete_edge(
     edge_id: str,
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """Delete an edge by ID."""
     success = await engine.delete_edge(edge_id)
@@ -3828,7 +3873,25 @@ class GraphChangesResponse(BaseModel):
         populate_by_name = True
 
 
-def _resolve_change_ops(request_ops, mint_id, mint_urn):
+def _replay_minters(scope: str, key: str, mint_urn):
+    """Id minters for a save sent with an Idempotency-Key, so a retry of it names the entities its
+    first attempt created. An op whose client ref is at least 16 characters (every canvas temp ref
+    is) is named by that ref, so a later batch that still carries the same staged create names the
+    same entity rather than a copy; any other op by the key and its turn in the batch, so a script
+    reusing a short ref like ``n1`` under a new key never overwrites what an earlier save created.
+    ``scope`` is graph/branch/actor: two principals never mint each other's ids. The 32-hex tail
+    is 128 bits, make_urn's collision bound. Called with the op's ref (``by_ref``)."""
+    n = itertools.count()
+
+    def slug(ref):
+        seed = f"ref:{ref}" if ref and len(ref) >= 16 else f"key:{key}/{next(n)}"
+        return hashlib.sha256(f"{scope}/{seed}".encode()).hexdigest()[:32]
+
+    return (lambda prefix, ref: f"{prefix}_{slug(ref)}"), (
+        lambda entity_type, ref: mint_urn(entity_type, slug=slug(ref)))
+
+
+def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False):
     """Translate a batch of canvas edit ops into ONE ``apply_ops`` op list. Two passes so creates AND
     the edges/updates/layer-moves that reference those fresh nodes (by a temp ``ref``) commit together
     as a SINGLE atomic commit — instead of one commit per create. Pass 1 assigns a real id to every
@@ -3837,17 +3900,22 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     emits the ops, resolving temp refs in edge endpoints + update/delete target ids and stamping the
     node urn into its payload. Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
     to the client to reconcile its optimistic ids. apply_ops validates same-batch edges against these
-    creates (proved in ``test_versioning_batch_create_edge``)."""
+    creates (proved in ``test_versioning_batch_create_edge``). With ``by_ref`` each minter is also
+    given the op's client ref (``_replay_minters``)."""
+    def _mint(mint, arg, ref):
+        return mint(arg, ref) if by_ref else mint(arg)
+
     endpoint_fields = ("sourceEntityId", "source_entity_id", "targetEntityId", "target_entity_id")
     assigned: dict = {}
     create_eid: dict = {}                      # op index → its assigned real id (reused in pass 2)
     for i, o in enumerate(request_ops):
         if o.op == "create":
             if o.kind == "edge":
-                eid = o.id or mint_id("ent")
+                eid = o.id or _mint(mint_id, "ent", o.ref)
             else:                              # a NODE's entity_id IS its urn (versioned-graph model);
                 pl = o.payload or {}           # mint one when the collapsed save omits it.
-                eid = pl.get("urn") or o.id or mint_urn(str(pl.get("entityType") or "entity"))
+                eid = pl.get("urn") or o.id or _mint(
+                    mint_urn, str(pl.get("entityType") or "entity"), o.ref)
             create_eid[i] = eid
             if o.ref:
                 assigned[o.ref] = eid
@@ -3876,7 +3944,7 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             if not o.id:
                 continue
             p = o.payload or {}
-            edge_id = mint_id("ent")
+            edge_id = _mint(mint_id, "ent", o.ref)
             if o.ref:                          # the client's optimistic link → the real one
                 assigned[o.ref] = edge_id
             ops.append({"op": "move", "entity_kind": "node", "entity_id": _ref(o.id), "payload": {
@@ -3914,7 +3982,8 @@ async def apply_graph_changes(
     request: GraphChangesRequest = Body(...),
     dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
     branchId: str = Query(..., description="Draft branch the changes are committed to."),
-    user=Depends(get_optional_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key", max_length=128),
+    user=Depends(get_current_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
@@ -3924,11 +3993,16 @@ async def apply_graph_changes(
     draft state, so the client sends only what changed. Deleting a node cascades to its
     containment subtree + all incident edges (ontology-driven, resolved live). Returns the
     new commit id and a temp-ref→entity-id map for creates so the client can reconcile
-    optimistic ids."""
+    optimistic ids.
+
+    An ``Idempotency-Key`` makes a retry safe: a save on this draft by the same caller with a
+    key that already committed is not applied again, and the answer is the first save's commit
+    with the entities' current values. A reused key returns the first result whatever the body,
+    so send a new key for a new batch."""
     from backend.app.services.versioning.service import (
         GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
     from backend.app.services.versioning.ids import prefixed_id
-    actor = user.id if user else "system"
+    actor = user.id
     svc = GraphVersioningService()
     g = await svc.get_graph_by_data_source(dataSourceId)
     if g is None or g.get("workspace_id") != ws_id:
@@ -3937,7 +4011,11 @@ async def apply_graph_changes(
 
     from backend.app.ontology.urn import make_urn
     try:
-        ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+        if idempotency_key:
+            ops, assigned = _resolve_change_ops(request.ops, *_replay_minters(
+                f"{graph_id}/{branchId}/{actor}", idempotency_key, make_urn), by_ref=True)
+        else:
+            ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
     except InvalidPatch as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 
@@ -3949,6 +4027,7 @@ async def apply_graph_changes(
         result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
+            idempotency_key=f"changes:{actor}:{idempotency_key}" if idempotency_key else None,
             containment_edge_types=await _resolve_containment_types(engine),
             ontology_rules=await _resolve_ontology_rules(
                 engine, fail_closed=(g.get("kind") == "blank")))
@@ -4043,6 +4122,7 @@ async def batch_commands(
     request: BatchCommandRequest = Body(...),
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
+    _main: None = Depends(require_main_writer),
 ):
     """
     Execute a batch of graph mutation commands.
@@ -4054,6 +4134,10 @@ async def batch_commands(
     Commands are executed in order. If fail_fast=true (default), execution
     stops on the first failure and returns partial results. If fail_fast=false,
     all commands are attempted and results are collected.
+
+    A busy graph (LockBusy) is a 503 only while no command has committed;
+    after that it is the failing command's result and the batch stops.
+    So is a graph that is not writable (GraphNotWritable), as a 409.
 
     All node/edge mutations are validated against the active ontology before
     any write is attempted.  Validation failures count as command failures.
@@ -4114,7 +4198,24 @@ async def batch_commands(
                     ref=cmd.ref, op=cmd.op, success=False,
                     error=f"Unsupported op: {cmd.op}",
                 ))
+        except LockBusy as exc:
+            if succeeded == 0:
+                raise                              # nothing landed: 503 + Retry-After is safe to retry
+            # Earlier commands committed, so a 503 would get them resent. Report which
+            # landed and stop, even when fail_fast=false: the graph is busy.
+            failed += 1
+            results.append(BatchCommandResult(
+                ref=cmd.ref, op=cmd.op, success=False, error=f"lock_busy (retryable): {exc}",
+            ))
+            for skipped in request.commands[len(results):]:
+                results.append(BatchCommandResult(
+                    ref=skipped.ref, op=skipped.op, success=False,
+                    error="Skipped: graph busy; retry only the commands that did not succeed",
+                ))
+            break
         except Exception as exc:
+            if isinstance(exc, GraphNotWritable) and succeeded == 0:
+                raise                              # nothing landed: the 409 says why
             failed += 1
             results.append(BatchCommandResult(
                 ref=cmd.ref, op=cmd.op, success=False, error=str(exc),

@@ -70,7 +70,7 @@ async def _stored_rules(client: AsyncClient, view_id: str) -> list:
 
 # ── flag off: today's behaviour ─────────────────────────────────────────
 
-async def test_flag_off_accepts_every_rule(test_client: AsyncClient):
+async def test_flag_off_accepts_every_rule(test_client: AsyncClient, any_open_draft):
     view_id = await _view_with(test_client, _layout(_EMPTY))
     assert (await test_client.put(f"/api/v1/views/{view_id}/layout",
                                   json={"referenceLayout": _layout(_EMPTY, {**_EMPTY, "id": "r3"})})).status_code == 200
@@ -137,7 +137,7 @@ async def test_every_inert_rule_is_named(test_client: AsyncClient):
 # ── PUT /views/{id}/layout?branchId= (the draft's overlay) ─────────────
 
 async def test_the_overlay_refuses_a_new_inert_rule_without_creating_itself(
-    test_client: AsyncClient, db_session: AsyncSession,
+    test_client: AsyncClient, db_session: AsyncSession, any_open_draft,
 ):
     view_id = await _view_with(test_client, _layout(_VALID))
     _set_contract(True)
@@ -151,7 +151,7 @@ async def test_the_overlay_refuses_a_new_inert_rule_without_creating_itself(
     assert overlay is None
 
 
-async def test_the_overlay_compares_with_the_draft_then_the_base(test_client: AsyncClient):
+async def test_the_overlay_compares_with_the_draft_then_the_base(test_client: AsyncClient, any_open_draft):
     """A first draft write compares with the published base; later ones with the draft itself."""
     view_id = await _view_with(test_client, _layout(_EMPTY))
     _set_contract(True)

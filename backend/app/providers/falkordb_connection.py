@@ -1494,11 +1494,12 @@ class ResilientGraph:
     """
 
     def __init__(self, clients: "TopologyGraphClients", cfg: FalkorDBConnConfig,
-                 name: str, graph: Any):
+                 name: str, graph: Any, node: Optional[Tuple[str, int]] = None):
         self._clients = clients
         self._cfg = cfg
         self._name = name
         self._graph = graph
+        self._node = node       # the key's owning node when this handle was built (cluster)
 
     async def query(self, *args, **kwargs):
         return await self._call("query", *args, **kwargs)
@@ -1571,6 +1572,46 @@ class ResilientGraph:
             await self._clients.invalidate(self._cfg, self._name)
             self._graph = await self._clients.resolve_graph(self._cfg, self._name)
             return await getattr(self._graph, method)(*args, **kwargs)
+
+    async def write_and_wait(self, query: str, *, timeout_ms: int, min_replicas: int,
+                             wait_ms: int) -> Optional[int]:
+        """Run one write, then ``WAIT min_replicas wait_ms``, and return how many replicas
+        acknowledged it — or None when that is not known, which the caller must treat as
+        unconfirmed.
+
+        WAIT counts what the ISSUING connection wrote, so both go out in one send on one
+        connection of the owning node's pool; the replication stream is ordered, so the write's
+        acknowledgement covers every earlier write to that master. Not known:
+
+        * the key's owner changed since this handle was built: the earlier writes went to
+          another master, whose replicas this one cannot speak for (nothing is sent);
+        * any error once the send is attempted (the socket closed under it by ``invalidate``,
+          a refused WAIT). Never retried: a WAIT re-sent on a reconnected socket counts a
+          connection that wrote nothing.
+
+        After an error or a cancel the socket is dropped before it goes back to the pool, so no
+        later caller reads this call's reply.
+        """
+        node, pool = await self._clients.node_pool(self._cfg, self._name)
+        if node != self._node:
+            return None
+        conn = await pool.get_connection()
+        try:
+            await conn.send_packed_command(conn.pack_commands([
+                ("GRAPH.QUERY", self._name, query, "--compact", "timeout", timeout_ms),
+                ("WAIT", min_replicas, wait_ms),
+            ]))
+            await conn.read_response()                   # the write; an error reply raises
+            return int(await conn.read_response())
+        except BaseException as exc:
+            await conn.disconnect()
+            if not isinstance(exc, Exception):
+                raise                                    # a cancel is the caller's
+            logger.warning("falkordb graph %r: write not confirmed on the replicas — %s: %s",
+                           self._name, type(exc).__name__, exc)
+            return None
+        finally:
+            await pool.release(conn)
 
     def __getattr__(self, item):
         # Anything not wrapped above (e.g. ``.name``) delegates unchanged.
@@ -1723,6 +1764,18 @@ class TopologyGraphClients:
                 )
         return entry[0]
 
+    def _cached_owner(self, cfg: FalkorDBConnConfig, graph_name: str):
+        return self._owner.get((self.identity(cfg), graph_name)) if cfg.mode == "cluster" else None
+
+    async def node_pool(self, cfg: FalkorDBConnConfig, graph_name: str):
+        """``(owner, pool)``: the key's owning node (None outside cluster mode) and the raw pool
+        of its cached client: in cluster mode the pool pinned to that node, else the instance's
+        (or the Sentinel master's) own. For a command that must reach the owner on a connection
+        of its own (``ResilientGraph.write_and_wait``)."""
+        await self._client_for(cfg, graph_name)
+        node = self._cached_owner(cfg, graph_name)   # no await since: still the entry's key
+        return node, self._clients[(self.identity(cfg), node)][1]
+
     async def resolve_graph(self, cfg: FalkorDBConnConfig, graph_name: str):
         """The raw ``falkordb`` graph object (no resilience wrapper)."""
         db = await self._client_for(cfg, graph_name)
@@ -1731,9 +1784,8 @@ class TopologyGraphClients:
     async def get_graph(self, cfg: FalkorDBConnConfig, graph_name: str) -> ResilientGraph:
         """The graph handle every consumer should use: correct for the
         instance's topology, and self-healing across a node rotation."""
-        return ResilientGraph(
-            self, cfg, graph_name, await self.resolve_graph(cfg, graph_name),
-        )
+        graph = await self.resolve_graph(cfg, graph_name)
+        return ResilientGraph(self, cfg, graph_name, graph, self._cached_owner(cfg, graph_name))
 
     async def invalidate(self, cfg: FalkorDBConnConfig, graph_name: str) -> None:
         """Drop the graph's owner mapping AND its node's client. Both must go: on

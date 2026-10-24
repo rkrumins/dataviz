@@ -533,7 +533,7 @@ async def test_a_purge_never_drops_a_key_something_else_reads(readers, dropped, 
         return None
     monkeypatch.setattr(generation, "bump_graph_generation", bump)
     ps = SimpleNamespace(falkor_graph_name="finance_copy", owns_falkor_graph=True,
-                         falkor_provider="prov_1")
+                         falkor_provider="prov_1", retired_keys=None)
     runner, lease, job, deletes, asked = _purge(ps, readers=readers)
     await runner._phase_falkor(lease, "g1")
     assert asked == [("prov_1", "finance_copy", "ds_mine")], "asked of the key, the job's own excluded"
@@ -542,7 +542,8 @@ async def test_a_purge_never_drops_a_key_something_else_reads(readers, dropped, 
 
 
 async def test_a_key_we_did_not_make_is_never_even_asked_about():
-    ps = SimpleNamespace(falkor_graph_name="cust", owns_falkor_graph=False, falkor_provider=None)
+    ps = SimpleNamespace(falkor_graph_name="cust", owns_falkor_graph=False, falkor_provider=None,
+                         retired_keys=None)
     runner, lease, job, deletes, asked = _purge(ps, readers=[])
     await runner._phase_falkor(lease, "g1")
     assert (deletes, asked) == ([], []) and "PROTECTED" in job.summary["falkor"]["verdict"]

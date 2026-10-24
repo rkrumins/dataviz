@@ -9,6 +9,10 @@ when a superseded attempt's squash lands under this one and its publish is refus
 job ends through its lease's fenced finish; a job no longer this worker's stops quietly. The
 versioning service, the job row and the lease are faked here; the same runs on Postgres in
 integration/test_versioning_publish_job.py.
+
+A queued publish holds its draft ``publishing``. A refusal that fails the job hands the draft back
+at once (``release_publishing``); a job that lands, or is no longer this worker's, leaves it alone.
+A busy graph is such a refusal: no route resumes a publish job, so it is published again.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import pytest
 
 from backend.app.api.v1.endpoints import versioning as ep
 from backend.app.services.versioning import db as ver_db
+from backend.app.services.versioning.errors import BranchNotOpen, ContentionExhausted, GroupsUnavailable, LockBusy
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import Superseded
 from backend.app.services.versioning.service import NotUpToDate
@@ -30,7 +35,7 @@ class _Versioning:
 
     def __init__(self, merged, publish=None):
         self._merged, self._publish = list(merged), publish
-        self.published = []
+        self.published, self.releases = [], []
 
     async def merged_commit_id(self, *, graph_id, branch_id):
         assert (graph_id, branch_id) == ("g1", "br1")
@@ -44,6 +49,10 @@ class _Versioning:
         if isinstance(self._publish, Exception):
             raise self._publish
         return self._publish
+
+    async def release_publishing(self, **kwargs):
+        self.releases.append(kwargs)
+        return [kwargs.get("branch_id")]
 
 
 class _Lease:
@@ -61,8 +70,8 @@ class _Lease:
     async def release(self):
         self.released = True
 
-    async def fail(self, *_args, **_kwargs):
-        self.failed = True
+    async def fail(self, *args, **_kwargs):
+        self.failed = args or True
 
 
 @pytest.fixture
@@ -121,7 +130,9 @@ async def test_a_publish_job_publishes_and_sets_off_what_a_publish_does(monkeypa
     lease = _Lease()
     assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_new"}
     assert len(svc.published) == 1 and set_off == _SET_OFF
+    assert svc.published[0]["queued"] is True, "the job's own draft is publishing: it may proceed"
     assert lease.finished == ("completed", {"summary": {"commitId": "cmt_new"}})
+    assert svc.releases == []
 
 
 async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_the_rest(
@@ -133,16 +144,18 @@ async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_t
     assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_landed"}
     assert svc.published == [] and set_off == _SET_OFF
     assert lease.finished == ("completed", {"summary": {"commitId": "cmt_landed"}})
+    assert svc.releases == []
 
 
 async def test_a_publish_refused_because_a_zombie_merged_the_draft_completes(monkeypatch, set_off):
     """Not merged when this attempt looked; merged by a superseded attempt's squash before this
     one's publish ran, which is refused for it (the draft is no longer open)."""
-    svc = _Versioning(merged=[None, "cmt_zombie"], publish=ValueError("branch br1 is merged"))
+    svc = _Versioning(merged=[None, "cmt_zombie"], publish=BranchNotOpen("br1", "merged"))
     lease = _Lease()
     assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_zombie"}
     assert len(svc.published) == 1 and set_off == _SET_OFF, "set off once, after the merge is found"
     assert lease.finished == ("completed", {"summary": {"commitId": "cmt_zombie"}})
+    assert svc.releases == []
 
 
 async def test_a_refused_publish_fails_the_job_with_the_routes_answer(monkeypatch, set_off):
@@ -153,6 +166,15 @@ async def test_a_refused_publish_fails_the_job_with_the_routes_answer(monkeypatc
     status, values = lease.finished
     assert (status, values["summary"]) == ("failed", result) and values["error_message"]
     assert set_off == [], "nothing landed: nothing to set off"
+    assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}], "the draft is handed back"
+
+
+async def test_a_refusal_no_longer_this_workers_leaves_the_draft_alone(monkeypatch, set_off):
+    """The job's new owner decides how it ends; only a failure that landed hands the draft back."""
+    svc = _Versioning(merged=[None, None], publish=NotUpToDate("br1", 3, 5))
+    with pytest.raises(Superseded):
+        await _service(monkeypatch, svc).run_publish("vjob_1", _Lease(finishes=False))
+    assert svc.releases == []
 
 
 async def test_a_publish_job_no_longer_this_workers_stops_quietly(monkeypatch, set_off):
@@ -165,3 +187,21 @@ async def test_a_publish_job_no_longer_this_workers_stops_quietly(monkeypatch, s
     ie = _service(monkeypatch, svc)
     await ie.run_publish_safe("vjob_1", lease)
     assert not (lease.failed or lease.released), "the job's new owner finishes it"
+
+
+@pytest.mark.parametrize("busy,kind", [(LockBusy("graph g1 is busy"), "lock_busy"),
+                                       (ContentionExhausted("graph g1 is busy"), "lock_busy"),
+                                       (GroupsUnavailable(), "groups_unavailable")])
+async def test_a_publish_that_finds_the_graph_busy_fails_and_hands_back_the_draft(monkeypatch, set_off, busy,
+                                                                                  kind):
+    """A busy graph, or a group lookup that failed, is answered as the route answers it (503: publish
+    again). Nothing can resume a publish job, so the job is not failed as an outage, and the draft is
+    handed back."""
+    svc = _Versioning(merged=[None, None], publish=busy)
+    lease = _Lease()
+    await _service(monkeypatch, svc).run_publish_safe("vjob_1", lease)
+    status, values = lease.finished
+    error = values["summary"]["error"]
+    assert (status, error["status"], error["detail"]["type"]) == ("failed", 503, kind)
+    assert not lease.failed and set_off == []
+    assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}], "the draft is handed back"

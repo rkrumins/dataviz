@@ -24,12 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.api.v1.feature_gate import (
     ensure_view_mode_allowed,
     feature_disabled,
     require_feature,
     resolve_enterprise_view_policy,
 )
+from backend.app.api.v1.versioning_gate import require_branch_scope
 from backend.app.api.v1.view_filter_query import ViewFilterQuery, _instant, view_filter_query
 from backend.app.api.v1.view_read_scope import (
     read_scope as _read_scope,
@@ -55,6 +57,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services import template_access, view_access, view_library, view_source_kinds
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
+from backend.app.services.versioning.service import GraphVersioningService
 from backend.auth_service.interface import User
 from backend.common.models.view_library import (
     DisplayRule,
@@ -884,6 +887,7 @@ async def get_view(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Get a single view by ID, enriched with workspace context and favourite data.
 
@@ -902,6 +906,8 @@ async def get_view(
             # 404 (not 403) so view existence stays private from
             # users with no access path.
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=False)
 
     await _record_break_glass_read(session, ctx, view_orm, user)
 
@@ -1011,9 +1017,9 @@ async def update_view(
             session, req.context_model_id or existing.context_model_id, req.context_model_version,
         )
 
-    # Layer rules are not checked here but where they are authored (create and PUT /layout):
-    # the wizard's save sends back the layout it read, a draft's overlay included, so a rename
-    # would be refused for a draft rule the base does not hold.
+    # Layer rules are not checked here: this route never writes the layout or scope (the
+    # stored ones are kept, view_repo._keep_config_layout). They are checked where they are
+    # authored, create and PUT /layout.
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,
     )
@@ -1078,6 +1084,7 @@ async def update_view_layout(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Update a view's layer layout (layers + assignments) in isolation.
 
@@ -1104,6 +1111,9 @@ async def update_view_layout(
                 status_code=403,
                 detail="Missing permission: workspace:view:edit",
             )
+    if branch_id:
+        await require_branch_scope(session, svc, await _load_view_orm(session, view_id), branch_id,
+                                   actor=_user_id(user), claims=claims, write=True)
 
     try:
         if branch_id:
@@ -1804,11 +1814,14 @@ async def get_view_library(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """The view's display rules — a draft's own on ``branchId`` once it has
     changed its layout, else the published ones — and its saved queries,
     with whether the caller may change them."""
     view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=False)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=False)
     return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit)
 
 
@@ -1821,11 +1834,14 @@ async def put_view_rule(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Add a display rule, or replace the one with this id where it stands.
     Only this rule is written: rules others changed meanwhile are kept.
     Returns the view's rules."""
-    await _library_view(session, view_id, user, claims, edit=True)
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=True)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=True)
     try:
         return await view_library.put_rule(
             session, view_id, branch_id, rule.model_copy(update={"id": rule_id}),
@@ -1842,10 +1858,13 @@ async def delete_view_rule(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Remove a display rule (no error when it is already gone). Returns the
     view's rules."""
-    await _library_view(session, view_id, user, claims, edit=True)
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=True)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=True)
     try:
         return await view_library.delete_rule(session, view_id, branch_id, rule_id)
     except view_library.LibraryError as exc:
@@ -1860,11 +1879,14 @@ async def order_view_rules(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Put the view's display rules in the order ``ids`` names them; rules
     it leaves out (added meanwhile) follow, in their order. Returns the
     view's rules."""
-    await _library_view(session, view_id, user, claims, edit=True)
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=True)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=True)
     try:
         return await view_library.order_rules(session, view_id, branch_id, order.ids)
     except view_library.LibraryError as exc:
@@ -1927,10 +1949,13 @@ async def export_view_library(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """The view's display rules and saved queries as a pack — a JSON file to
     import into another view. Anyone who can open the view can export it."""
     view_orm, _ = await _library_view(session, view_id, user, claims, edit=False)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=False)
     pack = await view_library.export_pack(session, view_orm, branch_id)
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", view_orm.name or "").strip("-.") or "view"
     return JSONResponse(
@@ -1949,6 +1974,7 @@ async def import_view_library(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """What importing a pack would do, item by item (``dryRun``, the
     default) — or do it. ``merge`` adds what the view doesn't have, ``copy``
@@ -1956,6 +1982,8 @@ async def import_view_library(
     Every item is checked as its kind is when saved; one that fails is
     refused, and the rest still import."""
     view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=True)
+    await require_branch_scope(session, svc, view_orm, branch_id,
+                               actor=_user_id(user), claims=claims, write=not dry_run)
     try:
         return await view_library.import_pack(
             session, view_orm, branch_id, pack, strategy=strategy, dry_run=dry_run,

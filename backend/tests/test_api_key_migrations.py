@@ -37,12 +37,12 @@ from alembic.script import ScriptDirectory
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 _EARLIER = "20261013_1200_activity_api_key.py"
 _LAST = "20261014_1200_aal_api_key.py"
-#: The revisions after the ledger's, then the chain's head.
+#: The cheap revisions right after the ledger's, in order.
 _NEXT = "20261018_1200_layout_templates"
 _THEN = "20261018_1300_tpl_lifecycle"
-_AFTER = "20261019_1000_ws_access"
-_LATER = "20261019_1600_access_life"
-_HEAD = "20261020_1000_ds_transfers"
+_THIRD = "20261019_1000_ws_access"
+_FOURTH = "20261019_1600_access_life"
+_FIFTH = "20261020_1000_ds_transfers"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -53,9 +53,24 @@ _ON_LIVE_TABLES = {
     _LAST: ("upgrade", "downgrade"),
     f"{_NEXT}.py": ("upgrade", "downgrade"),
     f"{_THEN}.py": ("upgrade", "downgrade"),
-    f"{_AFTER}.py": ("upgrade", "downgrade"),
-    f"{_LATER}.py": ("upgrade", "downgrade"),
-    f"{_HEAD}.py": ("upgrade", "downgrade"),
+    f"{_THIRD}.py": ("upgrade", "downgrade"),
+    f"{_FOURTH}.py": ("upgrade", "downgrade"),
+    f"{_FIFTH}.py": ("upgrade", "downgrade"),
+    # graphver.projection_state, which every projection pass writes.
+    "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
+    "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
+    # graphver.commits, which every save writes.
+    "20261017_1900_gv_commits_idem.py": ("upgrade", "downgrade"),
+    # graphver.jobs, which every job's heartbeat writes.
+    "20261017_1950_gv_ingest_active.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: the reseeding status.
+    "20261017_2000_gv_ps_reseeding.py": ("upgrade", "downgrade"),
+    # graphver.merge_requests, which every review writes.
+    "20261018_1000_gv_mr_approvals.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: a moved graph's retired keys.
+    "20261018_1100_gv_ps_retired.py": ("upgrade", "downgrade"),
+    # graphver.graphs, which every main commit writes.
+    "20261018_1200_gv_lifecycle.py": ("upgrade", "downgrade"),
 }
 
 
@@ -131,16 +146,32 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_the_chain_ends_five_cheap_revisions_after_the_ledger_revision():
+def test_the_chain_ends_at_the_ledger_revision():
+    """One head, and nothing after the ledger revision touches the ledger,
+    so its exclusive lock still lasts only for its own build.
+
+    Revisions after it still run inside the same transaction when an
+    upgrade starts below it: a database jumping straight from before
+    ``20261014_1200`` to a later head holds the ledger's lock through every
+    later revision too. Deploy that revision on its own first."""
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
-    script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _LATER
-    assert script.get_revision(_LATER).down_revision == _AFTER
-    assert script.get_revision(_AFTER).down_revision == _THEN
-    assert script.get_revision(_THEN).down_revision == _NEXT
-    assert script.get_revision(_NEXT).down_revision == _LAST[:-3]
+    scripts = ScriptDirectory.from_config(config)
+    assert len(scripts.get_heads()) == 1, scripts.get_heads()
+    later = [
+        s for s in scripts.walk_revisions(base=_LAST[:-3], head="heads")
+        if s.revision != _LAST[:-3]
+    ]
+    assert [
+        s.revision for s in later if "auth_audit_log" in Path(s.path).read_text()
+    ] == []
+    # The cheap revisions right after the ledger's stay in order, so the ledger's lock still
+    # covers only them before the ones that follow.
+    assert scripts.get_revision(_THEN).down_revision == _NEXT
+    assert scripts.get_revision(_NEXT).down_revision == _LAST[:-3]
+    assert scripts.get_revision(_THIRD).down_revision == _THEN
+    assert scripts.get_revision(_FOURTH).down_revision == _THIRD
+    assert scripts.get_revision(_FIFTH).down_revision == _FOURTH
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

@@ -77,6 +77,7 @@ function GraphRow({ graph, onOpenSource }: {
 }) {
     const size = graph.measuredBytes ?? graph.estimatedBytes
     const ds = graph.dataSources[0]
+    const v = graph.versioned
     return (
         <tr className={cn('border-t border-glass-border', !graph.present && 'opacity-60')}>
             <td className="py-1.5 pr-3 font-mono text-[11px] text-ink-secondary break-all">{graph.key}</td>
@@ -91,18 +92,33 @@ function GraphRow({ graph, onOpenSource }: {
                             {ds.label ?? ds.id}
                         </button>
                         : (ds.label ?? ds.id))
-                    : <span className="text-amber-600 dark:text-amber-400">no data source claims it</span>}
+                    : v
+                        ? `${v.kind === 'fork' ? 'fork' : 'versioned graph'} ${v.graphId}`
+                        : <span className="text-amber-600 dark:text-amber-400">no data source claims it</span>}
                 {ds?.workspaceName && <span className="text-ink-muted"> · {ds.workspaceName}</span>}
             </td>
-            <td className="py-1.5 pr-3 text-[11px] text-ink-muted whitespace-nowrap">{GRAPH_ROLE_LABEL[graph.role] ?? graph.role}</td>
+            <td className="py-1.5 pr-3 text-[11px] text-ink-muted whitespace-nowrap">
+                {GRAPH_ROLE_LABEL[graph.role] ?? graph.role}
+                {v && (
+                    <span className="ml-1.5 inline-flex rounded-full border border-glass-border px-1.5 py-0.5 text-[10px]">
+                        {v.kind === 'fork' ? 'Fork' : 'Versioned'} · {v.owned ? 'Platform copy' : 'Customer graph'}
+                    </span>
+                )}
+            </td>
             <td className="py-1.5 pr-3 text-[11px] text-ink-muted tabular-nums text-right">{compactEdges(graph.edgeCount)}</td>
             <td className="py-1.5 pr-3 text-[11px] text-ink-muted tabular-nums text-right whitespace-nowrap">
                 {size == null ? '—' : graph.measuredBytes != null ? compactBytes(size) : `~${compactBytes(size)}`}
             </td>
             <td className="py-1.5 text-[11px] text-ink-muted whitespace-nowrap">
-                {!graph.present
-                    ? <span className="text-amber-600 dark:text-amber-400">not found on the node</span>
-                    : (ds?.aggregationStatus ?? '')}
+                {v?.status === 'evicted'
+                    ? 'evicted'
+                    : !graph.present
+                        ? <span className="text-amber-600 dark:text-amber-400">not found on the node</span>
+                        : v && v.status !== 'idle'
+                            ? v.status
+                            : v && v.lag > 0
+                                ? `${v.lag} commit${v.lag === 1 ? '' : 's'} behind`
+                                : (ds?.aggregationStatus ?? '')}
             </td>
         </tr>
     )

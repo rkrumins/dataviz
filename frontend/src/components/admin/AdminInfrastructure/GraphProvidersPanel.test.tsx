@@ -320,3 +320,37 @@ describe('GraphProvidersPanel — the node’s own limits', () => {
     expect(onAdjust).toHaveBeenCalledWith('falkordb:6379')
   })
 })
+
+describe('GraphProvidersPanel — versioned graphs per provider', () => {
+  it('says how many versioned graphs a provider hosts and how much they take', () => {
+    render(<GraphProvidersPanel providers={[
+      { ...PROVIDERS[0], versionedGraphs: 3, versionedBytes: 26_214_400 },
+      { id: 'p2', name: 'Idle graph', type: 'falkordb', status: 'healthy', error: null, isActive: true, versionedGraphs: 0, versionedBytes: null },
+    ]} />)
+    expect(screen.getByText('3 versioned graphs · 25 MB')).toBeInTheDocument()
+    expect(screen.getByText('No versioned graphs')).toBeInTheDocument()
+  })
+
+  it('says nothing about versioned graphs before the graph store has been read', () => {
+    render(<GraphProvidersPanel providers={PROVIDERS} />)
+    expect(screen.queryByText(/versioned graph/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('GraphProvidersPanel — reseed from Postgres', () => {
+  const NEO: GraphProvider = { id: 'p3', name: 'Neo', type: 'neo4j', status: 'healthy', error: null, isActive: true }
+
+  it('offers a reseed on each FalkorDB provider, and only there', () => {
+    const onReseed = vi.fn()
+    render(<GraphProvidersPanel providers={[...PROVIDERS, NEO]} onReseed={onReseed} />)
+    const buttons = screen.getAllByRole('button', { name: /Reseed from Postgres/ })
+    expect(buttons).toHaveLength(1)
+    fireEvent.click(buttons[0])
+    expect(onReseed).toHaveBeenCalledWith(PROVIDERS[0])
+  })
+
+  it('offers nothing to a viewer who may not reseed', () => {
+    render(<GraphProvidersPanel providers={PROVIDERS} />)
+    expect(screen.queryByRole('button', { name: /Reseed from Postgres/ })).not.toBeInTheDocument()
+  })
+})

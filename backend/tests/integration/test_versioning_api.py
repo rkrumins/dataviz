@@ -18,6 +18,7 @@ from backend.app.services.versioning import db, models
 
 R = "workspace:datasource:read"
 M = "workspace:datasource:manage"
+P = "workspace:datasource:publish"
 
 
 def _hdr(perms: str) -> dict:
@@ -80,7 +81,7 @@ async def _seed_management_user() -> None:
         await s.commit()
 
 
-async def _run() -> None:
+async def _run(data_sources: dict) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
@@ -93,8 +94,8 @@ async def _run() -> None:
     async def _noop_project_now(graph_id: str) -> None:
         return None
 
-    _orig_project_now = V.project_now
-    V.project_now = _noop_project_now
+    _orig_project_now, _orig_rebuild_now = V.project_now, V.rebuild_now
+    V.project_now = V.rebuild_now = _noop_project_now
     c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
     ws1 = "/api/v1/ws1/versioning"
 
@@ -115,11 +116,11 @@ async def _run() -> None:
         assert r.status_code == 404, r.text
 
         # ── happy path (read+manage) ─────────────────────────────────────
-        h = _hdr(f"{R},{M}")
+        h = _hdr(f"{R},{M},{P}")
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={"originatingViewId": "v1"}, headers=h)).json()["branchId"]
         r = await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"displayName": "Alpha"}},
-            {"op": "create", "entityKind": "node", "entityId": "B", "payload": {"displayName": "Beta"}},
+            {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"entityType": "Dataset", "displayName": "Alpha"}},
+            {"op": "create", "entityKind": "node", "entityId": "B", "payload": {"entityType": "Dataset", "displayName": "Beta"}},
             {"op": "create", "entityKind": "edge", "entityId": "E1", "payload": {"edgeType": "R", "sourceEntityId": "A", "targetEntityId": "B"}},
         ]})
         assert r.json()["count"] == 3, r.text
@@ -148,7 +149,7 @@ async def _run() -> None:
         # advance main under it (publish another draft adding C), then the rebase pulls main forward
         adv = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "C", "payload": {"displayName": "Gamma"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "C", "payload": {"entityType": "Dataset", "displayName": "Gamma"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/commit", json={}, headers=h)
         await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/publish", json={"message": "add C"}, headers=h)
         pulled = await c.post(f"{ws1}/graphs/{gid}/branches/{rb}/rebase", json={}, headers=h)
@@ -156,8 +157,9 @@ async def _run() -> None:
         assert "C" in (await c.get(f"{ws1}/graphs/{gid}/branches/{rb}/state", headers=h)).json()["nodes"]
 
         # ── fork/PR governance ───────────────────────────────────────────
-        # read-only caller may fork and open a PR …
-        fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).json()
+        # forking needs manage; a read-only caller may open a PR …
+        assert (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).status_code == 403
+        fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()
         fgid = fork["graphId"]
         # diverge on the fork (needs manage on the fork)
         fb = (await c.post(f"{ws1}/graphs/{fgid}/branches", json={}, headers=h)).json()["branchId"]
@@ -177,7 +179,7 @@ async def _run() -> None:
         assert base_state["nodes"]["A"]["displayName"] == "Alpha2"
 
         # ── conflict → 409 → resolve → 200 (via the API) ─────────────────
-        f2 = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).json()["graphId"]
+        f2 = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()["graphId"]
         f2b = (await c.post(f"{ws1}/graphs/{f2}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{f2}/branches/{f2b}/changes", headers=h, json={"ops": [{"op": "update", "entityKind": "node", "entityId": "A", "payload": {"displayName": "FromFork"}}]})
         await c.post(f"{ws1}/graphs/{f2}/branches/{f2b}/commit", json={}, headers=h)
@@ -204,7 +206,7 @@ async def _run() -> None:
         # a checkpoint with no message no longer bakes the actor id into the stored message.
         mdb = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/changes", headers=h, json={"ops": [
-            {"op": "create", "entityKind": "node", "entityId": "Z", "payload": {"displayName": "Zed"}}]})
+            {"op": "create", "entityKind": "node", "entityId": "Z", "payload": {"entityType": "Dataset", "displayName": "Zed"}}]})
         await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/commit", json={}, headers=h)
         dcl = (await c.get(f"{ws1}/graphs/{gid}/commits", params={"branchId": mdb}, headers=h)).json()
         assert any(cm["message"] == "checkpoint" for cm in dcl["commits"]), dcl
@@ -252,9 +254,10 @@ async def _run() -> None:
         # the unpinned graph has no FalkorDB target to rebuild → 409
         assert (await c.post(f"{ws1}/graphs/{gid}/projection/rebuild", headers=h)).status_code == 409
         # a PINNED graph rebuilds: started, watermark flipped to rebuilding
+        pinned_ds = "ds_" + os.urandom(4).hex()
+        data_sources[pinned_ds] = "real_" + os.urandom(3).hex()
         pinned = (await c.post(f"{ws1}/graphs", json={
-            "dataSourceId": "ds_" + os.urandom(4).hex(), "workspaceId": "ws1",
-            "falkorGraphName": "real_" + os.urandom(3).hex()}, headers=_hdr(M))).json()["graphId"]
+            "dataSourceId": pinned_ds, "workspaceId": "ws1"}, headers=_hdr(M))).json()["graphId"]
         rb = await c.post(f"{ws1}/graphs/{pinned}/projection/rebuild", headers=h)
         assert rb.status_code == 200, rb.text
         assert rb.json()["started"] is True and rb.json()["alreadyRunning"] is False
@@ -265,15 +268,45 @@ async def _run() -> None:
         # cross-tenant rebuild via ws2 → 404
         assert (await c.post(f"/api/v1/ws2/versioning/graphs/{pinned}/projection/rebuild", headers=h)).status_code == 404
 
-    V.project_now = _orig_project_now                # restore: don't leak the no-op into other tests
+    V.project_now, V.rebuild_now = _orig_project_now, _orig_rebuild_now   # restore: don't leak the no-op
     await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_api_e2e():
-    asyncio.run(_run())
+def test_versioning_api_e2e(data_sources):
+    asyncio.run(_run(data_sources))
+
+
+async def _run_main_draft_routes() -> None:
+    """Stage, checkpoint and pull are draft writes: main's id answers 409 main_write_forbidden,
+    even to a member with manage only, and main does not move."""
+    from httpx import ASGITransport, AsyncClient
+
+    await models.create_schema_and_partitions()
+    ws1 = "/api/v1/ws1/versioning"
+    h = _hdr(f"{R},{M}")
+    try:
+        async with AsyncClient(transport=ASGITransport(app=_build_app()), base_url="http://test") as c:
+            r = await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(4).hex(),
+                                                   "workspaceId": "ws1"}, headers=h)
+            gid, main = r.json()["graphId"], r.json()["mainBranchId"]
+            head = (await c.get(f"{ws1}/graphs/{gid}", headers=h)).json()["mainHeadCommitSeq"]
+            for path, body in (("changes", {"ops": [{"op": "create", "entityKind": "node", "entityId": "A",
+                                                     "payload": {"entityType": "Dataset", "displayName": "A"}}]}),
+                               ("commit", {}), ("rebase", {})):
+                r = await c.post(f"{ws1}/graphs/{gid}/branches/{main}/{path}", json=body, headers=h)
+                assert r.status_code == 409, (path, r.text)
+                assert r.json()["detail"]["type"] == "main_write_forbidden", (path, r.text)
+            assert (await c.get(f"{ws1}/graphs/{gid}", headers=h)).json()["mainHeadCommitSeq"] == head
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_draft_write_routes_refuse_main(data_sources):
+    asyncio.run(_run_main_draft_routes())
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    asyncio.run(_run({}))
     print("versioning API (auth + RBAC + tenant + governance) e2e: OK")

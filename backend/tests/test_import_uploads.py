@@ -21,6 +21,7 @@ import pytest
 
 from backend.app.api.v1.endpoints.versioning import get_import_export_service, get_versioning_service
 from backend.app.services.storage.object_store import LocalFsObjectStore
+from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export import uploads
 from backend.app.services.versioning.import_export.uploads import UploadError
 
@@ -191,6 +192,44 @@ async def test_the_api_refuses_what_an_upload_cant_take(test_client, api):
     assert (await test_client.get(f"{BASE}/iu_{'0' * 32}")).status_code == 404
 
 
+async def _uploaded(test_client) -> str:
+    """An upload with every part in; its URL."""
+    up = (await test_client.post(BASE, json={"fileName": "f.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    url = f"{BASE}/{up['uploadId']}"
+    for n in range(up["parts"]):
+        assert (await test_client.put(f"{url}/parts/{n}", content=DATA[n * 64:(n + 1) * 64])).status_code == 200
+    return url
+
+
+async def test_a_second_import_on_a_busy_draft_is_refused_with_the_running_job(test_client, api):
+    message = "Another import is still running on this draft (job vjob_0). Wait for it to finish."
+
+    async def busy(**_kwargs):
+        raise JobActive("vjob_0", message)
+
+    api.create_import_job = busy
+    r = await test_client.post(f"{await _uploaded(test_client)}/complete", params={"branchId": "br_1"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == {"type": "job_active", "jobId": "vjob_0", "message": message}
+    assert api.started == []
+
+
+async def test_an_import_that_was_never_queued_is_failed_at_once(test_client, api):
+    """Its draft takes the next import now, not when the reaper fails it an hour later."""
+    abandoned = []
+
+    async def broken(_job_id):
+        raise RuntimeError("the job store went away")
+
+    async def abandon(job_id):
+        abandoned.append(job_id)
+
+    api.start_import, api.abandon_unqueued = broken, abandon
+    url = await _uploaded(test_client)
+    assert (await test_client.post(f"{url}/complete")).status_code == 500
+    assert abandoned == ["vjob_1"]
+
+
 # ── View packages ────────────────────────────────────────────────────────────
 
 
@@ -276,7 +315,7 @@ async def test_a_package_import_spools_once_and_never_sniffs(tmp_path, monkeypat
         staged.extend(batch)
 
     worker._reject_binary, worker._flush = sniff, flush
-    assert await worker._parse("vjob_1", uploads.record_key(record), "ndjson") == data.count(b"\n")
+    assert await worker._parse("vjob_1", uploads.record_key(record), "ndjson") == (data.count(b"\n"), 0)
     assert spooled == [record["uploadId"]], "one spool, for the one read"
     assert staged[0]["raw"]["entity_id"] == "n0" and staged[-1]["row_index"] == data.count(b"\n") - 1
     assert list(scratch.iterdir()) == []

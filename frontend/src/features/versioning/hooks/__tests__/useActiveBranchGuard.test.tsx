@@ -2,22 +2,18 @@
  * useActiveBranchGuard — the client must never keep a dead branch as its editing scope.
  *
  * The dangerous failure here is the FALSE eviction: throwing someone out of a live draft because
- * the branches list was momentarily stale or view-scoped. So the "does NOT evict" cases matter at
- * least as much as the eviction itself.
+ * its status was not known yet. So the "does NOT evict" cases matter at least as much as the
+ * eviction itself. The status is the active branch's own, read from that one branch (its freshness),
+ * not from a list of every draft ever made.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { useActiveBranchGuard } from '../useActiveBranchGuard'
 import { useBranchStore } from '@/store/branchStore'
-import type { Branch } from '@/services/versioningApiService'
-
-const branch = (branchId: string, status: string, kind = 'draft'): Branch =>
-  ({ branchId, status, kind, name: branchId, baseCommitSeq: 1 } as unknown as Branch)
 
 const BASE = {
   enabled: true,
-  listRefreshing: false,
   currentBranchId: 'br_1',
   unsavedCount: 0,
 }
@@ -32,14 +28,14 @@ describe('useActiveBranchGuard', () => {
   it('evicts to Published when the active branch has been merged', () => {
     const onEvict = vi.fn()
     renderHook(() =>
-      useActiveBranchGuard({ ...BASE, branches: [branch('br_1', 'merged')], onEvict }),
+      useActiveBranchGuard({ ...BASE, status: 'merged', onEvict }),
     )
     expect(onMain()).toBe(true)
     expect(onEvict).toHaveBeenCalledWith({ branchId: 'br_1', status: 'merged', hadUnsavedEdits: false })
   })
 
   it('evicts when the branch was abandoned (discarded elsewhere)', () => {
-    renderHook(() => useActiveBranchGuard({ ...BASE, branches: [branch('br_1', 'abandoned')] }))
+    renderHook(() => useActiveBranchGuard({ ...BASE, status: 'abandoned' }))
     expect(onMain()).toBe(true)
   })
 
@@ -47,39 +43,30 @@ describe('useActiveBranchGuard', () => {
     const onEvict = vi.fn()
     renderHook(() =>
       useActiveBranchGuard({
-        ...BASE, unsavedCount: 3, branches: [branch('br_1', 'merged')], onEvict,
+        ...BASE, unsavedCount: 3, status: 'merged', onEvict,
       }),
     )
     expect(onEvict).toHaveBeenCalledWith(expect.objectContaining({ hadUnsavedEdits: true }))
   })
 
   it('does NOT evict while the branch is open', () => {
-    renderHook(() => useActiveBranchGuard({ ...BASE, branches: [branch('br_1', 'open')] }))
+    renderHook(() => useActiveBranchGuard({ ...BASE, status: 'open' }))
     expect(onMain()).toBe(false)
   })
 
-  it('does NOT evict on a stale list mid-refetch — a just-opened draft is not in it yet', () => {
-    renderHook(() =>
-      useActiveBranchGuard({ ...BASE, listRefreshing: true, branches: [branch('br_1', 'merged')] }),
-    )
+  it('does NOT evict while the branch is being published — a failed publish hands it back', () => {
+    renderHook(() => useActiveBranchGuard({ ...BASE, status: 'publishing' }))
     expect(onMain()).toBe(false)
   })
 
-  it('does NOT evict when the branch is merely ABSENT from the list (ambiguous, not dead)', () => {
-    // A view-scoped slice, a permission edge, or a list that simply hasn't caught up. Ejecting here
-    // would throw people out of drafts they had just opened.
-    renderHook(() => useActiveBranchGuard({ ...BASE, branches: [branch('br_other', 'open')] }))
-    expect(onMain()).toBe(false)
-  })
-
-  it('does NOT evict before the list has loaded at all', () => {
-    renderHook(() => useActiveBranchGuard({ ...BASE, branches: undefined }))
+  it('does NOT evict before the branch\'s status is known (unread, or a read that failed)', () => {
+    renderHook(() => useActiveBranchGuard({ ...BASE, status: undefined }))
     expect(onMain()).toBe(false)
   })
 
   it('is inert when disabled, and on Published (no active branch)', () => {
     renderHook(() =>
-      useActiveBranchGuard({ ...BASE, enabled: false, branches: [branch('br_1', 'merged')] }),
+      useActiveBranchGuard({ ...BASE, enabled: false, status: 'merged' }),
     )
     expect(onMain()).toBe(false)
 
@@ -87,7 +74,7 @@ describe('useActiveBranchGuard', () => {
     const onEvict = vi.fn()
     renderHook(() =>
       useActiveBranchGuard({
-        ...BASE, currentBranchId: null, branches: [branch('br_1', 'merged')], onEvict,
+        ...BASE, currentBranchId: null, status: 'merged', onEvict,
       }),
     )
     expect(onEvict).not.toHaveBeenCalled()
@@ -96,10 +83,10 @@ describe('useActiveBranchGuard', () => {
   it('fires onEvict once, not on every re-render', () => {
     const onEvict = vi.fn()
     const { rerender } = renderHook(
-      (p: { branches: Branch[] }) => useActiveBranchGuard({ ...BASE, branches: p.branches, onEvict }),
-      { initialProps: { branches: [branch('br_1', 'merged')] } },
+      (p: { status: string }) => useActiveBranchGuard({ ...BASE, status: p.status, onEvict }),
+      { initialProps: { status: 'merged' } },
     )
-    rerender({ branches: [branch('br_1', 'merged')] })   // new array identity, same data
+    rerender({ status: 'merged' })   // a re-render, same status
     expect(onEvict).toHaveBeenCalledTimes(1)
   })
 })

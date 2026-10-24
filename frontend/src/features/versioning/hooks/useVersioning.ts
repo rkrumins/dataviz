@@ -5,7 +5,7 @@
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -21,13 +21,14 @@ export const VERSIONING_KEYS = {
     viewId
       ? ([...VERSIONING_KEYS.all, 'resolve', ws, ds, viewId] as const)
       : ([...VERSIONING_KEYS.all, 'resolve', ws, ds] as const),
-  // `viewId` is appended only when given, so graph-wide callers keep their existing cache key.
-  branches: (ws?: string, gid?: string | null, viewId?: string | null) =>
-    viewId
-      ? ([...VERSIONING_KEYS.all, 'branches', ws, gid, viewId] as const)
-      : ([...VERSIONING_KEYS.all, 'branches', ws, gid] as const),
+  // `viewId` and `status` are appended only when given, so graph-wide callers keep their existing
+  // cache key, and invalidating the graph's key still reaches every list.
+  branches: (ws?: string, gid?: string | null, viewId?: string | null, status?: BranchStatusFilter[]) =>
+    [...VERSIONING_KEYS.all, 'branches', ws, gid, ...(viewId ? [viewId] : []), ...(status ? [{ status }] : [])] as const,
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
+  branchMembers: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchMembers', ws, gid, bid] as const,
   branchFreshness: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchFreshness', ws, gid, bid] as const,
   diffVsMain: (ws?: string, gid?: string | null, bid?: string | null) =>
@@ -41,6 +42,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
+  forks: (ws?: string, gid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'forks', ws, gid] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
   prDiff: (ws?: string, prId?: string | null) =>
@@ -100,11 +103,14 @@ export function useResolveGraph(wsId?: string, dataSourceId?: string | null, vie
 }
 
 /** Branches on a graph. Omit `viewId` for the graph-wide (Data-Source) list; pass the active
- *  Context View's id to list only THAT view's branches (branch-per-view — what the switcher shows). */
-export function useBranches(wsId?: string, graphId?: string | null, viewId?: string | null) {
+ *  Context View's id to list only THAT view's branches (branch-per-view — what the switcher shows).
+ *  Omit `status` for the open and publishing drafts. */
+export function useBranches(
+  wsId?: string, graphId?: string | null, viewId?: string | null, status?: BranchStatusFilter[],
+) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.branches(wsId, graphId, viewId),
-    queryFn: () => api.listBranches(wsId!, graphId!, { viewId }),
+    queryKey: VERSIONING_KEYS.branches(wsId, graphId, viewId, status),
+    queryFn: () => api.listBranches(wsId!, graphId!, { viewId, status }),
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
   })
@@ -119,6 +125,15 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
   })
 }
 
+/** A draft's members and the caller's own role on it. */
+export function useBranchMembers(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId),
+    queryFn: () => api.listBranchMembers(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+  })
+}
+
 /** When main last advanced here (publish / merge / rollback), per graph. Right after that the
  *  projection has not started yet — the watermark reads idle-and-behind for a moment — and the
  *  status-gated poll below would stop on exactly that reading and never see it catch up. So for a
@@ -129,23 +144,26 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
   if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
 }
 
-/** How often to re-read the watermark (false = stop): while forced; while catching up or
- *  rebuilding; and, for a short window after main advanced, while merely behind — until the
- *  projection has had its chance to start. A recorded failure ends that window early. */
+/** How often to re-read the watermark (false = stop): while forced; while catching up,
+ *  rebuilding or waiting for an operator's reseed; and, for a short window after main advanced, while merely behind — until the
+ *  projection has had its chance to start. A recorded failure ends that window early, but keeps a
+ *  slow poll while behind: the projector retries after its backoff, and only a fresh read shows
+ *  the route back on FalkorDB. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
 ): number | false {
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
-  const active = d.status === 'projecting' || d.status === 'rebuilding'
+  const active = d.status === 'projecting' || d.status === 'rebuilding' || d.status === 'reseeding'
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
-  return active || (justAdvanced && !d.lastError) ? 3_000 : false
+  if (active || (justAdvanced && !d.lastError)) return 3_000
+  return d.lastError ? 30_000 : false
 }
 
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
- *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up.
+ *  forever; one whose last pass failed is re-read every 30s, so the retry landing is seen. A merge/publish invalidates this query, so a freshly-started projection is picked up.
  *  `opts.force` keeps the poll alive REGARDLESS of status — the Data health rebuild flow needs to
  *  observe the terminal transition (idle + lastError = failed), which the status-gated poll would
  *  stop one tick short of. */
@@ -246,6 +264,17 @@ export function useMergeRequests(wsId?: string, graphId?: string | null) {
     queryFn: () => api.listMergeRequests(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
+  })
+}
+
+/** A graph's forks, those in the trash included. Not retried: an old backend answers 404. */
+export function useForks(wsId?: string, graphId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.forks(wsId, graphId),
+    queryFn: () => api.listForks(wsId!, graphId!),
+    enabled: !!wsId && !!graphId,
+    staleTime: 15_000,
+    retry: false,
   })
 }
 
@@ -369,15 +398,35 @@ export function useViewPullRequests(wsId?: string, viewId?: string | null, statu
   })
 }
 
-/** All PRs against a data source (gated — only fetched when the user opts into the wider view). */
+/** The endpoint's largest page. */
+const DS_PRS_PAGE = 500
+
+/** Every open PR (status=open) on a data source, page by page until a short page: an open PR
+ *  awaiting review must not fall off the end of one page. */
+async function listAllOpenDataSourcePrs(wsId: string, dataSourceId: string): Promise<PullRequest[]> {
+  const all: PullRequest[] = []
+  for (let offset = 0; ; offset += DS_PRS_PAGE) {
+    const page = await api.listDataSourcePullRequests(wsId, dataSourceId, { status: 'open', limit: DS_PRS_PAGE, offset })
+    all.push(...page)
+    if (page.length < DS_PRS_PAGE) return all
+  }
+}
+
+/** All PRs against a data source (gated — only fetched when the user opts into the wider view).
+ *  `status='open'` reads every open PR, not just the first page. */
 export function useDataSourcePullRequests(
   wsId?: string, dataSourceId?: string | null, status?: string, enabled = true,
 ) {
   return useQuery({
     queryKey: VERSIONING_KEYS.dataSourcePrs(wsId, dataSourceId, status),
-    queryFn: () => api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
+    queryFn: () => status === 'open'
+      ? listAllOpenDataSourcePrs(wsId!, dataSourceId!)
+      : api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
     enabled: !!wsId && !!dataSourceId && enabled,
     staleTime: 15_000,
+    // A 404 is terminal (the data source has no versioned graph); the review inbox reads every
+    // data source in the workspace, versioned or not.
+    retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 1,
   })
 }
 
@@ -504,6 +553,16 @@ export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
   })
 }
 
+/** Pause or resume editing of a graph. Refetched on a refusal too, so a stale revision is replaced. */
+export function useSetGraphFrozen(wsId?: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ graphId, frozen, expectedRev }: { graphId: string; frozen: boolean; expectedRev: number }) =>
+      api.setGraphFrozen(wsId!, graphId, frozen, expectedRev),
+    onSettled: () => qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all }),
+  })
+}
+
 export function useOpenDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
@@ -533,17 +592,46 @@ export function useUpdateBranch(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { branchId: string; name?: string; description?: string; isShared?: boolean }) =>
       api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description, isShared: v.isShared }),
-    onSuccess: () => {
+    onSuccess: (_d, v) => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+      // Making a draft private removes its members.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, v.branchId) })
     },
   })
+}
+
+/** Add a draft member or change their role. Refreshes the members, and the branch list + resolve too,
+ *  since the first member makes a private draft shared. */
+export function useAddBranchMember(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { subjectType: 'user' | 'group'; subjectId: string; role: DraftRole }) =>
+      api.addBranchMember(wsId, graphId, branchId, v),
+    onSuccess: () => invalidateBranchMembers(qc, wsId, graphId, branchId),
+  })
+}
+
+export function useRemoveBranchMember(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { subjectType: 'user' | 'group'; subjectId: string }) =>
+      api.removeBranchMember(wsId, graphId, branchId, v.subjectType, v.subjectId),
+    onSuccess: () => invalidateBranchMembers(qc, wsId, graphId, branchId),
+  })
+}
+
+function invalidateBranchMembers(qc: ReturnType<typeof useQueryClient>, wsId: string, graphId: string, branchId: string) {
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can
  *  open the conflict resolver when `clean === false`; on a clean pull it refreshes the draft views. */
 export function usePullLatestDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
   return useMutation({
     mutationFn: (v: { branchId: string; resolutions?: ResolutionMap }) =>
       api.rebaseDraft(wsId, graphId, v.branchId, { resolutions: v.resolutions }),
@@ -559,6 +647,12 @@ export function usePullLatestDraft(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'mr'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
+      // Main's changes are now in the draft — refetch the canvas as publish does, so they show
+      // without a manual refresh.
+      if (!res.alreadyUpToDate) {
+        bumpMainEpoch()
+        invalidateAggregatedEdges()
+      }
     },
   })
 }
@@ -730,7 +824,8 @@ function useInvalidatePr(wsId: string) {
 export function useApproveMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   return useMutation({
-    mutationFn: (v: { prId: string; graphId: string }) => api.approveMergeRequest(wsId, v.prId),
+    mutationFn: (v: { prId: string; graphId: string; expectedHeadCommitId?: string | null }) =>
+      api.approveMergeRequest(wsId, v.prId, v.expectedHeadCommitId),
     onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
   })
 }

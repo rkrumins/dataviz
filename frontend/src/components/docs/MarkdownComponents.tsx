@@ -93,6 +93,11 @@ export const filenameMap: Record<string, string> = {
   'versioning/09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
   'versioning/10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
   'versioning/11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  'versioning/12-streaming-ingestion.md': 'versioning-streaming-ingestion',
+  'versioning/13-access-and-review.md': 'versioning-access-and-review',
+  'versioning/14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
+  'versioning/15-shared-contracts.md': 'versioning-shared-contracts',
+  'versioning/16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
   'README.md': 'versioning-guide',
   '02-data-model.md': 'versioning-data-model',
   '03-branching-commits-merge.md': 'versioning-branching-and-merge',
@@ -103,6 +108,11 @@ export const filenameMap: Record<string, string> = {
   '09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
   '10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
   '11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  '12-streaming-ingestion.md': 'versioning-streaming-ingestion',
+  '13-access-and-review.md': 'versioning-access-and-review',
+  '14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
+  '15-shared-contracts.md': 'versioning-shared-contracts',
+  '16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
   'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 

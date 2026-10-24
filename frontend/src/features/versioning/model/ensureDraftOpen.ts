@@ -13,13 +13,15 @@
  * opened from (branch-level attribution: a draft belongs to one view). The
  * server also claim-fills attribution onto a resumed draft that predates view
  * tracking. Returns the branch id, or null when no draft can be opened (the
- * graph context isn't resolved yet, or the caller lacks `:manage`) — callers
- * treat null as "cannot edit"; Published is read-only.
+ * graph context isn't resolved yet, the caller lacks `:manage`, or editing is
+ * paused — which is said to the user) — callers treat null as "cannot edit";
+ * Published is read-only.
  */
 import { useBranchStore } from '@/store/branchStore'
 import { useSchemaStore } from '@/store/schema'
 import { featureEnabled } from '@/store/features'
-import { resolveAndOpenDraft } from '@/services/versioningApiService'
+import { GraphNotWritableError, resolveAndOpenDraft } from '@/services/versioningApiService'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { VERSIONING_KEYS } from '../hooks/useVersioning'
 
 /** The branches/resolve caches must reflect a draft the moment it exists — the
@@ -27,7 +29,7 @@ import { VERSIONING_KEYS } from '../hooks/useVersioning'
  *  list, and a stale list makes it reject (and notify about) a draft this very
  *  function just opened or resumed. Loaded lazily so this model module keeps
  *  react-query out of its static graph. Fire-and-forget; never blocks the caller. */
-function invalidateVersioningCaches(): void {
+export function invalidateVersioningCaches(): void {
   void import('@/lib/queryClient')
     .then((m) => m.getQueryClient()?.invalidateQueries({ queryKey: VERSIONING_KEYS.all }))
     .catch(() => {})
@@ -55,7 +57,9 @@ export async function ensureDraftOpen(): Promise<string | null> {
       .switchToDraft(r.myDraft.branchId, r.myDraft.originatingViewId ?? activeViewId)
     invalidateVersioningCaches()
     return r.myDraft.branchId
-  } catch {
+  } catch (e) {
+    // Editing is paused: say so, in the server's words — otherwise authoring silently does nothing.
+    if (e instanceof GraphNotWritableError) useNotificationStore.getState().add({ type: 'error', message: e.message })
     // Missing :manage or a transient failure — no draft, so no editing.
     return null
   }

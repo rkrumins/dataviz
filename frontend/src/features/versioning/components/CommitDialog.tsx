@@ -20,6 +20,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
@@ -27,6 +28,7 @@ import { queryClient } from '@/lib/queryClient'
 import { MergeConflictError, NotUpToDateError, PullRequestExistsError } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
+import { ReviewerPicker } from './ReviewerPicker'
 import type { ChangeSet } from '../model/changeModel'
 
 export interface CommitDialogProps {
@@ -40,11 +42,17 @@ export interface CommitDialogProps {
   onLeave?: () => void
   /** Called once the draft is published. */
   onPublished?: () => void
+  /** False for an editor of a shared draft: only its owner or a maintainer publishes it directly. */
+  canPublishDraft?: boolean
 }
 
-export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
+export function CommitDialog({
+  workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished, canPublishDraft = true,
+}: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
+  /** Who must approve before the review can merge. */
+  const [reviewers, setReviewers] = useState<string[]>([])
   const [conflicts, setConflicts] = useState<number | null>(null)
   const [notUpToDate, setNotUpToDate] = useState(false)
   /** A review we discovered only when the server rejected our open (the race backstop). */
@@ -54,6 +62,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const { notify } = useAppNotifications()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
+  // Publishing straight to the live version needs publish; without it, a draft goes through review.
+  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
 
@@ -67,6 +77,9 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const viewChanges = viewChangesQ.data
   const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
   const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
+  // Edits still staged on the canvas are not on the draft: publishing would leave them behind. A
+  // review is not blocked — it tracks the branch, so edits saved later land in it.
+  const unsaved = useUnsavedCountOnBranch(branchId)
 
   // The review that already covers this branch — from the list, or from a lost race.
   const existingPr = livePr ? { prId: livePr.prId, title: livePr.title } : raced
@@ -95,7 +108,10 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
     setConflicts(null)
     setNotUpToDate(false)
     openMr.mutate(
-      { branchId, title: message || undefined, description: description || undefined },
+      {
+        branchId, title: message || undefined, description: description || undefined,
+        reviewers: reviewers.length ? reviewers : undefined,
+      },
       {
         onSuccess: (res) => {
           notify('success', 'Sent for review.')
@@ -107,6 +123,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   }
 
   const handlePublish = () => {
+    if (unsaved > 0) return
     // Publishing lands exactly what the open review proposed, so the server resolves that review as
     // merged. It's legitimate (it's the :manage escape hatch) but it skips the reviewers — so ask.
     if (inReview && !confirmBypass) {
@@ -236,7 +253,24 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
                   className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 resize-none"
                 />
               </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+                  Reviewers <span className="text-ink-muted/50 normal-case font-normal">· optional, they must approve before it merges</span>
+                </label>
+                <ReviewerPicker wsId={workspaceId} value={reviewers} onChange={setReviewers} />
+              </div>
             </>
+          )}
+
+          {unsaved > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="text-[11px] text-ink-muted leading-relaxed">
+                <span className="font-medium text-amber-500">{unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on the canvas.</span>{' '}
+                They aren’t part of this draft yet, so publishing now would leave them behind. Save them
+                in Review &amp; Save first, or discard them.
+              </div>
+            </div>
           )}
 
           {confirmBypass && (
@@ -276,14 +310,18 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
           {canManage && (
             <HoverTip
               className="inline-flex"
-              label={inReview
-                ? 'Publish straight to the live version, bypassing the open review'
-                : 'Publish straight to the live version, skipping review'}
-              detail="Everyone sees the result immediately"
+              label={!canPublish
+                ? 'Publishing straight to the live version needs the publish permission on this workspace'
+                : !canPublishDraft
+                ? 'Only the draft’s owner or a maintainer can publish a shared draft'
+                : inReview
+                  ? 'Publish straight to the live version, bypassing the open review'
+                  : 'Publish straight to the live version, skipping review'}
+              detail={canPublish && canPublishDraft ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges}
+              disabled={busy || !hasChanges || unsaved > 0 || !canPublish || !canPublishDraft}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass

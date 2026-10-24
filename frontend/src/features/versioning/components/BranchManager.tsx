@@ -3,7 +3,8 @@
  *
  * Opened from the BranchSwitcher ("Manage all drafts"). Lists open drafts with status, owner and
  * last activity, and exposes the full lifecycle per draft: Open, Get latest updates, Publish,
- * Settings, Archive. All wording comes from `branchVocab` (presentational only — no API/URL change).
+ * Settings, Archive. A draft being published stays listed, badged; the Archived tab lists the
+ * published and archived drafts, read-only. All wording comes from `branchVocab` (presentational only — no API/URL change).
  * Reuses the existing mutations and the CommitDialog/BranchSettingsModal/PullLatestButton so the
  * behaviour matches the rest of the app.
  */
@@ -19,18 +20,22 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
-import type { Branch } from '@/services/versioningApiService'
+import { useAuthStore } from '@/store/auth'
+import type { Branch, BranchStatusFilter } from '@/services/versioningApiService'
 import {
   useBranches, useOpenDraft, useAbandonDraft,
 } from '../hooks/useVersioning'
-import { BRANCH_VOCAB, draftStatus, ownerName } from '../model/branchVocab'
-import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
+import { BRANCH_VOCAB, canManageDraft, canWriteDraft, draftStatus, ownerName } from '../model/branchVocab'
+import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
 import { PublishDraftDialog } from './PublishDraftDialog'
 import { MOTION } from '@/lib/motion'
 
 type SortKey = 'recent' | 'name'
+type Tab = 'active' | 'archived'
+
+const ARCHIVED: BranchStatusFilter[] = ['merged', 'abandoned']
 
 export function BranchManager({
   wsId,
@@ -52,12 +57,16 @@ export function BranchManager({
   onClose: () => void
 }) {
   const { notify } = useAppNotifications()
+  const me = useAuthStore((s) => s.user?.id)
   const hasView = !!viewId
   // Branch-per-view: default to THIS view's own drafts. "Show all data-source drafts" is an
   // explicit, secondary toggle (default OFF) for the data-source-wide rollup — mirrors the
   // "this view / whole data source" pattern in ViewPrList/ViewHistoryTimeline.
   const [allDataSource, setAllDataSource] = useState(false)
-  const branchesQ = useBranches(wsId, graphId, hasView && !allDataSource ? viewId : undefined)
+  const [tab, setTab] = useState<Tab>('active')
+  const branchesQ = useBranches(
+    wsId, graphId, hasView && !allDataSource ? viewId : undefined, tab === 'archived' ? ARCHIVED : undefined,
+  )
   const openDraft = useOpenDraft(wsId, graphId)
 
   const [query, setQuery] = useState('')
@@ -68,8 +77,10 @@ export function BranchManager({
   const [publishBranch, setPublishBranch] = useState<Branch | null>(null)
   const [archiveBranch, setArchiveBranch] = useState<Branch | null>(null)
 
+  // The server sends open + publishing drafts, or on the Archived tab merged + abandoned ones.
+  const listed = useMemo(() => (branchesQ.data ?? []).filter((b) => b.kind !== 'main'), [branchesQ.data])
   const drafts = useMemo(() => {
-    const all = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open')
+    const all = listed
     const q = query.trim().toLowerCase()
     const filtered = q
       ? all.filter((b) =>
@@ -81,9 +92,9 @@ export function BranchManager({
         ? (a.name || BRANCH_VOCAB.untitled).localeCompare(b.name || BRANCH_VOCAB.untitled)
         : (b.updatedAt || '').localeCompare(a.updatedAt || ''),
     )
-  }, [branchesQ.data, query, sort])
+  }, [listed, query, sort])
 
-  const totalOpen = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open').length
+  const totalOpen = listed.length
 
   const handleCreate = () => {
     openDraft.mutate(
@@ -121,7 +132,9 @@ export function BranchManager({
               <div className="min-w-0">
                 <h2 className="text-[15px] font-semibold text-ink tracking-tight">{BRANCH_VOCAB.manageAll}</h2>
                 <p className="text-[11px] text-ink-muted">
-                  {totalOpen === 0 ? 'No drafts yet' : `${totalOpen} ${totalOpen === 1 ? BRANCH_VOCAB.draft.toLowerCase() : BRANCH_VOCAB.draftPlural.toLowerCase()} · everything stays private until published`}
+                  {tab === 'archived'
+                    ? 'Published and archived drafts'
+                    : totalOpen === 0 ? 'No drafts yet' : `${totalOpen} ${totalOpen === 1 ? BRANCH_VOCAB.draft.toLowerCase() : BRANCH_VOCAB.draftPlural.toLowerCase()} · everything stays private until published`}
                 </p>
               </div>
             </div>
@@ -132,6 +145,20 @@ export function BranchManager({
 
           {/* Toolbar */}
           <div className="px-5 py-3 flex items-center gap-2 border-b border-glass-border/40">
+            <div className="shrink-0 inline-flex rounded-lg border border-glass-border overflow-hidden text-[11px]">
+              {(['active', 'archived'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={cn(
+                    'px-2.5 py-1.5 font-medium first:border-0 border-l border-glass-border',
+                    tab === t ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+                  )}
+                >
+                  {t === 'active' ? 'Active' : 'Archived'}
+                </button>
+              ))}
+            </div>
             <div className="relative flex-1 min-w-0">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/70" />
               <input
@@ -187,7 +214,10 @@ export function BranchManager({
             {branchesQ.isLoading ? (
               <SkeletonRows />
             ) : drafts.length === 0 ? (
-              <EmptyState hasAny={totalOpen > 0} canManage={canManage} onCreate={() => setCreating(true)} />
+              <EmptyState
+                hasAny={totalOpen > 0} archived={tab === 'archived'} canManage={canManage}
+                onCreate={() => setCreating(true)}
+              />
             ) : (
               drafts.map((b) => (
                 <DraftCard
@@ -257,6 +287,7 @@ export function BranchManager({
         <PublishDraftDialog
           wsId={wsId} graphId={graphId} branchId={publishBranch.branchId}
           onClose={() => setPublishBranch(null)}
+          canPublishDraft={canManageDraft(publishBranch, me)}
         />
       )}
       {archiveBranch && (
@@ -287,6 +318,13 @@ function DraftCard({
   onArchive: () => void
 }) {
   const status = draftStatus(branch.baseCommitSeq, mainHead)
+  // Someone else's draft opens to look at; what would change it is offered to writers only, and
+  // renaming or archiving it to its owner or a maintainer.
+  const me = useAuthStore((s) => s.user?.id)
+  const canWrite = canWriteDraft(branch, me)
+  const canManageIt = canManageDraft(branch, me)
+  const live = branch.status === 'open'
+  const closed = branch.status === 'merged' || branch.status === 'abandoned'
   return (
     <div
       className={cn(
@@ -303,6 +341,7 @@ function DraftCard({
             {isCurrent && (
               <span className="shrink-0 text-[9px] font-bold uppercase tracking-wide text-accent-lineage bg-accent-lineage/10 px-1.5 py-0.5 rounded">Open now</span>
             )}
+            {branch.status === 'publishing' && <PublishingBadge />}
           </div>
           {branch.description ? (
             <p className="text-[12px] text-ink-muted line-clamp-2 mt-0.5">{branch.description}</p>
@@ -310,7 +349,13 @@ function DraftCard({
             <p className="text-[12px] text-ink-muted/60 italic mt-0.5">No description</p>
           )}
           <div className="flex items-center flex-wrap gap-x-2 gap-y-1 mt-2">
-            <DraftStatusPill status={status} />
+            {closed ? (
+              <span className="text-[10px] font-semibold text-ink-muted">
+                {branch.status === 'merged' ? BRANCH_VOCAB.published : 'Archived'}
+              </span>
+            ) : (
+              <DraftStatusPill status={status} />
+            )}
             <span className="text-[11px] text-ink-muted">{ownerName(branch.owner, branch.userNames)}</span>
             <span className="text-ink-muted/40">·</span>
             <span className="text-[11px] text-ink-muted">edited {timeAgo(branch.updatedAt)}</span>
@@ -318,7 +363,8 @@ function DraftCard({
         </div>
       </div>
 
-      {/* Actions */}
+      {/* Actions — none on a published or archived draft; a publishing one only opens and renames */}
+      {!closed && (
       <div className="flex items-center gap-1 mt-2.5 pt-2.5 border-t border-glass-border/40">
         <button
           onClick={onOpen}
@@ -329,17 +375,20 @@ function DraftCard({
               : 'text-accent-lineage hover:bg-accent-lineage/10',
           )}
         >
-          {isCurrent ? <><Eye className="w-3.5 h-3.5" /> Viewing</> : <><ArrowRight className="w-3.5 h-3.5" /> Open</>}
+          {isCurrent ? <><Eye className="w-3.5 h-3.5" /> Viewing</>
+            : canWrite ? <><ArrowRight className="w-3.5 h-3.5" /> Open</> : <><Eye className="w-3.5 h-3.5" /> View</>}
         </button>
 
-        <PullLatestButton
-          variant="manager" wsId={wsId} graphId={graphId}
-          branchId={branch.branchId} behind={status.behind}
-        />
+        {canWrite && live && (
+          <PullLatestButton
+            variant="manager" wsId={wsId} graphId={graphId}
+            branchId={branch.branchId} behind={status.behind}
+          />
+        )}
 
         <div className="flex-1" />
 
-        {canManage && (
+        {canManage && canWrite && live && (
           <HoverTip
             className="inline-flex"
             label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
@@ -352,6 +401,7 @@ function DraftCard({
             </button>
           </HoverTip>
         )}
+        {canManageIt && (
         <HoverTip className="inline-flex" label="Rename this draft, describe it, or copy a link to it">
           <button
             onClick={onSettings}
@@ -361,7 +411,8 @@ function DraftCard({
             <Settings2 className="w-3.5 h-3.5" />
           </button>
         </HoverTip>
-        {canManage && (
+        )}
+        {canManage && canManageIt && live && (
           <HoverTip
             className="inline-flex"
             label={`${BRANCH_VOCAB.archive} this draft`}
@@ -377,6 +428,7 @@ function DraftCard({
           </HoverTip>
         )}
       </div>
+      )}
     </div>
   )
 }
@@ -440,7 +492,12 @@ function ArchiveConfirm({
   )
 }
 
-function EmptyState({ hasAny, canManage, onCreate }: { hasAny: boolean; canManage: boolean; onCreate: () => void }) {
+function EmptyState({ hasAny, archived, canManage, onCreate }: {
+  hasAny: boolean; archived: boolean; canManage: boolean; onCreate: () => void
+}) {
+  if (archived && !hasAny) {
+    return <p className="text-center text-[12px] text-ink-muted px-6 py-12">No published or archived drafts yet.</p>
+  }
   return (
     <div className="flex flex-col items-center justify-center text-center px-6 py-12">
       <span className="flex items-center justify-center w-12 h-12 rounded-2xl bg-canvas-elevated border border-glass-border mb-3">

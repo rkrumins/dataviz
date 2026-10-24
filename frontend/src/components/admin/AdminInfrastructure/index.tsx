@@ -8,12 +8,12 @@
  * Read-only observability (v1): verdicts come from work signals in shared
  * state, so the page is equally truthful on docker-compose and GKE.
  */
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Activity, AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
-import type { OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
+import type { GraphProvider, OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
 import { useSystemStatus } from './useSystemStatus'
 import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
@@ -23,6 +23,8 @@ import { GraphStoreLimitsDialog } from './GraphStoreLimitsDialog'
 import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
+import { VersionedGraphsPanel } from './VersionedGraphsPanel'
+import { ReseedProviderDialog } from './ReseedProviderDialog'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -152,6 +154,21 @@ export function AdminInfrastructure() {
         }, { replace: true })
     }, [setSearchParams])
 
+    // The fleet inventory opens from the projection panel and is keyed by the
+    // URL (``?graphs``) too, so a link to it lands with the list open.
+    const showGraphs = isSystemAdmin && searchParams.has('graphs')
+    const setShowGraphs = useCallback((open: boolean) => {
+        setSearchParams(prev => {
+            const p = new URLSearchParams(prev)
+            if (open) p.set('graphs', '')
+            else p.delete('graphs')
+            return p
+        }, { replace: true })
+    }, [setSearchParams])
+
+    // The provider whose versioned graphs are being reseeded from Postgres.
+    const [reseedFor, setReseedFor] = useState<GraphProvider | null>(null)
+
     const hero = data ? HERO[data.status] : null
     const HeroIcon = hero?.icon ?? Loader2
     const updatedAgo = dataUpdatedAt ? formatAgeMs(Date.now() - dataUpdatedAt) : null
@@ -233,6 +250,7 @@ export function AdminInfrastructure() {
                         projection={data.projection}
                         capacity={capacity.data ?? null}
                         onAdjustLimits={isSystemAdmin ? openLimits : undefined}
+                        onReseed={isSystemAdmin ? setReseedFor : undefined}
                     />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
@@ -287,11 +305,21 @@ export function AdminInfrastructure() {
                     <DiagnosticsPanel snapshot={data} />
 
                     <BootstrapJobsPanel jobs={data.bootstrapJobs} />
-                    <ProjectionPanel projection={data.projection} providers={data.graphProviders} />
+                    <ProjectionPanel
+                        projection={data.projection}
+                        providers={data.graphProviders}
+                        onShowAll={isSystemAdmin ? () => setShowGraphs(true) : undefined}
+                    />
+                    {showGraphs && (
+                        <VersionedGraphsPanel providers={data.graphProviders} onClose={() => setShowGraphs(false)} />
+                    )}
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>
             ) : null}
 
+            {isSystemAdmin && reseedFor && (
+                <ReseedProviderDialog provider={reseedFor} onClose={() => setReseedFor(null)} />
+            )}
             {isSystemAdmin && limitsFor && (
                 <GraphStoreLimitsDialog open endpoint={limitsFor} onClose={closeLimits} />
             )}

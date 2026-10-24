@@ -76,37 +76,50 @@ erDiagram
 
 ## 3.2 Opening a draft
 
-`open_draft` (`service.py:277`) inserts a `draft` `BranchORM` whose `base_commit_seq` is the graph's
+`open_draft` (`service.py:686`) inserts a `draft` `BranchORM` whose `base_commit_seq` is the graph's
 current `main_head_commit_seq` — the point the draft is "branched from." A draft is **per-user** by
 default (`owner`); `shared=True` opens a collaborative draft whose checkpoints field-merge concurrent
-editors instead of clobbering (§3.13).
+editors instead of clobbering (§3.13). A private draft is written only by its owner, a shared one by
+its editors and maintainers, and a draft is read only by the people it is for (§3.15). A draft is not
+opened on a graph whose editing is paused (409 `graph_not_writable`, §3.15). A graph in the trash is
+not found (404), and one trashed while the request runs answers 409 `graph_not_writable` with
+`state: "trashed"`.
 
 **Branch-per-view.** A draft carries an `originating_view_id` so each Context View gets its *own*
-isolated draft on the same data source. `resolve_graph` (`service.py:3032`) is the UI's boot lookup —
+isolated draft on the same data source. `resolve_graph` (`service.py:5100`) is the UI's boot lookup —
 data source → graph + the caller's editing draft. Its resolution rules matter:
 
 - No `originating_view_id` → the owner's most-recent open draft (legacy behavior).
 - With a view → prefer *this view's* draft; else **claim-if-null**: adopt a legacy
   `originating_view_id IS NULL` draft for this view — **but only on a write-intent resolve**
   (`open_draft_if_absent=True`). A plain read *sees* the null draft without mutating it, so two
-  concurrent reads from different views can't race to claim the same draft (`service.py:3053-3074`).
+  concurrent reads from different views can't race to claim the same draft (`service.py:5123-5146`).
 
 ```mermaid
 stateDiagram-v2
     [*] --> open : open_draft (base = main head)
     open --> open : stage_changes → checkpoint (draft commits)
     open --> open : rebase_draft (pull latest main)
-    open --> publishing : publish / merge_mr (under _lock_graph)
-    publishing --> merged : squash lands on main
-    open --> abandoned : abandon_draft / idle-TTL sweep
+    open --> merged : publish / merge_mr in the request (under _lock_graph)
+    open --> publishing : a large publish or merge is queued as a job
+    publishing --> merged : the job's squash lands on main
+    publishing --> open : the job is refused or fails (release_publishing)
+    open --> abandoned : abandon_draft / idle-TTL sweep (see §3.15)
     merged --> [*]
     abandoned --> [*]
     note right of publishing
-        Auto-rebase-when-clean: a stale draft is
-        merged against CURRENT main in one step;
-        a real clash raises MergeConflict.
+        Closed to every writer but its job:
+        a save answers 409 branch_closed.
+        A draft behind main never merges;
+        it must pull latest first (§3.6).
     end note
 ```
+
+A publish or merge that changes more than `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities answers 202
+and runs as a job; `create_publish_job` (`import_export/service.py`) sets the draft `publishing`,
+and the job hands it back `open` at once when it is refused (any answer the route would have given).
+Any other ending (an unexpected error, a lost lease, a timeout) is reopened by `release_publishing`
+(`service.py:1787`) on the transfer lane's reap loop, about every 60 s.
 
 ---
 
@@ -248,9 +261,10 @@ draft tombstoned N" — E and N are different entities. `find_dangling_edges(liv
 
 ## 3.6 Publish & squash
 
-`publish` (`service.py:656`) is the ungated path (admin / no review); `merge_mr` (`service.py:1462`) is the
+`publish` (`service.py:1133`) is the path without review; `merge_mr` (`service.py:2762`) is the
 reviewed equivalent. Both flush pending edits, then run under `_retry_seq` + `_lock_graph`, then share the
-squash body `_apply_draft_squash` (`service.py:715`).
+squash body `_apply_draft_squash` (`service.py:1209`). Both need `workspace:datasource:publish` at the
+route, and run the gates listed in §3.15 before any merge is computed.
 
 ```mermaid
 sequenceDiagram
@@ -344,12 +358,19 @@ what a pull had pulled.
 
 ## 3.8 Fork (copy-on-write) & pull requests
 
-`fork_graph` (`service.py:1057`) creates a new graph whose `main` **inherits the parent's state without
+`fork_graph` (`service.py:2139`) creates a new graph whose `main` **inherits the parent's state without
 copying any rows** — `fork_parent_graph_id` + `fork_base_commit_seq` are set, and the fork-point commit
-carries the parent's merkle root (`service.py:1076-1101`). Divergence accrues only as the fork's own
+carries the parent's merkle root (`service.py:2162-2191`). Divergence accrues only as the fork's own
 commits; reads compose parent@fork-base ⊕ own (that recursion lives in `_state_as_of`, §3.4). The fork
 gets its own FalkorDB graph name **only if the parent is pinned** — an unpinned parent's fork stays
-unpinned so the projector doesn't materialize an orphan key nothing reads (`service.py:1104-1114`).
+unpinned so the projector doesn't materialize an orphan key nothing reads (`service.py:2192-2204`).
+
+Forking needs `workspace:datasource:manage`. It runs under the parent's `_lock_graph`, refuses a
+parent with `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with **409** `fork_limit {limit}`
+(trashed forks do not count), and refuses a frozen parent with **409** `graph_not_writable`. A fork is
+deleted into the trash (`DELETE …/graphs/{forkId}`) and brought back (`POST …/graphs/{forkId}/restore`);
+the reaper purges it once `GRAPHVER_PURGE_GRACE_DAYS` have passed, dropping only its own key. See
+[06 · API Reference](06-api-reference.md) for the refusals.
 
 ```mermaid
 flowchart LR
@@ -367,13 +388,15 @@ flowchart LR
     MERGE --> PM2["parent main @ N+1"]
 ```
 
-`open_pr` (`service.py:1121`) opens a fork-main → parent-main PR, recording the current
+`open_pr` (`service.py:2212`) opens a fork-main → parent-main PR, recording the current
 mergeability/conflict set from `_compute_fork_merge`; listed `reviewers` make approval a merge
 precondition. `merge_pr` re-locks the parent, recomputes the fork merge, runs the ontology + approval
-gates, and squashes into the parent's `main` with the fork's contributors. `merge_mr` (`service.py:1462`)
+gates, and squashes into the parent's `main` with the fork's contributors. `merge_mr` (`service.py:2762`)
 is the unified entry: it dispatches a fork PR to `merge_pr` and a draft→main MR through the shared squash
-body, enforcing the reviewer-approval gate (`ApprovalRequired`) in between (`service.py:1512-1519`). Proof:
-`test_versioning_fork.py`, `test_versioning_pr_gate.py`, `test_versioning_draft_mr.py`.
+body, enforcing the reviewer-approval gate (`_require_approvals`, `service.py:2872`) before the merge is
+computed (`service.py:2810`). An approval counts until a content commit lands on the draft after it
+(§3.15). Proof: `test_versioning_fork.py`, `test_versioning_pr_gate.py`,
+`test_versioning_draft_mr.py`.
 
 ### Invariant — ONE LIVE PR PER SOURCE BRANCH
 
@@ -492,26 +515,32 @@ flowchart TD
     Retry --> R
 ```
 
-1. **Advisory lock.** `_lock_graph` (`service.py:3927`) takes a transaction-scoped
+1. **Advisory lock.** `_lock_graph` (`service.py:6636`) takes a transaction-scoped
    `pg_advisory_xact_lock(hashtext(graph_id))` **before** reading `main` head, so the merge composes
-   against current main. Different graphs never contend — no cross-graph latency. Wraps publish, merge_mr,
-   merge_pr.
-2. **`commit_seq` retry.** `_retry_seq` (`service.py:3912`) re-runs the whole thunk — which re-fetches
+   against current main. Different graphs never contend — no cross-graph latency. Wraps every write that
+   advances `main`: publish, merge_mr, merge_pr, revert, restore, sync, bulk import through the API, and
+   `apply_ops` on `main`. Every lock here is waited on for at most `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS`
+   (default 5000) through `_bounded_lock`; a wait that runs out is `LockBusy`.
+2. **`commit_seq` retry.** `_retry_seq` (`service.py:6587`) re-runs the whole thunk — which re-fetches
    state and recomputes against the *current* head — on a `uq_commits_branch_seq` `IntegrityError` (or a
-   head-CAS miss, §4 below), up to `COMMIT_MAX_RETRIES` (5) with exponential backoff, else
-   `ConcurrencyError`. For the **lock-holding** paths (publish/merge/rebase) this closes the
-   read-stale-then-write race outright, because state is read *under* the lock, so any intervening commit
-   forces the seq collision. Wraps checkpoint, publish, merge_mr, merge_pr, apply_ops.
+   head-CAS miss, §4 below, or a `LockBusy`), up to `COMMIT_MAX_RETRIES` (5) with full-jitter backoff
+   capped at 2 s, else `ContentionExhausted`, answered as **503** `lock_busy` with `Retry-After`. For the
+   **lock-holding** paths (publish/merge/rebase) this closes the read-stale-then-write race outright,
+   because state is read *under* the lock, so any intervening commit forces the seq collision. Wraps
+   checkpoint, publish, merge_mr, merge_pr, apply_ops.
 3. **OCC, three ways.** (a) Direct-edit `base_version` token → a 3-way merge in `_apply_ops_once` turns a
    stale same-field edit into a conflict, not an overwrite. (b) Shared-draft staged `base_content_hash` →
    `_fold_shared` merges each edit against the value it was staged against. (c) Sync base-snapshot 3-way in
    `sync_ingest` ([10](10-authoritative-sources-datahub-openmetadata.md)). Proof:
    `test_versioning_occ_concurrency.py`, `test_versioning_shared.py`.
-4. **Per-entity head compare-and-swap** (`_write_deltas(occ_guard=True)`). The lock-free `apply_ops` path
-   (interactive canvas / provider write-through / import) takes **no** advisory lock, so its state read and
-   its `commit_seq` allocation are separate statements — a concurrent same-branch commit that lands
-   *between* them would get a non-colliding next seq and (with only §2) silently overwrite the other
-   writer's entity from stale state. Closed by a CAS on the mutable head pointer: the `entity_heads` upsert
+4. **Per-entity head compare-and-swap** (`_write_deltas(occ_guard=True)`). `apply_ops` (interactive
+   canvas / provider write-through / import) holds `_lock_graph` on `main`; on a draft it takes no graph
+   lock, but the graph's lifecycle key shared and the draft's row lock (`FOR NO KEY UPDATE`,
+   `_lock_branch`, `service.py:6669`), which every writer of that draft — stage, checkpoint, pull, claim,
+   abandon — also takes, so one draft's writers take turns. The CAS is the guard beneath those locks: a
+   writer's state read and its `commit_seq` allocation are separate statements, and a same-branch commit
+   that landed *between* them would get a non-colliding next seq and (with only §2) silently overwrite the
+   other writer's entity from stale state. Closed by a CAS on the mutable head pointer: the `entity_heads` upsert
    advances an entity only if its `content_hash` is still the pre-image this commit read
    (`content_hash == prev`, empty-state/tombstone-aware so a legit delete→re-create resurrects while a
    concurrent *live* create misses). A miss updates 0 rows → `_StaleHead` → `_retry_seq` re-runs against
@@ -533,6 +562,122 @@ squash-publishes + shared genesis/import/revert events), which is byte-identical
 single-view data source. `entity_history` returns one entity's full revision timeline across branches.
 These read APIs are documented in [06 · API Reference](06-api-reference.md) and surfaced by the UI in
 [07 · Frontend](07-frontend-integration.md).
+
+---
+
+## 3.15 Who may write: drafts, publish, approvals and frozen graphs
+
+The routes check workspace permissions (`requires(...)`); the service checks who may touch a given draft
+(`_require_edit`, `_require_manage`, `_require_publish`, `service.py:5499-5520`) and whether the graph
+takes writes at all (`_assert_writable`, `service.py:634`). [13 · Access & Review](13-access-and-review.md)
+is the fuller design; this section is what ships.
+
+### Draft visibility and write rules
+
+A draft is **private** (`is_shared = false`, the default) or **shared**. Its owner is an implicit
+maintainer; a shared draft's members hold `viewer`, `editor` or `maintainer`, directly or through a
+group (`_branch_role`).
+
+| Action | Private draft | Shared draft |
+|---|---|---|
+| Read (state, diffs, commit log, history, freshness, members, exports, a `?branchId=` graph read) | owner, workspace managers, the author or a requested reviewer of any PR raised from it | the same, plus every member |
+| Write: save, stage, checkpoint, pull, import, open a merge request | owner | owner, editors, maintainers |
+| Publish it directly | owner | owner, maintainers |
+| Abandon, rename, add or remove members | owner | owner, maintainers |
+| Make it private or shared (`isShared`) | owner | owner |
+
+- Anyone else gets **403** `{type: "access_denied", code: "not_draft_owner", branchId, owner}` on a
+  private draft, and **403** `{…, code: "not_owner_or_member", required: "editor" | "maintainer"}` on a
+  shared one. Workspace managers read every draft but write only their own, or a shared one on which
+  they are an editor or maintainer.
+- A draft the caller may not read answers **404**, as for a branch that does not exist
+  (`_branch_readable`, `service.py:5535`). Write routes need `workspace:datasource:manage`, and managers
+  read every draft, so a refused write is a 403, not a 404.
+- Member rows left on a private draft grant nothing, and a deleted group grants nothing. When a group
+  row could decide and the groups cannot be looked up, the answer is **503** `groups_unavailable`, never
+  a refusal.
+- Adding the first member shares a private draft; making a draft private deletes every member row.
+- At every checkpoint — so at every publish and merge too, which fold pending edits through one — edits
+  staged by someone who may no longer write the draft (removed, un-shared, out of the group) are
+  withdrawn, not folded in (`service.py:970-983`).
+- Merging a review does not check the merger's role on the draft: the merger needs
+  `workspace:datasource:manage` and `workspace:datasource:publish` at the route, not ownership of or
+  membership in the draft.
+- The idle-draft sweep (`sweep_idle_drafts`, `service.py:1752`) abandons an open draft idle past
+  `GRAPHVER_DRAFT_TTL_DAYS`, but not one with a live PR or staged edits, nor one on a graph that is
+  deleted, not live, or was unfrozen within the TTL.
+
+### Publish permission
+
+Advancing `main` needs `workspace:datasource:publish` on top of manage: publish, PR and merge-request
+merge, revert, restore, sync and `/graph/resync` (and freeze and unfreeze, below). A person without it
+gets **403** `{error: "missing_permission", permission: "workspace:datasource:publish", …}` from the
+route gate. A person's direct write to a versioned graph's `main` — the graph routes with no draft named
+(`/graph/save`, `/graph/nodes/create`, `/graph/edges`, `/graph/commands/batch`) and `POST …/bulk-ingest`
+— gets **403** `{type: "access_denied", code: "publish_required", required:
+"workspace:datasource:publish"}` (`require_publish_for_main`, `backend/app/api/v1/versioning_gate.py`).
+An API key never holds publish: it writes `main` directly only if the person who owns it holds publish,
+and cannot call the publish, merge, revert, restore or sync routes at all (403 `api_key_not_allowed`).
+`workspace_publisher`, `workspace_data_engineer` and the admins hold publish; `workspace_member` does
+not.
+
+### Head-bound approvals
+
+`approve_pr` (`service.py:2329`) records each approval in `merge_requests.approvals` as `{actor:
+{headCommitId, headSeq, at}}`: the source draft's head at that moment, and that commit's own seq. It
+takes an optional `expectedHeadCommitId` (the head the reviewer loaded) and answers **409**
+`head_moved {prId, headCommitId}` when the draft has moved on. The PR's author and the source draft's
+owner get **403** `self_review`; a merged or closed PR is 404. The PR row is locked for the
+transaction (bounded), so two reviewers approving at once both land.
+
+An approval holds until a content commit lands on the draft after its `headSeq` (`_approvals`,
+`service.py:2843`). A pull that rewrote none of the draft's own edits (`stats.rebased` all zero) is not
+content and keeps it; an approval with no recorded head (given before the
+`20261018_1000_gv_mr_approvals` migration) is stale. The merge gate `_require_approvals` passes a PR with
+no requested reviewers; otherwise it answers **409** `{type: "approval_required", pending, stale}`, where
+`pending` is every requested reviewer without a standing approval and `stale` those of them whose
+approval went stale. It runs before the merge is computed, and for a merge large enough to queue, before
+the job is queued. A workspace manager who was not asked may approve; that approval does not count
+toward the gate.
+
+### Frozen, trashed and purging graphs
+
+`_assert_writable` refuses a content write to a graph that is not live with **409** `{type:
+"graph_not_writable", state, reason, retryable: false}`: `state` is `frozen` (editing paused),
+`trashed` (its data source is in the trash) or `purging` (a purge of it exists). Only `live` and
+`frozen` are stored (`graphs.lifecycle_state`); the other two are derived from `deleted_at` and the
+purge job. It covers opening a draft, saves, staging, checkpoints, pulls, publish, merge, revert,
+restore, forking, bulk import, sync and resync, and creating an import or publish job. Reads, exports,
+abandon, reviews and member changes are not refused.
+
+A publisher pauses and resumes editing with `POST …/graphs/{gid}/lifecycle/freeze` and `…/unfreeze`
+(`{expectedRev}` → `{graphId, state, rev}`; `set_frozen`, `service.py:1814`). A stale `expectedRev` is
+**409** `version_conflict`, and asking for the state the graph is already in is a 200 that changes
+nothing. A freeze is refused while version control is still being enabled (409 `integrity`).
+
+Draft writers take the graph's lifecycle key (`gvlifecycle:<gid>`) shared before `_assert_writable`;
+a freeze, trash, restore or purge being queued takes it exclusive. So a freeze waits for the saves in
+flight, and a save that asks after it waits for it and then sees `frozen`. A wait past
+`GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` is 503 `lock_busy`. Main writers do not take the key; they hold
+`_lock_graph`, which a freeze takes after it.
+
+### Gate order
+
+The first refusal wins.
+
+- **Draft write** (`_apply_ops_once`, `service.py:6751`): 409 `integrity` while version control is
+  still being enabled → lifecycle key shared → `_assert_writable` →
+  the draft's row lock (404 if it is not this graph's) → an `Idempotency-Key` replay answers here → 409
+  `graph_not_writable` → 409 `branch_closed` (`_require_open`) → 403 (`_require_edit`). A save to `main`
+  through `/graph/changes` is 409 `main_write_forbidden` before any lock. Stage, checkpoint and pull run
+  the same checks with no replay, so their 409 `graph_not_writable` comes before the row lock.
+- **Publish** (`service.py:1159-1180`): fold staged edits (a checkpoint) → `_lock_graph` →
+  `_assert_writable` → draft row lock → 409 `branch_closed` → 409 `job_active` while an import runs on the
+  draft → staged edits that arrived since are folded by a retry → 403 (`_require_publish`: owner of a
+  private draft, maintainer of a shared one) → 409 `not_up_to_date` → merge.
+- **Merge a draft's merge request** (`service.py:2786-2818`): fold staged edits → `_lock_graph` → PR still
+  live → `_assert_writable` → draft row lock → 409 `branch_closed` → 409 `job_active` → 409
+  `approval_required` → 409 `not_up_to_date` → merge.
 
 ---
 

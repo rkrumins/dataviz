@@ -715,6 +715,10 @@ _EVENT_META.update({
     "workspace.versioning.resynced": ("info", _envelope_summary("Re-synced the versioned graph of {}")),
     "workspace.versioning.blank_created": ("info", _envelope_summary("Created a new versioned model, {}")),
     "workspace.versioning.duplicates_collapsed": ("warning", _envelope_summary("Collapsed duplicate copies in {}")),
+    "workspace.versioning.fork_deleted": ("warning", _envelope_summary("Deleted fork {}")),
+    "workspace.versioning.fork_restored": ("info", _envelope_summary("Restored fork {}")),
+    "workspace.versioning.frozen": ("warning", _envelope_summary("Paused editing of the versioned graph of {}")),
+    "workspace.versioning.unfrozen": ("info", _envelope_summary("Resumed editing of the versioned graph of {}")),
     "provider.connection.created": ("info", _envelope_summary("Registered provider {}")),
     "provider.connection.updated": ("info", _envelope_summary("Updated provider {}")),
     "provider.connection.deleted": ("warning", _envelope_summary("Deleted provider {}")),
@@ -722,6 +726,14 @@ _EVENT_META.update({
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
+    "platform.versioning.watermarks_reset": ("warning", lambda p: (
+        "Reseeded every versioned graph on FalkorDB provider "
+        f"{_detail(p, 'provider') or '?'} from Postgres"
+    )),
+    "platform.versioning.projection_moved": ("warning", lambda p: (
+        f"Moved versioned graph {_detail(p, 'graphId') or '?'} to FalkorDB key "
+        f"{(_detail(p, 'to') or {}).get('key', '?')}"
+    )),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
@@ -773,12 +785,18 @@ LABELS: dict[str, str] = {
     "workspace.versioning.resynced": "Re-synced a versioned graph",
     "workspace.versioning.blank_created": "Created a versioned model",
     "workspace.versioning.duplicates_collapsed": "Collapsed duplicates",
+    "workspace.versioning.fork_deleted": "Deleted a fork",
+    "workspace.versioning.fork_restored": "Restored a fork",
+    "workspace.versioning.frozen": "Paused version control editing",
+    "workspace.versioning.unfrozen": "Resumed version control editing",
     "provider.connection.created": "Registered a provider",
     "provider.connection.updated": "Updated a provider",
     "provider.connection.deleted": "Deleted a provider",
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
     "platform.node_identity.updated": "Changed node identity",
+    "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
+    "platform.versioning.projection_moved": "Moved a versioned graph projection",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",

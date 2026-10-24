@@ -46,7 +46,7 @@ async def _count(factory, name: str) -> int:
     graph = factory(name)
     if asyncio.iscoroutine(graph):                       # the factory resolves topology async
         graph = await graph
-    res = await graph.query("MATCH (n) RETURN count(n)")
+    res = await graph.query("MATCH (n) WHERE NOT n:_GVProjMeta RETURN count(n)")
     rows = res.result_set or []
     return int(rows[0][0]) if rows else 0
 
@@ -61,6 +61,7 @@ async def _seed(svc, proj, provider: str, name: str) -> str:
     gid = (await svc.create_graph(
         data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a",
         falkor_graph_name=name, falkor_provider=provider,
+        owns_falkor_graph=True,                         # only minted keys evict
     ))["graph_id"]
     d = await svc.open_draft(graph_id=gid, owner="a")
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="a", ops=[

@@ -161,6 +161,16 @@ async def test_the_preview_shows_everything_that_moves(test_client, db_session, 
                             "pinsDestinationDefault": None}
 
 
+async def test_the_preview_says_the_forks_of_its_history_move_with_it(test_client, db_session,
+                                                                      world):
+    world.facts = {**VERSIONED, "forks": 2}
+    async with acting_as(db_session, "cy"):
+        p = await _preview(test_client)
+    assert p["versioning"]["forks"] == 2
+    assert {n["code"]: n["message"] for n in p["notes"]}["forks"] == \
+        "2 forks of its version history move with it."
+
+
 async def test_the_preview_names_who_would_lose_access(test_client, db_session, world):
     """Owners and the people a view is shared with keep it. Finance's audience for its three
     workspace-shared views does not — the Analysts team, Finance's viewer and its other admin —
@@ -781,6 +791,37 @@ async def test_undo_puts_everything_back(test_client, db_session, world):
         AggregationDataSourceStateORM.data_source_id == DS)) == A
     assert world.relocations == [(DS, B, True), (DS, A, True)]
     assert len(await _events(db_session, "workspace.data_source.move_undone")) == 2
+
+
+async def test_an_undo_that_landed_but_raised_keeps_the_graph_with_the_source(
+    test_client, db_session, world, monkeypatch,
+):
+    """The undo's commit lands and only its answer is lost (a connection reset after the server
+    committed): the source is back in A, so its history stays there, and the retry is answered
+    with the undo it made."""
+    world.facts = VERSIONED
+    async with acting_as(db_session, "cy"):
+        moved = (await _move(test_client)).json()
+
+    commit = db_session.commit
+    lost = []
+
+    async def _land_then_fail_once():
+        await commit()
+        if not lost:
+            lost.append(True)
+            raise ConnectionResetError("connection reset after COMMIT")
+
+    monkeypatch.setattr(db_session, "commit", _land_then_fail_once)
+    async with acting_as(db_session, "cy"):
+        first = await test_client.post(f"{TRANSFERS}/{moved['id']}/undo", headers=REASON)
+        retry = await test_client.post(f"{TRANSFERS}/{moved['id']}/undo", headers=REASON)
+
+    assert first.status_code == 503                         # a lost connection's answer
+    assert world.relocations == [(DS, B, True), (DS, A, True)], \
+        "the graph is not moved back from where its source now is"
+    assert (await _fresh(db_session, WorkspaceDataSourceORM, DS)).workspace_id == A
+    assert (retry.status_code, retry.json()["status"]) == (200, "undone")
 
 
 async def test_undo_is_refused_once_something_is_built_on_it(test_client, db_session, world):

@@ -33,7 +33,7 @@ def _falkordb_available() -> bool:
 
 
 async def _node_rows(graph):
-    res = await graph.query("MATCH (n) RETURN n.urn, n.entityId, n.displayName, labels(n) ORDER BY n.urn")
+    res = await graph.query("MATCH (n) WHERE NOT n:_GVProjMeta RETURN n.urn, n.entityId, n.displayName, labels(n) ORDER BY n.urn")
     return res.result_set or []
 
 
@@ -47,7 +47,7 @@ async def _run() -> None:
     svc = GraphVersioningService()
     factory = make_falkor_graph_factory()
     name = f"gv_live_{os.getpid()}_{os.urandom(3).hex()}"
-    graph = factory(name)
+    graph = await factory(name)
     proj = FalkorProjector(graph_client_factory=factory)
 
     try:

@@ -24,15 +24,16 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
+from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import ImportRowORM, JobORM
+from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, Viewer
 from . import stream
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import ImportWorker, lease_job
 from .rowmodel import column_order
-from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED
+from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
 from .uploads import PACKAGE_PREFIX
 
@@ -58,13 +59,17 @@ class ImportExportService:
         ontology_resolver=None,
         layout_writer=None,
         publish_hook=None,
+        replace_scope_resolver=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
-        # Optional async ``(workspace_id, data_source_id, view_id) -> scope dict | None`` — resolves
-        # a view's scope for view-scoped export AND view-scoped replace. Injected at the API layer
+        # Optional async ``(workspace_id, data_source_id, view_id, branch_id) -> scope dict | None``
+        # — resolves a view's scope for view-scoped export. Injected at the API layer
         # (management-DB access), so the worker stays decoupled.
         self._scope_resolver = scope_resolver
+        # The same for a view-scoped replace, which deletes within that scope; it raises when it
+        # cannot read the view. Fail-closed: without a scope, the replace is refused.
+        self._replace_scope_resolver = replace_scope_resolver
         # Optional async ``(workspace_id, data_source_id) -> {node_types, edge_types} | None`` — the
         # live ontology types for the per-row import gate. Injected the same way.
         self._ontology_resolver = ontology_resolver
@@ -99,35 +104,120 @@ class ImportExportService:
         auto_publish: bool = False,
         idempotency_key: Optional[str] = None,
         name: Optional[str] = None,
+        originating_view_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
         Returns ``{job_id, branch_id, source_uri}``. When ``source_uri`` is omitted it is minted
         from the traceable ``{ws}/{ds}/{graph}/{job}/source.<fmt>`` layout (the caller then streams
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
-        imports per branch, like successive manual edits); omitted -> open a fresh import draft.
-        """
-        if branch_id is None:
-            branch_id = await self._svc.open_draft(
-                graph_id=graph_id, owner=actor, name=name or "Import")
+        imports per branch, like successive manual edits); omitted -> open a fresh import draft
+        (for ``originating_view_id``), in the job's transaction once the graph is known to be in
+        ``workspace_id``: an import refused or rolled back leaves no empty draft behind.
+        A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
+        a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
+        any other branch ``ValueError``.
 
+        One import at a time per draft: while one is pending or running it is :class:`JobActive`.
+        It is checked under the draft's lock, so the rule holds where a worker start has not built
+        ``uq_jobs_ingest_active`` yet, and the index settles it too. A job nothing will run does not
+        count — the transfer lane's reaper rules are applied to it first — but a running one whose
+        worker went quiet does: it is taken over and resumed.
+        """
+        if branch_id == "main":
+            raise MainWriteForbidden()
+
+        async def insert() -> Dict[str, str]:
+            uri, draft_id = source_uri, branch_id
+            async with db.graphver_session() as s:
+                await self._svc._lock_lifecycle(s, graph_id, shared=True)
+                await self._lock_in_workspace(s, graph_id, workspace_id)
+                await self._svc._assert_writable(s, graph_id)
+                if draft_id is None:
+                    draft_id = await self._svc._add_draft(
+                        s, graph_id=graph_id, owner=actor, name=name or "Import",
+                        originating_view_id=originating_view_id)
+                branch = await self._svc._lock_branch(s, graph_id, draft_id)
+                if branch.kind == "main":
+                    raise MainWriteForbidden()
+                self._svc._require_open(branch)
+                await self._svc._require_edit(s, branch, actor, ())
+                active = await self._import_on(s, draft_id, idempotency_key)
+                if active is not None:
+                    raise JobActive(active)
+                job = JobORM(
+                    job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
+                    data_source_id=data_source_id, provider_id=provider_id,
+                    scope_view_id=scope_view_id, branch_id=draft_id,
+                    reconcile_mode=reconcile_mode, import_format=import_format,
+                    field_scope=field_scope, auto_publish=auto_publish,
+                    source_uri=uri, idempotency_key=idempotency_key, status="pending",
+                )
+                s.add(job)
+                await s.flush()
+                job_id = job.id
+                if uri is None:
+                    uri = storage_key(
+                        workspace_id, data_source_id, graph_id, job_id, f"source.{import_format}")
+                    job.source_uri = uri
+            return {"job_id": job_id, "branch_id": draft_id, "source_uri": uri}
+
+        for attempt in (1, 2):
+            try:
+                return await insert()
+            except JobActive as busy:
+                active = busy.job_id
+            except IntegrityError:
+                # A repeated idempotency key: the caller answers with that key's job (find_job).
+                if idempotency_key and await self.find_job(graph_id=graph_id, idempotency_key=idempotency_key):
+                    raise
+                active = await self._active_import(branch_id) if branch_id else None
+                if active is None:          # the import it met has finished since: the draft is free
+                    if attempt == 2:
+                        raise
+                    continue
+            if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
+                raise JobActive(active, f"Another import is still running on this draft (job "
+                                        f"{active}). Wait for it to finish, then import again.") from None
+
+    async def _lock_in_workspace(self, s, graph_id: str, workspace_id: str) -> None:
+        """Take the graph's move lock shared (:meth:`GraphVersioningService._lock_move`), which a
+        move of its data source holds but no main write does, and refuse a graph that has moved
+        out of ``workspace_id`` (``ValueError``, the 404 of a graph in no workspace of the
+        caller's): a job is never stamped with the workspace its graph has left."""
+        await self._svc._lock_move(s, graph_id, shared=True)
+        if await s.scalar(select(GraphORM.id).where(
+                GraphORM.id == graph_id, GraphORM.workspace_id != workspace_id)) is not None:
+            raise ValueError(f"unknown graph {graph_id}")
+
+    @staticmethod
+    async def _import_on(s, branch_id: str, idempotency_key: Optional[str]) -> Optional[str]:
+        """The import pending or running on draft ``branch_id``, read in ``s`` under the draft's
+        lock — but not one created for ``idempotency_key``: that is this request sent twice at
+        once, which its key's index answers."""
+        look = select(JobORM.id).where(JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+                                       JobORM.status.in_(("pending", "running")))
+        if idempotency_key:
+            look = look.where(JobORM.idempotency_key.is_distinct_from(idempotency_key))
+        return await s.scalar(look.limit(1))
+
+    async def _active_import(self, branch_id: str) -> Optional[str]:
+        """The import pending or running on draft ``branch_id``, if any."""
         async with db.graphver_session() as s:
-            job = JobORM(
-                job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
-                data_source_id=data_source_id, provider_id=provider_id,
-                scope_view_id=scope_view_id, branch_id=branch_id,
-                reconcile_mode=reconcile_mode, import_format=import_format,
-                field_scope=field_scope, auto_publish=auto_publish,
-                source_uri=source_uri, idempotency_key=idempotency_key, status="pending",
-            )
-            s.add(job)
-            await s.flush()
-            job_id = job.id
-            if source_uri is None:
-                source_uri = storage_key(
-                    workspace_id, data_source_id, graph_id, job_id, f"source.{import_format}")
-                job.source_uri = source_uri
-        return {"job_id": job_id, "branch_id": branch_id, "source_uri": source_uri}
+            return (await s.execute(select(JobORM.id).where(
+                JobORM.branch_id == branch_id, JobORM.job_type == "ingest",
+                JobORM.status.in_(("pending", "running"))).limit(1))).scalar_one_or_none()
+
+    async def abandon_unqueued(self, job_id: str) -> None:
+        """Fail a job created but never queued — its request broke off before its input was
+        stored — so its draft takes the next import now, not once the reaper finds it. A queued
+        job is left alone."""
+        async with db.graphver_session() as s:
+            now = _now()
+            await s.execute(update(JobORM).where(
+                JobORM.id == job_id, JobORM.status == "pending", JobORM.current_phase.is_(None))
+                .values(status="failed", error_message=config.JOB_NEVER_QUEUED,
+                        completed_at=now, updated_at=now))
 
     async def start_import(self, job_id: str) -> str:
         """Queue the import once its file is stored. Returns the status to report."""
@@ -255,11 +345,16 @@ class ImportExportService:
         scope, so absence-deletes stay confined to the view's own entities."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, mode = ((row.workspace_id, row.data_source_id, row.scope_view_id,
-                                      row.reconcile_mode) if row else (None, None, None, None))
+            ws, ds, view_id, mode, branch_id = (
+                (row.workspace_id, row.data_source_id, row.scope_view_id, row.reconcile_mode,
+                 row.branch_id) if row else (None, None, None, None, None))
         scope = None
-        if mode == "replace" and view_id and self._scope_resolver is not None:
-            scope = await self._scope_resolver(ws, ds, view_id)
+        if mode == "replace" and view_id:
+            if self._replace_scope_resolver is not None:
+                scope = await self._replace_scope_resolver(ws, ds, view_id, branch_id)
+            if not scope:
+                raise ValueError("This view has nothing placed in it, so an import that replaces "
+                                 "the view's contents has nothing it may delete. Nothing was imported.")
         ontology = None
         if self._ontology_resolver is not None:
             ontology = await self._ontology_resolver(ws, ds)
@@ -339,6 +434,7 @@ class ImportExportService:
         if select_types:
             options["types"] = select_types
         async with db.graphver_session() as s:
+            await self._lock_in_workspace(s, graph_id, workspace_id)
             job = JobORM(
                 job_type="export", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,
@@ -415,16 +511,40 @@ class ImportExportService:
         merge_request_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """A publish of a draft too large to publish inside a request — or the merge of its review
-        (``merge_request_id``), queued like an export. The request rides in ``field_scope``."""
+        (``merge_request_id``), queued like an export. The request rides in ``field_scope``.
+
+        The draft is taken in the same transaction: under its row lock it must be open (main is
+        :class:`MainWriteForbidden`, a closed draft :class:`BranchNotOpen`), and it becomes
+        ``publishing``, closed to every write but the job's publish until the job ends. A publish of
+        someone else's private draft is :class:`NotDraftOwner`, of a shared draft by anyone but its owner
+        or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
+        :class:`ApprovalRequired` here, before the draft is closed for it; the job checks again. The job
+        is stored already queued: it has no input to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
         if merge_request_id:
             fields["mergeRequestId"] = merge_request_id
         async with db.graphver_session() as s:
+            await self._svc._lock_lifecycle(s, graph_id, shared=True)
+            await self._lock_in_workspace(s, graph_id, workspace_id)
+            await self._svc._assert_writable(s, graph_id)
+            branch = await self._svc._lock_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._svc._require_open(branch)
+            if not merge_request_id:                     # a review's merger need not own the draft
+                await self._svc._require_publish(s, branch, actor, ())
+            await self._svc._require_no_import(s, branch_id)
+            if merge_request_id:
+                pr = await s.get(MergeRequestORM, merge_request_id)
+                if pr is None or pr.status in ("merged", "closed"):
+                    raise ValueError(f"merge request {merge_request_id} is not open")
+                await self._svc._require_approvals(s, pr)
+            branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,
-                         field_scope=fields, status="pending")
+                         field_scope=fields, status="pending", current_phase=QUEUED, updated_at=_now())
             s.add(job)
             await s.flush()
             return {"job_id": job.id}
@@ -438,6 +558,7 @@ class ImportExportService:
         the transfer lane's, which keeps a large squash alive while it says nothing until it lands;
         called without one, the job is taken here (:func:`.import_worker.lease_job`). The hook's
         answer is the job's summary, and a refusal fails the job; both through the fenced finish.
+        A refusal hands the draft back (``publishing`` → ``open``) once the job has failed.
 
         Safe to run again. An earlier attempt may have merged the draft and died (or been taken
         over) before it finished the job: a merged draft is not published twice — the hook is told
@@ -463,6 +584,8 @@ class ImportExportService:
         if not await lease.finish(**values):
             raise Superseded(f"publish job {job_id} (epoch {lease.epoch}) was taken over before it "
                              "could finish")
+        if "error" in result:
+            await self._svc.release_publishing(graph_id=job["graphId"], branch_id=job["branchId"])
         return result
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
@@ -476,18 +599,39 @@ class ImportExportService:
         (a person decided to run it again) and its failure is cleared; the next claim bumps the
         epoch. A job with no cursor starts over: rows staged by a worker from before leases (with
         no cursor to resume them by) are dropped, or the claim would fail it again on sight.
-        True when the job was queued."""
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id, with_for_update=True)
-            if row is None or row.status != "failed":
-                return False
-            if row.last_cursor is None:
-                await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
-            summary = row.summary if isinstance(row.summary, dict) else {}
-            row.summary = {k: v for k, v in summary.items() if k not in ("takeovers", "failure")} or None
-            row.status, row.current_phase = "pending", QUEUED
-            row.error_message = row.completed_at = None
-            row.updated_at = _now()
+        True when the job was queued. An import whose draft has another import pending or
+        running is :class:`JobActive`: one at a time per draft, checked under the draft's lock as
+        :meth:`create_import_job` checks it, so it holds without ``uq_jobs_ingest_active``."""
+        draft = None
+        try:
+            async with db.graphver_session() as s:
+                peek = await s.get(JobORM, job_id)
+                if peek is None or peek.status != "failed":
+                    return False
+                draft = peek.branch_id if peek.job_type == "ingest" else None
+                if draft:                       # the draft's lock before the job row's
+                    await self._svc._lock_branch(s, peek.graph_id, draft)
+                row = await s.get(JobORM, job_id, with_for_update=True, populate_existing=True)
+                if row is None or row.status != "failed":
+                    return False
+                if draft:
+                    active = await self._import_on(s, draft, None)   # this one is failed
+                    if active is not None:
+                        raise JobActive(active, f"Another import is running on this draft (job "
+                                                f"{active}). Retry this one once it has finished.")
+                if row.last_cursor is None:
+                    await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
+                summary = row.summary if isinstance(row.summary, dict) else {}
+                row.summary = {k: v for k, v in summary.items() if k not in ("takeovers", "failure")} or None
+                row.status, row.current_phase = "pending", QUEUED
+                row.error_message = row.completed_at = None
+                row.updated_at = _now()
+        except IntegrityError:
+            active = draft and await self._active_import(draft)
+            if not active:
+                raise
+            raise JobActive(active, f"Another import is running on this draft (job {active}). "
+                                    "Retry this one once it has finished.") from None
         return True
 
     async def cancel_export(self, job_id: str, *, viewer: Viewer) -> bool:

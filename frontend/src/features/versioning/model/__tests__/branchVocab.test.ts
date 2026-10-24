@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { draftStatus, ownerName, ownerInitials, BRANCH_VOCAB } from '../branchVocab'
+import { canManageDraft, draftStatus, ownerName, ownerInitials, BRANCH_VOCAB } from '../branchVocab'
 
 describe('draftStatus', () => {
   it('flags updates-available when the base trails the published head', () => {
@@ -49,5 +49,16 @@ describe('ownerName / ownerInitials', () => {
   it('falls back gracefully when empty', () => {
     expect(ownerName(null)).toBe('Unknown')
     expect(ownerInitials(undefined)).toBe('?')
+  })
+})
+
+describe('canManageDraft', () => {
+  it('lets the owner and a shared draft\'s maintainer discard, archive, rename or publish it — not an editor', () => {
+    expect(canManageDraft({ owner: 'ana' }, 'ana')).toBe(true)
+    expect(canManageDraft({ owner: 'bob', isShared: true, myRole: 'maintainer' }, 'ana')).toBe(true)
+    expect(canManageDraft({ owner: 'bob', isShared: true, myRole: 'editor' }, 'ana')).toBe(false)
+    expect(canManageDraft({ owner: 'bob', isShared: true, myRole: 'viewer' }, 'ana')).toBe(false)
+    // A maintainer row left on a draft made private grants nothing.
+    expect(canManageDraft({ owner: 'bob', isShared: false, myRole: 'maintainer' }, 'ana')).toBe(false)
   })
 })

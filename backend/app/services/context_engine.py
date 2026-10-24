@@ -17,6 +17,7 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
+from .versioning.errors import HTTP_MAPPED, AccessDenied
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
     TRACE_ENGINE_HEADROOM_SECS,
@@ -81,6 +82,8 @@ class ContextEngine:
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
+        # Writes commit to a versioned graph's main (no draft named): the routes need publish.
+        self._writes_main = False
         # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
@@ -103,10 +106,13 @@ class ContextEngine:
         data_source_id: Optional[str] = None,
         actor: Optional[str] = None,
         branch_id: Optional[str] = None,
+        viewer: Any = None,  # versioning Viewer
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
+        A draft ``viewer`` can't read is a ``KeyError`` (404), exactly like an unknown
+        branch; internal callers pass no viewer and are not scoped.
 
         Ontology is resolved and pushed into the provider *eagerly* so
         that endpoints which call ``engine.provider.*`` directly (e.g.
@@ -126,6 +132,15 @@ class ContextEngine:
         from ..ontology.service import LocalOntologyService
 
         try:
+            # Name the primary when the caller did not, so the versioned routing and write wrap
+            # below see the same data source the provider serves (else a versioned primary gets
+            # a raw FalkorDB writer).
+            if not data_source_id:
+                from ..db.repositories import data_source_repo
+                primary = await data_source_repo.get_primary_data_source(session, workspace_id)
+                if primary is None:
+                    raise KeyError(f"No data source for workspace: {workspace_id}")
+                data_source_id = primary.id
             provider = await registry.get_provider_for_workspace(
                 workspace_id, session, data_source_id
             )
@@ -149,22 +164,29 @@ class ContextEngine:
         # reader so the change shows immediately; once the projection catches up, use the live
         # FalkorDB provider (hot path). A non-versioned data source ignores branch_id (live provider).
         norm = (branch_id or "").strip()
+        graph = None
         if data_source_id:
             from .versioning.service import GraphVersioningService
+            from .versioned_sources import serves_pin
             svc = GraphVersioningService()
             graph = await svc.get_graph_by_data_source(data_source_id)
             if graph is not None:
                 gid = graph["graph_id"]
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
-                main_fresh = (await svc.projection_watermark(gid))["fresh"]
+                wm = await svc.projection_watermark(gid)
+                # Main is served from FalkorDB only from the key the projection publishes.
+                main_fresh = wm["fresh"] and serves_pin(
+                    getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+                    wm.get("falkor_graph_name"), gid)
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:
                     async with svc._session() as gv_s:
                         try:
-                            await svc._get_branch(gv_s, gid, norm)
-                        except ValueError as exc:
+                            branch = await svc._get_branch(gv_s, gid, norm)
+                            await svc._assert_branch_readable(gv_s, branch, viewer)
+                        except (ValueError, AccessDenied) as exc:
                             raise KeyError(f"branch_not_found: {norm}") from exc
                     # Draft = main ⊕ sparse delta: overlay the draft's bounded patch set on WHATEVER
                     # serves main — the live FalkorDB provider when fresh (so the materialized
@@ -189,6 +211,7 @@ class ContextEngine:
                     engine._data_source_id = data_source_id
                     engine._db_session = session
                     engine._branch_id = read_branch
+                    engine._writes_main = not is_draft
                     try:
                         await engine._resolve_ontology()
                     except Exception as exc:
@@ -199,12 +222,13 @@ class ContextEngine:
                     return engine
             # graph is None → not versioned: ignore branch_id, serve the live provider.
 
-        # Out-of-the-box write-through versioning: wrap the provider so every write also
-        # lands as an audited commit on the data source's versioned graph (the audit trail
-        # + branch/version history). Reads delegate unchanged. Opt out with
-        # GRAPHVER_VERSIONED_WRITES=0.
+        # Out-of-the-box write-through versioning: wrap the provider so every write lands
+        # as an audited commit on the data source's versioned graph (the audit trail +
+        # branch/version history). Reads delegate unchanged. A versioned graph is always
+        # wrapped: a raw provider write would be a second FalkorDB writer the projector cannot
+        # see. GRAPHVER_VERSIONED_WRITES=0 opts out only data sources that are not versioned.
         from .versioning import config as vconfig
-        if vconfig.VERSIONED_WRITES_ENABLED and data_source_id:
+        if data_source_id and (vconfig.VERSIONED_WRITES_ENABLED or graph is not None):
             from ..providers.versioned_write_provider import VersionedWriteProvider
             # Resolve the data source's real FalkorDB graph so a lazily-created versioned graph
             # projects merged main state into the SAME graph the canvas reads (not an orphan gv_<id>).
@@ -230,6 +254,7 @@ class ContextEngine:
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
+        engine._writes_main = bool(data_source_id) and graph is not None
 
         # Eagerly resolve ontology so the provider is configured before
         # any request handler touches ``engine.provider`` directly.
@@ -2286,6 +2311,8 @@ class ContextEngine:
         except NotImplementedError:
             # Provider doesn't support creation - return the node anyway for optimistic UI
             logger.warning("Provider does not support node creation - returning optimistic result")
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as e:
             return CreateNodeResult(
                 node=None,
@@ -2352,6 +2379,8 @@ class ContextEngine:
             await self.provider.create_edge(edge)
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as exc:
             from backend.app.services.versioning.service import OntologyViolation
             if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
@@ -2376,6 +2405,8 @@ class ContextEngine:
             return EdgeMutationResult(edge=edge, success=True)
         except (NotImplementedError, AttributeError):
             return EdgeMutationResult(success=False, error="Provider does not support edge updates")
+        except HTTP_MAPPED:
+            raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
 

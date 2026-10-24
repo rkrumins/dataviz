@@ -740,6 +740,7 @@ class BootstrapRunner:
             # A fresh read: a new job, a restart, or a re-check — nothing has been copied yet in
             # any of them, so the tallies start from zero. A recorded decision is kept: the read
             # it was made on may well come out the same (its fingerprint says).
+            await self._require_whole_replies(client)
             summary.update(_fresh_tallies(await self._count(client, _MAX_NODE_ID)))
             summary.pop("duplicates", None)
             async with self._session() as s:
@@ -836,6 +837,25 @@ class BootstrapRunner:
             else:
                 hidden += int(n or 0)
         return visible, hidden
+
+    async def _require_whole_replies(self, client) -> None:
+        """Refuse a graph server that cuts replies short. FalkorDB's ``RESULTSET_SIZE`` caps every
+        reply at that many rows and drops the rest with no error and no marker, and the stock
+        ``falkordb/falkordb`` image ships it at 10000. Every read here takes its reply as the whole
+        answer, so a capped server reads as a smaller graph: a pre-flight window cut short hides
+        duplicates, a copy window skips items, and a collapse that saw only some of a copy's
+        relationships deletes the rest with the copy. A server that will not say (or a client
+        with no raw command) reads as uncapped."""
+        from backend.app.providers.shard_capacity import _read_config_int
+
+        cap = await _read_config_int(client, None, "RESULTSET_SIZE")
+        if cap is not None:
+            raise BootstrapFailure(
+                f"The graph server returns at most {cap:,} rows per query and drops the rest "
+                "without saying so (its RESULTSET_SIZE setting), so the copy could miss items "
+                "and a duplicate collapse could delete relationships it never saw. Set "
+                "RESULTSET_SIZE to -1 (no limit) on the graph server, then resume.",
+                "infrastructure")
 
     async def _count(self, client, cypher: str) -> Optional[int]:
         # Deliberately NOT ``read_only``, though the cypher only reads: this is the
@@ -1212,6 +1232,7 @@ class BootstrapRunner:
                 ps.target_commit_seq = commit.commit_seq
                 ps.status = "idle"
                 ps.last_projected_at = _now()
+                ps.epoch = ProjectionStateORM.epoch + 1      # fenced by the lease, with the flip
         logger.info("bootstrap %s: head flipped to seq %s (projection fast-forwarded)",
                     lease.job_id, commit.commit_seq)
         # On the decision, not on the tally of deletes: a window replayed after a crash between
@@ -1757,7 +1778,8 @@ async def create_bootstrap_job(
     starts as not ours. ``package`` describes the package (``summary.package``, with
     ``uploadId``) and ``coverage`` how much of its types the ontology declares. Asking again for
     the same upload returns its job; a data source with any other job is
-    :class:`BootstrapConflict` ``ds_has_other_job``.
+    :class:`BootstrapConflict` ``ds_has_other_job``. A FalkorDB graph another versioned graph
+    already projects into is :class:`BootstrapConflict` ``graph_key_in_use``.
     """
     args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
                 falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind,
@@ -1816,11 +1838,15 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             main_id = await _main_branch(s, graph.id)
             gid = graph.id
         else:
-            res = await GraphVersioningService().create_graph(
-                data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
-                actor=actor, falkor_graph_name=falkor_graph_name,
-                falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
-                ontology_enforcement=ontology_enforcement, session=s)
+            try:
+                res = await GraphVersioningService().create_graph(
+                    data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
+                    actor=actor, falkor_graph_name=falkor_graph_name,
+                    falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
+                    ontology_enforcement=ontology_enforcement, session=s)
+            except ConcurrencyError as exc:
+                # Another versioned graph already projects into this FalkorDB graph.
+                raise BootstrapConflict("graph_key_in_use", str(exc))
             gid, main_id = res["graph_id"], res["main_branch_id"]
 
         await s.flush()                                   # create_graph's rows are still pending
@@ -1828,6 +1854,7 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
         if ps is not None:
             ps.projected_commit_seq = 1                   # see docstring — never project mid-bootstrap
             ps.target_commit_seq = 1
+            ps.epoch = ProjectionStateORM.epoch + 1
         commit = await _ensure_import_commit(
             s, gid, main_id, actor,
             message="seed from view package" if seed else "enable version control")

@@ -704,9 +704,15 @@ async def update_view(
     ``user_id`` is stamped into ``updated_by`` so surfaces can show who
     last edited the view. When None (e.g. legacy callers / seed scripts)
     the existing ``updated_by`` is preserved.
+
+    The layout and scope in ``config`` are not written here; the stored
+    ones are kept (see ``_keep_config_layout``).
     """
+    # populate_existing: the endpoint loaded the row before the lock; read
+    # what the lock holds, not that.
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id)
+        .with_for_update().execution_options(populate_existing=True)
     )
     row = result.scalar_one_or_none()
     if not row:
@@ -723,7 +729,7 @@ async def update_view(
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
-        _keep_config_display_rules(req.config, _load_config(row))
+        _keep_config_layout(req.config, _load_config(row))
         row.config = json.dumps(req.config)
     # visibility is NOT written here: it is a security field with its own
     # authorization (publish gate) — see update_visibility. The endpoint
@@ -765,26 +771,34 @@ def _keep_display_rules(new_layout: Any, previous_layout: Any) -> None:
         new_layout.pop("displayRules", None)
 
 
-def _keep_config_display_rules(new_config: Any, stored_config: Any) -> None:
-    """``_keep_display_rules`` for a whole replacement config. A config with
-    no referenceLayout of its own — a graph view's, which the wizard saves
-    with none — gets one to hold the stored rules, so a config save never
-    drops them."""
+def _keep_config_layout(new_config: Any, stored_config: dict) -> None:
+    """Keep the stored ``referenceLayout`` (its display rules included) and
+    ``content.entityScope`` on a whole replacement config, whatever it says.
+
+    They are written only by PUT /layout (the overlay, on a draft), promote,
+    restore and the library. A config save is built from the copy its caller
+    read, which on a draft is the published view with the draft's overlay
+    laid over it: writing its layout and scope published the draft's edits
+    unreviewed (VIEWS-1)."""
     if not isinstance(new_config, dict):
         return
+    new_config.pop("referenceLayout", None)          # the legacy top-level spelling
     stored = _base_reference_layout(stored_config)
     layout = new_config.get("layout")
-    if isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
-        target = layout["referenceLayout"]
-    elif isinstance(new_config.get("referenceLayout"), dict):
-        target = new_config["referenceLayout"]
-    elif isinstance(stored.get("displayRules"), list):
+    if stored:
         if not isinstance(layout, dict):
             layout = new_config["layout"] = {}
-        target = layout["referenceLayout"] = {}
-    else:
-        return
-    _keep_display_rules(target, stored)
+        layout["referenceLayout"] = stored
+    elif isinstance(layout, dict):
+        layout.pop("referenceLayout", None)
+    stored_content = stored_config.get("content")
+    content = new_config.get("content")
+    if isinstance(stored_content, dict) and "entityScope" in stored_content:
+        if not isinstance(content, dict):
+            content = new_config["content"] = {}
+        content["entityScope"] = stored_content["entityScope"]
+    elif isinstance(content, dict):
+        content.pop("entityScope", None)
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -847,8 +861,10 @@ async def update_view_layout(
     one of the submitted layers' ids (the endpoint maps this to a 422), or
     if ``check_layer_rules`` refuses a new or changed layer rule.
     """
+    # populate_existing: as in update_view.
     result = await session.execute(
-        select(ViewORM).where(ViewORM.id == view_id).with_for_update()
+        select(ViewORM).where(ViewORM.id == view_id)
+        .with_for_update().execution_options(populate_existing=True)
     )
     row = result.scalar_one_or_none()
     if not row:

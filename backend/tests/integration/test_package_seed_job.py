@@ -251,7 +251,8 @@ async def _version_rows(graph_id):
 
 
 async def _falkor_counts(client):
-    n = (await _rows(client, "MATCH (n) RETURN count(n)"))[0][0]
+    # The projector's _GVProjMeta marker is a derived node, not part of the copy.
+    n = (await _rows(client, "MATCH (n) WHERE NOT n:_GVProjMeta RETURN count(n)"))[0][0]
     e = (await _rows(client, "MATCH ()-[r]->() RETURN count(r)"))[0][0]
     return n, e
 

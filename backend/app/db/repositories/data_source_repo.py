@@ -131,19 +131,27 @@ async def get_data_source(
 
 
 async def get_data_source_orm(
-    session: AsyncSession, ds_id: str, *, include_deleted: bool = False
+    session: AsyncSession, ds_id: str, *, include_deleted: bool = False,
+    lock: Optional[str] = None,
 ) -> Optional[WorkspaceDataSourceORM]:
     """Return the raw ORM row (used by ProviderRegistry).
 
     `include_deleted` exists for the two callers that legitimately need a tombstone — restore,
     and the trash listing. Everything else gets None for a deleted source, which is what every
     caller's "not found" branch already handles correctly.
+
+    `lock` holds the row for the rest of the transaction, re-read as committed: "share" (FOR
+    SHARE) for what must not race a move, which holds it FOR UPDATE
+    (``services/data_source_transfer.py``); "update" takes it FOR UPDATE.
     """
     stmt = (select(WorkspaceDataSourceORM)
             .options(selectinload(WorkspaceDataSourceORM.catalog_item))
             .where(WorkspaceDataSourceORM.id == ds_id))
     if not include_deleted:
         stmt = stmt.where(_live())
+    if lock:
+        stmt = (stmt.with_for_update(read=lock == "share")
+                .execution_options(populate_existing=True))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 

@@ -15,12 +15,13 @@
  *   rather than being re-derived.
  * - Keyed by the same scope string the store already partitions by
  *   (`${ws}::${ds}::${branch}`), extended with viewId for branch-per-view.
- * - `phase` guards the one dangerous window: a crash AFTER a save's server
- *   commit returns but BEFORE the store clears would otherwise re-apply
- *   already-committed changes (duplicating graph data). While a save is in
- *   flight the snapshot is marked 'committing'; on restore a 'committing'
- *   snapshot is discarded, not replayed — we prefer losing that millisecond
- *   window of work over duplicating it.
+ * - `phase` marks the one dangerous window: a crash while a save is in
+ *   flight, when the server may or may not have committed it. The snapshot is
+ *   then 'committing' and carries the save's Idempotency-Key (`pendingSave`);
+ *   on restore the work comes back and the next save first sends that batch
+ *   again, exactly, under that key, so the server answers with what the first
+ *   save did instead of applying it twice — and applies it if it never arrived.
+ *   Edits made since go after it, under a key of their own.
  */
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 import type { StagedChange } from '@/store/stagedChangesStore'
@@ -30,6 +31,15 @@ const KEY_PREFIX = 'synodic:staged-draft:'
 const SNAPSHOT_VERSION = 1
 
 /** The serializable fields of a StagedChange (closures dropped). */
+/** A save that may have reached the server: its request body, its Idempotency-Key, and the staged
+ *  changes it carried — each one's id → its `after` as sent (JSON), so an edit made since is told
+ *  apart. Absent in snapshots written before it existed: such a save is only ever resent as is. */
+export interface PendingSave {
+  body: string
+  key: string
+  sent?: Record<string, string>
+}
+
 export type SerializableChange = Pick<
   StagedChange,
   'id' | 'type' | 'targetId' | 'targetUrn' | 'before' | 'after' | 'summary' | 'timestamp'
@@ -40,8 +50,10 @@ export interface StagedDraftSnapshot {
   scopeKey: string
   /** Resolved branch this work belongs to — restore refuses a mismatch. */
   branchId: string | null
-  /** 'staged' = safe to restore; 'committing' = a save was in flight, discard. */
+  /** 'staged' = no save in flight; 'committing' = a save was in flight (see `pendingSave`). */
   phase: 'staged' | 'committing'
+  /** The save that may have reached the server — its retry reuses the key (saveStagedChangesToDraft). */
+  pendingSave?: PendingSave
   savedAt: number
   changes: SerializableChange[]
   /** The canvas copies of every node / edge the unsaved work touches — new ones AND existing ones
@@ -102,19 +114,20 @@ export function clearSnapshot(scopeKey: string): void {
   }
 }
 
-/** Flip an existing snapshot to 'committing' (called when a save starts) so a
- *  crash mid-commit doesn't restore already-committed work. No-op if absent. */
-export function markSnapshotCommitting(scopeKey: string): void {
+/** Flip an existing snapshot to 'committing' (called when a save starts, and again with the save's
+ *  key before it is sent) so a crash mid-commit restores work that retries under that key. No-op if
+ *  absent. */
+export function markSnapshotCommitting(scopeKey: string, pendingSave?: PendingSave): void {
   const snap = readSnapshot(scopeKey)
   if (!snap) return
-  writeSnapshot({ ...snap, phase: 'committing' })
+  writeSnapshot({ ...snap, phase: 'committing', ...(pendingSave && { pendingSave }) })
 }
 
 /**
  * Decide what to do with a snapshot on canvas mount. PURE so it can be
  * unit-tested without the DOM/stores.
  *   - null            → nothing persisted, no-op.
- *   - 'discard'       → stale/unsafe (wrong branch, mid-commit, or empty) —
+ *   - 'discard'       → stale/unsafe (wrong branch or empty) —
  *                       delete it, don't restore.
  *   - 'restore'       → safe to replay onto the canvas.
  */
@@ -123,7 +136,6 @@ export function reconcileSnapshot(
   currentBranchId: string | null,
 ): 'noop' | 'discard' | 'restore' {
   if (!snapshot) return 'noop'
-  if (snapshot.phase === 'committing') return 'discard'
   if (snapshot.branchId !== currentBranchId) return 'discard'
   if (snapshot.changes.length === 0) return 'discard'
   return 'restore'

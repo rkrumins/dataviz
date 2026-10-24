@@ -803,7 +803,7 @@ async def preflight(
         if forks:
             notes.append(_issue(
                 "forks", f"{_plural(forks, 'fork')} of its version history "
-                         f"{'stays' if forks == 1 else 'stay'} in {source.name}."))
+                         f"{'moves' if forks == 1 else 'move'} with it."))
     asked = [v for v in live if v.publish_requested]
     if asked:
         notes.append(_issue(
@@ -1083,14 +1083,28 @@ async def _ask_new_publishers(session: AsyncSession, pre: Preflight, actor: str)
 
 
 async def _compensate(ds_id: str, ws_id: str) -> None:
-    """Put the versioned graph back where the source still is after a failed move."""
+    """Put the versioned graph, and its forks, back where the source still is after a failed
+    move."""
     try:
         await purge_worker.rehome_graph_for_data_source(
             data_source_id=ds_id, to_workspace_id=ws_id, refuse_busy=False)
     except Exception:
-        # The next move or undo of this source sets it right: relocation sets, never swaps.
+        # The reaper re-files it under its source's workspace once no job runs on it, and the
+        # next move or undo of this source sets it right: relocation sets, never swaps.
         logger.error("could not put the versioned graph of %s back in %s after a failed move",
                      ds_id, ws_id, exc_info=True)
+
+
+async def _landed(session: AsyncSession, ds_id: str, ws_id: str) -> bool:
+    """Whether the source's row is committed in ``ws_id`` after the commit raised: one that
+    landed, and only lost its answer, keeps the graph where the source now is. False when the
+    row can't be read, so the graph is put back as for any failure."""
+    try:
+        return await session.scalar(select(WorkspaceDataSourceORM.workspace_id).where(
+            WorkspaceDataSourceORM.id == ds_id)) == ws_id
+    except Exception:
+        logger.exception("could not read where data source %s is after its move", ds_id)
+        return False
 
 
 def _is_clash(exc: IntegrityError) -> bool:
@@ -1172,7 +1186,7 @@ async def _execute(
     except BaseException as exc:
         with contextlib.suppress(Exception):
             await asyncio.shield(session.rollback())
-        if graph_id is not None:
+        if graph_id is not None and not await asyncio.shield(_landed(session, ds_id, target_id)):
             await asyncio.shield(_compensate(ds_id, source_id))
         if isinstance(exc, IntegrityError) and _is_clash(exc):
             raise _conflict("already_connected", f"{target_name} already has this graph connected.")
@@ -1519,7 +1533,7 @@ async def undo(session: AsyncSession, *, transfer_id: str, claims: PermissionCla
     except BaseException as exc:
         with contextlib.suppress(Exception):
             await asyncio.shield(session.rollback())
-        if graph_id is not None:
+        if graph_id is not None and not await asyncio.shield(_landed(session, ds_id, source_id)):
             await asyncio.shield(_compensate(ds_id, target_id))
         if isinstance(exc, IntegrityError) and _is_clash(exc):
             raise _conflict("already_connected", f"{source_name} already has this graph connected.")

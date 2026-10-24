@@ -146,18 +146,18 @@ curl -b cookies.txt -s "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BID/st
 | `POST /graphs/{gid}/branches/{bid}/changes` | bulk-stage node/edge edits | `…:manage` |
 | `POST /graphs/{gid}/branches/{bid}/commit` | checkpoint the draft | `…:manage` |
 | `GET  /graphs/{gid}/branches/{bid}/merge-preview` | dry-run publish (conflicts) | `…:read` |
-| `POST /graphs/{gid}/branches/{bid}/publish` | squash-publish to main | `…:manage` |
+| `POST /graphs/{gid}/branches/{bid}/publish` | squash-publish to main | `…:manage` + `…:publish` |
 | `GET  /graphs/{gid}/branches/{bid}/state` | live node/edge state | `…:read` |
 | `GET  /graphs/{gid}/entities/{eid}/history` | entity revision timeline | `…:read` |
 | `GET  /graphs/{gid}/branches/{bid}/diff?fromSeq=&toSeq=` | field-level diff | `…:read` |
-| `POST /graphs/{gid}/forks` | copy-on-write fork | `…:read` |
+| `POST /graphs/{gid}/forks` | copy-on-write fork (409 `fork_limit` past `GRAPHVER_MAX_FORKS_PER_GRAPH` live forks) | `…:manage` |
 | `POST /graphs/{gid}/pulls` | open a PR (fork → base) | `…:read` |
 | `GET  /graphs/{gid}/pulls` | list PRs targeting this graph | `…:read` |
 | `GET  /pulls/{pr}` | PR metadata | `…:read` |
 | `GET  /pulls/{pr}/preview` | dry-run the PR merge | `…:read` |
-| `POST /pulls/{pr}/merge` | merge the PR into base main | `…:manage` |
-| `POST /graphs/{gid}/commits/{cid}/revert` | undo ONE published commit (409 `merge_conflict` if later commits touched the same entities) | `…:manage` |
-| `POST /graphs/{gid}/commits/{cid}/restore` | reset main to its state at that commit — point-in-time rollback, never conflicts | `…:manage` |
+| `POST /pulls/{pr}/merge` | merge the PR into base main | `…:manage` + `…:publish` |
+| `POST /graphs/{gid}/commits/{cid}/revert` | undo ONE published commit (409 `merge_conflict` if later commits touched the same entities) | `…:manage` + `…:publish` |
+| `POST /graphs/{gid}/commits/{cid}/restore` | reset main to its state at that commit — point-in-time rollback, never conflicts | `…:manage` + `…:publish` |
 | `GET  /graphs/{gid}/commits/{cid}/restore-preview` | exact impact of that restore (commits undone + per-kind counts) | `…:read` |
 
 `…` = `workspace:datasource` (a versioned graph is 1:1 with a data source).
@@ -282,6 +282,8 @@ Properties worth knowing:
 | `GRAPHVER_INGEST_POLL_SECS` | 5 | Worker pickup cadence (`config.py:253`). |
 | `GRAPHVER_INGEST_STALE_SECS` | 120 | Heartbeat age after which a `running` job is presumed dead and taken over (`config.py:254`). |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | 250000 | Largest graph a RE-SYNC may attempt. A guard rail over a real limit, not a policy: `sync_ingest` rebuilds the whole graph several times to 3-way merge it — **measured 2.03 GB of RSS to compute 808 changes on a 478k graph**, in one request on the web tier; the 7.7M model would ask for ~30 GB and take the API down. Above the limit it refuses with a `422 graph_too_large_to_sync` quoting the entity count and the estimate. Set `0` to disable if you know the memory is there. Exists to be DELETED — see [docs/versioning/11-resync-at-any-scale.md](versioning/11-resync-at-any-scale.md) (`config.py:255`). |
+| `GRAPHVER_SYNC_DELETE_MAX_ABS` | 500 | A sync deletes by ABSENCE, so a snapshot missing rows reads as the source deleting them. A sync or re-sync that would delete more than max(this, `GRAPHVER_SYNC_DELETE_MAX_FRACTION` × live entities on main) is refused with `409 mass_delete_blocked`; a workspace admin can pass `allowMassDelete=true`. Stop-gap until the per-source delete breaker. |
+| `GRAPHVER_SYNC_DELETE_MAX_FRACTION` | 0.05 | The proportional half of that limit. A FRACTION (0.05 = 5%), not a percent: `5` would allow deleting five times the graph. |
 | `GRAPHVER_INGEST_HEARTBEAT_SECS` | 30 | How often a running worker says "still alive" — a TIMER, not a per-window commit. Must stay well under the stale window: a scan halving down its ladder, or a validate anti-joining a 10M-row commit, works for minutes without committing anything, and a worker that only beat on commit would be declared dead by a colleague while perfectly healthy (`config.py:262`). |
 
 Operationally: the k8s worker takes these via `envFrom: worker-config` (edit the ConfigMap and
@@ -310,11 +312,26 @@ and background projection keeps running. The frontend reads the flag from the pu
   (HttpOnly) + `nx_csrf`. Persist cookies; echo `nx_csrf` as the `X-CSRF-Token`
   header on every write (POST). GETs are exempt.
 - **Permissions**: reads need `workspace:datasource:read`, writes need
-  `workspace:datasource:manage`. Forking + opening a PR need only `read`
-  (anyone who can see a graph may propose changes); **merging** a PR into the
-  base needs `manage` — the governance gate. Admin's `system:admin` implies all.
+  `workspace:datasource:manage`. Forking needs `manage`; opening a PR from a fork
+  needs only `read`. Anything that advances `main` — publishing a draft, merging a
+  PR or merge request, revert, restore, sync and `/graph/resync` — also needs
+  `workspace:datasource:publish`, or answers **403** `missing_permission`. So does
+  a person's direct write to a versioned graph's `main` through the graph routes
+  with no draft named, and bulk ingest: **403** `publish_required`. An API key
+  writes `main` directly only if the person who owns it holds publish, and cannot
+  call the publish, merge, revert, restore or sync routes at all (**403**
+  `api_key_not_allowed`). `workspace_publisher`, `workspace_data_engineer` and the
+  admins hold publish; `workspace_member` does not. Admin's `system:admin`
+  implies all.
+- **Drafts**: a private draft is written only by its owner (**403**
+  `not_draft_owner`); a shared draft by its editors and maintainers (**403**
+  `not_owner_or_member` with the `required` role). A draft is read by its owner,
+  workspace managers, its members and the people on a PR raised from it; anyone
+  else gets **404**, as for a branch that does not exist.
 - **Tenant isolation**: a graph must belong to `{ws_id}`; cross-tenant access
-  returns **404** (existence isn't leaked across workspaces).
+  returns **404** (existence isn't leaked across workspaces). A PR is visible to
+  its author, its requested reviewers and workspace managers; anyone else gets
+  **404** too.
 
 ---
 
@@ -338,15 +355,47 @@ run it on a loop or from a publish/merge hook.
 
 ## 6 · Automated tests
 
+The end-to-end suite is every file named in `backend/tests/ci-versioning-e2e-files.txt`:
+137 files, the `GRAPHVER_E2E` files under `backend/tests/integration/` plus
+`tests/test_data_source_move.py`. Many are not named `test_versioning_*` — the access
+suites (`test_private_draft_owner.py`, `test_private_draft_read.py`,
+`test_shared_draft_members.py`, `test_review_inbox_open_prs.py`), the Stage 2 story
+(`test_stage2_collaboration_story.py`), `test_graph_changes_idempotent.py`,
+`test_import_one_active.py`, `test_graph_freeze.py`, `test_sync_curation_guard.py` and
+others — so a `test_versioning_*` glob misses them. Run the list the way CI does,
+against Postgres, FalkorDB on 6379 and the Redis bus on 6380:
+
 ```bash
-export MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic' GRAPHVER_E2E=1
-python -m pytest backend/tests/test_versioning_core.py backend/tests/test_versioning_schema.py \
-    backend/tests/integration/test_versioning_*.py -q
+export GRAPHVER_E2E=1 RUN_FALKOR_LIVE=1 \
+  MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic' \
+  FALKORDB_HOST=localhost FALKORDB_PORT=6379
+python -m backend.scripts.upgrade upgrade
+python -c "import asyncio; from backend.app.services.versioning import models; asyncio.run(models.create_schema_and_partitions())"
+cd backend && python -m pytest -q -ra $(grep -vE '^\s*(#|$)' tests/ci-versioning-e2e-files.txt)
 ```
 
-Covers the pure merge/diff/merkle core, the schema, the write path, fork→PR→merge
-(copy-on-write), the API boundary (auth + RBAC + tenant + governance), and the
-FalkorDB projection.
+Covers the write path, drafts, checkpoints, publish and review, fork→PR→merge
+(copy-on-write), the API boundary (auth, RBAC, draft access, tenant, governance), the
+lifecycle (trash, purge, freeze, moves) and the FalkorDB projection.
+
+In CI this is the `versioning-e2e` job in `.github/workflows/backend-tests.yml`
+(Postgres 16, FalkorDB, Redis on 6380, Python 3.11, 60-minute timeout). It is
+**informational** for now (`continue-on-error: true`), to be made required once it has
+a green track record. `backend/tests/test_ci_required_list.py` fails if a
+`GRAPHVER_E2E` file is neither in the list nor excused in `_E2E_NOT_RUN` (only
+`test_system_status.py`, which needs the whole dev stack), and if the job stops reading
+the list. The file's header gives the command that regenerates it.
+
+The unit tests that need no live services — the merge/diff/merkle core
+(`test_versioning_core.py`), the schema, the domain errors, the route gates
+(`test_versioning_feature_gate.py`, `test_versioning_freeze_route.py`,
+`test_versioning_pr_reviewers_routes.py`, `test_versioning_access_groups.py`, …) — are
+named in `backend/tests/ci-required-files.txt` and run in the **required**
+`connectivity-suite` job:
+
+```bash
+cd backend && python -m pytest -q -m "not integration" $(grep -vE '^\s*(#|$)' tests/ci-required-files.txt)
+```
 
 ---
 

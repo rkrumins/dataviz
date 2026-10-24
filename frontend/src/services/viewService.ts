@@ -111,6 +111,23 @@ function buildViewConfig(
     }
 }
 
+/**
+ * The view to cache after a settings save. PUT /views/{id} writes the
+ * Published row but not the layout or scope, so its response carries the
+ * base layout. On a draft the store holds the draft's layout, and the canvas
+ * saves the store into the draft on its next gesture, so the store's own
+ * layout and scope are kept.
+ */
+function withStoredLayout(viewConfig: ViewConfiguration): ViewConfiguration {
+    const existing = useSchemaStore.getState().schema?.views.find((v) => v.id === viewConfig.id)
+    if (!existing) return viewConfig
+    return {
+        ...viewConfig,
+        layout: { ...viewConfig.layout, referenceLayout: existing.layout?.referenceLayout },
+        content: { ...viewConfig.content, entityScope: existing.content?.entityScope },
+    }
+}
+
 // ============================================
 // View Service Implementation
 // ============================================
@@ -177,7 +194,7 @@ class ViewServiceImpl {
                 } catch (visError) {
                     // Settings saved; the tier didn't. Cache the saved
                     // half and report precisely.
-                    const viewConfig = viewApi.viewToViewConfig(result)
+                    const viewConfig = withStoredLayout(viewApi.viewToViewConfig(result))
                     useSchemaStore.getState().addOrUpdateView(viewConfig)
                     return {
                         success: false,
@@ -189,7 +206,7 @@ class ViewServiceImpl {
                 }
             }
 
-            const viewConfig = viewApi.viewToViewConfig(result)
+            const viewConfig = withStoredLayout(viewApi.viewToViewConfig(result))
             useSchemaStore.getState().addOrUpdateView(viewConfig)
 
             return { success: true, data: viewConfig }
