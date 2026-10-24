@@ -13,16 +13,22 @@
  *
  * Each item carries a one-line subtitle so the difference is legible at a glance, not inferred
  * from the verb alone.
+ *
+ * Moving to another workspace sits above them in calm indigo: nothing is removed, the source
+ * and everything built on it simply live somewhere else — and it can be undone for a week.
  */
 import { useState, useRef, useEffect } from 'react'
-import { MoreHorizontal, Pencil, Shield, ArchiveX, Trash2 } from 'lucide-react'
+import { MoreHorizontal, Pencil, Shield, ArchiveX, Trash2, ArrowRightLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface DataSourceActionMenuProps {
     /** Offboard → Recently deleted; the subtitle names the window. Default 30. */
     restoreWindowDays?: number
-    onOffboard: () => void
-    onDelete: () => void
+    /** Offered only where the source may be deleted (never the last one). */
+    onOffboard?: () => void
+    onDelete?: () => void
+    /** Move it, with its views, to another workspace. */
+    onMove?: () => void
     onEdit?: () => void
     /** Shown only when the source isn't already primary. */
     onSetPrimary?: () => void
@@ -35,6 +41,7 @@ export function DataSourceActionMenu({
     restoreWindowDays = 30,
     onOffboard,
     onDelete,
+    onMove,
     onEdit,
     onSetPrimary,
     disabled,
@@ -108,39 +115,60 @@ export function DataSourceActionMenu({
                             Set as primary
                         </button>
                     )}
-                    {(onEdit || onSetPrimary) && (
+                    {(onEdit || onSetPrimary) && (onMove || onOffboard || onDelete) && (
                         <div className="border-t border-glass-border/60 my-1.5" />
                     )}
 
-                    {/* Offboard — reversible, the safe default. Calm, not red. */}
-                    <button
-                        role="menuitem"
-                        onClick={run(onOffboard)}
-                        className="w-full flex items-start gap-2.5 px-3.5 py-2 text-left text-ink hover:bg-amber-500/10 transition-colors group/off"
-                    >
-                        <ArchiveX className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                        <span className="flex flex-col">
-                            <span className="text-sm font-semibold">Offboard</span>
-                            <span className="text-[11px] text-ink-muted leading-snug">
-                                Move to Recently deleted · restore for {restoreWindowDays} days
+                    {/* Move — nothing is removed, and it can be undone. Calm, like Offboard. */}
+                    {onMove && (
+                        <button
+                            role="menuitem"
+                            onClick={run(onMove)}
+                            className="w-full flex items-start gap-2.5 px-3.5 py-2 text-left text-ink hover:bg-indigo-500/10 transition-colors"
+                        >
+                            <ArrowRightLeft className="w-3.5 h-3.5 mt-0.5 shrink-0 text-indigo-500" />
+                            <span className="flex flex-col">
+                                <span className="text-sm font-semibold">Move to another workspace…</span>
+                                <span className="text-[11px] text-ink-muted leading-snug">
+                                    Views, history and access come with it
+                                </span>
                             </span>
-                        </span>
-                    </button>
+                        </button>
+                    )}
+
+                    {/* Offboard — reversible, the safe default. Calm, not red. */}
+                    {onOffboard && (
+                        <button
+                            role="menuitem"
+                            onClick={run(onOffboard)}
+                            className="w-full flex items-start gap-2.5 px-3.5 py-2 text-left text-ink hover:bg-amber-500/10 transition-colors group/off"
+                        >
+                            <ArchiveX className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                            <span className="flex flex-col">
+                                <span className="text-sm font-semibold">Offboard</span>
+                                <span className="text-[11px] text-ink-muted leading-snug">
+                                    Move to Recently deleted · restore for {restoreWindowDays} days
+                                </span>
+                            </span>
+                        </button>
+                    )}
 
                     {/* Delete permanently — irreversible. Loud, and set apart. */}
-                    <button
-                        role="menuitem"
-                        onClick={run(onDelete)}
-                        className="w-full flex items-start gap-2.5 px-3.5 py-2 text-left text-red-600 dark:text-red-400 hover:bg-red-500/10 transition-colors"
-                    >
-                        <Trash2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                        <span className="flex flex-col">
-                            <span className="text-sm font-semibold">Delete permanently</span>
-                            <span className="text-[11px] text-red-500/80 leading-snug">
-                                Irreversible · removes version history
+                    {onDelete && (
+                        <button
+                            role="menuitem"
+                            onClick={run(onDelete)}
+                            className="w-full flex items-start gap-2.5 px-3.5 py-2 text-left text-red-600 dark:text-red-400 hover:bg-red-500/10 transition-colors"
+                        >
+                            <Trash2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                            <span className="flex flex-col">
+                                <span className="text-sm font-semibold">Delete permanently</span>
+                                <span className="text-[11px] text-red-500/80 leading-snug">
+                                    Irreversible · removes version history
+                                </span>
                             </span>
-                        </span>
-                    </button>
+                        </button>
+                    )}
                 </div>
             )}
         </div>

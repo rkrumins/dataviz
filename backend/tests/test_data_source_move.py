@@ -2,31 +2,28 @@
 
 A catalog item belongs to exactly ONE workspace (uq_ds_catalog_item) and is
 allocated at onboarding. Getting that allocation wrong had no remedy short of
-detaching, which is destructive. This is the remedy, restricted to the case where
-it is provably safe: nothing is built on the source.
+detaching, which is destructive. This is the remedy.
 
-The zero-views rule is not caution, it is correctness:
+It used to refuse any source with a view on it, because moving the row alone is
+wrong: views.data_source_id stays valid, but a view still carries workspace_id = A
+while its source now lives in B, and members of A would read B's data through a
+workspace-scoped check that no longer describes reality. Now the views go with the
+source — trashed ones too, because restoring one later would recreate exactly that.
+The full behaviour (access, requests, undo) is in test_data_source_transfers.py.
 
-  * views.data_source_id is ON DELETE SET NULL, so detach-and-re-add does not
-    delete the old workspace's views — it silently ORPHANS them.
-  * Moving the row in place keeps data_source_id valid, but the view still carries
-    workspace_id = A while its source now lives in B. Members of A would read B's
-    data through a workspace-scoped RBAC check that no longer describes reality.
-
-Soft-deleted views count, because restoring one would recreate exactly that.
-
-The versioned graph and its forks move with the source, before the management row
-does. The graphver cases need a live Postgres (``GRAPHVER_E2E=1``); without it the
-move finds no versioned graph.
+A versioned source's graph moves with it, first — with its forks, at any depth and those in the
+trash too, and their jobs — so a refusal from version control, or a version store that can't be
+reached, fails the request before anything else has moved, and a failure after that puts them
+back. The graphver cases need a live Postgres (``GRAPHVER_E2E=1``); the others fake the version
+store.
 
 A move races nothing that stamps a workspace: a fork, an import, an export or a publish
 started in the old workspace waits for the move's lock and is then refused (a job's start
-waits for no main write, and an import refused leaves no draft behind), a second
-move finds the graph already gone from the workspace it moves from, and enabling version
-control waits for the data source's row, which the move holds. A move whose graph could
-not be put back says so, and how to finish it. Version control also holds a move back, with
-the reason, while an enable that failed waits to be resumed or cancelled, or while the graph
-or a fork of it has open drafts or review requests, so nothing moves.
+waits for no main write, and an import refused leaves no draft behind), a second move finds
+the graph already gone from the workspace it moves from, and enabling version control waits
+for the data source's row, which the move holds. Version control holds a move back while a
+job is pending or running on the graph or a fork of it, or while an enable that failed waits
+to be resumed or cancelled; open drafts and review requests go with it.
 """
 import asyncio
 import json
@@ -42,32 +39,28 @@ from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from backend.app.db.models import (
-    Base, OutboxEventORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
+    Base, OutboxEventORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM,
 )
 from backend.app.db.repositories import view_repo
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.versioning import config, db, models, purge_worker
-from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.models import BranchORM, GraphORM, JobORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.management import DataSourceMoveRequest, ViewCreateRequest
+from tests.common.transfer_world import fake_version_store
+
+VERSIONED = {"graphId": "graph_a", "activeJobs": [], "commits": 3, "openDrafts": [],
+             "openReviews": 0, "forks": 0}
 
 
-@pytest.fixture
-def version_store(monkeypatch):
-    """The version store's side of a move, faked: records each call; answers ``graph`` (None:
-    the source isn't versioned) or raises ``fail``."""
-    state = {"calls": [], "graph": None, "fail": None}
-
-    async def move(_self, ds_id, ws_id, **_kw):
-        state["calls"].append((ds_id, ws_id))
-        if state["fail"] is not None:
-            raise state["fail"]
-        return [state["graph"]] if state["graph"] else []
-
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", move)
-    return state
+@pytest.fixture(autouse=True)
+def version_store(request, monkeypatch):
+    """The version store runs on Postgres only: faked, answering ``facts`` (None: the source
+    isn't versioned) and recording each relocation — unless the test asks for the live one."""
+    if "live_store" in request.fixturenames:
+        return None
+    return fake_version_store(monkeypatch)
 
 
 _E2E = bool(os.getenv("GRAPHVER_E2E"))
@@ -75,12 +68,9 @@ e2e = pytest.mark.skipif(not _E2E, reason="set GRAPHVER_E2E=1 + a live Postgres"
 
 
 @pytest.fixture(autouse=True)
-async def _graphver(monkeypatch):
-    """The version store: a live one under GRAPHVER_E2E, otherwise one with no graphs."""
+async def _graphver():
+    """The live version store under GRAPHVER_E2E."""
     if not _E2E:
-        async def _no_graph(_self, _ds, _ws, **_kw):
-            return []
-        monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _no_graph)
         yield
         return
     db._engine = None                       # an engine cached by another test's loop is unusable
@@ -88,6 +78,17 @@ async def _graphver(monkeypatch):
     await models.create_schema_and_partitions()
     yield
     await db.dispose_engine()
+
+
+@pytest.fixture
+def live_store(monkeypatch):
+    """A move against the live version store (``GRAPHVER_E2E``), with only the caches, which
+    have nothing to hold here, left out."""
+    from backend.app.services import data_source_transfer
+
+    async def _no_caches(**_kw):
+        return None
+    monkeypatch.setattr(data_source_transfer, "_invalidate_reads", _no_caches)
 
 
 async def _workspace(client: AsyncClient, name: str) -> str:
@@ -146,7 +147,8 @@ async def test_moves_a_clean_data_source(test_client: AsyncClient):
     assert resp.status_code == 200, resp.text
 
     # The row KEEPS ITS ID, so stats/polling/aggregation state follow it for free.
-    assert resp.json()["id"] == ds
+    assert resp.json()["dataSource"]["id"] == ds
+    assert resp.json()["status"] == "completed"
 
     gone = await test_client.get(f"/api/v1/admin/workspaces/{src}")
     assert all(d["id"] != ds for d in gone.json()["dataSources"])
@@ -155,28 +157,30 @@ async def test_moves_a_clean_data_source(test_client: AsyncClient):
     assert any(d["id"] == ds for d in arrived.json()["dataSources"])
 
 
-async def test_refuses_to_move_a_source_with_a_view(
-    test_client: AsyncClient, db_session: AsyncSession, version_store,
+async def _workspace_of(session: AsyncSession, view_id: str) -> str:
+    return (await session.execute(
+        select(ViewORM.workspace_id).where(ViewORM.id == view_id))).scalar_one()
+
+
+async def test_a_source_with_a_view_takes_the_view_with_it(
+    test_client: AsyncClient, db_session: AsyncSession,
 ):
-    """The whole point of the restriction."""
+    """What the old zero-views rule protected: the view never ends up in one workspace
+    reading a source that lives in another."""
     src = await _workspace(test_client, "Has A View")
     dst = await _workspace(test_client, "Elsewhere")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Busy"))
 
-    await _view_on(db_session, src, ds, "Revenue Lineage")
+    view = await _view_on(db_session, src, ds, "Revenue Lineage")
     await db_session.commit()
 
     resp = await test_client.post(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
-    assert resp.status_code == 409
-    assert "1 view is built on this data source" in resp.json()["detail"]
-
-    # And it did NOT move — nor did anything ask the version store to.
-    still = await test_client.get(f"/api/v1/admin/workspaces/{src}")
-    assert any(d["id"] == ds for d in still.json()["dataSources"])
-    assert version_store["calls"] == []
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["viewCount"] == 1
+    assert await _workspace_of(db_session, view.id) == dst
 
 
 async def test_a_versioned_source_takes_its_history_with_it(
@@ -185,43 +189,49 @@ async def test_a_versioned_source_takes_its_history_with_it(
     src = await _workspace(test_client, "Old Home")
     dst = await _workspace(test_client, "New Home")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Versioned"))
-    version_store["graph"] = "graph_a"
+    version_store.facts = VERSIONED
 
     resp = await test_client.post(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
     assert resp.status_code == 200, resp.text
-    assert version_store["calls"] == [(ds, dst)]
+    assert version_store.relocations == [(ds, dst, True)]
 
+    # Both workspaces' record of the move names the graph that went with it.
     events = (await db_session.execute(select(OutboxEventORM).where(
-        OutboxEventORM.event_type == "workspace.datasource.moved"))).scalars().all()
-    assert [json.loads(e.payload)["graph_id"] for e in events] == ["graph_a"]
+        OutboxEventORM.event_type == "workspace.data_source.moved"))).scalars().all()
+    assert {json.loads(e.payload)["details"]["graphId"] for e in events} == {"graph_a"}
 
 
-@pytest.mark.parametrize("fail, status", [
-    (purge_worker.MoveBlocked("2 open drafts are on this data source's version history."), 409),
-    (OSError("connection refused"), 503),
+@pytest.mark.parametrize("fail, status, error", [
+    (purge_worker.MoveBlocked("Version control is busy with this data source."), 409, "graph_busy"),
+    (OSError("connection refused"), 503, "version_store_unavailable"),
 ])
 async def test_when_its_history_cant_move_the_move_is_refused(
-    test_client: AsyncClient, version_store, fail, status,
+    test_client: AsyncClient, monkeypatch, version_store, fail, status, error,
 ):
-    """What the request answers. That it leaves nothing behind is a property of the request's
+    """What the request answers when version control turns the graph down after the preview
+    passed — or can't be reached. That it leaves nothing behind is a property of the request's
     transaction, which this fixture's one shared session can't show (see conftest's
     ``test_client``) — the next test checks it with real transactions."""
     src = await _workspace(test_client, "Stays Put")
     dst = await _workspace(test_client, "Never Reached")
     ds = await _attach(test_client, src, await _catalog_item(test_client, f"Pinned {status}"))
-    version_store["fail"] = fail
+    version_store.facts = VERSIONED
 
+    async def refuse(**_kw):
+        raise fail
+
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", refuse)
     resp = await test_client.post(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
     assert resp.status_code == status, resp.text
-    assert version_store["calls"] == [(ds, dst)]
-    if status == 409:
-        assert resp.json()["detail"] == str(fail)       # the reason, as a sentence to act on
+    assert resp.json()["detail"]["error"] == error
+    if status == 409:                                   # the reason, as a sentence to act on
+        assert resp.json()["detail"]["message"].startswith(str(fail))
 
 
 @pytest_asyncio.fixture()
@@ -263,10 +273,11 @@ async def scoped_sessions(tmp_path):
 
 
 @pytest.mark.parametrize("fail", [
-    purge_worker.MoveBlocked("1 open draft is on this data source's version history."),
+    purge_worker.MoveBlocked("Version control is busy with this data source."),
     OSError("connection refused"),
 ])
-async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, version_store, fail):
+async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, monkeypatch, version_store,
+                                                        fail):
     from backend.app.api.v1.endpoints.workspaces import move_data_source
 
     async with scoped_sessions() as s:
@@ -276,8 +287,12 @@ async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, version
             WorkspaceDataSourceORM(id="ds_a", workspace_id="ws_from", provider_id="prov_a",
                                    graph_name="orders", is_primary=True),
         ])
-    version_store["fail"] = fail
+    version_store.facts = VERSIONED
 
+    async def refuse(**_kw):
+        raise fail
+
+    monkeypatch.setattr(purge_worker, "rehome_graph_for_data_source", refuse)
     with pytest.raises(HTTPException) as refused:
         async with scoped_sessions() as s:
             await move_data_source(
@@ -295,14 +310,14 @@ async def test_when_its_history_cant_move_nothing_moves(scoped_sessions, version
         assert (await s.execute(select(OutboxEventORM))).scalars().all() == []
 
 
-async def test_a_TRASHED_view_also_blocks_the_move(
+async def test_a_TRASHED_view_moves_too(
     test_client: AsyncClient, db_session: AsyncSession,
 ):
     """The subtle one.
 
-    A soft-deleted view still has a row pointing at the source. Restore it after a
-    move and you have a view in workspace A reading a source owned by workspace B —
-    exactly the state the rule exists to prevent. So the trash blocks it too.
+    A soft-deleted view still has a row pointing at the source. Left behind, restoring it
+    after the move would give a view in workspace A reading a source owned by workspace B.
+    So the trash moves with the source.
     """
     src = await _workspace(test_client, "Has Trash")
     dst = await _workspace(test_client, "Target")
@@ -316,9 +331,8 @@ async def test_a_TRASHED_view_also_blocks_the_move(
         f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move",
         json={"targetWorkspaceId": dst},
     )
-    assert resp.status_code == 409, (
-        "a view in the trash can be restored, which would strand it across workspaces"
-    )
+    assert resp.status_code == 200, resp.text
+    assert await _workspace_of(db_session, view.id) == dst
 
 
 async def test_moving_into_the_same_workspace_is_rejected(test_client: AsyncClient):
@@ -391,38 +405,14 @@ async def _in_workspace(client: AsyncClient, ws: str, ds: str) -> bool:
     return any(d["id"] == ds for d in resp.json()["dataSources"])
 
 
-async def test_a_version_store_it_cannot_reach_refuses_the_move(
-    test_client: AsyncClient, monkeypatch,
-):
-    """The graph moves first. If it cannot, nothing moves: no source in B with its
-    history stranded in A."""
-    async def _down(_self, _ds, _ws, **_kw):
-        raise OSError("connection refused")
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _down)
-
-    src = await _workspace(test_client, "Store Down")
-    dst = await _workspace(test_client, "Store Down Target")
-    ds = await _attach(test_client, src, await _catalog_item(test_client, "Unreachable"))
-
-    resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 503, resp.text
-    assert await _in_workspace(test_client, src, ds)
-
-
 async def test_a_move_that_fails_to_commit_puts_the_graph_back(
-    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, version_store,
 ):
     """The graph has moved when the management commit fails: it is moved back."""
-    calls = []
-
-    async def _record(_self, ds_id, ws_id, **_kw):
-        calls.append((ds_id, ws_id))
-        return ["g_moved"]
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
-
     src = await _workspace(test_client, "Commit Lost")
     dst = await _workspace(test_client, "Commit Lost Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Lost"))
+    version_store.facts = VERSIONED
 
     commit = db_session.commit
     failed = []
@@ -435,26 +425,20 @@ async def test_a_move_that_fails_to_commit_puts_the_graph_back(
     monkeypatch.setattr(db_session, "commit", _fail_once)
 
     resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 503, resp.text
-    assert "Nothing has been changed" in resp.json()["detail"]
-    assert calls == [(ds, dst), (ds, src)]
+    assert resp.status_code == 500, resp.text
+    assert version_store.relocations == [(ds, dst, True), (ds, src, False)]
+    assert await _in_workspace(test_client, src, ds)
 
 
 async def test_a_move_cancelled_after_the_graph_moved_puts_it_back(
-    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, version_store,
 ):
     """A request cancelled once the graph has moved (its time ran out, the client went away)
     still moves the graph back: the source stays in A, so must its history."""
-    calls = []
-
-    async def _record(_self, ds_id, ws_id, **_kw):
-        calls.append((ds_id, ws_id))
-        return ["g_moved"]
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
-
     src = await _workspace(test_client, "Cancelled")
     dst = await _workspace(test_client, "Cancelled Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Cut Off"))
+    version_store.facts = VERSIONED
 
     commit = db_session.commit
     cancelled = []
@@ -467,24 +451,19 @@ async def test_a_move_cancelled_after_the_graph_moved_puts_it_back(
     monkeypatch.setattr(db_session, "commit", _cancel_once)
 
     await _move(test_client, src, ds, dst)          # the middleware answers for the cancelled handler
-    assert calls == [(ds, dst), (ds, src)]
+    assert version_store.relocations == [(ds, dst, True), (ds, src, False)]
 
 
 async def test_a_commit_that_landed_but_raised_keeps_the_graph_with_the_source(
-    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, version_store,
 ):
     """The management commit lands and only its answer is lost (a connection reset after the
-    server committed): the source is in B, so its history stays there and the move succeeds."""
-    calls = []
-
-    async def _record(_self, ds_id, ws_id, **_kw):
-        calls.append((ds_id, ws_id))
-        return ["g_moved"]
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _record)
-
+    server committed): the source is in B, so its history stays there, and the retry is
+    answered with the move it made."""
     src = await _workspace(test_client, "Answer Lost")
     dst = await _workspace(test_client, "Answer Lost Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Landed"))
+    version_store.facts = VERSIONED
 
     commit = db_session.commit
     lost = []
@@ -496,79 +475,81 @@ async def test_a_commit_that_landed_but_raised_keeps_the_graph_with_the_source(
             raise ConnectionResetError("connection reset after COMMIT")
     monkeypatch.setattr(db_session, "commit", _land_then_fail_once)
 
-    resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 200, resp.text
-    assert calls == [(ds, dst)], "the graph is not moved back from where its source now is"
-    assert resp.json()["workspaceId"] == dst
+    assert (await _move(test_client, src, ds, dst)).status_code == 503   # a lost connection's answer
+    assert version_store.relocations == [(ds, dst, True)], \
+        "the graph is not moved back from where its source now is"
+    assert await _in_workspace(test_client, dst, ds)
 
-
-async def test_a_graph_that_cannot_be_moved_back_is_recorded_and_the_answer_says_how_to_finish(
-    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
-):
-    """The commit fails and the move back is refused (a job started on the graph in B): the
-    source is in A and its history in B. The answer names both and how to finish the move, and
-    the activity log keeps a record of it."""
-    async def _one_way(_self, ds_id, ws_id, **_kw):
-        if ws_id == src:
-            raise JobActive("job_b", "job job_b is still running")
-        return ["g_moved"]
-    monkeypatch.setattr(GraphVersioningService, "move_graph_workspace", _one_way)
-
-    src = await _workspace(test_client, "Half Moved")
-    dst = await _workspace(test_client, "Half Moved Target")
-    ds = await _attach(test_client, src, await _catalog_item(test_client, "Split"))
-
-    commit = db_session.commit
-    failed = []
-
-    async def _fail_once():
-        if not failed:
-            failed.append(True)
-            raise RuntimeError("commit lost")
-        await commit()
-    monkeypatch.setattr(db_session, "commit", _fail_once)
-
-    resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 503, resp.text
-    detail = resp.json()["detail"]
-    assert "Half Moved" in detail and "Half Moved Target" in detail
-    assert "again" in detail
-    assert await _in_workspace(test_client, src, ds)
-
-    rows = (await db_session.execute(select(OutboxEventORM).where(
-        OutboxEventORM.event_type == "workspace.data_source.move_incomplete"))).scalars().all()
-    assert len(rows) == 1
-    payload = json.loads(rows[0].payload)
-    assert payload["data_source_id"] == ds and payload["workspace_id"] == src
-    assert payload["details"] == {"from_workspace_id": src, "to_workspace_id": dst}
+    retry = await _move(test_client, src, ds, dst)
+    assert retry.status_code == 200, retry.text
+    assert (retry.json()["status"], retry.json()["toWorkspace"]["id"]) == ("completed", dst)
+    assert version_store.relocations == [(ds, dst, True)]
 
 
 @e2e
-async def test_work_opened_on_the_moved_graph_does_not_stop_the_move_back(
-    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+async def test_a_failed_move_puts_the_graph_and_its_forks_back(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, live_store,
 ):
     """Someone in B opens a draft on the graph between its move and the management commit,
-    which then fails: the graph still moves back with the source, draft and all."""
+    which then fails: the graph and its fork still move back with the source, draft and all."""
     src = await _workspace(test_client, "Back Home")
     dst = await _workspace(test_client, "Back Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Back"))
-    svc, gid = await _graph(ds, src)
+    gid, fork = await _versioned(ds, src)
+    svc = GraphVersioningService()
 
     commit = db_session.commit
-    failed = []
+    failed, drafts = [], []
 
     async def _draft_then_fail_once():
         if not failed:
             failed.append(True)
-            await svc.open_draft(graph_id=gid, owner="carol")
+            drafts.append(await svc.open_draft(graph_id=gid, owner="carol"))
             raise RuntimeError("commit lost")
         await commit()
     monkeypatch.setattr(db_session, "commit", _draft_then_fail_once)
 
     resp = await _move(test_client, src, ds, dst)
-    assert resp.status_code == 503, resp.text
-    assert "Nothing has been changed" in resp.json()["detail"]
-    assert (await svc.get_graph(gid))["workspace_id"] == src
+    assert resp.status_code == 500, resp.text
+    assert await _in_workspace(test_client, src, ds)
+    assert await _homes(gid, fork) == {src}
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, drafts[0])).status == "open"
+
+
+@e2e
+async def test_a_failed_move_puts_the_graph_back_while_a_job_runs_on_it(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, live_store,
+):
+    """Someone in B starts an export on the fork between the graph's move and the management
+    commit, which then fails: the graph, its fork and the job still go back with the source.
+    Only a person's move waits for a job; left in B, the history would answer there and not
+    where its source is."""
+    src = await _workspace(test_client, "Busy Home")
+    dst = await _workspace(test_client, "Busy Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Busy"))
+    gid, fork = await _versioned(ds, src)
+
+    commit = db_session.commit
+    jobs = []
+
+    async def _job_then_fail_once():
+        if not jobs:
+            async with db.graphver_session() as s:
+                job = JobORM(job_type="export", graph_id=fork, workspace_id=dst,
+                             data_source_id=ds, status="running")
+                s.add(job)
+            jobs.append(job.id)
+            raise RuntimeError("commit lost")
+        await commit()
+    monkeypatch.setattr(db_session, "commit", _job_then_fail_once)
+
+    resp = await _move(test_client, src, ds, dst)
+    assert resp.status_code == 500, resp.text
+    assert await _in_workspace(test_client, src, ds)
+    assert await _homes(gid, fork) == {src}
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, jobs[0])).workspace_id == src
 
 
 def _row_locks(session: AsyncSession) -> list:
@@ -598,6 +579,29 @@ async def test_a_move_holds_the_data_source_row_from_its_first_read(
     assert locks[0] == "update"
 
 
+@pytest.mark.parametrize("permanent", [False, True])
+async def test_a_delete_holds_the_data_source_row_from_its_first_read(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch, permanent,
+):
+    """A delete from the old workspace while a move, undo or accept of the source is in flight
+    waits for it on the row, then finds the source gone (404). Read without the lock, it would
+    trash or destroy the source where it went, and miss its graph, which went too."""
+    ws = await _workspace(test_client, f"Deleting {permanent}")
+    ds = await _attach(test_client, ws, await _catalog_item(test_client, f"Doomed {permanent}"))
+    await _attach(test_client, ws, await _catalog_item(test_client, f"Kept {permanent}"))
+
+    async def _nothing(**_kw):
+        return []
+    monkeypatch.setattr(purge_worker, "tombstone_graphs_for_data_source", _nothing)
+    monkeypatch.setattr(purge_worker, "purge_graph_for_data_source", _nothing)
+
+    locks = _row_locks(db_session)
+    resp = await test_client.delete(f"/api/v1/admin/workspaces/{ws}/data-sources/{ds}",
+                                    params={"permanent": str(permanent).lower()})
+    assert resp.status_code == 204, resp.text
+    assert locks[0] == "update"
+
+
 async def test_enabling_version_control_holds_the_data_source_row(
     test_client: AsyncClient, db_session: AsyncSession,
 ):
@@ -619,14 +623,30 @@ async def _versioned(ds: str, ws: str):
     return gid, fork
 
 
+async def _homes(*gids: str) -> set:
+    """The workspaces the graphs ``gids`` are filed under."""
+    async with db.graphver_session() as s:
+        return set((await s.execute(select(GraphORM.workspace_id).where(
+            GraphORM.id.in_(gids)))).scalars())
+
+
 @e2e
-async def test_the_versioned_graph_and_its_forks_move_with_the_source(test_client: AsyncClient):
-    """History is read through the new workspace's versioning routes, and is gone from the
-    old one's — for the graph and for its fork."""
+async def test_the_versioned_graph_and_its_forks_move_with_the_source(
+    test_client: AsyncClient, live_store,
+):
+    """The preview says the fork goes too. History is read through the new workspace's
+    versioning routes, and is gone from the old one's — for the graph and for its fork."""
     src = await _workspace(test_client, "Versioned Home")
     dst = await _workspace(test_client, "Versioned Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Versioned"))
     gid, fork = await _versioned(ds, src)
+
+    preview = await test_client.get(f"/api/v1/admin/workspaces/{src}/data-sources/{ds}/move-preview",
+                                    params={"to": dst})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["versioning"]["forks"] == 1
+    assert {n["code"]: n["message"] for n in preview.json()["notes"]}["forks"] == \
+        "1 fork of its version history moves with it."
 
     resp = await _move(test_client, src, ds, dst)
     assert resp.status_code == 200, resp.text
@@ -640,9 +660,34 @@ async def test_the_versioned_graph_and_its_forks_move_with_the_source(test_clien
 
 
 @e2e
-async def test_a_job_on_a_fork_refuses_the_move(test_client: AsyncClient):
+async def test_undoing_a_move_brings_the_graph_and_its_forks_back(
+    test_client: AsyncClient, live_store,
+):
+    """An undo is a move back: the graph and its forks, those in the trash too, go with it."""
+    src = await _workspace(test_client, "Undo Home")
+    dst = await _workspace(test_client, "Undo Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Undone"))
+    gid, fork = await _versioned(ds, src)
+    svc = GraphVersioningService()
+    trashed = (await svc.fork_graph(parent_graph_id=gid, workspace_id=src, actor="u1"))["graph_id"]
+    await svc.delete_fork(graph_id=trashed, workspace_id=src, actor="u1")
+
+    moved = await _move(test_client, src, ds, dst)
+    assert moved.status_code == 200, moved.text
+    assert await _homes(gid, fork, trashed) == {dst}
+
+    undone = await test_client.post(
+        f"/api/v1/admin/data-source-transfers/{moved.json()['id']}/undo")
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["status"] == "undone"
+    assert await _in_workspace(test_client, src, ds)
+    assert await _homes(gid, fork, trashed) == {src}
+
+
+@e2e
+async def test_a_job_on_a_fork_refuses_the_move(test_client: AsyncClient, live_store):
     """A job carries the workspace it was queued in, so nothing moves while one is pending or
-    running on the graph or any fork of it."""
+    running on the graph or any fork of it — named before anything is changed."""
     src = await _workspace(test_client, "Busy Home")
     dst = await _workspace(test_client, "Busy Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Busy Graph"))
@@ -655,8 +700,9 @@ async def test_a_job_on_a_fork_refuses_the_move(test_client: AsyncClient):
     try:
         resp = await _move(test_client, src, ds, dst)
         assert resp.status_code == 409, resp.text
-        assert resp.json()["detail"]["type"] == "job_active"
-        assert resp.json()["detail"]["jobId"] == job_id
+        detail = resp.json()["detail"]
+        assert detail["error"] == "blocked"
+        assert [i["code"] for i in detail["issues"]] == ["graph_busy"]
 
         assert await _in_workspace(test_client, src, ds)
         for g in (gid, fork):
@@ -668,7 +714,44 @@ async def test_a_job_on_a_fork_refuses_the_move(test_client: AsyncClient):
 
 
 @e2e
-async def test_impact_in_the_new_workspace_shows_the_versioned_graph(test_client: AsyncClient):
+async def test_a_job_started_after_the_check_refuses_the_move_with_graph_busy(
+    test_client: AsyncClient, monkeypatch, live_store,
+):
+    """A job queued on a fork between the preview's check and the graph's move meets the move's
+    lock and refusal instead: 409 graph_busy, and nothing has moved."""
+    from backend.app.services.versioning import lifecycle
+
+    src = await _workspace(test_client, "Late Job Home")
+    dst = await _workspace(test_client, "Late Job Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Late Job"))
+    gid, fork = await _versioned(ds, src)
+    checked = lifecycle.relocation_facts
+    jobs = []
+
+    async def _then_a_job_starts(ds_id):
+        facts = await checked(ds_id)
+        ie = ImportExportService(GraphVersioningService(), store=None)
+        jobs.append((await ie.create_export_job(workspace_id=src, data_source_id=ds,
+                                                graph_id=fork, actor="u1"))["job_id"])
+        return facts
+    monkeypatch.setattr(lifecycle, "relocation_facts", _then_a_job_starts)
+    try:
+        resp = await _move(test_client, src, ds, dst)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error"] == "graph_busy"
+        assert resp.json()["detail"]["message"].startswith("Version control is busy")
+        assert await _in_workspace(test_client, src, ds)
+        assert await _homes(gid, fork) == {src}
+    finally:
+        async with db.graphver_session() as s:
+            for job_id in jobs:
+                (await s.get(JobORM, job_id)).status = "cancelled"
+
+
+@e2e
+async def test_impact_in_the_new_workspace_shows_the_versioned_graph(
+    test_client: AsyncClient, live_store,
+):
     src = await _workspace(test_client, "Impact Home")
     dst = await _workspace(test_client, "Impact Target")
     ds = await _attach(test_client, src, await _catalog_item(test_client, "Impactful"))
@@ -803,41 +886,26 @@ async def test_a_second_move_from_the_old_workspace_finds_the_graph_gone():
 
 
 @e2e
-async def test_open_work_on_a_fork_holds_the_move_back_but_not_its_finish():
-    """A draft or review open on a fork stays with its authors, in the old workspace, as one on
-    the graph does: the move is refused and nothing moves. Once the graph is in the target,
-    moving the source there again finishes the move, whatever was opened there meanwhile."""
+async def test_open_work_on_a_fork_moves_with_it():
+    """A draft or review open on a fork goes with the fork, as one on the graph does: still
+    open, answered in the new workspace."""
     ds = "ds_" + os.urandom(4).hex()
     gid, fork = await _versioned(ds, "ws_a")
     svc = GraphVersioningService()
 
-    async def _homes():
-        async with db.graphver_session() as s:
-            return set((await s.execute(select(GraphORM.workspace_id).where(
-                GraphORM.id.in_([gid, fork])))).scalars())
-
     draft = await svc.open_draft(graph_id=fork, owner="bob")
-    with pytest.raises(purge_worker.MoveBlocked, match="1 open draft is on this .* abandon it first"):
-        await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a")
-    assert await _homes() == {"ws_a"}
-    await svc.abandon_draft(graph_id=fork, branch_id=draft, actor="bob")
-
     pr = await svc.open_pr(source_graph_id=fork, actor="bob")
-    with pytest.raises(purge_worker.MoveBlocked, match="1 open review request is on this"):
-        await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a")
-    assert await _homes() == {"ws_a"}
-    await svc.close_pr(pr_id=pr, actor="bob")
-
     assert await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a") == [gid, fork]
-    await svc.open_draft(graph_id=gid, owner="carol")
-    assert await svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a") == [gid, fork]
-    assert await _homes() == {"ws_b"}
+    assert await _homes(gid, fork) == {"ws_b"}
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, draft)).status == "open"
+    assert (await svc.get_pr(pr))["status"] not in ("merged", "closed")
 
 
 @e2e
-async def test_open_work_on_a_trashed_fork_does_not_hold_the_move_back():
-    """A trashed fork keeps its drafts and reviews, but no route reaches them to publish or
-    abandon them: they do not hold the move back, and the fork moves with its graph."""
+async def test_open_work_on_a_trashed_fork_moves_with_it():
+    """A trashed fork moves with its graph, its drafts and reviews too, so restoring it brings
+    them back where its graph is."""
     ds = "ds_" + os.urandom(4).hex()
     gid, fork = await _versioned(ds, "ws_a")
     svc = GraphVersioningService()
@@ -848,19 +916,20 @@ async def test_open_work_on_a_trashed_fork_does_not_hold_the_move_back():
 
 
 @e2e
-async def test_a_draft_opened_during_the_move_holds_it_back():
-    """A draft that opens while the move counts open work is waited for and counted: it does not
-    open unseen in the workspace the graph is leaving."""
+async def test_a_draft_opened_during_the_move_is_waited_for_and_moves_with_it():
+    """A draft that opens while the move takes the graph's row finishes first, then moves with
+    the graph: it does not open unseen in the workspace the graph is leaving."""
     ds = "ds_" + os.urandom(4).hex()
     svc, gid = await _graph(ds, "ws_a")
     async with db.graphver_session() as s:        # open_draft, its transaction not yet committed
-        await svc._add_draft(s, graph_id=gid, owner="bob")
+        draft = await svc._add_draft(s, graph_id=gid, owner="bob")
         move = asyncio.ensure_future(svc.move_graph_workspace(ds, "ws_b", from_workspace_id="ws_a"))
         await asyncio.sleep(0.5)
         assert not move.done(), "the move did not wait for the draft being opened"
-    with pytest.raises(purge_worker.MoveBlocked, match="1 open draft is on this"):
-        await move
-    assert (await svc.get_graph(gid))["workspace_id"] == "ws_a"
+    assert await move == [gid]
+    assert (await svc.get_graph(gid))["workspace_id"] == "ws_b"
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, draft)).status == "open"
 
 
 @e2e

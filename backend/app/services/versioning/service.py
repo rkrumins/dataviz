@@ -5074,11 +5074,12 @@ class GraphVersioningService:
             return None if g is None else self._graph_meta(g)
 
     async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str, *,
-                                   from_workspace_id: str, refuse_open_work: bool = True,
+                                   from_workspace_id: str, refuse_failed_enable: bool = True,
+                                   refuse_active_jobs: bool = True,
                                    tombstone_by: Optional[str] = None) -> List[str]:
         """Re-home a data source's versioned graph, and every fork of it, from
         ``from_workspace_id`` into ``new_workspace_id`` — the graphver half of moving the data
-        source. Returns the moved graph ids; ``[]`` when the source is not versioned.
+        source. Returns the moved graph ids, root first; ``[]`` when the source is not versioned.
 
         Each graph is locked before its forks are read: a fork is created under its graph's
         lock, and a job under its move lock (:meth:`_lock_move`), in the workspace it reads
@@ -5087,14 +5088,16 @@ class GraphVersioningService:
         workspace was moved by another request (:class:`GraphMoved`). Nothing moves while any of
         them has a pending or running job (:class:`JobActive`), because a job runs in the
         workspace it was queued in; the finished ones move with their graph, so lookups scoped by
-        workspace still find them.
+        workspace still find them. ``refuse_active_jobs=False`` waives that, for putting the graph
+        back after its source failed to commit: the source never left, so its graph, and any job
+        started on it meanwhile, belong where it is.
 
-        Taking the graph out of ``from_workspace_id`` is also refused (:class:`MoveBlocked`, with
-        the reason) while an enable that failed waits to be resumed or cancelled, or while any of
-        them holds open drafts or review requests: their authors work in the workspace it leaves.
-        Each graph row is held FOR UPDATE first, so none opens unseen. ``refuse_open_work=False``
-        waives that check — moving the graph back after its source failed to commit, and the
-        reaper re-filing a graph whose source already lives elsewhere —
+        Open drafts and review requests move with their graph: each graph row is held FOR UPDATE
+        first, so one being opened, a restore or a trash in flight finishes and moves along.
+        Taking the graph out of ``from_workspace_id`` is refused (:class:`MoveBlocked`) while an
+        enable that failed waits to be resumed or cancelled where it was started.
+        ``refuse_failed_enable=False`` waives that — putting the graph back after its source
+        failed to commit, and the reaper re-filing a graph whose source already lives elsewhere —
         and ``tombstone_by`` also trashes a still-live graph, as that actor, in this transaction
         (after its lifecycle key, as the trash takes it)."""
         async with self._session() as s:
@@ -5116,19 +5119,19 @@ class GraphVersioningService:
                 ids.append(gid)
                 todo += sorted((await s.execute(select(GraphORM.id).where(
                     GraphORM.fork_parent_graph_id == gid))).scalars().all())
-            active = await s.scalar(select(JobORM.id).where(
+            active = None if not refuse_active_jobs else await s.scalar(select(JobORM.id).where(
                 JobORM.graph_id.in_(ids), JobORM.status.in_(("pending", "running"))).limit(1))
             if active is not None:
                 raise JobActive(active, "Version control is busy with this data source — turning "
                                         "it on, an import, an export or a publish. Try again once "
                                         "that finishes.")
-            for gid in ids:         # parent before child: a draft or review opens on none unseen
+            for gid in ids:         # parent before child: what is opening on one finishes first
                 await self._bounded_lock(s, select(GraphORM.id).where(GraphORM.id == gid)
                                          .with_for_update(), f"graph {gid}")
-            if refuse_open_work and at == from_workspace_id:
-                reason = await self._why_graph_stays(s, root, ids)
-                if reason:
-                    raise MoveBlocked(reason)
+            if (refuse_failed_enable and at == from_workspace_id and await s.scalar(
+                    select(JobORM.id).where(*bootstrap_unfinished(root)).limit(1)) is not None):
+                raise MoveBlocked("Turning on version control for this data source didn't "
+                                  "finish. Resume or cancel it first.")
             await s.execute(update(GraphORM).where(GraphORM.id.in_(ids))
                             .values(workspace_id=new_workspace_id))
             await s.execute(update(JobORM).where(JobORM.graph_id.in_(ids))
@@ -5138,34 +5141,6 @@ class GraphVersioningService:
                                                        GraphORM.deleted_at.is_(None))
                                 .values(deleted_at=_now(), deleted_by=tombstone_by))
             return ids
-
-    @staticmethod
-    async def _why_graph_stays(s, root: str, ids: List[str]) -> Optional[str]:
-        """Why a person can't move this graph, with its forks (``ids``), to another workspace
-        right now, or None. A job still pending or running is :class:`JobActive`, asked first.
-        Work on a graph in the trash counts for nothing: no route reaches it to be finished."""
-        stalled = await s.scalar(select(JobORM.id).where(*bootstrap_unfinished(root)).limit(1))
-        if stalled is not None:
-            return ("Turning on version control for this data source didn't finish. Resume or "
-                    "cancel it first.")
-        live = (await s.execute(select(GraphORM.id).where(
-            GraphORM.id.in_(ids), GraphORM.deleted_at.is_(None)))).scalars().all()
-        drafts = await s.scalar(select(func.count()).select_from(BranchORM).where(
-            BranchORM.graph_id.in_(live), BranchORM.kind.in_(("draft", "fork_draft")),
-            BranchORM.status.in_(("open", "publishing"))))
-        reviews = await s.scalar(select(func.count()).select_from(MergeRequestORM).where(
-            or_(MergeRequestORM.graph_id.in_(live), MergeRequestORM.target_graph_id.in_(live)),
-            MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS)))
-        if drafts or reviews:
-            work = " and ".join(part for part in (
-                f"{drafts} open draft{'s' if drafts != 1 else ''}" if drafts else "",
-                f"{reviews} open review request{'s' if reviews != 1 else ''}" if reviews else "",
-            ) if part)
-            them = "it" if drafts + reviews == 1 else "them"
-            return (f"{work} {'is' if them == 'it' else 'are'} on this data source's version "
-                    f"history. Publish or abandon {them} first: the people working on {them} "
-                    f"may not reach {them} in the other workspace.")
-        return None
 
     async def projection_placements(self, graph_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
         """Where each live graph projects, for the placement routes: its workspace (their gate),

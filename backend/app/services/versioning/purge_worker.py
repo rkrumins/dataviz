@@ -56,7 +56,7 @@ from sqlalchemy.orm import aliased
 
 from . import config, db, job_lease
 from .job_lease import Draining, Lease, Superseded
-from .errors import JobActive
+from .errors import GraphMoved, JobActive, LockBusy
 from .models import GraphORM, JobORM, ProjectionStateORM, _now
 
 logger = logging.getLogger(__name__)
@@ -748,6 +748,47 @@ class MoveBlocked(Exception):
     why, as a sentence the person moving it can act on. Nothing was changed."""
 
 
+async def rehome_graph_for_data_source(*, data_source_id: str, to_workspace_id: str,
+                                       refuse_busy: bool = True) -> Optional[str]:
+    """File a data source's versioned graph, with its forks and their jobs, under
+    ``to_workspace_id``, from wherever it is filed now. Returns the graph's id, or None when the
+    source has no versioned graph. The transfer engine's way in — a move, an accepted request, an
+    undo, and a failed one putting the graph back (``services/data_source_transfer.py``);
+    :meth:`~.service.GraphVersioningService.move_graph_workspace` takes the locks and moves them.
+
+    The graph records its workspace for itself, and every tenant check on it reads that: the
+    graph routes, resolving a source to its graph, enablement, the trash and the purge. Keyed by
+    the data source alone, and it sets rather than swaps, so a retried move lands the same way
+    and a graph a failure left elsewhere is set right. Open drafts and review requests go with
+    it. Every refusal is :class:`MoveBlocked`, with nothing written: the graph's lock not granted
+    in time, or another request moving the graph meanwhile; and with ``refuse_busy`` — a
+    person's move — a job pending or running on the graph or a fork of it (a job runs in the
+    workspace it was queued in), or a failed attempt to turn version control on, waiting to be
+    resumed or cancelled. Putting the graph back after a failed move runs with it off: the source
+    never left, so its graph, and any job started on it meanwhile, belong where it is.
+    """
+    from .service import GraphVersioningService
+
+    async with db.graphver_session() as s:
+        at = await s.scalar(select(GraphORM.workspace_id).where(
+            GraphORM.data_source_id == data_source_id))
+    if at is None:
+        return None
+    try:
+        ids = await GraphVersioningService().move_graph_workspace(
+            data_source_id, to_workspace_id, from_workspace_id=at,
+            refuse_failed_enable=refuse_busy, refuse_active_jobs=refuse_busy)
+    except JobActive as busy:
+        raise MoveBlocked(str(busy)) from busy
+    except LockBusy as busy:
+        raise MoveBlocked(
+            "Version history is being written right now; try again shortly.") from busy
+    except GraphMoved as moved:
+        raise MoveBlocked(
+            "Another request moved its version history meanwhile; try again.") from moved
+    return ids[0] if ids else None
+
+
 #: How long a data source made from a view package may stand without its versioned graph before the
 #: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
 ORPHAN_PACKAGE_SOURCE_SECS = 3600
@@ -826,8 +867,8 @@ class Reaper:
                     elif ds_id not in _LEFT_STANDING:
                         # Restored under us, read by a fork, or tombstoned without its graph
                         # (a force-delete whose graph tombstone failed; a graph filed under
-                        # another workspace, which _misplaced_graphs re-files once it
-                        # settles). Its row is never removed while a graph of it stands.
+                        # another workspace, which _misplaced_graphs re-files once no job
+                        # runs on it). Its row is never removed while a graph of it stands.
                         _LEFT_STANDING.add(ds_id)
                         logger.warning("reaper: %s is past its grace period but its graph was "
                                        "not purged; leaving both alone", ds_id)
@@ -907,17 +948,18 @@ class Reaper:
 
         A source moved before moves carried their graphs leaves its graph filed under the old
         workspace — readable there, external where the source went, and missed by the trash and
-        the purge — and so does a move whose graph could not be moved back after its data source
+        the purge — and so does a move whose graph could not be put back after its data source
         failed to commit. The management database decides tenancy, so the graph follows its
         source, tombstone and all: a source in the trash whose graph is still live gets the delete
-        it missed, in the same transaction. It is a data-source move without the refusals that
-        keep people's drafts and reviews where they work (the source already lives elsewhere), and
-        a graph a job still runs on waits for a later pass: a job runs in the workspace it was
-        queued in. A move commits the graph first and its source a moment later, holding the
-        source's row in between, so the row is read again FOR SHARE SKIP LOCKED and held while
-        the graph moves: a move in flight is skipped, left to finish. A fork moves with its
-        graph, never on its own; a graph whose source row is gone is the purge's business, not
-        this."""
+        it missed, in the same transaction. It is a data-source move without the refusal a
+        person's move meets while an enable that failed waits (the source already lives
+        elsewhere); open drafts and reviews go with it, as with any move, and a graph a job still
+        runs on waits for a later pass: a job runs in the workspace it was queued in. A move, an
+        accepted request and an undo hold the source's row FOR UPDATE from before its graph moves
+        until the source commits, so the row is read again FOR UPDATE SKIP LOCKED and held while
+        the graph moves: a move in flight is skipped, left to finish, and so is a source another
+        reaper is re-filing. A fork moves with its graph, never on its own; a graph whose source
+        row is gone is the purge's business, not this."""
         from backend.app.db.models import WorkspaceDataSourceORM as DS
         from .service import GraphVersioningService
 
@@ -945,12 +987,12 @@ class Reaper:
             try:
                 async with Session() as s:
                     home = (await s.execute(select(DS.workspace_id, DS.deleted_at).where(
-                        DS.id == ds_id).with_for_update(read=True, skip_locked=True))).first()
+                        DS.id == ds_id).with_for_update(skip_locked=True))).first()
                     if home is None or home[0] == ws_id:
-                        continue              # being moved, gone, or no longer misplaced
+                        continue              # held by a move or another reaper, gone, or in place
                     to_ws, source_deleted = home
                     await svc.move_graph_workspace(
-                        ds_id, to_ws, from_workspace_id=ws_id, refuse_open_work=False,
+                        ds_id, to_ws, from_workspace_id=ws_id, refuse_failed_enable=False,
                         tombstone_by="reaper" if source_deleted and not graph_deleted else None)
             except JobActive:
                 logger.info("reaper: %s's graph is filed under %s; re-filed once its job ends",

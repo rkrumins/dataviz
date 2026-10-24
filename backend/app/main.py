@@ -2763,6 +2763,9 @@ class _TimeoutMiddleware:
         prefix /api/v1/graph         -> 120s  (read queries inc. advanced search;
                                                per-query bounded by soft deadline)
         prefix /api/v1/aggregation/  ->  90s  (write-heavy operations)
+        /api/v1/admin/workspaces/{ws}/data-sources/{ds}/move,
+        prefix /api/v1/admin/data-source-transfers/
+                                     -> 120s  (moving a source rewrites every view on it)
         everything else              ->  30s  (default)
 
     Why anchored prefixes (vs. substring): substring matching meant
@@ -2838,6 +2841,15 @@ class _TimeoutMiddleware:
         # Tier list order matters when prefixes nest (e.g. /api/v1/health
         # vs. /api/v1/health/providers — both legitimate; longer matches
         # wins via list-then-startswith).
+        # Moving a data source rewrites every view on it, their history and its versioned graph
+        # in one transaction: tens of thousands of views legitimately outlast the 30s default.
+        # Accepting a request or undoing a move does the same work. Below nginx's
+        # proxy_read_timeout (180s), as for versioning.
+        move_secs = float(os.getenv("HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS", "120"))
+        # Tiers a prefix can't name, because the part that decides sits mid-path.
+        self._pattern_tiers: list[tuple[re.Pattern, float]] = [
+            (re.compile(r"^/api/v1/admin/workspaces/[^/]+/data-sources/[^/]+/move$"), move_secs),
+        ]
         # Trace routes get their own (longer) tier ahead of the generic
         # /graph/ tier so the prefix-longest-wins lookup picks them up.
         # Both /api/v1 and /api/v2 surface trace endpoints; main.py
@@ -2864,10 +2876,14 @@ class _TimeoutMiddleware:
             # against the target graph legitimately outlasts the 30s default. Below nginx's
             # proxy_read_timeout (180s) for the same reason as versioning.
             ("/api/v1/views/transfer/", float(os.getenv("HTTP_TIMEOUT_VIEW_TRANSFER_SECS", "120"))),
+            ("/api/v1/admin/data-source-transfers/", move_secs),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
     def _resolve_timeout(self, path: str) -> float:
+        for pattern, timeout in self._pattern_tiers:
+            if pattern.match(path):
+                return timeout
         candidates = _route_candidates(path)
         for pattern, timeout in self._tiers:
             for candidate in candidates:

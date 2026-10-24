@@ -204,11 +204,13 @@ async def _reads(svc):
                                    actor="u")
     await svc.update_branch(graph_id=gid, branch_id=other, actor="u", name="kept", is_shared=False)
     assert (await svc.abandon_draft(graph_id=gid, branch_id=other, actor="u"))["status"] == "abandoned"
-    # Moving its data source moves no content, once no draft or review holds it back.
-    assert (await svc.abandon_draft(graph_id=gid, branch_id=draft, actor="u"))["status"] == "abandoned"
-    await svc.close_pr(pr_id=g["pr"], actor="v")
+    # Moving its data source moves no content; open drafts and reviews go with it.
     assert await svc.move_graph_workspace(g["ds"], "ws2", from_workspace_id="ws1")
     assert await svc.move_graph_workspace(g["ds"], "ws1", from_workspace_id="ws2")
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, draft)).status == "open"
+    assert (await svc.get_pr(g["pr"]))["status"] not in ("merged", "closed")
+    await svc.close_pr(pr_id=g["pr"], actor="v")
 
     # A frozen fork is trashed and restored like any other; its PR writes only the parent.
     fork = g["fork"]

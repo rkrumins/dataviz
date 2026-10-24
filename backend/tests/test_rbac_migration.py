@@ -225,7 +225,7 @@ def test_datasource_publish_seed_convergence():
         _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
     )
     assert (mod.revision, mod.down_revision) == (
-        "20261017_1000_datasource_publish", "20261019_1600_access_life",
+        "20261017_1000_datasource_publish", "20261020_1000_ds_transfers",
     )
 
     # Permission row: the same text in both paths.

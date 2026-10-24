@@ -136,13 +136,13 @@ p95 under 3 s, zero lost acknowledged writes.
 | Stale projection pass | Discarded on epoch mismatch |
 | Group directory down | 503 `groups_unavailable` |
 | Contention | 503 `lock_busy` + Retry-After after bounded retries; a partly applied `/graph/commands/batch` answers 200 with the rest skipped |
-| Data-source move commit raises | Landed: 200. Not landed: moved back. Cannot move back: 503 and `move_incomplete` recorded |
+| Data-source move fails after its graph moved | The graph and its forks are moved back, unless the commit landed and only its answer was lost; if moving them back fails, the reaper re-files them under the source's workspace. A retry whose first try landed gets that answer for ten minutes |
 | Capped graph server | Bootstrap refuses before reading |
 | Worker on a graphver DB missing a required column | Exits; the restart retries |
 
 ## 9. Rollout
 
-1. Migrations after `main`'s `20261019_1600_access_life`: `20261017_1000_datasource_publish`, then eight
+1. Migrations after `main`'s `20261020_1000_ds_transfers`: `20261017_1000_datasource_publish`, then eight
    `gv_` revisions to `20261018_1200_gv_lifecycle`. Each `gv_` one waits at most 5 s for a lock.
 2. With a separate `GRAPHVER_DB_URL`, start the versioning workers before the API pods.
 3. Grant `workspace_publisher` to people who land changes and to owners of keys that write `main`.

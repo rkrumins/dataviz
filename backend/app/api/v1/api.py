@@ -16,7 +16,7 @@ from .endpoints import (
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory,
+    workspace_directory, data_source_transfers,
     versioning,
     versioning_admin,
     admin_idp_groups,
@@ -236,6 +236,24 @@ api_router.include_router(
     access_reviews.router,
     prefix="/admin/workspaces/{ws_id}/access-reviews",
     tags=["admin:access-reviews"],
+)
+# Moving a data source, with its views, to another workspace — directly or
+# by asking the destination. Three prefixes so the gate is naturally scoped:
+# one source, one workspace's requests, and the parties answering.
+api_router.include_router(
+    data_source_transfers.source_router,
+    prefix="/admin/workspaces/{workspace_id}/data-sources/{ds_id}",
+    tags=["admin:data-source-transfers"],
+)
+api_router.include_router(
+    data_source_transfers.workspace_router,
+    prefix="/admin/workspaces/{workspace_id}/data-source-transfers",
+    tags=["admin:data-source-transfers"],
+)
+api_router.include_router(
+    data_source_transfers.admin_router,
+    prefix="/admin/data-source-transfers",
+    tags=["admin:data-source-transfers"],
 )
 # Find a workspace — any signed-in user, while the deployment's switch is
 # on (the router carries the gate). Lists workspaces to ask to join.

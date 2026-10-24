@@ -364,7 +364,7 @@ Stage 2 assumes C33 is merged, so the projector is the only FalkorDB writer and 
 ### (d) Missing lifecycle operations
 
 **2D-1 Move data source carries its graph (S/M; LIFECYCLE-12, pulled forward from doc 14)**
-- **Status: Done** (7d5bd23d, a4587264, 46776c87). The graph, its forks and their jobs move under each graph's lock and move lock (`gvmove`); any pending or running job on them answers 409 `job_active`, and a graph in neither workspace 409 `graph_moved`. Forks, enables and job starts racing the move get 404. A commit that raised but landed answers 200. The impact report counts live forks.
+- **Status: Done** (7d5bd23d, a4587264, 46776c87; the move is the transfer engine's since #562). The graph, its forks and their jobs move under each graph's lock and move lock (`gvmove`). A pending or running job on any of them, or a failed enable, answers 409 `blocked` (the preview) or `graph_busy` (the version store, a lock wait, or another move). Open drafts and reviews move with the graph. Forks, enables and job starts racing the move get 404. A commit that landed but raised keeps the graph with the source, and the retry is answered from the engine's 10-minute replay. The impact report counts live forks.
 - `move_data_source` (workspaces.py:814) updates `GraphORM.workspace_id` (including forks) through a new service method, under the graph lock, returning 409 when a job is active.
 - Tests:
   - add graphver cases to tests/test_data_source_move.py: history reachable in the new workspace and 404 in the old;

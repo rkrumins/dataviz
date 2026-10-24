@@ -35,6 +35,7 @@ import { DataSourceVersioningTab } from '@/features/versioning/components/DataSo
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import { FinishImportingViewsBanner } from '@/features/view-transfer/FinishImportingViewsBanner'
 import { DataSourceActionMenu } from './DataSourceActionMenu'
+import { DataSourceLifecycle, MovedFromChip } from '@/features/data-source-transfer/DataSourceLifecycle'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 
@@ -73,6 +74,10 @@ interface DataSourceDetailPanelProps {
     onDelete?: () => void
     /** Delete permanently — irreversible; only the guarded direct path offers it. */
     onDeletePermanent?: () => void
+    /** Move it, with its views, to another workspace. Offered to whoever may. */
+    onMove?: () => void
+    /** The source moved away from here (an undo) — the page refreshes. */
+    onMovedAway?: () => void
     onReaggregate: () => void
     onPurge: () => Promise<void>
     onSetPrimary: () => void
@@ -145,6 +150,8 @@ export function DataSourceDetailPanel({
     onSaveEdit,
     onDelete,
     onDeletePermanent,
+    onMove,
+    onMovedAway,
     onReaggregate,
     onPurge,
     onSaveAggregationConfig,
@@ -357,6 +364,7 @@ export function DataSourceDetailPanel({
                                     </span>
                                 )}
                                 <NodeIdentityBadge value={ds.identityProperty} />
+                                <MovedFromChip wsId={wsId} dataSourceId={ds.id} />
                             </div>
 
                             {/* Quick action buttons */}
@@ -378,6 +386,7 @@ export function DataSourceDetailPanel({
                                     onEdit={startEditing}
                                     onDelete={onDelete}
                                     onDeletePermanent={onDeletePermanent}
+                                    onMove={onMove}
                                 />
                                 {/* DataSourceActions handles permission gating per
                                     workspace; falls back to hidden buttons if the
@@ -389,6 +398,8 @@ export function DataSourceDetailPanel({
                             no overlap with the header chips. */}
                         {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
                         {!editing && <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />}
+                        {/* Where it has lived: a request waiting, a move that can still be undone. */}
+                        {!editing && <DataSourceLifecycle wsId={wsId} dataSourceId={ds.id} onChanged={onMovedAway} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         {!editing && (
@@ -704,7 +715,7 @@ export function DataSourceDetailPanel({
 // workspace; without it the buttons are hidden so a viewer doesn't
 // click into a 403 notification.
 function DataSourceActions({
-    wsId, onEdit, onDelete, onDeletePermanent,
+    wsId, onEdit, onDelete, onDeletePermanent, onMove,
 }: {
     wsId: string
     onEdit: () => void
@@ -712,6 +723,8 @@ function DataSourceActions({
     onDelete?: () => void
     /** Delete permanently (irreversible). */
     onDeletePermanent?: () => void
+    /** Move to another workspace — not tied to deleting being allowed. */
+    onMove?: () => void
 }) {
     const isPlatformAdmin = usePermission('system:admin')
     const canManage = isPlatformAdmin || usePermission('workspace:datasource:manage', wsId)
@@ -721,11 +734,12 @@ function DataSourceActions({
             <button onClick={onEdit} className="p-2 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Edit">
                 <Edit2 className="w-3.5 h-3.5" />
             </button>
-            {onDelete && onDeletePermanent && (
+            {((onDelete && onDeletePermanent) || onMove) && (
                 <DataSourceActionMenu
                     align="right"
-                    onOffboard={onDelete}
-                    onDelete={onDeletePermanent}
+                    onOffboard={onDelete && onDeletePermanent ? onDelete : undefined}
+                    onDelete={onDelete && onDeletePermanent ? onDeletePermanent : undefined}
+                    onMove={onMove}
                 />
             )}
         </>

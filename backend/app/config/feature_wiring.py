@@ -404,6 +404,9 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "GET /workspace-directory — refused while off",
             "POST /access-requests and GET /me/access-requests — name a workspace the person "
             "cannot open only while this is on and the workspace is listed",
+            "GET …/data-sources/{ds}/move-destinations, move-preview, and moving or asking to "
+            "move a data source — offer or accept a workspace the person cannot open only while "
+            "this is on and the workspace is listed (404 otherwise)",
         ),
         ui_surfaces=(
             "The Find a workspace tab on Workspaces, and its entry in search",
