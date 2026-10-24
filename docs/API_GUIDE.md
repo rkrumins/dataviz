@@ -4,28 +4,14 @@
 
 This page gets a script signed in, shows you where to find any endpoint, explains the
 conventions every endpoint shares, and walks through the nine integrations people build
-most often. Each recipe is a short procedure with the real request.
+most often. Each recipe is a short procedure with the real request. New to the API? Start with
+the [Integration Quickstart](/docs/integration-quickstart): a credential, a key, your first calls
+and every answer, in order.
 
 > **Before you start:** you need the address you open the app at, and an account that holds
 > the permissions your task needs (each recipe says which). Scripts act as that account,
 > with an API key it creates or with its password. You also need `curl` and `jq`, or Python
 > 3 with `requests` or `httpx`.
-
-## Your path
-
-1. **API Guide for Integrators** — this page: sign in, find endpoints, conventions, recipes.
-2. [Graph Metadata & History API](/docs/graph-metadata-api) — a workspace's graphs, external
-   or versioned, and each versioned graph's full commit history, field by field.
-3. [Search & Display Rules: developer reference](/docs/feature-search-and-rules-reference) —
-   the query model and every search and view-library endpoint, with curl recipes.
-4. [Versioning API reference](/docs/versioning-api-reference) — drafts, publishing, history,
-   imports and exports over HTTP.
-5. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched to
-   what is already there, and applied.
-6. [View portability](/docs/feature-view-portability) — the view file format and the checks
-   an import runs.
-7. [Feature Switches API](/docs/api-features) — which administrator switch turns which
-   endpoint off.
 
 ## Sign in from a script
 
@@ -839,9 +825,7 @@ in [Single Sign-On](/guide/sso-setup).
 | CSRF and origin checks | `backend/auth_service/csrf.py` | `CSRFMiddleware` |
 | API keys on a request: checks, scope fence | `backend/app/auth/api_key_auth.py` | `authenticate`, `_REFUSALS` |
 | Which routes a key may call | `backend/app/auth/api_key_surface.py` | `SURFACE` |
-| Creating, previewing, renaming, rotating and revoking keys; the key describing itself | `backend/app/api/v1/endpoints/api_keys.py` | `create_my_api_key`, `preview_my_api_key`, `update_my_api_key`, `rotate_my_api_key`, `describe_this_key` |
-| Every key: counts, filters, detail, revoking with a note, CSV export | `backend/app/api/v1/endpoints/api_keys.py`, `backend/app/db/repositories/api_key_repo.py` | `api_key_stats`, `list_api_keys`, `export_api_keys`, `status_expr` |
-| Counting each key's requests per day | `backend/app/services/api_key_usage.py` | `record_request`, `UsageRecorder.flush` |
+| Every key route, and who may make a service account's keys | [Key Management API](/docs/key-management-api#where-the-code-lives) | — |
 | Session lifetimes and sign-in limits | `backend/auth_service/core/config.py` | `JWT_EXPIRY_MINUTES`, `SESSION_ABSOLUTE_MAX_HOURS`, `RATELIMIT_LOGIN_PER_ACCOUNT` |
 | Router mounts and URL prefixes | `backend/app/api/v1/api.py` | `api_router` |
 | Explorer switch, error handlers, body and time limits | `backend/app/main.py` | `_DOCS_ENABLED`, `_feature_disabled_handler`, `_provider_busy_handler`, `_BodySizeLimitMiddleware`, `_TimeoutMiddleware` |
