@@ -738,8 +738,9 @@ export function useAdvancedSearch(
             // explicit Run button still forces a retry.
             if (runKey) setRunState({ hash: runKey, status: 'failed' })
             // On error, drop any previously-published result-set so the
-            // canvas doesn't keep highlighting stale matches.
-            useSearchStore.getState().clear()
+            // canvas doesn't keep highlighting stale matches — but keep the
+            // query itself, so the user can fix it.
+            useSearchStore.getState().clearSearchResults()
         }
     }, [provider, stampScope, viewId])
 
@@ -918,8 +919,9 @@ export function useAdvancedSearch(
     const cancel = useCallback(() => {
         abortRef.current?.abort()
         // Drop any published result-set so the canvas doesn't keep
-        // highlighting matches from a query the user explicitly killed.
-        useSearchStore.getState().clear()
+        // highlighting matches from a query the user explicitly killed —
+        // the query stays, to adjust and run again.
+        useSearchStore.getState().clearSearchResults()
         // An aborted run never reports an outcome, so clear the run
         // state here — otherwise it would sit at 'running' forever and
         // the editor would think the draft was already dispatched.

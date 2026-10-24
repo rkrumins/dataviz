@@ -544,6 +544,48 @@ describe('useAdvancedSearch — clearOnUnmount', () => {
 })
 
 
+/** A run that fails or is cancelled drops the matches it would leave on the
+ *  canvas, never the query the user wrote — or their undo history. */
+describe('useAdvancedSearch — a failed or cancelled run keeps the query', () => {
+    it('keeps the draft and its history when the run fails', async () => {
+        useSearchStore.getState().commitDraft(PREDICATE)
+        searchAdvanced
+            .mockResolvedValueOnce(page({ hits: [HIT] }))
+            .mockRejectedValueOnce(new Error('API Error 400: {"detail":"bad"}'))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(useSearchStore.getState().matchUrnSet.size).toBe(1)
+        const history = useSearchStore.getState().historyPast
+
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(result.current.view.kind).toBe('error')
+        const state = useSearchStore.getState()
+        expect(state.matchUrnSet.size).toBe(0)
+        expect(state.draftPredicate).toEqual(PREDICATE)
+        expect(state.historyPast).toBe(history)
+    })
+
+    it('keeps the draft when the user cancels the run', async () => {
+        useSearchStore.getState().commitDraft(PREDICATE)
+        searchAdvanced.mockImplementationOnce(() => new Promise<SearchResultPage>(() => {}))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            void result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        act(() => { result.current.cancel() })
+
+        expect(useSearchStore.getState().draftPredicate).toEqual(PREDICATE)
+        expect(result.current.runState).toBeNull()
+    })
+})
+
+
 /**
  * The session hands this whole object to the panel and re-exposes it on a
  * context. A fresh object literal every render would make the session
