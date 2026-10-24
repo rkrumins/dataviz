@@ -3465,7 +3465,9 @@ export function ContextViewCanvas({
     if (!target || target.type !== 'node' || !isSelectableNode(target.id)) return []
     const selection = selectedNodeIds.filter(isSelectableNode)
     const urns = selection.length > 1 && selection.includes(target.id) ? selection : [target.id]
-    return questionsFromHere(urns, { readOnly }).map((q) => ({
+    // Entities holding others: their lineage questions take in what is inside.
+    const containers = new Set(urns.filter((urn) => Number(displayMap.get(urn)?.data?.childCount ?? 0) > 0))
+    return questionsFromHere(urns, { readOnly, containers }).map((q) => ({
       id: `query-${q.id}`, label: q.label, icon: q.icon as ContextMenuAction['icon'],
       onClick: () => {
         // Named before the query is committed, so its sentence and chips
@@ -3484,7 +3486,7 @@ export function ContextViewCanvas({
       },
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel])
+  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel, displayMap])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {

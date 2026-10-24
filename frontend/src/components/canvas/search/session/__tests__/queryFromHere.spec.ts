@@ -37,6 +37,32 @@ describe('questionsFromHere', () => {
         expect(questionsFromHere(['urn:x'], { readOnly: true }).map((q) => q.id)).toEqual(['inside'])
         expect(questionsFromHere(['urn:a', 'urn:b'], { readOnly: true })).toEqual([])
     })
+
+    it('takes in what is inside a container, whose lineage runs through it', () => {
+        const isOrInside = (urn: string): Predicate => ({
+            kind: 'group', op: 'or', children: [
+                { kind: 'is', refs: [{ urn }] },
+                { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs: [{ urn }] } },
+            ],
+        })
+        const by = Object.fromEntries(
+            questionsFromHere(['urn:ds'], { containers: new Set(['urn:ds']) }).map((q) => [q.id, q]),
+        )
+        expect(by.targets.predicate).toEqual({
+            kind: 'related', axis: 'upstream', maxHops: 3, where: isOrInside('urn:ds') })
+        expect(by.sources.predicate).toEqual({
+            kind: 'related', axis: 'downstream', maxHops: 3, where: isOrInside('urn:ds') })
+        // Its children are still its own.
+        expect(by.children.predicate).toEqual(named('parent', 'urn:ds'))
+        // Routes start from a condition, so both ends are conditions: 3 hops.
+        expect(by.routes.predicate).toMatchObject({
+            kind: 'path', sourceUrns: [], sourceWhere: isOrInside('urn:ds'), maxHops: 3 })
+
+        const [targets] = questionsFromHere(['urn:ds', 'urn:col'], { containers: new Set(['urn:ds']) })
+        expect(targets.predicate).toEqual({ kind: 'group', op: 'and', children: [
+            { kind: 'related', axis: 'upstream', maxHops: 3, where: isOrInside('urn:ds') },
+            named('upstream', 'urn:col', 3)] })
+    })
 })
 
 

@@ -82,10 +82,26 @@ export function hopRange(p: RelatedPredicate): [number, number] {
     return [lo, p.maxHops ?? TREE_DEPTH_MAX]
 }
 
-/** Whether its far end is named entities (an `is`): walked from them, so
- *  lineage may go as far as within-hops does — at the top of the query. */
+/** Whether its far end is named entities — an `is`, inside one, or an OR of
+ *  those (the server's `anchor_groups`): walked from them, so lineage may go
+ *  as far as within-hops does — at the top of the query. */
 export function namesItsFarEnd(p: RelatedPredicate): boolean {
-    return (p.quantifier ?? 'any') === 'any' && !p.count && p.where?.kind === 'is'
+    return (p.quantifier ?? 'any') === 'any' && !p.count && namesEntities(p.where)
+}
+
+function namesEntities(p: Predicate | null | undefined): boolean {
+    if (!p) return false
+    if (p.kind === 'is') return true
+    if (p.kind === 'related') {
+        return p.axis === 'ancestor' && (p.quantifier ?? 'any') === 'any' && !p.count
+            && p.where?.kind === 'is'
+    }
+    if (p.kind === 'group') {
+        const op = p.op ?? 'and'
+        return op !== 'not' && (op === 'or' || p.children.length === 1)
+            && p.children.length > 0 && p.children.every(namesEntities)
+    }
+    return false
 }
 
 /** The most lineage hops this relationship may follow where it stands. */

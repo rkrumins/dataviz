@@ -20,6 +20,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError as PydanticValidationError
 
 from backend.app.providers.falkordb_deep_search import (
+    CompileError,
     _build_candidate_cypher,
     _build_within_hops_continuation,
     _Compiler,
@@ -43,7 +44,12 @@ from backend.app.services.advanced_search_service import (
     follows_relationships,
 )
 from backend.app.services.view_scope import EffectiveViewScope
-from backend.common.models.search import Predicate, RelatedPredicate, SearchQuery
+from backend.common.models.search import (
+    Predicate,
+    RelatedPredicate,
+    SearchQuery,
+    anchor_groups,
+)
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
 
 P = TypeAdapter(Predicate).validate_python
@@ -103,6 +109,18 @@ class TestModel:
         with pytest.raises(PydanticValidationError, match=why):
             P(raw)
 
+    def test_named_entities_a_walk_can_start_from(self):
+        inside = rel("ancestor", IS("x"))
+        spans = lambda raw: [(g.lo, g.hi) for g in anchor_groups(P(raw))]  # noqa: E731
+        assert spans(IS("x")) == [(0, 0)]
+        assert spans(inside) == [(1, 20)]
+        assert spans(OR(IS("x"), inside)) == [(0, 0), (1, 20)]
+        assert spans(AND(IS("x"))) == [(0, 0)]
+        for raw in (TYPE("x"), AND(IS("x"), TYPE("t")), OR(IS("x"), TYPE("t")),
+                    rel("ancestor", IS("x"), quantifier="none"), rel("ancestor", TYPE("t")),
+                    rel("parent", IS("x")), {"kind": "group", "op": "not", "children": [IS("x")]}):
+            assert anchor_groups(P(raw)) is None, raw
+
     def test_how_far_each_axis_reaches_by_default(self):
         assert P(rel("parent")).hop_range() == (1, 1)
         assert P(rel("upstream")).hop_range() == (1, 1)
@@ -148,6 +166,12 @@ class TestValidation:
                     rel("parent", rel("upstream", IS("u"), maxHops=10))):
             with pytest.raises(ValidationError, match="at most 3"):
                 _validate_predicate(P(raw))
+
+    def test_lineage_from_inside_named_entities_goes_ten_too(self):
+        """What a container's lineage question asks: is it, or is inside it."""
+        _validate_predicate(P(rel("upstream", OR(IS("ds"), rel("ancestor", IS("ds"))), maxHops=10)))
+        with pytest.raises(ValidationError, match="at most 3"):
+            _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4)))
 
     def test_a_rule_follows_lineage_one_hop(self):
         _validate_predicate(P(rel("upstream", TYPE("topic"))), rule=True)
@@ -378,6 +402,26 @@ class TestCompiler:
             "ELSE _xs_wh0 + [_xm_wh0] END)) WITH DISTINCT n")
         assert params == {"_whUrns7": ["src"]}
 
+    def test_lineage_from_inside_named_entities_is_walked_from_their_contents(self):
+        c = _compiler()
+        head = c.compile(P(rel("upstream", OR(IS("ds"), rel("ancestor", IS("ds"))), maxHops=3)))
+        assert head == "true" and c.tail == []
+        fragment, params, _ = _build_within_hops_continuation(c.hoisted_within_hops, 0)
+        # Back from the candidate to an entity on a route, then up the tree
+        # from it — one parent a step — to the one named, or to itself.
+        assert fragment == (
+            "MATCH _whP0 = (anchor)-[:FLOWS_TO*1..3]->(n) "
+            "MATCH _whC0 = (anchor)<-[:CONTAINS*0..20]-(_whG0) WHERE "
+            "((_whG0.urn IN $_whUrns0 AND length(_whC0) >= 0 AND length(_whC0) <= 0) OR "
+            "(_whG0.urn IN $_whUrns1 AND length(_whC0) >= 1 AND length(_whC0) <= 20)) "
+            "AND ID(anchor) <> ID(n) WITH DISTINCT n")
+        assert params == {"_whUrns0": ["ds"], "_whUrns1": ["ds"]}
+
+    def test_inside_needs_the_containment_edges(self):
+        c = _Compiler(lineage_edge_types={"FLOWS_TO"}, containment_edge_types=None)
+        with pytest.raises(CompileError, match="containment edge types"):
+            c.compile(P(rel("upstream", rel("ancestor", IS("ds")))))
+
     def test_past_one_hop_a_route_passes_no_entity_twice(self):
         c = _compiler()
         c.compile(P(rel("downstream", TYPE("dataset"), minHops=2, maxHops=3)))
@@ -449,6 +493,20 @@ class TestStatements:
         probe, _ = raw_probe_statement(Unit("range", "L"), replace_raw(ctx))
         assert "S1" not in probe and "HOPS" not in probe
 
+    def test_an_ids_unit_leaves_out_the_walk_its_ids_already_meet(self):
+        ctx = Context(where="n.a = 1", params={}, sort=SortSpec((SortKey("n.urn"),)),
+                      containment=("CONTAINS",), max_depth=12, within_hops="H0 H1",
+                      hop_parts=("H0", "H1"))
+        cypher, params = match_statement(Unit("ids", roots=[4, 2], satisfies=0), ctx, [])
+        assert cypher == ("UNWIND $_ids AS _ii MATCH (n) WHERE ID(n) = _ii AND "
+                          "n.urn IS NOT NULL AND (n.a = 1) H1")
+        assert params["_ids"] == [4, 2]
+        # Every other unit takes every walk.
+        assert match_statement(Unit("range", "L"), ctx, [])[0].endswith(" H0 H1")
+        assert [u.roots for u in Unit("ids", roots=[1, 2, 3], satisfies=0).split()] == [[1], [2, 3]]
+        assert Unit.from_dict(Unit("ids", roots=[1], satisfies=0).to_dict()).satisfies == 0
+        assert Unit.from_dict({"kind": "range", "label": "L"}).satisfies is None
+
     def test_rules_side_by_side_never_share_a_name(self):
         provider = SimpleNamespace(_get_lineage_edge_types=lambda: {"FLOWS_TO"},
                                    _get_containment_edge_types=lambda: {"CONTAINS"})
@@ -495,6 +553,86 @@ def _service(stub) -> AdvancedSearchService:
 
     svc._resolve_scope, svc._guard_view_data_source = resolve, guard
     return svc
+
+
+class TestReachPlan:
+    """A lineage relationship naming its far end drives the plan: one walk
+    out from the entities it names — or from what is inside them — and only
+    what it reaches, in scope, is read."""
+
+    @staticmethod
+    def _run(seen, *, reached=((20,), (21,), (22,)), anchors=((10,), (11,), (12,))):
+        async def run(cypher, params):
+            seen.append((cypher, params))
+            if cypher.startswith("MATCH (r:"):                      # the named entities
+                return SimpleNamespace(result_set=[[10]])
+            if "]->(_a)" in cypher:                                 # what is inside them
+                return SimpleNamespace(result_set=[list(a) for a in anchors])
+            if "MATCH _whP0" in cypher:                             # the walk
+                return SimpleNamespace(result_set=[list(r) for r in reached])
+            if "labels(n)" in cypher:                               # the scope's check
+                return SimpleNamespace(result_set=[
+                    [20, "u20", ["Column"], []], [21, None, ["Column"], []],
+                    [22, "u22", ["_AggMeta"], []]])
+            raise AssertionError(cypher)
+        return run
+
+    @staticmethod
+    def _compiled(where):
+        c = _compiler()
+        c.compile(P(rel("upstream", where, maxHops=3)))
+        return c
+
+    async def test_it_reads_only_what_the_walk_reaches_in_scope(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        seen = []
+        c = self._compiled(OR(IS("ds"), rel("ancestor", IS("ds"))))
+        provider = SimpleNamespace(_entity_type_levels={"column": 1})
+        plan = await plan_mod.reach_plan(self._run(seen), provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[])
+        # 21 has no URN, 22 is bookkeeping: what the scope's own units skip.
+        assert [(u.kind, u.roots, u.satisfies) for u in plan.units] == [("ids", [20], 0)]
+        walk = next(p for cy, p in seen if "MATCH _whP0" in cy)
+        assert walk["_anchors"] == [10, 11, 12]
+        assert "ID(anchor) <> ID(n)" in next(cy for cy, _ in seen if "MATCH _whP0" in cy)
+
+    async def test_it_steps_aside_when_the_walk_reaches_too_far(self, monkeypatch):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        c = self._compiled(IS("ds"))
+        provider = SimpleNamespace(_entity_type_levels={})
+        monkeypatch.setattr(plan_mod, "REACH_MAX", 2)
+        assert await plan_mod.reach_plan(self._run([]), provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[]) is None
+        monkeypatch.setattr(plan_mod, "REACH_MAX", 50_000)
+        monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 2)
+        c = self._compiled(rel("ancestor", IS("ds")))
+        assert await plan_mod.reach_plan(self._run([]), provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[]) is None
+
+    async def test_it_steps_aside_when_the_walk_runs_out_of_time(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+
+        async def run(cypher, params):
+            if cypher.startswith("MATCH (r:"):
+                return SimpleNamespace(result_set=[[10]])
+            raise Exception("Query timed out")
+
+        c = self._compiled(IS("ds"))
+        provider = SimpleNamespace(_entity_type_levels={})
+        assert await plan_mod.reach_plan(run, provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[]) is None
+
+    async def test_entities_not_in_the_graph_reach_nothing(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+
+        async def run(cypher, params):
+            return SimpleNamespace(result_set=[])
+
+        notes = []
+        plan = await plan_mod.reach_plan(run, SimpleNamespace(_entity_type_levels={}),
+                                         _query({"kind": "all"}), self._compiled(IS("ds")),
+                                         ["Column"], ("CONTAINS",), width=2, notes=notes)
+        assert plan.units == [] and "not in the graph" in notes[0]
 
 
 class TestService:

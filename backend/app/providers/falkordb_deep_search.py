@@ -88,6 +88,7 @@ from backend.common.search_semantics import (
 )
 from backend.common.models.search import (
     LINEAGE_AXES,
+    anchor_groups,
     AggregationSpec,
     AncestorRef,
     DegreePredicate,
@@ -855,33 +856,51 @@ class _Compiler:
 
     def _anchorable(self, p) -> bool:
         """A top-level relationship whose far end is named entities: walked
-        from them rather than tested from every candidate alone."""
+        from them rather than tested from every candidate alone. Lineage
+        takes anything ``anchor_groups`` reads as named entities — "is X or
+        inside X" included; up the tree, an ``is``."""
         if (p.kind != "related" or p.quantifier != "any" or p.count is not None
-                or p.where is None or p.where.kind != "is"):
+                or p.where is None):
             return False
         if p.axis in LINEAGE_AXES:
-            return self.anchor_lineage
-        return p.axis in ("parent", "ancestor", "root")
+            return self.anchor_lineage and anchor_groups(p.where) is not None
+        return p.where.kind == "is" and p.axis in ("parent", "ancestor", "root")
 
     def _hoist_anchored(self, p) -> str:
         """Lineage: a withinHops continuation from the named entities, the
         whole test. Up the tree: their subtrees clamp the candidates, and
         the tail keeps the exact test (strict, the depth range, a root's)."""
-        urns = _ref_urns(p.where.refs, "a relationship")
-        if not urns:
-            return "false"      # its references named nothing
         lo, hi = p.hop_range()
         if p.axis not in LINEAGE_AXES:
+            urns = _ref_urns(p.where.refs, "a relationship")
+            if not urns:
+                return "false"      # its references named nothing
             self.hoisted_root_urns.append(urns)
             self.hoisted_max_depths.append(hi)
             return "true"
-        self.hoisted_within_hops.append({
-            "urns": urns, "hops": hi, "min_hops": lo, "strict": True,
+        groups = [{"urns": _ref_urns(g.refs, "a relationship"), "lo": g.lo, "hi": g.hi}
+                  for g in anchor_groups(p.where)]
+        groups = [g for g in groups if g["urns"]]
+        if not groups:
+            return "false"          # its references named nothing
+        entry = {
+            "urns": [u for g in groups for u in g["urns"]],
+            "hops": hi, "min_hops": lo, "strict": True,
             # The continuation walks from the named entity to the candidate.
             "direction": {"upstream": "out", "downstream": "in", "neighbor": "both"}[p.axis],
             "edge_types": self._relation_edge_types(p),
             "edge_where": self._emit_edge_predicate_fragment(p.edge),
-        })
+        }
+        if any(g["hi"] for g in groups):
+            # Not only the entities themselves: what is inside them too,
+            # reached down the containment edges.
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    "a relationship to what is inside an entity requires the provider's "
+                    "containment edge types — ontology resolution must complete before search.")
+            entry["groups"] = groups
+            entry["containment"] = sorted(self._containment_edge_types or ())
+        self.hoisted_within_hops.append(entry)
         return "true"
 
     def _visit_related(self, p) -> str:
@@ -1644,59 +1663,96 @@ def _build_within_hops_continuation(
 
     Returns (cypher_fragment, params, next_param_id).
     """
-    if not hoisted:
-        return "", {}, next_param_id
+    if any(not entry["edge_types"] for entry in hoisted):
+        # No edges of this class exist → no node reaches anything.
+        # Force a no-match by binding n to nothing.
+        return _NO_REACH, {}, next_param_id
+    parts, params, pid = within_hops_parts(hoisted, next_param_id)
+    return " ".join(parts), params, pid
 
+
+_NO_REACH = "WITH n WHERE false WITH n"
+
+
+def within_hops_walk(entry: Dict[str, Any], idx: int) -> Tuple[str, List[str]]:
+    """The walk one hoisted entry makes from ``anchor`` to ``n``: its
+    pattern, and what every route must meet — the edge filter on each edge,
+    never relating an entity to itself, and passing no entity twice. Shared
+    by the per-candidate continuation and the planner's walk out from the
+    anchors (``plan.reach_plan``), so the two can't disagree."""
+    rel = "|".join(_sanitize_label(t) for t in entry["edge_types"])
+    hops = int(entry["hops"])
+    lo = int(entry.get("min_hops") or 1)
+    direction = entry["direction"]
+    # Bind the variable-length path so we can apply per-edge filters.
+    # Each occurrence gets its own path alias to avoid clashes when
+    # multiple WithinHops predicates AND together.
+    path_alias = f"_whP{idx}"
+    if direction == "out":
+        arrow = f"-[:{rel}*{lo}..{hops}]->"
+    elif direction == "in":
+        arrow = f"<-[:{rel}*{lo}..{hops}]-"
+    else:  # both — undirected; planner walks either side
+        arrow = f"-[:{rel}*{lo}..{hops}]-"
+    conds: List[str] = []
+    edge_where = entry.get("edge_where") or ""
+    if edge_where:
+        conds.append(f"ALL(rel IN relationships({path_alias}) WHERE {edge_where})")
+    # A relationship never relates an entity to itself, a cycle
+    # notwithstanding, and follows routes that pass no entity twice —
+    # which, past one hop, FalkorDB's walk alone does not promise (it
+    # differs with the end it walks from).
+    if entry.get("strict"):
+        conds.append("ID(anchor) <> ID(n)")
+    if lo > 1:
+        conds.append(_distinct_nodes(path_alias, f"_wh{idx}"))
+    return f"{path_alias} = (anchor){arrow}(n)", conds
+
+
+def within_hops_parts(
+    hoisted: List[Dict[str, Any]], next_param_id: int,
+) -> Tuple[List[str], Dict[str, Any], int]:
+    """One continuation per hoisted entry, in order — so a caller that
+    already knows which candidates meet one entry can leave its part out.
+    An entry over no edges is a part that keeps nothing.
+
+    The anchor is one of the entry's URNs; for an entry with ``groups``
+    ("is X or inside X"), one of them or ``lo..hi`` containment levels
+    below one — checked upward from the anchor, a chain with one parent a
+    step."""
     parts: List[str] = []
     params: Dict[str, Any] = {}
     pid = next_param_id
-
     for idx, entry in enumerate(hoisted):
-        edge_types = entry["edge_types"]
-        if not edge_types:
-            # No edges of this class exist → no node reaches anything.
-            # Force a no-match by binding n to nothing.
-            return (
-                "WITH n WHERE false WITH n",
-                params, pid,
+        if not entry["edge_types"]:
+            parts.append(_NO_REACH)
+            continue
+        pattern, conds = within_hops_walk(entry, idx)
+        groups = entry.get("groups")
+        if groups:
+            crel = "|".join(_sanitize_label(t) for t in entry.get("containment") or ())
+            top = max(int(g["hi"]) for g in groups)
+            alts: List[str] = []
+            for g in groups:
+                p = f"_whUrns{pid}"
+                pid += 1
+                params[p] = list(g["urns"])
+                alts.append(f"(_whG{idx}.urn IN ${p} AND length(_whC{idx}) >= {int(g['lo'])} "
+                            f"AND length(_whC{idx}) <= {int(g['hi'])})")
+            parts.append(
+                f"MATCH {pattern} MATCH _whC{idx} = (anchor)<-[:{crel}*0..{top}]-(_whG{idx}) "
+                f"WHERE " + " AND ".join(["(" + " OR ".join(alts) + ")"] + conds)
+                + " WITH DISTINCT n"
             )
-        rel = "|".join(_sanitize_label(t) for t in edge_types)
-        hops = int(entry["hops"])
-        lo = int(entry.get("min_hops") or 1)
-        direction = entry["direction"]
+            continue
         urns_param = f"_whUrns{pid}"
         pid += 1
         params[urns_param] = list(entry["urns"])
-        edge_where = entry.get("edge_where") or ""
-        # Bind the variable-length path so we can apply per-edge filters.
-        # Each occurrence gets its own path alias to avoid clashes when
-        # multiple WithinHops predicates AND together.
-        path_alias = f"_whP{idx}"
-        if direction == "out":
-            arrow = f"-[:{rel}*{lo}..{hops}]->"
-        elif direction == "in":
-            arrow = f"<-[:{rel}*{lo}..{hops}]-"
-        else:  # both — undirected; planner walks either side
-            arrow = f"-[:{rel}*{lo}..{hops}]-"
-        pat = f"MATCH {path_alias} = (anchor){arrow}(n)"
-        where_extra = (
-            f" AND ALL(rel IN relationships({path_alias}) WHERE {edge_where})"
-            if edge_where else ""
-        )
-        # A relationship never relates an entity to itself, a cycle
-        # notwithstanding, and follows routes that pass no entity twice —
-        # which, past one hop, FalkorDB's walk alone does not promise (it
-        # differs with the end it walks from).
-        if entry.get("strict"):
-            where_extra += " AND ID(anchor) <> ID(n)"
-        if lo > 1:
-            where_extra += " AND " + _distinct_nodes(path_alias, f"_wh{idx}")
         parts.append(
-            f"{pat} WHERE anchor.urn IN ${urns_param}{where_extra} "
-            "WITH DISTINCT n"
+            f"MATCH {pattern} WHERE " + " AND ".join([f"anchor.urn IN ${urns_param}"] + conds)
+            + " WITH DISTINCT n"
         )
-
-    return " ".join(parts), params, pid
+    return parts, params, pid
 
 
 # ---------------------------------------------------------------------------

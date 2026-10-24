@@ -61,6 +61,7 @@ from backend.common.models.search import (
     ResolvedEntity,
     ResolvedRef,
     ScopeDiagnostics,
+    anchor_groups,
     SearchAncestorCountsRequest,
     SearchAncestorCountsResult,
     SearchCatalogRequest,
@@ -181,8 +182,9 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
                        relations: int, top: bool) -> int:
     """A relationship's caps: how deep relationships nest, how far lineage
     goes — tested from every candidate, a few hops; walked from entities
-    its condition names (a top-level ``is``), as far as withinHops; in a
-    display rule, one — and its edge filter's."""
+    its condition names (top level: ``anchor_groups`` — an ``is``, inside
+    one, or an OR of those), as far as withinHops; in a display rule, one —
+    and its edge filter's."""
     s = get_deep_search_settings()
     if relations + 1 > s.max_relation_depth:
         raise ValidationError(
@@ -192,7 +194,7 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
     hops = p.hop_range()[1]
     if p.axis in LINEAGE_AXES:
         named = (top and p.quantifier == "any" and p.count is None
-                 and p.where is not None and p.where.kind == "is")
+                 and anchor_groups(p.where) is not None)
         if rule and hops > 1:
             raise ValidationError(
                 f"relationship at {path}: a rule follows lineage one hop — it is "

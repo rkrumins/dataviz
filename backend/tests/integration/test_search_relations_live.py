@@ -208,6 +208,16 @@ def _matrix():
         rel("root", IS(9)), rel("root", IS(13)), rel("root", IS(2)), rel("parent", IS(999)),
         AND(TYPE("dataset"), rel("upstream", IS(22), maxHops=2), rel("parent", IS(13))),
         AND(rel("ancestor", IS(13)), rel("downstream", TYPE("dashboard"))),
+        # A container's lineage question: it, or anything inside it — walked
+        # from everything inside it.
+        rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=3),
+        rel("downstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=3),
+        rel("upstream", rel("ancestor", IS(13)), maxHops=2),
+        rel("upstream", rel("ancestor", IS(9), maxHops=1)),
+        rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=2, edge=CONFIDENT),
+        rel("downstream", OR(IS(14), rel("ancestor", IS(14)), IS(29)), minHops=2, maxHops=3),
+        AND(TYPE("dashboard"), rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=3)),
+        AND(rel("upstream", IS(22)), rel("upstream", OR(IS(18), rel("ancestor", IS(18))))),
         # A user's edge properties, read from the edge's JSON.
         rel("downstream", edge={"kind": "edgeHasProperty", "key": "transform"}),
         rel("downstream", edge={"kind": "edgeHasProperty", "key": "transform", "negate": True}),
@@ -347,6 +357,33 @@ async def test_rule_membership(provider, expected, scope_name):
     wrong = [(i, CASES[i], got[i], expected[scope_name][i]) for i in RULE_CASES
              if got[i] != expected[scope_name][i]]
     assert not wrong, _report(wrong)
+
+
+async def test_a_named_lineage_walk_plans_the_scan(provider):
+    """For a lineage relationship naming its far end, the uncapped engine's
+    units come from one walk out from it — from everything inside a
+    container too — not from the scope: the cases above answered through it."""
+    from backend.app.providers.falkordb_deep_search import _build_compiler_for_provider
+    from backend.app.providers.falkordb_search.plan import make_plan
+
+    async def run(cypher, params):
+        return await provider._ro_query(cypher, params=params, timeout=10)
+
+    async def plan_for(predicate, scope):
+        query = _query(predicate, scope)
+        compiler = _build_compiler_for_provider(provider)
+        compiler.compile(query.predicate)
+        return await make_plan(provider, query, compiler, run=run, width=500,
+                               walk_max=50_000, timeout_s=10)
+
+    for predicate, scope in [
+        (rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=3), SCOPES["view"]),
+        (rel("upstream", IS(22), maxHops=3), SCOPES["data_source"]),
+    ]:
+        plan = await plan_for(predicate, scope)
+        assert plan.units and all(u.kind == "ids" and u.satisfies == 0 for u in plan.units)
+    plan = await plan_for(rel("upstream", TYPE("topic")), SCOPES["data_source"])
+    assert plan.units and not any(u.kind == "ids" for u in plan.units)
 
 
 @pytest.mark.parametrize("scope_name", list(SCOPES))

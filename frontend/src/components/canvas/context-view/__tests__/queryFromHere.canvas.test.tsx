@@ -20,14 +20,17 @@ async function rightClick(id: string) {
 
 
 describe('questions from a right-click on the canvas', () => {
-  it('asks what feeds the entity, walking from it', async () => {
+  it('asks what feeds the entity — and what is inside it — walking from it', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     const [id] = h.visibleCardIds()
     await rightClick(id)
     await act(async () => { fireEvent.click(screen.getByText('What feeds this')) })
 
+    // The card holds others (childCount 1), so its lineage runs through them.
+    const is = { kind: 'is', refs: [{ urn: id }] }
     expect(useSearchStore.getState().draftPredicate).toEqual({
-      kind: 'related', axis: 'downstream', maxHops: 3, where: { kind: 'is', refs: [{ urn: id }] },
+      kind: 'related', axis: 'downstream', maxHops: 3,
+      where: { kind: 'group', op: 'or', children: [is, { kind: 'related', axis: 'ancestor', where: is }] },
     })
   }, 30000)
 

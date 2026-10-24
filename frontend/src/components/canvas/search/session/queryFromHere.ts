@@ -9,6 +9,9 @@
  * Each names its entities by URN in a relationship whose far end is an
  * `is`: the server walks from them (an anchored relationship) instead of
  * testing every entity in the view, so the answers are quick and exact.
+ * For a container the far end is "is it, or is inside it" — a dataset's
+ * lineage runs through its columns — and the server walks from everything
+ * inside it just the same.
  *
  * And for a match the panel lists: how it matches — the routes from it to
  * the relatives a lineage relationship in the query found.
@@ -24,6 +27,8 @@ export const FROM_HERE_HOPS = 3
 export const FROM_HERE_MAX_SHARED = 8
 /** How far a route may go when one end is a condition (`PathPredicate`). */
 const ROUTE_MAX_HOPS = 4
+/** …and when both ends are: a container's routes start from a condition. */
+const ROUTE_MAX_HOPS_BOTH = 3
 
 export interface FromHereQuestion {
     id: string
@@ -36,21 +41,40 @@ export interface FromHereQuestion {
 }
 
 
-function anchored(axis: RelatedPredicate['axis'], urn: string, hops = 1): RelatedPredicate {
+/** What a relative must be: the entity — or, for a container, the entity or
+ *  anything inside it. */
+function relativeIs(urn: string, container: boolean): Predicate {
+    const is: Predicate = { kind: 'is', refs: [{ urn }] }
+    return container
+        ? { kind: 'group', op: 'or', children: [is, { kind: 'related', axis: 'ancestor', where: is }] }
+        : is
+}
+
+
+function anchored(axis: RelatedPredicate['axis'], urn: string, hops = 1,
+                  container = false): RelatedPredicate {
     return {
         kind: 'related', axis, ...(hops > 1 ? { maxHops: hops } : {}),
-        where: { kind: 'is', refs: [{ urn }] },
+        where: relativeIs(urn, container),
     }
 }
 
 
 /** The questions for the entities right-clicked (the selection, when the
  *  entity is part of one). ``readOnly``: a shared link's, which may only
- *  search inside its view — relationships and routes reach outside it. */
-export function questionsFromHere(urns: string[], { readOnly = false } = {}): FromHereQuestion[] {
+ *  search inside its view — relationships and routes reach outside it.
+ *  ``containers``: which of them hold other entities, whose lineage
+ *  questions take in what is inside them. */
+export function questionsFromHere(
+    urns: string[],
+    { readOnly = false, containers = new Set<string>() }: {
+        readOnly?: boolean; containers?: ReadonlySet<string>
+    } = {},
+): FromHereQuestion[] {
     if (urns.length === 0) return []
     if (urns.length === 1) {
         const [urn] = urns
+        const container = containers.has(urn)
         const inside: FromHereQuestion = {
             id: 'inside', label: 'Everything inside this', icon: 'FolderTree',
             predicate: { kind: 'descendantOf', urns: [urn], uiScope: 'any' } as Predicate,
@@ -61,25 +85,33 @@ export function questionsFromHere(urns: string[], { readOnly = false } = {}): Fr
             { id: 'children', label: 'Its children', icon: 'ListTree', predicate: anchored('parent', urn) },
             {
                 id: 'sources', label: 'What feeds this', icon: 'GitMerge',
-                predicate: anchored('downstream', urn, FROM_HERE_HOPS),
+                predicate: anchored('downstream', urn, FROM_HERE_HOPS, container),
             },
             {
                 id: 'targets', label: 'What this feeds', icon: 'Workflow',
-                predicate: anchored('upstream', urn, FROM_HERE_HOPS),
+                predicate: anchored('upstream', urn, FROM_HERE_HOPS, container),
             },
             {
                 id: 'routes', label: 'Routes from this to…', icon: 'Route', refine: true,
-                predicate: {
-                    kind: 'path', sourceUrns: [urn], targetUrns: [], maxHops: ROUTE_MAX_HOPS,
-                    direction: 'outgoing', edgeClass: 'lineage',
-                    targetWhere: { kind: 'entityType', op: 'in', values: [] },
-                },
+                predicate: container
+                    ? {
+                        kind: 'path', sourceUrns: [], targetUrns: [], maxHops: ROUTE_MAX_HOPS_BOTH,
+                        direction: 'outgoing', edgeClass: 'lineage',
+                        sourceWhere: relativeIs(urn, true),
+                        targetWhere: { kind: 'entityType', op: 'in', values: [] },
+                    }
+                    : {
+                        kind: 'path', sourceUrns: [urn], targetUrns: [], maxHops: ROUTE_MAX_HOPS,
+                        direction: 'outgoing', edgeClass: 'lineage',
+                        targetWhere: { kind: 'entityType', op: 'in', values: [] },
+                    },
             },
         ]
     }
     if (readOnly || urns.length > FROM_HERE_MAX_SHARED) return []
     const all = (axis: RelatedPredicate['axis']): Predicate => ({
-        kind: 'group', op: 'and', children: urns.map((urn) => anchored(axis, urn, FROM_HERE_HOPS)),
+        kind: 'group', op: 'and',
+        children: urns.map((urn) => anchored(axis, urn, FROM_HERE_HOPS, containers.has(urn))),
     })
     return [
         { id: 'shared-targets', label: `What all ${urns.length} feed`, icon: 'Workflow', predicate: all('upstream') },

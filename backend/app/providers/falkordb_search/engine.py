@@ -140,7 +140,7 @@ async def execute_session_search(
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("path search is not run by the uncapped engine")
-    hops, hop_params = within_hops(compiler)
+    hops, hop_params, hop_parts = within_hops(compiler)
     name_key = getattr(provider, "_name_property", None)
     relevance = None
     if options.sort == "relevance" and not options.sort_property:
@@ -153,7 +153,7 @@ async def execute_session_search(
         containment=containment, max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops, tail=tuple(compiler.tail),
+        within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
         tally=(options.results == "both" and bool(containment)
                and any(a.by == "ancestor" for a in options.aggregations or [])),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
@@ -235,14 +235,14 @@ async def execute_count_session(
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("a path search has no count")
-    hops, hop_params = within_hops(compiler)
+    hops, hop_params, hop_parts = within_hops(compiler)
     ctx = Context(
         where=where, params={**compiler.params, **hop_params},
         sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
         max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops, tail=tuple(compiler.tail),
+        within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = query_identity(query, context.scope_hash, 0)

@@ -40,6 +40,19 @@ describe('relations — hops', () => {
         expect(maxHopsFor(rel({ axis: 'upstream' }), { topLevel: true, rule: false })).toBe(3)
         expect(maxHopsFor(named, { topLevel: true, rule: true })).toBe(1)
     })
+
+    it('counts what is inside named entities as named too, as the server does', () => {
+        const is: Predicate = { kind: 'is', refs: [{ path: ['Sales'] }] }
+        const inside: Predicate = { kind: 'related', axis: 'ancestor', where: is }
+        const far = (where: Predicate) => maxHopsFor(rel({ axis: 'upstream', where }), { topLevel: true, rule: false })
+        expect(far({ kind: 'group', op: 'or', children: [is, inside] })).toBe(10)
+        expect(far(inside)).toBe(10)
+        expect(far({ kind: 'group', op: 'and', children: [inside] })).toBe(10)
+        expect(far({ kind: 'group', op: 'and', children: [is, inside] })).toBe(3)
+        expect(far({ kind: 'group', op: 'or', children: [is, { kind: 'entityType', op: 'in', values: ['x'] }] })).toBe(3)
+        expect(far({ kind: 'related', axis: 'parent', where: is })).toBe(3)
+        expect(far({ kind: 'related', axis: 'ancestor', quantifier: 'none', where: is })).toBe(3)
+    })
 })
 
 

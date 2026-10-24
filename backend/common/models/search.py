@@ -31,7 +31,7 @@ Design notes
   model — the service produces meaningful path-into-tree error messages
   the model can't.
 """
-from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -699,6 +699,45 @@ Predicate = Annotated[
 GroupPredicate.model_rebuild()
 RelatedPredicate.model_rebuild()
 PathPredicate.model_rebuild()
+
+
+class AnchorGroup(NamedTuple):
+    """Entities a lineage walk can start from: those ``refs`` name, taken
+    ``lo`` to ``hi`` containment levels below them — ``0..0`` the entities
+    themselves, ``1..20`` everything inside them, ``0..20`` both."""
+    refs: Tuple[NodeRef, ...]
+    lo: int
+    hi: int
+
+
+def anchor_groups(where: Optional["Predicate"]) -> Optional[List[AnchorGroup]]:
+    """The named entities ``where`` amounts to, when it amounts to named
+    entities and nothing else: ``is``; inside one (``related(ancestor,
+    is)``, any relative, no count); an OR of those. None for any other
+    condition.
+
+    A lineage relationship whose condition is one of these is walked from
+    the entities, as far as ``withinHops``, instead of tested from every
+    candidate — the service's hop limit and the compiler both read it here,
+    so they can't disagree."""
+    if where is None:
+        return None
+    if where.kind == "is":
+        return [AnchorGroup(tuple(where.refs), 0, 0)]
+    if (where.kind == "related" and where.axis == "ancestor" and where.quantifier == "any"
+            and where.count is None and where.where is not None and where.where.kind == "is"):
+        lo, hi = where.hop_range()
+        return [AnchorGroup(tuple(where.where.refs), lo, hi)]
+    if where.kind == "group" and (where.op == "or" or len(where.children) == 1) \
+            and where.op != "not":
+        groups: List[AnchorGroup] = []
+        for child in where.children:
+            sub = anchor_groups(child)
+            if sub is None:
+                return None
+            groups.extend(sub)
+        return groups
+    return None
 
 
 # ---------------------------------------------------------------------------

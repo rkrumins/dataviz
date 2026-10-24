@@ -174,6 +174,8 @@ function renderInner(p: Predicate, depth: number): ReactNode {
         return <Inline><em>empty {op === 'or' ? 'ANY' : 'ALL'} group</em></Inline>
     }
     if (p.children.length === 1) return renderInner(p.children[0], depth)
+    const inside = isOrInside(p)
+    if (inside) return <Inline>{isOrInsideSentence(inside)}</Inline>
     // 2+ children — render as inline conjunction when all children are
     // leaves (keeps single-clause bullets compact); otherwise break
     // into a nested bullet list.
@@ -391,7 +393,32 @@ function named(urns?: string[] | null, refs?: NodeRef[] | null): string[] {
 
 
 function leafOrGroup(p: Predicate, many = false): ReactNode {
-    return p.kind === 'group' ? renderInner(p, 1) : leafSentence(p, many)
+    if (p.kind !== 'group') return leafSentence(p, many)
+    const inside = isOrInside(p)
+    return inside ? isOrInsideSentence(inside, many) : renderInner(p, 1)
+}
+
+
+/** The names in "is X or inside X" — what a lineage question about a
+ *  container asks of a relative — or null for any other condition. */
+function isOrInside(p: Predicate): NodeRef[] | null {
+    if (p.kind !== 'group' || p.op !== 'or' || p.children.length !== 2) return null
+    const is = p.children.find((c) => c.kind === 'is')
+    const inside = p.children.find((c) => c.kind === 'related')
+    if (is?.kind !== 'is' || inside?.kind !== 'related' || inside.axis !== 'ancestor'
+        || inside.count || (inside.quantifier ?? 'any') !== 'any'
+        || inside.minHops || inside.maxHops || inside.where?.kind !== 'is') return null
+    return JSON.stringify(inside.where.refs) === JSON.stringify(is.refs) ? is.refs : null
+}
+
+
+/** "is or is inside VBAP" — "are or are inside …" when it describes several. */
+function isOrInsideSentence(refs: NodeRef[], many = false): ReactNode {
+    const v = many ? MANY : ONE
+    const names = named([], refs)
+    return <>{v.is} or {v.is} inside {names.length === 1
+        ? <Value>{names[0]}</Value>
+        : <>one of {names.map((n, i) => <span key={i}>{i > 0 && ', '}<Value>{n}</Value></span>)}</>}</>
 }
 
 
