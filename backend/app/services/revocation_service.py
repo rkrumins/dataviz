@@ -833,6 +833,7 @@ async def revoke_provider_sessions(
         try:
             await svc.revoke_all_user_sessions(uid)
             await _emit_session_revoked(session, user_id=uid, reason=reason)
+            _publish_permissions_changed(session, user_id=uid)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "revoke_provider_sessions(%s, user=%s) failed: %s",
@@ -870,6 +871,7 @@ async def revoke_platform_sessions(*, session, reason: str) -> dict:
         try:
             await svc.revoke_all_user_sessions(uid)
             await _emit_session_revoked(session, user_id=uid, reason=reason)
+            _publish_permissions_changed(session, user_id=uid)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "revoke_platform_sessions(user=%s) failed: %s", uid, exc,
@@ -927,6 +929,7 @@ async def revoke_role_sessions(
         try:
             await svc.revoke_all_user_sessions(uid)
             await _emit_session_revoked(session, user_id=uid, reason=reason)
+            _publish_permissions_changed(session, user_id=uid)
             count += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning(
