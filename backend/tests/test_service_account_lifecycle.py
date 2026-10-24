@@ -371,6 +371,46 @@ async def test_a_service_account_acts_only_through_its_own_workspace_roles(db_se
     assert person.global_perms and set(person.ws_perms) == {"ws_a", "ws_b"}
 
 
+async def test_a_view_it_made_is_no_way_back_into_a_workspace(db_session):
+    """A view a service account made through its key is its own only while it
+    still holds a role in that workspace; a person keeps what they made."""
+    from sqlalchemy import select as sql_select
+
+    from backend.app.db.models import ViewORM
+    from backend.app.services import view_access
+    from backend.app.services.permission_service import PermissionClaims
+
+    db_session.add_all([
+        ViewORM(id="v_svc", name="Its own", workspace_id="ws_a", visibility="private", created_by="svc_maker"),
+        ViewORM(id="v_usr", name="Theirs", workspace_id="ws_a", visibility="private", created_by="usr_maker"),
+    ])
+    await db_session.flush()
+
+    def viewer(user_id, ws_perms):
+        claims = PermissionClaims(sid="sess", global_perms=(), ws_perms=ws_perms)
+        return view_access.ViewerContext(user_id=user_id, claims=claims, group_ids=())
+
+    async def lists(ctx):
+        scope = await view_access.build_read_scope(db_session, ctx)
+        return set((await db_session.execute(
+            sql_select(ViewORM.id).where(view_access.readable_views_clause(scope))
+        )).scalars())
+
+    holding = viewer("svc_maker", {"ws_a": ("workspace:datasource:read",)})
+    gone = viewer("svc_maker", {})
+    v_svc = await db_session.get(ViewORM, "v_svc")
+    assert await view_access.can_read_view(db_session, holding, v_svc)
+    assert await view_access.can_edit_view(db_session, holding, v_svc)
+    assert "v_svc" in await lists(holding)
+    assert not await view_access.can_read_view(db_session, gone, v_svc)
+    assert not await view_access.can_edit_view(db_session, gone, v_svc)
+    assert "v_svc" not in await lists(gone)
+
+    person = viewer("usr_maker", {})
+    assert await view_access.can_read_view(db_session, person, await db_session.get(ViewORM, "v_usr"))
+    assert "v_usr" in await lists(person)
+
+
 async def test_a_role_widened_after_it_was_given_brings_the_account_none_of_it(db_session):
     """A role it holds may later be given the power to administer a workspace;
     the account's keys never get that, though a person holding it does."""
