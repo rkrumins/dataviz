@@ -418,7 +418,7 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | Method · path | Body → answer | Notes |
 | --- | --- | --- |
 | `POST /search/advanced` | `SearchQuery` → `SearchResultPage` | The search |
-| `POST /search/explain` | `SearchQuery` → `{cypher, hits_cypher, params, candidate_cap, hoisted_root_urns, effective_root_urns, notes, resolvedScope}` | Compiles without running |
+| `POST /search/explain` | `SearchQuery` → `{cypher, hits_cypher, inlinedCypher, params, candidate_cap, hoisted_root_urns, effective_root_urns, notes, resolvedScope}` | Compiles without running. `inlinedCypher` is the statement with its values written in, or `null` when a value has no Cypher literal |
 | `GET /search/schema` | → the `SearchQuery` JSON Schema | `ETag`, `X-Schema-Version`; cached 5 min |
 | `GET /search/discover?samplePerLabel=` | → `{labels, tagValues, edges, blobOnlyLabels, missingContainment, missingSearchableText, elapsedMs}` | Samples 1–2,000 (default 200) nodes per type; `edges[].storedAs` says where each edge key is kept. Not for share links |
 | `POST /search/resolve` | `{scope, refs}` → `{results: [{count, matches: [{urn, displayName, entityType, ancestorPath}], error}], dataVersion, elapsedMs}` | What each of up to 32 [name references](#names-instead-of-urns) names in the View — how many, the first 10 with their containers. What the name picker checks as a path is typed |
@@ -430,6 +430,7 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `POST /search/exports` | `{scope, predicate, format: csv\|ndjson, columns, waitMs, sessionId}` → `{sessionId, status, rows, progress, format, columns, filename, downloadToken}` | Every match to a file; ≤ 200 property columns. Repeat until `complete`. Needs the **Export graph data** feature |
 | `GET /search/exports/{sessionId}/download?token=` | → the file | For the user who exported it, for an hour |
 | `POST /search` | `{query, limit, offset}` → nodes | Legacy free-text search |
+| `POST /search/native?viewId=` | `{query, limit, timeoutMs}` → `{engine, columns, rows, rowCount, truncated, truncatedReason, limitApplied, timeoutMs, executedQuery, queryHash, elapsedMs, notes, requestId}` | Your own read-only Cypher, on FalkorDB and Neo4j. Not the rule above: it needs `workspace:native-query:read` with data-source access, or a direct share of `viewId` with `canQuerySource`; never an API key or a draft, and never a View's visibility alone. Never retried by the app. See [Native read-only queries: security](/docs/native-queries) |
 
 **Errors**
 
@@ -885,7 +886,10 @@ curl -s -b "$JAR" -o pii.csv \
   enforced): load is shed with `429` when the graph is busy.
 - **The panel's Options tab** (page size, candidate cap, grouping) doesn't
   change what the panel sends; call the API for other options.
-- **FalkorDB only**: other graph stores answer `501`.
+- **FalkorDB only**: other graph stores answer `501`. Native queries
+  (`/search/native`) run on FalkorDB and Neo4j.
+- **Native queries take no API key, parameters or more than one statement**,
+  and read the published graph only.
 
 ---
 

@@ -89,10 +89,10 @@ server works out the View's boundary itself, whatever the browser sends.
 
 ### Building a query
 
-An empty query card shows a search field ("add a filter") and example queries
-drawn from this View's own data. Pick a suggestion — an entity type, a tag, a
-property or one of its values — and it becomes a filter row. Or use **Add
-filter**:
+An empty query card shows a search field ("add a filter"), example queries
+drawn from this View's own data, and every filter, grouped as below. Pick a
+suggestion — an entity type, a tag, a property or one of its values — or a
+filter, and it becomes a filter row. Later, use **Add filter**:
 
 | Category | Filters |
 | --- | --- |
@@ -180,8 +180,25 @@ end a condition, routes go up to 4 hops; with both, 3.
 ### Code mode
 
 Switch the query card from **Visual** to **Code** to type the query instead.
-Both modes edit the same query, so you can move between them freely. Press
-`⌘↵` / `Ctrl+Enter` (or click away) to apply.
+Both modes edit the same query, so you can move between them freely, and the
+card reopens in the mode you used last. Press `⌘↵` / `Ctrl+Enter` (or click
+away) to apply, and `Esc` to undo your edit.
+
+The editor helps as you type:
+
+- **Colours** show how each word is read — a keyword, a property, a value, a
+  relationship — and a red underline marks where a query stops making sense,
+  with the reason below it.
+- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is: entity
+  types after `type:`, tags after `tag:`, a property's values after
+  `owner =`, edge properties inside `.via(`, and entities by name after `@"`.
+  They come from this View's own data.
+- **Reads as** says the query in words, and lists any words that will be
+  searched as plain text in names.
+- **Examples** insert a ready-made condition at the cursor.
+
+A query that doesn't read is never applied: the one you had stays until you fix
+it.
 
 | You type | It means |
 | --- | --- |
@@ -218,6 +235,53 @@ Anything the words can't spell — within N hops, a path, a depth-limited
 subtree — appears as its own JSON, such as `{"kind": "withinHops", …}`, and
 you can paste JSON there yourself. A quoted value always stays text:
 `code = "007"` looks for the text `007`, not the number 7.
+
+### The Cypher tab
+
+**Cypher** shows the query in words and the Cypher it runs as — exactly what a
+search sends — with its bound parameters and any notes from the compiler.
+**Copy with values** gives the statement with its values written in, so it runs
+as it is anywhere Cypher runs. A data source that isn't searched as Cypher says
+so instead.
+
+### Your own Cypher
+
+If you may query the View's data source, the Cypher tab also offers **Edit and
+run**: write your own read-only Cypher and run it on the data source, on
+FalkorDB and Neo4j. It starts from the search's Cypher with its values written
+in, so changing one thing and running it is the first thing it offers.
+
+1. Choose **Edit and run**, change the query (or write a new one), and pick
+   **Rows** (50, 200 or 1,000) and **Time** (5, 10 or 30 seconds).
+2. Press **Run** (`⌘↵` / `Ctrl+Enter`). **Cancel** stops it.
+3. Read the answer as a table. A node, an edge or a path is a chip that opens
+   to its properties; a map or a list opens to its entries. The footer says how
+   many rows came back and, when the answer was cut, why: more rows matched, or
+   it was too large to show whole.
+4. **Highlight on canvas** lights up the entities the answer names (any column
+   holding nodes, or their `urn`). **Clear highlight** puts them out.
+
+Things to know:
+
+- **It reads the whole data source**, not only this View — including entities
+  the View leaves out and internal bookkeeping such as rollup edges.
+- **It only reads.** A query that would write, change the database, read files
+  or URLs, call a plugin (`apoc.*`, `gds.*`) or use `$parameters` is refused
+  before it runs, and the place in the query is underlined. `CALL` takes only
+  the schema listings (`db.labels()`, `db.relationshipTypes()`,
+  `db.propertyKeys()` …) and the full-text and vector index queries.
+- **Every run is recorded** in the workspace's activity log, with its query,
+  including the ones that are refused.
+- **A run is never repeated for you.** If it fails, run it again yourself.
+- On a **draft**, **Edit and run** is off: native queries read the published
+  graph. Switch the View to main.
+
+Who may: everyone whose role reads the workspace's data sources, through the
+native query permission (`workspace:native-query:read`) an administrator can
+remove from a role; and someone a View is shared with directly, when the share
+has **Query data** on (see
+[Let someone query the data source](/guide/managing-views#let-someone-query-the-data-source)). How it is kept safe is
+in [Native read-only queries: security](/docs/native-queries).
 
 ### Running
 
@@ -280,7 +344,10 @@ Your administrator has turned off **Export graph data**.)
 Right-click an entity in a Context View to ask about it without building
 anything: **Everything inside this**, **Its children**, **What feeds this**,
 **What this feeds** (each three hops; change it in the row), or **Routes from
-this to…**, which opens the builder for you to say where to. With several
+this to…**, which opens the builder for you to say where to. On a container —
+a table, a schema, a domain — the lineage questions take in everything inside
+it, since a dataset's lineage often runs through its columns: **What this
+feeds** is what it, or anything in it, feeds. With several
 entities selected, right-click one of them for **What all *N* feed** and **What
 feeds all *N***. Each opens the panel on an ordinary query you can refine,
 save or turn into a rule.
@@ -353,6 +420,9 @@ a lineage relationship of more than one hop.
 | `J` / `↓` · `K` / `↑` | Panel (outside a text field) | Next / previous match |
 | `Enter` | Panel (outside a text field) | Reveal the current match on the canvas |
 | `⌘↵` / `Ctrl+Enter` | Code mode | Apply what you typed |
+| `Esc` | Code mode | Undo your edit (closes the suggestions first) |
+| `Ctrl+Space` | Code mode | Show suggestions |
+| `⌘↵` / `Ctrl+Enter` | Your own Cypher | Run it |
 
 ---
 
@@ -475,6 +545,10 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | Saved searches per View | 500 (names unique in the View, up to 120 characters) |
 | Recent searches kept per View | 10, plus any you pin |
 | Export columns | 200 properties |
+| Your own Cypher: rows | 200 by default, 1,000 at most |
+| Your own Cypher: time | 10 s by default, 30 s at most |
+| Your own Cypher: runs | 20 a minute per person; 2 at once per data source |
+| Your own Cypher: query and answer | 20,000 characters; an answer of up to 8 MiB, each text value up to 2,000 characters and each list or map up to 100 entries |
 
 ---
 
@@ -494,6 +568,11 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |
 | "*A query named … is already saved*" | Names are unique in a View (ignoring case) | Choose another name |
 | **Export** is missing | The **Export graph data** feature is off | Ask your administrator |
+| No **Edit and run** on the Cypher tab | You may not query this data source, it isn't FalkorDB or Neo4j, or **Native read-only queries** is off | Ask an administrator for the permission, or the View's owner to turn on **Query data** on your share |
+| "*… reads files or URLs, and native queries only read*", "*… writes to the graph …*" | Your own Cypher used something native queries refuse | Remove what the underlined place names |
+| "*More rows matched — these are the first …*" | The answer had more rows than **Rows** allows | Raise **Rows**, or narrow the query |
+| "*The answer was too large to show whole*", "*… needs more memory than one query may use*" | Whole nodes or long lists made the answer too big | Return properties (`n.name`) instead of whole nodes, or fewer rows |
+| "*You've run a lot of queries in a short time*" | 20 runs a minute is the limit | Wait a moment |
 
 ---
 
@@ -507,3 +586,5 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
   Views, or Views between environments.
 - [Search & Display Rules Reference](/docs/feature-search-and-rules-reference) — when
   you need the query language, every endpoint and scripting.
+- [Native read-only queries: security](/docs/native-queries) — when you
+  review or operate **Edit and run**.

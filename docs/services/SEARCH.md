@@ -102,6 +102,7 @@ parameters.
 | POST | `/search/exports` | Write every match to a CSV or NDJSON file; repeat with `sessionId` until complete. Gated by the `graphExportEnabled` feature. |
 | GET | `/search/exports/{sessionId}/download` | Download a finished export with its `token`, for the user who ran it, for an hour. |
 | POST | `/search` | Legacy free-text node search (superseded by `/search/advanced`). |
+| POST | `/search/native` | A person's own read-only Cypher on FalkorDB and Neo4j. Its own access rule (`workspace:native-query:read`, or a View share that opts in), never an API key; see [Native read-only queries: security](/docs/native-queries). |
 
 `/search/advanced` sets response headers `X-Search-Scope-Hash` and, when
 out-of-view URNs were dropped, `X-Search-Dropped-URNs`.

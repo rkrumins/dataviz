@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Ask the graph: relationships, names and routes in Advanced Search
+## [Unreleased] — Ask the graph: relationships, names, routes and your own Cypher in Advanced Search
 
 ### Added
 
@@ -43,8 +43,33 @@ is, is not, is one of, is none of. Discovery says where each edge key is kept
 
 **Questions from the canvas.** Right-click an entity for **Everything inside this**, **Its
 children**, **What feeds this**, **What this feeds** or **Routes from this to…**; with several
-selected, **What all N feed** and **What feeds all N**. A match found through lineage offers **How it
-matches**: its routes to the relatives it was matched by.
+selected, **What all N feed** and **What feeds all N**. On a container, the lineage questions take in
+everything inside it — a dataset's lineage often runs through its columns — and the server walks out
+from the container's contents once, so the answer costs what the container's own lineage costs, not
+what the graph does. A match found through lineage offers **How it matches**: its routes to the
+relatives it was matched by.
+
+**A query editor that knows the language.** Code mode is a real editor now: words are coloured by
+how they are read, a red underline marks where a query stops making sense and says why, and
+suggestions offer what fits where the cursor is — entity types, tags, a property's values, edge
+properties inside `.via(`, entities by name after `@"` — from the View's own data. **Reads as**
+says the query in words while you type, and **Examples** insert a ready-made condition. `Esc` undoes
+your edit, and a query that doesn't read is never applied.
+
+**The Cypher tab.** The query card's third mode shows the query in words and the Cypher a search
+runs as — built by the same code that builds the run, so it is exactly what is sent — with its
+parameters and notes. **Copy with values** gives a statement that runs as it is anywhere Cypher
+runs (`inlinedCypher` on `POST /search/explain`).
+
+**Your own read-only Cypher.** On FalkorDB and Neo4j data sources, **Edit and run** on the Cypher tab
+runs your own Cypher on the whole data source, starting from the search's own statement. Answers
+come back as a table of typed values — nodes, edges and paths as chips that open to their
+properties — and **Highlight on canvas** lights up the entities an answer names. It is for everyone
+whose role reads the workspace's data sources (the new `workspace:native-query:read` permission,
+which an administrator can remove from any role), and for someone a View is shared with directly
+when the share turns on **Query data**. Writes, `LOAD CSV`, other databases, plugins and parameters
+are refused before the query runs; rows, time and size are capped; every run is recorded in the
+activity log. The **Native read-only queries** switch turns it off. `POST /search/native`.
 
 **Templates and examples.** Four templates (*Everything inside a named container*, *What feeds a
 kind of entity*, *Everything that feeds a named entity*, *Entities holding something tagged*),
@@ -59,6 +84,17 @@ governance pack.
   words.
 - A path in a saved search opens in the visual editor instead of as JSON.
 - New settings: `DEEP_SEARCH_MAX_RELATION_DEPTH` (3) and `DEEP_SEARCH_RELATION_MAX_HOPS` (3).
+- An empty query card lists every filter under the search field; the **All filters** link, which
+  opened the drawer's options instead, is gone.
+- The query card reopens on the mode you used last — Visual, Code or Cypher.
+- Relationship sentences say the edges a relationship walks after its condition: "has a target that
+  has an ancestor that is Tableau, through edges where logic is Direct Query".
+- The drawer keeps Options and JSON; the compiled Cypher moved to the Cypher tab.
+- The JSON editor follows the light and dark themes.
+- New settings for native queries: `NATIVE_QUERY_DEFAULT_ROWS` (200), `NATIVE_QUERY_MAX_ROWS`
+  (1,000), `NATIVE_QUERY_DEFAULT_TIMEOUT_MS` (10 s), `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s),
+  `NATIVE_QUERY_RATE` (20 a minute per person), `NATIVE_QUERY_CONCURRENCY` (2 per data source per
+  process) and `NATIVE_QUERY_MAX_REPLY_BYTES` (16 MiB).
 
 ### Fixed
 
@@ -71,6 +107,15 @@ governance pack.
 - An edge filter on a property a user added to edges matched nothing.
 - Edge filters had no size limit; they now nest at most three groups deep and hold at most 16
   conditions.
+- A search that failed or was cancelled wiped the query; it now stays in the box.
+- Search errors showed raw server text (`API Error 422: {"detail": …}`); the error card and the match
+  bar now say what is wrong in plain words.
+- In Code mode, clicking away from a query with an error applied an empty query and wiped the one you
+  had; some errors read `[object Object]`; `rowCount >` threw instead of saying what was missing; an
+  unclosed `"` or `@"` went unreported; and `tag:PII,GDPR` was read as three terms instead of either
+  tag.
+- The compiled Cypher the panel showed could differ from what a search ran (its candidate cap,
+  `LIMIT`, scope and incomplete rows), and a late answer could replace a newer one.
 
 ### Security
 
@@ -79,10 +124,27 @@ governance pack.
   that follow lineage or relationships now answer `403` for share links; in rule membership and
   counts only the rule that does is refused, so the other rules still colour the shared View.
 - A share link's name references are resolved inside its View only.
+- Native queries are read-only three ways: the engine's read-only mode (`GRAPH.RO_QUERY`, a Neo4j
+  `READ` transaction that is always rolled back), Neo4j's own plan check before anything runs, and
+  a guard in front of both that reads the query as tokens. They are never open to API keys, to a
+  View's visibility or to drafts, and a run's activity record is committed before any row is
+  returned — no record, no rows. See
+  [Native read-only queries: security](docs/NATIVE_QUERIES.md).
 
 ### Upgrading
 
-- Nothing to run. The two new settings default to what the panel offers.
+- **Run the upgrade job.** Migration `20261024_1000_native_query` adds the
+  `workspace:native-query:read` permission, grants it to every built-in and custom role that holds
+  `workspace:datasource:read`, and adds `resource_grants.can_query_source` (the share's **Query
+  data**). Downgrading removes them.
+- **Native read-only queries is on by default.** Turn it off under **Administration → Features**
+  before people can run their own queries, or remove the permission from roles that shouldn't have
+  it.
+- Set FalkorDB's `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` (and Neo4j's `db.transaction.timeout` and
+  `db.memory.transaction.max`), and limit the database hosts' outbound network: both engines run
+  `LOAD CSV` as a read, so the guard is what stops it. See
+  [Operator hardening](docs/NATIVE_QUERIES.md#operator-hardening).
+- The relationship settings default to what the panel offers.
 
 ### Known limitations
 
@@ -97,6 +159,14 @@ governance pack.
   plan.
 - **How it matches** draws routes up to 4 hops, and routes a path lists stop at 128.
 - Share links can't use relationships, paths or *Within N hops*.
+- A native query reads the whole data source, not only the View, including internal bookkeeping
+  such as rollup edges. A share's **Query data** stays on until someone turns it off, even if the
+  person who turned it on later loses their own access.
+- FalkorDB may keep working on a native query past the client's deadline, until its own
+  `TIMEOUT_MAX` stops it; Neo4j can't cap one huge row on the client, so its transaction memory
+  limit is what bounds it.
+- Native queries use the data source's existing login; the engines' read-only modes keep them
+  read-only, not the login's privileges.
 
 ---
 
