@@ -540,6 +540,7 @@ function UnifiedPickerDropdown({
     const inner = (
         <motion.div
             ref={portal ? portalRef : undefined}
+            data-floating-layer={portal ? '' : undefined}
             id={listboxId}
             role="listbox"
             initial={{ opacity: 0, y: portalCoords?.flipped ? 4 : -4 }}

@@ -74,6 +74,7 @@ import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { QuerySentence } from './panel/QuerySentence'
+import { useEditorMode } from './panel/builderMode'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
@@ -217,6 +218,10 @@ function PanelInner({
     // only search IS this panel have nowhere else to compose a query, so
     // for them the builder is always the top of the panel.
     const refineOpen = viewSession ? viewSession.refineOpen : true
+    // The Sentence builder already reads as the query, so the one-line
+    // statement above the results would repeat it.
+    const [editorMode] = useEditorMode()
+    const sentenceShowing = refineOpen && editorMode === 'sentence'
     const { loadAll, isLoadingAll, cancelLoadAll } = useLoadAll(session)
 
     const draftPredicate = useDraftPredicate()
@@ -563,7 +568,7 @@ function PanelInner({
                             <div className="flex flex-col gap-2">
                                 {/* With the builder folded away this is the
                                     only statement of what was asked. */}
-                                <QuerySentence draftPredicate={draftPredicate} />
+                                {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
                                 <MatchBar
                                     count={resultsCount}
                                     elapsedMs={elapsedMs}

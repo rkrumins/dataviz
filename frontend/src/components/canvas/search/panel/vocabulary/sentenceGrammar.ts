@@ -317,6 +317,37 @@ function relationSegments(p: RelatedPredicate, many: boolean): Segment[] {
 }
 
 
+/** Each axis as a verb, describing one entity and several: what the
+ *  Sentence builder reads a relationship as — "datasets that **feed** a
+ *  dashboard", never "have a target that is a dashboard". */
+const AXIS_VERB: Record<string, [one: string, many: string]> = {
+    parent: ['is directly inside', 'are directly inside'],
+    ancestor: ['is inside', 'are inside'],
+    root: ['sits under', 'sit under'],
+    child: ['directly contains', 'directly contain'],
+    descendant: ['contains', 'contain'],
+    upstream: ['is fed by', 'are fed by'],
+    downstream: ['feeds', 'feed'],
+    neighbor: ['is linked to', 'are linked to'],
+}
+
+/** A relationship's verb phrase with its quantifier: "feed", "feed no",
+ *  "only feed", "are only fed by", "feed at least" — the relative (and,
+ *  for a count, its number) follows. */
+export function relationVerb(p: RelatedPredicate, many = true): string {
+    const [one, several] = AXIS_VERB[p.axis] ?? AXIS_VERB.parent
+    const verb = many ? several : one
+    if (p.count) return `${verb} ${COUNT_WORDS[p.count.op ?? 'gte']}`
+    if (p.quantifier === 'none') return `${verb} no`
+    if (p.quantifier === 'all' && p.where) {
+        // "are only fed by", "only feed": "only" after a leading are / is.
+        const [first, ...rest] = verb.split(' ')
+        return first === 'are' || first === 'is' ? [first, 'only', ...rest].join(' ') : `only ${verb}`
+    }
+    return verb
+}
+
+
 function edgeSegments(ep: EdgePredicateNode): Segment[] {
     if (ep.kind === 'edgeGroup') {
         if (ep.op === 'not') return [{ t: 'em', text: 'NOT', tone: 'not' }, txt(' '), ...edgeSegments(ep.children[0])]

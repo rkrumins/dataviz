@@ -20,6 +20,7 @@ const OUT = '.harness'
 // Each state light, and the ones carrying the most colour dark as well.
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'empty', 'empty:dark', 'form', 'form:dark',
+  'sentence', 'sentence:dark', 'sentence:w380', 'sentenceFlat', 'sentenceAny',
 ]
 
 function findChromium() {

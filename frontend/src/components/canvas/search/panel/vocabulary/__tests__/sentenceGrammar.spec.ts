@@ -6,9 +6,11 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import type { Predicate } from '@/types/search'
+import type { Predicate, RelatedPredicate } from '@/types/search'
 
-import { connector, isOrInside, leafSegments, reachSegments, type Segment } from '../sentenceGrammar'
+import {
+    connector, isOrInside, leafSegments, reachSegments, relationVerb, type Segment,
+} from '../sentenceGrammar'
 
 
 /** The segments' words, as the read-only sentence prints them (values
@@ -98,5 +100,26 @@ describe('sentenceGrammar — shared rules', () => {
         expect(isOrInside({ kind: 'group', op: 'or', children: [{ kind: 'is', refs },
             { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs } }] })).toEqual(refs)
         expect(isOrInside({ kind: 'is', refs })).toBeNull()
+    })
+})
+
+
+describe('relationVerb — a relationship read as a verb', () => {
+    const rel = (over: Partial<RelatedPredicate>): RelatedPredicate => ({ kind: 'related', axis: 'downstream', ...over })
+
+    it.each<[Partial<RelatedPredicate>, boolean, string]>([
+        [{}, true, 'feed'],
+        [{}, false, 'feeds'],
+        [{ axis: 'upstream' }, true, 'are fed by'],
+        [{ axis: 'ancestor' }, false, 'is inside'],
+        [{ axis: 'child' }, true, 'directly contain'],
+        [{ quantifier: 'none' }, true, 'feed no'],
+        [{ quantifier: 'all', where: { kind: 'isLeaf' } }, true, 'only feed'],
+        [{ axis: 'upstream', quantifier: 'all', where: { kind: 'isLeaf' } }, true, 'are only fed by'],
+        // "every" means nothing without a condition on the relatives.
+        [{ quantifier: 'all' }, true, 'feed'],
+        [{ count: { op: 'gte', value: 2 } }, true, 'feed at least'],
+    ])('%j, several: %s → %s', (over, many, words) => {
+        expect(relationVerb(rel(over), many)).toBe(words)
     })
 })

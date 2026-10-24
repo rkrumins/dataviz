@@ -318,11 +318,18 @@ function advanced(query: SearchQuery) {
     }
 }
 
+/** Whether ``p`` holds a route search anywhere — the one kind with no count. */
+function hasRoute(p: Predicate): boolean {
+    if (p.kind === 'path') return true
+    if (p.kind === 'group') return p.children.some(hasRoute)
+    return p.kind === 'related' && !!p.where && hasRoute(p.where)
+}
+
 function counts(body: { items: Array<{ id: string; predicate: Predicate }> }) {
     const scope = inScope()
     return {
         counts: Object.fromEntries(body.items.map((item) => {
-            if (JSON.stringify(item.predicate).includes('"path"')) {
+            if (hasRoute(item.predicate)) {
                 return [item.id, { count: 0, status: 'complete', error: 'A path search has no count.' }]
             }
             return [item.id, { count: scope.filter((e) => matches(e, item.predicate)).length, status: 'complete' }]

@@ -89,6 +89,17 @@ describe('planClauseCounts', () => {
         expect(plan.total).not.toBeNull()
     })
 
+    it('counts a subject\'s any-of clauses within the subject', () => {
+        const draft = all(type('dataset'), any(tag('PII'), { kind: 'isLeaf' }))
+        const plan = planClauseCounts(draft)
+        expect(plan.clauses.map((c) => c.alone)).toEqual([
+            countId(type('dataset')),
+            countId(all(type('dataset'), tag('PII'))),
+            countId(all(type('dataset'), { kind: 'isLeaf' })),
+        ])
+        expect(plan.clauses.every((c) => c.prefix === null)).toBe(true)
+    })
+
     it('counts what a relationship\'s relatives must be', () => {
         const feeds: Predicate = { kind: 'related', axis: 'downstream', maxHops: 3, where: type('dashboard') }
         const plan = planClauseCounts(all(type('dataset'), feeds))

@@ -247,6 +247,15 @@ interface EditorCtx {
 }
 
 
+export type ConditionEditorProps = Omit<EditorCtx, 'autoFocus'> & { autoFocus?: boolean }
+
+/** A condition's editor alone — a row without its card. The Sentence
+ *  builder's popovers edit a clause with exactly what Form edits it with. */
+export function ConditionEditor(props: ConditionEditorProps) {
+    return <>{renderEditor({ ...props, autoFocus: props.autoFocus ?? false })}</>
+}
+
+
 function renderEditor(ctx: EditorCtx): ReactNode {
     const { value } = ctx
     switch (value.kind) {

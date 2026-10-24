@@ -218,18 +218,46 @@ export interface SearchFixture {
 
 const type = (...values: string[]): Predicate => ({ kind: 'entityType', op: 'in', values })
 
+const formDraft: Predicate = {
+    kind: 'group', op: 'and', children: [
+        type('dataset'),
+        { kind: 'related', axis: 'downstream', maxHops: 3,
+            where: { kind: 'group', op: 'and', children: [type('chart'),
+                { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs: [{ path: ['**', 'Finance'] }] } }] } },
+    ],
+}
+
 export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
     empty: { draft: null, note: 'The empty panel: where everyone starts.' },
     form: {
         editorMode: 'form',
-        note: 'Today\'s cards, holding a relationship: datasets that feed a dashboard in Finance.',
-        draft: {
-            kind: 'group', op: 'and', children: [
-                type('dataset'),
-                { kind: 'related', axis: 'downstream', maxHops: 3,
-                    where: { kind: 'group', op: 'and', children: [type('chart'),
-                        { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs: [{ path: ['**', 'Finance'] }] } }] } },
-            ],
-        },
+        note: 'Today\'s cards, holding a relationship: datasets that feed a chart in Finance.',
+        draft: formDraft,
+    },
+    sentence: {
+        editorMode: 'sentence',
+        note: 'The same query as a sentence: datasets that feed a chart in Finance.',
+        draft: formDraft,
+    },
+    sentenceFlat: {
+        editorMode: 'sentence',
+        note: 'Clauses narrowing the matches: certified datasets with over 100k rows and an owner.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'tag', op: 'hasAny', values: ['Certified'] },
+            { kind: 'property', key: 'rowCount', op: 'gt', value: 100000 } as Predicate,
+            { kind: 'hasProperty', key: 'owner', negate: false },
+        ] },
+    },
+    sentenceAny: {
+        editorMode: 'sentence',
+        note: 'Any of several clauses, each counted within the subject: datasets holding PII or read by nothing.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'group', op: 'or', children: [
+                { kind: 'tag', op: 'hasAny', values: ['PII'] },
+                { kind: 'isLeaf' },
+            ] },
+        ] },
     },
 }

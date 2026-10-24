@@ -2,7 +2,9 @@
  * clauseItems — the counts a query's clauses are read with, planned as one
  * request's worth of items:
  *
- *   alone   each clause by itself — "1,204 are tagged PII"
+ *   alone   each clause by itself — "1,204 are tagged PII" — or, for a
+ *           subject's any-of clauses, within the subject: "86 Datasets
+ *           are tagged PII"
  *   prefix  the clauses up to each one, in order — how the matches narrow
  *           as each clause is added (an all-of query's only)
  *   where   what a relationship's relatives must be — "12 dashboards"
@@ -16,8 +18,8 @@ import type { Predicate } from '@/types/search'
 
 import { requestPredicate } from '../../searchRequest'
 import { isRowIncomplete } from '../ConditionRow'
-import { rootGroupOp, topLevelConditions } from '../predicateComposition'
 import { buildRunnablePredicate } from '../runnablePredicate'
+import { listedClauses } from '../sentence/clauseModel'
 
 import { whyUncountable, type Uncountable } from './countable'
 
@@ -30,7 +32,8 @@ export interface CountItem {
     predicate: Predicate
 }
 
-/** One clause's counts, by item id (null: no count to ask for). */
+/** One listed clause's counts, by item id (null: no count to ask for) —
+ *  the subject first, when the query has one, as the Sentence lists them. */
 export interface ClauseCountIds {
     alone: string | null
     /** The clauses up to and including this one. */
@@ -75,16 +78,23 @@ export function planClauseCounts(draft: Predicate | null): ClausePlan {
         return id
     }
 
-    const conditions = draft ? topLevelConditions(draft) : []
+    const listed = listedClauses(draft)
+    const subject = listed.subject?.predicate ?? null
+    const conditions = [...(subject ? [subject] : []), ...listed.clauses.map((c) => c.predicate)]
     // The whole query first, so the number that matters most never falls
     // past the cap.
     const runnable = buildRunnablePredicate(draft)
     const total = runnable && !whyUncountable(runnable.predicate) ? ask(runnable.predicate) : null
 
-    const allOf = conditions.length > 1 && rootGroupOp(draft) === 'and'
-    const clauses: ClauseCountIds[] = conditions.map((c) => {
-        const reason = whyUncountable(c)
-        return { alone: reason ? null : ask(c), prefix: null, where: null, reason }
+    const allOf = conditions.length > 1 && listed.combine === 'and'
+    // A subject's any-of clauses each count within it: "Datasets tagged
+    // PII", not everything tagged PII.
+    const within = (c: Predicate, i: number): Predicate => (subject && !allOf && i > 0
+        ? { kind: 'group', op: 'and', children: [subject, c] } : c)
+    const clauses: ClauseCountIds[] = conditions.map((c, i) => {
+        const p = within(c, i)
+        const reason = whyUncountable(p)
+        return { alone: reason ? null : ask(p), prefix: null, where: null, reason }
     })
 
     // How the matches narrow: each complete clause added in turn. A clause

@@ -22,7 +22,7 @@
 import { motion } from 'framer-motion'
 import {
     Code2,
-    Eye,
+    LayoutList,
     Loader2,
     AlertCircle,
     Sparkles,
@@ -52,6 +52,7 @@ import {
     useState,
 } from 'react'
 
+import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -74,6 +75,7 @@ import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
 import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { useEditorMode, type EditorMode } from './builderMode'
 import { CypherView } from './CypherView'
 import { isNativeResult } from './native/nativeCells'
 import { CodeMode } from './dsl/CodeMode'
@@ -85,6 +87,7 @@ import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
 import { RelationProvider } from './RelationshipEditor'
+import { SentenceBuilder } from './sentence/SentenceBuilder'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -105,7 +108,14 @@ export interface QueryCardProps {
 }
 
 
-type ViewMode = 'visual' | 'code' | 'cypher'
+/** Sentence (guided) and Form (the cards) build a query by pointing; Code
+ *  and Cypher by typing. All four edit the same draft. */
+const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] = [
+    { value: 'sentence', label: 'Sentence', icon: Sparkles },
+    { value: 'form', label: 'Form', icon: LayoutList },
+    { value: 'code', label: 'Code', icon: Code2 },
+    { value: 'cypher', label: 'Cypher', icon: Terminal },
+]
 
 
 export const QueryCard: FC<QueryCardProps> = ({
@@ -378,10 +388,11 @@ export const QueryCard: FC<QueryCardProps> = ({
     const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
     const incompleteCount = conditions.length - completeCount
 
-    // Empty state in Visual mode gets its own premium hero treatment —
+    // Empty state in Sentence or Form gets its own premium hero treatment —
     // no QUERY header chrome, no run controls (nothing to act on), just
     // a confident "start here" surface with example-led onboarding.
-    const isEmptyVisual = mode === 'visual' && conditions.length === 0
+    const pointing = mode === 'sentence' || mode === 'form'
+    const isEmptyVisual = pointing && conditions.length === 0
     const showHeader = !isEmptyVisual
 
     const omnibox = (
@@ -443,21 +454,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 </span>
                             )}
                         </div>
-                        <div className={cn(
-                            'inline-flex rounded-md p-0.5 shrink-0',
-                            'bg-black/[0.04] dark:bg-white/[0.04]',
-                            'border border-black/[0.08] dark:border-white/[0.06]',
-                        )}>
-                            <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
-                                <Eye className="w-3 h-3" /> Visual
-                            </ToggleBtn>
-                            <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
-                                <Code2 className="w-3 h-3" /> Code
-                            </ToggleBtn>
-                            <ToggleBtn active={mode === 'cypher'} onClick={() => setMode('cypher')}>
-                                <Terminal className="w-3 h-3" /> Cypher
-                            </ToggleBtn>
-                        </div>
+                        <Segmented options={EDITOR_MODES} value={mode} onChange={setMode}
+                                   label="How to build the query" className="shrink-0" />
                     </div>
 
                     {/* Row 2 — action toolbar (skipped in empty hero) */}
@@ -489,7 +487,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 'flex flex-col gap-2',
                 isEmptyVisual ? 'p-0' : 'p-2.5',
             )}>
-                {mode === 'visual' ? (
+                {pointing ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
                             omnibox={omnibox}
@@ -513,6 +511,30 @@ export const QueryCard: FC<QueryCardProps> = ({
                             discoveryError={discovery.error}
                             propertyKeyCount={discovery.allKeys.length}
                         />
+                    ) : mode === 'sentence' ? (
+                        <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            <SentenceBuilder
+                                viewId={viewId}
+                                predicate={draftPredicate}
+                                onSeed={seedDraftPredicate}
+                                onCommit={commitDraft}
+                                discovery={{
+                                    allKeys: discovery.allKeys,
+                                    keysByEntityType: discovery.keysByEntityType,
+                                    tagValues: discovery.tagValues,
+                                    getValueSamples: discovery.getValueSamples,
+                                    suggestValues: discovery.suggestValues,
+                                }}
+                                knownEntityTypes={knownEntityTypes}
+                                presentEntityTypes={presentEntityTypes}
+                                discoveredLayers={discoveredLayers}
+                                isRunning={isRunning}
+                                onSubmit={dispatchRun}
+                                onOpenAdvanced={onOpenAdvanced}
+                                onOpenCode={handleOpenCode}
+                                onEditInCode={() => setMode('code')}
+                            />
+                        </RelationProvider>
                     ) : (
                         <>
                             <RelationProvider viewId={viewId} edges={edgeDiscovery}>
@@ -1370,28 +1392,7 @@ function RunButton({
 // ---------------------------------------------------------------------------
 
 const RUN_MODE_KEY = 'synodic.advancedSearch.runMode'
-const EDITOR_MODE_KEY = 'synodic.advancedSearch.editorMode'
 type RunMode = 'auto' | 'manual'
-
-/** Visual, Code or Cypher, as this browser last left it — the card
- *  remounts each time the Advanced drawer closes, and a power user's Code
- *  mode with it. */
-function useEditorMode(): [ViewMode, (next: ViewMode) => void] {
-    const [mode, setMode] = useState<ViewMode>(() => {
-        try {
-            const saved = localStorage.getItem(EDITOR_MODE_KEY)
-            return saved === 'code' || saved === 'cypher' ? saved : 'visual'
-        } catch {
-            return 'visual'
-        }
-    })
-    const update = useCallback((next: ViewMode) => {
-        setMode(next)
-        try { localStorage.setItem(EDITOR_MODE_KEY, next) } catch { /* ignore */ }
-    }, [])
-    return [mode, update]
-}
-
 
 function useRunMode(): [RunMode, (next: RunMode) => void] {
     const [mode, setMode] = useState<RunMode>(() => {

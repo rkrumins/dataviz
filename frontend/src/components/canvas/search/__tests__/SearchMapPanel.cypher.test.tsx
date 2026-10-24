@@ -1,5 +1,5 @@
 /**
- * The Query card's Cypher tab sits beside Visual and Code, and the card
+ * The Query card's Cypher tab sits beside Sentence, Form and Code, and the card
  * reopens on it — the card remounts each time the Advanced drawer closes.
  * A native query's highlight is no draft's, so emptying the draft leaves
  * it lit.
@@ -52,7 +52,7 @@ describe('SearchMapPanel — the Cypher tab', () => {
 
     it('shows what the query compiles to, and reopens on it', () => {
         const first = renderPanel(stubSession({ refineOpen: true }))
-        fireEvent.click(screen.getByRole('button', { name: 'Cypher' }))
+        fireEvent.click(screen.getByRole('radio', { name: 'Cypher' }))
         expect(screen.getByText('Compiling the query…')).toBeInTheDocument()
         first.unmount()
 
