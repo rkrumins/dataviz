@@ -46,6 +46,8 @@ export interface NativeConsoleProps {
 export const STARTER_QUERY = 'MATCH (n) RETURN n LIMIT 25'
 const ROW_CHOICES = [50, 200, 1000] as const
 const TIME_CHOICES = [5_000, 10_000, 30_000] as const
+/** The most entities whose containers one highlight looks up. */
+const CHAINS_MAX = 1000
 
 type RunState =
     | { status: 'idle'; note?: string }
@@ -98,10 +100,27 @@ export const NativeConsole: FC<NativeConsoleProps> = ({ viewId, engine, seed, un
 
     const answer = state.status === 'ok' ? state.answer : null
     const urns = useMemo(() => (answer ? urnsOf(answer.columns, answer.rows) : []), [answer])
-    const highlight = useCallback(() => {
+    const highlight = useCallback(async () => {
         if (!answer || urns.length === 0) return
-        setResult({ viewId, matchUrns: urns, queryHash: NATIVE_RESULT_PREFIX + answer.queryHash })
-    }, [answer, urns, setResult, viewId])
+        const queryHash = NATIVE_RESULT_PREFIX + answer.queryHash
+        setResult({ viewId, matchUrns: urns, queryHash })
+        // What an answer names often sits inside collapsed containers, which
+        // would otherwise dim with everything else: light them up too, with
+        // how many they hold — unless the highlight has moved on meanwhile.
+        try {
+            const chains = await remote?.getAncestorChains(urns.slice(0, CHAINS_MAX))
+            if (!chains || useSearchStore.getState().queryHash !== queryHash) return
+            setResult({
+                viewId, matchUrns: urns, queryHash,
+                ancestorPaths: Object.values(chains).map((chain) => ({
+                    path: chain.map((urn) => ({ urn, displayName: '', entityType: '' })),
+                    leafEntityType: '',
+                })),
+            })
+        } catch {
+            // The highlight stands without its containers.
+        }
+    }, [answer, urns, setResult, viewId, remote])
 
     // The error points into the text it was about — not into one edited since.
     const underline = useMemo(() => {
@@ -232,7 +251,7 @@ export const NativeConsole: FC<NativeConsoleProps> = ({ viewId, engine, seed, un
                             <div className="flex items-center gap-1.5">
                                 <button
                                     type="button"
-                                    onClick={highlight}
+                                    onClick={() => void highlight()}
                                     disabled={urns.length === 0}
                                     title={urns.length === 0 ? 'The answer names no entities' : undefined}
                                     className={cn(

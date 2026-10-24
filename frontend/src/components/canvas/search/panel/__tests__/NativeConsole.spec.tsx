@@ -18,6 +18,7 @@ vi.mock('@/providers/GraphProviderContext', () => ({
 }))
 
 const runNativeQuery = vi.fn()
+const getAncestorChains = vi.fn()
 let provider: RemoteGraphProvider
 
 // jsdom measures no layout; CodeMirror asks Ranges for their boxes.
@@ -29,7 +30,9 @@ beforeAll(() => {
 
 beforeEach(() => {
     runNativeQuery.mockReset()
-    provider = Object.assign(Object.create(RemoteGraphProvider.prototype), { runNativeQuery }) as RemoteGraphProvider
+    getAncestorChains.mockReset().mockResolvedValue({})
+    provider = Object.assign(Object.create(RemoteGraphProvider.prototype),
+                             { runNativeQuery, getAncestorChains }) as RemoteGraphProvider
     useSearchStore.getState().clear()
 })
 
@@ -139,16 +142,22 @@ describe('NativeConsole', () => {
         expect(signal?.aborted).toBe(true)
     })
 
-    it('lights the answer up on the canvas, and puts it out', async () => {
+    it('lights the answer up on the canvas, with the containers that hold it, and puts it out', async () => {
         runNativeQuery.mockResolvedValue(answer())
+        getAncestorChains.mockResolvedValue({ 'urn:a': ['urn:schema', 'urn:db'], 'urn:b': ['urn:db'] })
         render(<NativeConsole viewId="view-1" engine="falkordb" seed={SEED} />)
         open()
         await runIt()
-        fireEvent.click(screen.getByRole('button', { name: /Highlight on canvas \(2\)/ }))
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: /Highlight on canvas \(2\)/ }))
+        })
         const state = useSearchStore.getState()
         expect([...state.matchUrnSet]).toEqual(['urn:a', 'urn:b'])
         expect(state.queryHash).toBe('native:abc123')
         expect(state.viewId).toBe('view-1')
+        expect(getAncestorChains).toHaveBeenCalledWith(['urn:a', 'urn:b'])
+        expect(state.ancestorMatchCounts.get('urn:db')).toBe(2)
+        expect(state.ancestorMatchCounts.get('urn:schema')).toBe(1)
 
         fireEvent.click(screen.getByRole('button', { name: /Clear highlight/ }))
         expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
