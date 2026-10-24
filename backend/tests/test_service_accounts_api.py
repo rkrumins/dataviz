@@ -469,7 +469,8 @@ async def test_those_who_answer_hear_when_someone_who_made_keys_stops(test_clien
 
     # Back in the team, then the team is deleted.
     await test_client.post("/api/v1/admin/groups/grp_ops/members", json={"userId": "usr_bea"})
-    assert (await test_client.delete("/api/v1/admin/groups/grp_ops")).status_code == 204
+    deleted = await test_client.delete("/api/v1/admin/groups/grp_ops")
+    assert deleted.status_code == 204
     assert (await told())[1:] == [bea_left]
 
     # Bea is appointed herself, and Ada suspended: Bea hears of Ada's key.
