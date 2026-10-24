@@ -329,6 +329,18 @@ async def test_a_disabled_service_accounts_keys_stop_at_once(client, db_session)
     assert (refused.status_code, error(refused)) == (401, "api_key_owner_inactive")
 
 
+async def test_a_service_accounts_keys_stop_when_its_record_is_gone(client, db_session):
+    """A rollback of the service account tables leaves the account's user row
+    and keys behind with nobody answering for them: they are refused."""
+    await _managed_account(db_session)
+    key = await _service_key(db_session)
+    assert (await client.get("/api/v1/views/v_a_ws", headers=key.headers)).status_code == 200
+    await db_session.delete(await db_session.get(ServiceAccountORM, "svc_job"))
+    await db_session.commit()
+    refused = await client.get("/api/v1/views/v_a_ws", headers=key.headers)
+    assert (refused.status_code, error(refused)) == (401, "api_key_owner_inactive")
+
+
 async def test_a_service_account_acts_only_through_its_own_workspace_roles(db_session):
     """A platform role or a team's role attached to a service account never
     reaches its keys."""

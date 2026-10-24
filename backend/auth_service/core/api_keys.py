@@ -229,6 +229,7 @@ def lifecycle_refusal(
     passwords_allowed: bool,
     unmanaged_since: Optional[str] = None,
     unmanaged_grace_days: int = 14,
+    account_on_record: bool = True,
 ) -> Optional[str]:
     """Why this key may not act now — ``revoked``, ``expired``,
     ``owner_inactive``, ``owner_reauth_required`` or ``unmanaged`` — or
@@ -240,7 +241,9 @@ def lifecycle_refusal(
     its last one has gone, for ``unmanaged_grace_days`` more, counted from
     ``unmanaged_since`` (when that was first noticed), so an integration
     keeps running while someone appoints a successor. A key whose kind and
-    owner disagree never works.
+    owner disagree never works, and nor does a service account's whose
+    record is gone (``account_on_record``): a rollback of its tables leaves
+    the account's ``users`` row and keys behind, answering to no one.
     """
     if key.revoked_at:
         return "revoked"
@@ -251,7 +254,7 @@ def lifecycle_refusal(
         if (
             owner.deleted_at is not None or owner.status != "active"
             or getattr(owner, "is_system_account", False)
-            or not is_service_account(owner.id)
+            or not is_service_account(owner.id) or not account_on_record
         ):
             return "owner_inactive"
         since = parse_instant(unmanaged_since)

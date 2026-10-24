@@ -490,10 +490,10 @@ async def _policy(session: AsyncSession) -> _PolicyValues:
 
 async def _identity_facts(
     session: AsyncSession, user_ids: set[str],
-) -> dict[str, tuple[int, Optional[str], Optional[str]]]:
+) -> dict[str, tuple[int, Optional[str], Optional[str], bool]]:
     """Per principal, what its keys' status rests on: how many SSO identities
     and their latest sign-in — and, for a service account, since when it has
-    had no manager."""
+    had no manager and whether its record is there at all."""
     if not user_ids:
         return {}
     rows = (await session.execute(
@@ -505,20 +505,23 @@ async def _identity_facts(
         .where(UserIdentityORM.user_id.in_(sorted(user_ids)))
         .group_by(UserIdentityORM.user_id)
     )).all()
-    facts = {uid: (int(count or 0), last, None) for uid, count, last in rows}
+    facts = {uid: (int(count or 0), last, None, True) for uid, count, last in rows}
     accounts = sorted(uid for uid in user_ids if is_service_account(uid))
     if accounts:
+        for uid in accounts:
+            count, last, _, _ = facts.get(uid, (0, None, None, True))
+            facts[uid] = (count, last, None, False)
         for uid, since in (await session.execute(
             select(ServiceAccountORM.user_id, ServiceAccountORM.unmanaged_since)
             .where(ServiceAccountORM.user_id.in_(accounts))
         )).all():
-            count, last, _ = facts.get(uid, (0, None, None))
-            facts[uid] = (count, last, since)
+            count, last, _, _ = facts[uid]
+            facts[uid] = (count, last, since, True)
     return facts
 
 
 def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str:
-    count, last, unmanaged_since = facts.get(owner.id, (0, None, None))
+    count, last, unmanaged_since, on_record = facts.get(owner.id, (0, None, None, True))
     reason = api_keys.lifecycle_refusal(
         key, owner,
         identity_count=count, idp_last_login_at=last,
@@ -528,6 +531,7 @@ def _status(key: ApiKeyORM, owner: UserORM, facts, policy: _PolicyValues) -> str
         passwords_allowed=policy.passwords_allowed,
         unmanaged_since=unmanaged_since,
         unmanaged_grace_days=policy.grace_days,
+        account_on_record=on_record,
     )
     return _STATUS_BY_REFUSAL.get(reason, reason)
 

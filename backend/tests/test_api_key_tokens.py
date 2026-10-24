@@ -324,8 +324,10 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
     for uid, since in unmanaged.items():
         users[uid] = await _user(db_session, uid, status="suspended" if uid == "svc_off" else "active")
         db_session.add(ServiceAccountORM(user_id=uid, unmanaged_since=since))
+    # And one whose record is gone, as a rollback of its tables leaves it.
+    users["svc_orphan"] = await _user(db_session, "svc_orphan")
     keys, plain = [], {}
-    for uid in [*owners, *unmanaged]:
+    for uid in [*owners, *unmanaged, "svc_orphan"]:
         kind = "service" if uid.startswith("svc_") else "personal"
         for expires_at, created_at, revoked in (
             (None, None, False),
@@ -362,6 +364,7 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
                 now=now, sso_signin_window_days=window, max_lifetime_days=cap,
                 passwords_allowed=passwords,
                 unmanaged_since=unmanaged.get(key.user_id), unmanaged_grace_days=grace,
+                account_on_record=not key.user_id.startswith("svc_") or key.user_id in unmanaged,
             )
             shown = _SHOWN.get(refusal, refusal)
             assert in_sql[key.id] == shown, (
@@ -381,4 +384,5 @@ async def test_the_status_the_inventory_filters_on_is_the_one_every_request_gets
         assert in_sql[plain["svc_recent"].id] == ("active" if grace > 3 else "paused")
         assert in_sql[plain["svc_lapsed"].id] == "paused"
         assert in_sql[plain["svc_off"].id] == "owner_inactive"
+        assert in_sql[plain["svc_orphan"].id] == "owner_inactive"
     assert seen == {"active", "paused", "owner_inactive", "expired", "revoked"}

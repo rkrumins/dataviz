@@ -155,6 +155,7 @@ def status_expr(
                 UserORM.deleted_at.is_not(None), UserORM.status != "active",
                 UserORM.is_system_account.is_(True),
                 and_(service, ~service_owner),
+                and_(service, ServiceAccountORM.user_id.is_(None)),
             ),
             "owner_inactive",
         ),
@@ -349,6 +350,9 @@ class AuthRow:
     #: For a service account: since when it has had no manager in good
     #: standing (``service_accounts.unmanaged_since``), or ``None``.
     unmanaged_since: Optional[str] = None
+    #: Whether the owner has a ``service_accounts`` row: a service account
+    #: without one is refused.
+    account_on_record: bool = True
 
 
 async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[AuthRow]:
@@ -363,7 +367,10 @@ async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[Auth
         .scalar_subquery()
     )
     row = (await session.execute(
-        select(ApiKeyORM, UserORM, identity_count, idp_last_login, ServiceAccountORM.unmanaged_since)
+        select(
+            ApiKeyORM, UserORM, identity_count, idp_last_login,
+            ServiceAccountORM.unmanaged_since, ServiceAccountORM.user_id,
+        )
         .join(UserORM, UserORM.id == ApiKeyORM.user_id)
         .outerjoin(ServiceAccountORM, ServiceAccountORM.user_id == ApiKeyORM.user_id)
         .where(ApiKeyORM.token_hash == token_hash)
@@ -371,11 +378,11 @@ async def find_for_auth(session: AsyncSession, token_hash: str) -> Optional[Auth
     )).first()
     if row is None:
         return None
-    key, owner, count, last_login, unmanaged_since = row
+    key, owner, count, last_login, unmanaged_since, account_row = row
     return AuthRow(
         key=key, owner=owner,
         identity_count=int(count or 0), idp_last_login_at=last_login,
-        unmanaged_since=unmanaged_since,
+        unmanaged_since=unmanaged_since, account_on_record=account_row is not None,
     )
 
 

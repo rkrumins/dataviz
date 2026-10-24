@@ -2874,6 +2874,7 @@ def _api_key_refusal(
         passwords_allowed=passwords_allowed,
         unmanaged_since=getattr(row, "unmanaged_since", None),
         unmanaged_grace_days=policy.service_account_grace_days,
+        account_on_record=getattr(row, "account_on_record", True),
     )
     if reason is None and not api_keys.address_allowed(client_ip, row.key.allowed_cidrs):
         return "ip_not_allowed"
