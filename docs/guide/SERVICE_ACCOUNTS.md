@@ -57,6 +57,17 @@ neither administers the workspace nor lets people in — Viewer or Editor, say,
 but never Admin or Steward — and never a platform role or a place in a team.
 Its keys pick a new role up within half a minute.
 
+Those roles are all it has. Nothing else can be shared with it — a view, a
+template or a draft — and should someone later widen a role it holds to
+administer a workspace or let people in, it gets none of that. In a workspace
+whose identity provider decides who is in it, its role is not an exception
+that ends within 90 days: the provider doesn't know the account, so the role
+is your decision here, and it lasts until you take it away.
+
+Wherever access is listed — a workspace's members, everyone with access,
+access reviews, the activity log — it is marked as a service account, and
+links here. It is never counted among people.
+
 ### Teams as managers
 
 Prefer a **team** — ideally one your identity provider keeps — to a single
@@ -88,8 +99,12 @@ Who manages an account, and its roles, are an administrator's to change.
 Someone allowed to manage users (a super admin) can make, rotate and revoke an
 account's keys without managing it; its managers are told when they do.
 
-Misuse of a key, a key about to expire and an administrator revoking one are
-told to the account's managers — or, while it has none, to its administrators.
+What concerns the account is told to its managers — or, while it has none,
+to its administrators — naming it: misuse of a key, a key about to expire, an
+administrator revoking one, disabling or enabling the account, and anything
+said to the account itself, such as a workspace removing its access, an end
+date set on that access or its coming end, or a decision on a publication it
+asked for. Nobody reads the account's own inbox.
 
 ---
 
@@ -130,6 +145,9 @@ Two refusals say something particular about a service account:
 | 401 | `api_key_owner_inactive` | The account is disabled. |
 
 Secret scanners find both kinds with `nx[ps]at_[0-9A-Za-z]{38}`.
+
+A service account's key can't review or approve a pull request: approving is
+a person's call, and its managers would otherwise approve through it.
 
 ---
 

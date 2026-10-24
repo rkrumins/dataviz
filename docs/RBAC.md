@@ -137,13 +137,14 @@ enforce, and the app shows or hides it to match:
 | **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
 | **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
 | **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
-| **Administration** (entering it at all) | `system:admin`, `system:groups:manage` or `system:audit:read` |
+| **Administration** (entering it at all) | `system:admin`, `system:groups:manage`, `system:audit:read` or `system:service-accounts:manage` |
 | Administration → **Activity** and **Telemetry** | `system:audit:read` |
 | Administration → **Groups** | `system:groups:manage` |
+| Administration → **Service accounts** | `system:service-accounts:manage` |
 | Every other Administration page | `system:admin` |
 
 Entering **Administration** and opening one of its pages are separate checks: a page inside
-it needs its own permission as well as one of the three that open Administration.
+it needs its own permission as well as one of the four that open Administration.
 
 ### View visibility and sharing
 

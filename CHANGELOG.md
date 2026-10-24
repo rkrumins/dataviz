@@ -43,17 +43,24 @@ managers are told when they do.
 
 - A key's notices — misuse, expiry reminders, an administrator revoking it — go to the people
   who can act for a service account's key: its managers, and the members of its teams, or its
-  administrators while it has none.
+  administrators while it has none. So does anything said to the account itself — a workspace
+  removing its access or setting an end date on it, that access about to end, a decision on a
+  publication it asked for, an administrator disabling or enabling it — naming the account.
 - The API explorer's API key scheme names both kinds of key, `nxpat_…` and `nxsat_…`.
-- People lists, pickers, the directory, analytics and inboxes leave service accounts out; the
-  routes about a person answer `404` for one.
+- People lists, pickers, the directory, the admin user search, people counts, analytics and
+  inboxes leave service accounts out; the routes about a person answer `404` for one. Where
+  access is listed — a workspace's members, everyone with access, access reviews, the activity
+  log — one is marked as a service account and links to its page.
 
 ### Security
 
 - A service account never signs in: every sign-in path refuses it, an identity provider can't
   link to one, and it can't join a team or a workspace's members directly. It holds only the
   workspace roles given it on its own page: never a platform role, a team's roles, or a role
-  that administers a workspace.
+  that administers a workspace — not even one widened to after it was given — and no view,
+  template or draft can be shared with it.
+- A service account neither reviews nor approves a pull request, so nobody approves their own
+  through an account they manage.
 
 ### Upgrading
 

@@ -202,12 +202,12 @@ do their job; you can always raise it later.
 | Role | ID | What it's for |
 | --- | --- | --- |
 | **Super Admin** | `super_admin` | The platform owner. Carries `system:admin`, which implies every permission everywhere: every Administration page, every workspace, user accounts, single sign-on and feature switches. Bind sparingly. |
-| **Org Admin** | `org_admin` | Runs every workspace and creates new ones, manages groups, and sees Analytics. Does **not** manage user accounts or single sign-on — in Administration it opens only **Groups**. |
+| **Org Admin** | `org_admin` | Runs every workspace and creates new ones, manages groups, and sees Analytics. Does **not** manage user accounts or single sign-on — in Administration it opens **Groups** and **Service accounts**. |
 | **Org Auditor** | `org_auditor` | Read-only across every workspace, with the permissions to read the activity log — **Administration → Activity** — and every role binding (`system:audit:read`, `system:bindings:read`) and to see Analytics. Can't change anything. |
 | **User** | `user` | The default for anyone without an organization-wide role. No platform-wide access on its own — everything comes from workspace roles. |
 
 > **Note:** Opening **Administration** itself needs `system:admin`,
-> `system:groups:manage` or `system:audit:read`, so an **Org Auditor** reaches
+> `system:groups:manage`, `system:audit:read` or `system:service-accounts:manage`, so an **Org Auditor** reaches
 > **Activity** and **Telemetry** there. See [The Admin Console](/guide/governance-ops#who-can-open-each-page).
 
 > **Note:** A workspace appears in an **Org Admin**'s or **Org Auditor**'s
