@@ -33,17 +33,25 @@ from backend.app.providers.falkordb_provider import (
     CursorMismatchError,
 )
 from backend.common.models.search import (
+    NativeQueryErrorDetail,
+    NativeQueryRequest,
+    NativeQueryResponse,
     SearchAncestorCountsRequest,
     SearchCatalogRequest,
     SearchCountsRequest,
     SearchExportRequest,
     SearchMembershipRequest,
+    SearchResolveRequest,
     SearchQuery,
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.services.advanced_search_service import (
+    SHARED_LINK_RELATIONSHIPS,
+    follows_relationships,
+)
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
     CompileError,
@@ -114,6 +122,9 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 require_trace = require_feature("traceEnabled")        # POST /trace*
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 require_export = require_feature("graphExportEnabled")  # /search/exports*
+# A SECURITY flag: whether a person's own query may reach a data source. Fails
+# closed — an unreadable value refuses.
+require_native_query = require_feature("nativeQueryEnabled")  # /search/native
 
 
 # ------------------------------------------------------------------ #
@@ -1946,6 +1957,9 @@ def _guard_capability_scope(
     against the view's own authorised roots, so that alone stays open.
     Membership callers are unaffected.
 
+    A condition that follows lineage (``path``, ``withinHops``) is refused
+    too: it reaches entities outside the view.
+
     ``query=None`` is ``/search/discover``, which takes no query at all:
     it reports the whole graph's labels, property keys and tag values,
     and nothing narrows that to the granted view — so every capability
@@ -1961,6 +1975,13 @@ def _guard_capability_scope(
             status_code=403,
             detail="This link can only search inside its view.",
         )
+    # Lineage leads out of the view: a path returns the entities on it, and
+    # a hop test answers yes or no about entities the link can't see. A
+    # rules request is answered rule by rule instead (the service refuses
+    # each such rule in ``errors``).
+    predicate = getattr(query, "predicate", None)
+    if predicate is not None and follows_relationships(predicate):
+        raise HTTPException(status_code=403, detail=SHARED_LINK_RELATIONSHIPS)
 
 
 @router.post(
@@ -2130,6 +2151,124 @@ async def search_explain(
         raise _map_not_implemented(engine, exc) from exc
 
 
+@router.post(
+    "/search/native",
+    response_model=NativeQueryResponse,
+    response_model_by_alias=True,
+    responses={code: {"model": NativeQueryErrorDetail} for code in (400, 403, 422, 429, 501, 503, 504)},
+)
+async def search_native(
+    body: NativeQueryRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    viewId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    _enabled: None = Depends(require_native_query),
+    _admission: None = Depends(_admit_graph_request),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Run a person's own read-only Cypher on a data source — FalkorDB or
+    Neo4j — and answer its rows as typed cells.
+
+    Read-only three times over: the engine's own read-only mode, Neo4j's
+    plan check, and a guard in front of both that refuses writes,
+    administration, files and URLs, other databases, and every procedure
+    and plugin function outside a short list. Bounded in rows, time, reply
+    size and concurrency (``NATIVE_QUERY_*``), and recorded in the activity
+    log — a run that can't be recorded sends no rows.
+
+    Who may: holders of ``workspace:native-query:read`` with data source
+    access, or a share of ``viewId`` that opts in, for that view's data
+    source only. Never with an API key; never on a draft. Every refusal is
+    ``{detail: {code, message, requestId, position?}}``.
+    """
+    from backend.app.middleware.request_id import get_request_id
+    from backend.app.services.native_query import access as native_access
+    from backend.app.services.native_query.guard import ENGINES
+    from backend.app.services.native_query.service import (
+        NativeQueryFailure, NativeRun, run_native_query,
+    )
+
+    request_id = get_request_id(request)
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    if (branchId or "").strip() not in ("", "main"):
+        raise _native_refusal(
+            request_id, 501, "native_query_unavailable",
+            "Native queries read the published graph. Open the view on main to run one.",
+        )
+    try:
+        granted = await native_access.authorize(
+            session, user=user, claims=claims, workspace_id=ws_id,
+            data_source_id=dataSourceId, view_id=viewId,
+        )
+    except native_access.NativeAccessDenied as exc:
+        permission = None
+        if exc.status == 403:
+            permission = "workspace:native-query:read"
+            from backend.app.auth.dependencies import _audit_access_denied
+
+            await _audit_access_denied(
+                session, user_id=user.id, permission=permission,
+                scope_obj={"type": "workspace", "id": ws_id},
+            )
+        raise _native_refusal(
+            request_id, exc.status, "missing_permission" if exc.status == 403 else "not_found",
+            exc.message, permission=permission,
+        )
+    try:
+        provider = await provider_manager.get_provider_for_workspace(
+            ws_id, session, granted.data_source_id,
+        )
+    except KeyError:
+        raise _native_refusal(request_id, 404, "not_found", "The data source wasn't found.")
+    except ProviderUnavailable as exc:
+        raise _native_refusal(
+            request_id, 503, "unavailable", "The data source isn't answering. Try again shortly.",
+            retry_after=exc.retry_after_seconds,
+        )
+    engine_name = getattr(provider, "native_query_engine", None)
+    if engine_name not in ENGINES:
+        raise _native_refusal(
+            request_id, 501, "native_query_unavailable",
+            "Native queries run on FalkorDB and Neo4j data sources only.",
+        )
+    run = NativeRun(
+        workspace_id=ws_id, data_source_id=granted.data_source_id,
+        data_source_label=granted.data_source_label, user_id=user.id, engine=engine_name,
+        via=granted.via, view_id=viewId, request_id=request_id,
+    )
+    try:
+        return await run_native_query(
+            provider, run, body, session, is_disconnected=request.is_disconnected,
+        )
+    except NativeQueryFailure as exc:
+        raise _native_refusal(
+            request_id, exc.status, exc.code, exc.message, position=exc.position,
+            retry_after=exc.retry_after,
+        )
+
+
+def _native_refusal(
+    request_id: str, status: int, code: str, message: str, *, position: Optional[int] = None,
+    retry_after: Optional[int] = None, permission: Optional[str] = None,
+) -> HTTPException:
+    """A native query's refusal: plain words, a code, the request id — never a
+    host or a credential."""
+    detail = NativeQueryErrorDetail(
+        code=code, message=message, request_id=request_id, position=position,
+        permission=permission, retry_after_seconds=retry_after,
+    )
+    return HTTPException(
+        status_code=status,
+        detail=detail.model_dump(by_alias=True, exclude_none=True),
+        headers={"Retry-After": str(retry_after)} if retry_after else None,
+    )
+
+
 @router.get("/search/discover")
 async def search_discover(
     request: Request,
@@ -2255,6 +2394,37 @@ async def search_membership(
     from backend.app.services.advanced_search_service import ValidationError
     try:
         return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/resolve", response_model_by_alias=True)
+async def search_resolve(
+    body: SearchResolveRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
+):
+    """Which entities each name reference names in the view — how many, the
+    first ten with the containers they sit in, or why the reference can't
+    be used. What the reference picker checks as a path is typed, and how it
+    finds the shortest path that names one entity. A share link's references
+    are kept to its view.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session,
+                        can_read_view)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.resolve(body, run_context=SearchRunContext(
             data_version=await _search_data_version(engine),
             admit=_statement_admission(engine),
         ))
@@ -2457,6 +2627,7 @@ def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
         data_source_id=data_source_id,
         branch_id=branch_id,
         can_read_view=can_read_view,
+        confined=bool(getattr(request.state, "view_capability", None)),
     )
 
 

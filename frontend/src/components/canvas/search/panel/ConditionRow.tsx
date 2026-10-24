@@ -32,10 +32,13 @@ import type {
     EntityTypePredicate,
     GroupPredicate,
     HasPropertyPredicate,
+    IsPredicate,
     LayerPredicate,
+    PathPredicate,
     Predicate,
     PropertyOp,
     PropertyPredicate,
+    RelatedPredicate,
     TagPredicate,
     TextMatchMode,
     TextPredicate,
@@ -59,7 +62,11 @@ import { useValueSuggestions } from '../typed/useValueSuggestions'
 import { parseDuration, recode, valueProblem } from '../typed/valueCodec'
 import { TYPE_META, VALUE_TYPES, type ValueType, observeType } from '../typed/valueTypes'
 
+import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
+import { PathEditor } from './PathEditor'
+import { RelationshipEditor } from './RelationshipEditor'
+import { axisMeta } from './relations'
 import { RowCard } from './builder-atoms/RowCard'
 import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
@@ -78,7 +85,8 @@ import { useCanvasAnchorOptions, useTopLevelCanvasContainers } from './useCanvas
  *  fields), and deliberately so: it's what lets a saved or recent query
  *  reopen in the editor the user built it in. */
 export type DescendantOfPredicateWithScope = DescendantOfPredicate & {
-    uiScope?: 'roots' | 'any'
+    /** ``'name'``: anchors named by their path of display names. */
+    uiScope?: 'roots' | 'any' | 'name'
 }
 
 
@@ -261,13 +269,46 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             //   - 'any': every canvas-loaded node. Power-user
             //     isolation to deeper subtrees.
             // The BE Cypher is identical for both.
-            const scope = (value as DescendantOfPredicateWithScope).uiScope ?? 'roots'
+            const d = value as DescendantOfPredicateWithScope
+            const scope = d.uiScope ?? (d.refs?.length && !d.urns?.length ? 'name' : 'roots')
+            if (scope === 'name') {
+                return (
+                    <Field label="Containers, by name" group>
+                        <NodeRefList value={d.refs ?? []} autoFocus={ctx.autoFocus}
+                                     disabled={ctx.isRunning}
+                                     onChange={(refs) => ctx.onChange({ ...d, refs })} />
+                    </Field>
+                )
+            }
             return scope === 'any'
-                ? <InsideSubtreeEditor {...ctx} value={value as DescendantOfPredicateWithScope} />
-                : <RootInViewEditor {...ctx} value={value as DescendantOfPredicateWithScope} />
+                ? <InsideSubtreeEditor {...ctx} value={d} />
+                : <RootInViewEditor {...ctx} value={d} />
         }
         case 'hasProperty':
             return <HasPropertyEditor {...ctx} value={value as HasPropertyPredicate} />
+        case 'is': {
+            const p = value as IsPredicate
+            return (
+                <Field label="Entities" group>
+                    <NodeRefList value={p.refs} autoFocus={ctx.autoFocus} disabled={ctx.isRunning}
+                                 onChange={(refs) => ctx.onChange({ ...p, refs })} />
+                </Field>
+            )
+        }
+        case 'related':
+            return (
+                <RelationshipEditor value={value as RelatedPredicate} onChange={ctx.onChange}
+                                    discovery={ctx.discovery} knownEntityTypes={ctx.knownEntityTypes}
+                                    discoveredLayers={ctx.discoveredLayers} isRunning={ctx.isRunning}
+                                    onSubmit={ctx.onSubmit} />
+            )
+        case 'path':
+            return (
+                <PathEditor value={value as PathPredicate} onChange={ctx.onChange}
+                            discovery={ctx.discovery} knownEntityTypes={ctx.knownEntityTypes}
+                            discoveredLayers={ctx.discoveredLayers} isRunning={ctx.isRunning}
+                            onSubmit={ctx.onSubmit} />
+            )
         case 'property':
             return <PropertyEditor {...ctx} value={value as PropertyPredicate} />
         case 'isOrphan':
@@ -280,7 +321,6 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             // says everything. No editor body needed.
             return null
         case 'withinHops':
-        case 'path':
         case 'degree':
             // No visual editor — these predicate kinds are Code-only.
             // Saved queries that still contain them render this banner;
@@ -566,7 +606,7 @@ function RootInViewEditor({
         <Field label="Root nodes">
             <UnifiedPicker
                 multiple
-                value={value.urns}
+                value={value.urns ?? []}
                 onChange={(next) => onChange({ ...value, urns: next })}
                 options={roots.map((r) => ({
                     value: r.urn,
@@ -603,7 +643,7 @@ function InsideSubtreeEditor({
     // option so the picker shows "GOLD", not a bare URN or a blank.
     const options = useMemo(() => {
         const known = new Set(anchors.map((r) => r.urn))
-        const extra = value.urns
+        const extra = (value.urns ?? [])
             .filter((urn) => urn && !known.has(urn))
             .map((urn) => ({
                 value: urn,
@@ -623,7 +663,7 @@ function InsideSubtreeEditor({
         <Field label="Anchor nodes">
             <UnifiedPicker
                 multiple
-                value={value.urns}
+                value={value.urns ?? []}
                 onChange={(next) => onChange({ ...value, urns: next })}
                 options={options}
                 placeholder="pick one or more anchors from this canvas…"
@@ -994,14 +1034,18 @@ function WildcardHelp({
 // Atoms — Field wrapper + shared input className
 // ---------------------------------------------------------------------------
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+/** ``group``: it holds several controls (a list of names), so it is a
+ *  group, not a <label> — a label hands a click anywhere inside it to its
+ *  first control, which there could be "Use its name". */
+function Field({ label, children, group }: { label: string; children: ReactNode; group?: boolean }) {
+    const Tag = group ? 'div' : 'label'
     return (
-        <label className="flex flex-col gap-1.5 min-w-0">
+        <Tag className="flex flex-col gap-1.5 min-w-0" {...(group ? { role: 'group', 'aria-label': label } : {})}>
             <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
                 {label}
             </span>
             {children}
-        </label>
+        </Tag>
     )
 }
 
@@ -1071,7 +1115,16 @@ function getKindMeta(p: Predicate): KindMeta {
             // results pane writes when you search inside a group, and
             // its anchor is usually a mid-tree container — calling that
             // "Root in view" would be wrong.
-            if ((p as DescendantOfPredicateWithScope).uiScope === 'any') {
+            const scope = (p as DescendantOfPredicateWithScope).uiScope
+            if (scope === 'name' || (!scope && p.refs?.length && !p.urns?.length)) {
+                return {
+                    icon: '⌂', label: 'Inside a container named…',
+                    description:
+                        'Entities under a container named by its path — '
+                        + '"Country / United Kingdom" — the same in every environment.',
+                }
+            }
+            if (scope === 'any') {
                 return {
                     icon: '⌂', label: 'Inside…',
                     description:
@@ -1092,8 +1145,9 @@ function getKindMeta(p: Predicate): KindMeta {
             description: 'N-hop neighbourhood of an anchor URN.',
         }
         case 'path': return {
-            icon: '⤇', label: 'Path between two nodes',
-            description: 'Lineage paths from a source URN to a target URN.',
+            icon: '⤇', label: 'Paths',
+            description: 'Every route from where it starts to where it ends — each end named '
+                + 'entities or a condition — through edges you choose.',
         }
         case 'degree': return {
             icon: '#', label: 'Number of edges',
@@ -1102,6 +1156,20 @@ function getKindMeta(p: Predicate): KindMeta {
         case 'all': return {
             icon: '∗', label: 'Every entity',
             description: 'Every entity in the view.',
+        }
+        case 'is': return {
+            icon: '◎', label: 'Is a named entity',
+            description: 'One entity — or several — by its path of names, or by URN.',
+        }
+        case 'related': {
+            const meta = axisMeta(p.axis)
+            return {
+                icon: meta.lineage ? '⇄' : '⊶',
+                label: `Relationship: ${meta.label.toLowerCase()}`,
+                description: meta.lineage
+                    ? 'A condition on the entities it is linked to by lineage.'
+                    : 'A condition on its containers or what it contains.',
+            }
         }
         case 'group': return {
             icon: '⊕', label: 'Composite group',
@@ -1151,11 +1219,25 @@ function isIncomplete(p: Predicate): boolean {
         case 'layer':        return !p.layerAssignment.trim()
         case 'hasProperty':  return !p.key.trim()
         case 'property':     return !p.key.trim() || valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null
-        case 'descendantOf': return p.urns.length === 0
-        case 'withinHops':   return p.urns.length === 0
-        case 'path':         return p.sourceUrns.length === 0 || p.targetUrns.length === 0
+        case 'descendantOf': return !p.urns?.length && !p.refs?.length
+        case 'withinHops':   return !p.urns?.length && !p.refs?.length
+        case 'path':
+            return !(p.sourceUrns?.length || p.sourceRefs?.length || p.sourceWhere)
+                || !(p.targetUrns?.length || p.targetRefs?.length || p.targetWhere)
+                || [p.sourceWhere, p.targetWhere].some((w) => !!w && hasIncompleteLeaf(w))
+        case 'is':           return !p.refs.length || p.refs.some((r) => !r.urn && !r.path?.length)
+        // A relationship with no condition is complete: any relative will do.
+        case 'related':      return !!p.where && hasIncompleteLeaf(p.where)
         default:             return false
     }
+}
+
+
+/** Whether a condition, or any condition nested in it, is unfinished — a
+ *  relationship's own would reach the server, which refuses it. */
+function hasIncompleteLeaf(p: Predicate): boolean {
+    if (p.kind === 'group') return p.children.some(hasIncompleteLeaf)
+    return isIncomplete(p)
 }
 
 

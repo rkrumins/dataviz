@@ -240,20 +240,27 @@ def test_edge_comparison_runs_inside_a_path_query(graph):
     )
     from backend.common.models.search import PathPredicate
 
+    # ``confidence`` is a field edges keep natively, so the comparison is
+    # the typed one (a user's keys are read from the edge's JSON).
     graph.query(
-        "CREATE (:P {urn: 'a'})-[:R {w: '1.5'}]->(:P {urn: 'b'})"
-        "-[:R {w: [1, 2]}]->(:P {urn: 'c'})-[:R {w: 'heavy'}]->(:P {urn: 'd'})")
+        "CREATE (:P {urn: 'a'})-[:R {confidence: '1.5'}]->(:P {urn: 'b'})"
+        "-[:R {confidence: [1, 2]}]->(:P {urn: 'c'})-[:R {confidence: 'heavy'}]->"
+        "(:P {urn: 'd'})")
     c = _Compiler(lineage_edge_types={"R"}, containment_edge_types=set())
     c.compile(PathPredicate.model_validate({
         "sourceUrns": ["a"], "targetUrns": ["b", "c", "d"],
-        "edgePredicate": {"kind": "edgeProperty", "key": "w", "op": "between",
+        "edgePredicate": {"kind": "edgeProperty", "key": "confidence", "op": "between",
                           "value": [1, 2], "valueType": "number"},
     }))
-    cypher = _build_path_cypher(direction="outgoing", max_hops=3,
-                                edge_where=c.hoisted_path["edge_where"])
+
+    def ids(urns):
+        return [r[0] for r in graph.query(
+            "MATCH (n:P) WHERE n.urn IN $u RETURN ID(n)", {"u": urns}).result_set]
+
+    cypher = _build_path_cypher(c.hoisted_path, anchor="sources")
     rows = graph.query(cypher, {
-        **c.params, "_pathEdgeTypes": ["R"], "_pathSrc": ["a"],
-        "_pathTgt": ["b", "c", "d"], "_pathMaxPaths": 10,
+        **c.params, "_pathSrcIds": ids(["a"]), "_pathTgtIds": ids(["b", "c", "d"]),
+        "_pathMaxPaths": 10,
     }).result_set
     # a→b (1.5) and a→b→c ([1, 2]) pass; the hop over "heavy" does not.
     assert sorted(r[2] for r in rows) == [1, 2]

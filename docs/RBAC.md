@@ -60,14 +60,14 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 25 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 19 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 26 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 20 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
-| `workspace_data_engineer` | 11 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_steward` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_viewer` | 5 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
+| `workspace_data_engineer` | 12 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_member` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_steward` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_viewer` | 6 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
 [Resolver behaviour](#resolver-behaviour):
@@ -107,6 +107,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward` |
 | `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
 | `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
+| `workspace:native-query:read` | workspace | Run your own read-only queries on a workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
 | `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_steward`, `workspace_viewer` |
@@ -346,6 +347,46 @@ who, and the move records them.
 Access is given back the usual way — a role or group in the destination, or an identity-provider
 mapping where the provider decides — never by copying it, which would outlive the provider removing
 someone. A pending publication request is put to the destination's publishers.
+
+### Native queries
+
+`workspace:native-query:read` lets a person write their own read-only Cypher and
+run it on a workspace's FalkorDB and Neo4j data sources, from the search panel's
+**Cypher** tab. A native query reads **the whole data source**, not only the View
+it starts from, which is why it is a permission of its own rather than following
+from `workspace:datasource:read`:
+
+* **Who has it.** Every built-in role that reads data sources stores it, and
+  `workspace:admin` implies it; so do the organisation-wide shortcuts, including
+  `system:org-viewer` (it is a `:read` permission), so Org Auditors can run them.
+  Migration `20261024_1000_native_query` gave it to every custom role that held
+  `workspace:datasource:read`.
+* **Taking it away.** Remove it from a role in **Administration → Permissions**;
+  readers keep everything else. The check is the permission **and**
+  `workspace:datasource:read` in the same workspace
+  (`view_access.may_query_sources`).
+* **Never through an API key.** It is not in `KEY_GRANTABLE_PERMISSIONS`, the
+  route is off the API-key surface, and the check refuses a key's claims anyway.
+* **Through a share.** A direct share of a View — to a person or a group — can
+  opt in to **Query data** (`resource_grants.can_query_source`, allowed only on
+  View shares). It lets the share's holder run native queries on that View's own
+  data source, and nothing else: visibility never does, so a View open to the
+  organization or the workspace lets no one query its source. Turning it **on**
+  needs the right to manage the View's shares **and** to query its data source
+  yourself (`can_grant_source_query`), so no one hands on a reach they don't
+  have; turning it **off** needs only the right to manage the shares
+  (`POST` / `PUT /api/v1/views/{view_id}/grants` with `canQuerySource`). It is
+  recorded in the share's outbox event, the View's activity and the recipient's
+  notification, and stays until someone turns it off — even if the person who
+  turned it on later loses their own access.
+* **What the UI is told.** A View's access envelope carries
+  `canQueryDataSource`, `canGrantSourceQuery` and, when the first is true and the
+  source takes native queries, `nativeQueryEngine` (`falkordb` or `neo4j`). The
+  UI offers **Edit and run** and the **Query data** switch from these alone.
+
+The switch **Native read-only queries** (`nativeQueryEnabled`) turns the whole
+feature off. What may run, the limits and the audit record are in
+[Native read-only queries: security](/docs/native-queries).
 
 ## Resolver behaviour
 
@@ -967,7 +1008,8 @@ audience.
 The workspace audience is an explicit allow-list: member bindings and role
 cascades in the workspace, access requests for it, view grants, its
 aggregation runs and source operations, and its data-source and
-version-control changes. Everything else is platform audience. The
+version-control changes — native query runs (`workspace.data_source.native_query_run`,
+with the query's text) among them. Everything else is platform audience. The
 workspace scope is forced on the server, so no query parameter widens it.
 
 Each family serves `events` (keyset pages, 50 by default and 200 at most),
@@ -1041,6 +1083,7 @@ last 7 days. Through the API:
 | Activity explorer UI                   | `frontend/src/components/activity/`                           |
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
 | View visibility and publishing         | `backend/app/services/view_access.py`                         |
+| Native queries: who may run one        | `backend/app/services/native_query/access.py`, `backend/app/services/view_access.py` (`may_query_sources`, `can_grant_source_query`) |
 | API key claims and scope               | `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`), `backend/app/services/api_key_service.py` (`claims_for_key`) |
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |
@@ -1082,6 +1125,10 @@ replaying the chain, and CI holds the two paths to the same result.
 with one open request per person per workspace, the workspace access
 settings (`directory_listed`, `access_mode`, `access_note`), and the records
 of how a grant came about (`access_request_id`, `idp_exception`).
+
+`20261024_1000_native_query` added `workspace:native-query:read`, granted it to
+every role that held `workspace:datasource:read`, and added the **Query data**
+opt-in on View shares (`resource_grants.can_query_source`).
 
 ## See also
 

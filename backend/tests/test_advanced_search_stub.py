@@ -451,14 +451,10 @@ async def test_entity_types_still_clamp_without_roots():
 
 @pytest.mark.asyncio
 async def test_unsupported_predicate_raises_compile_error(stub):
-    # PathPredicate isn't implemented in the stub; the test confirms
+    # WithinHopsPredicate isn't implemented in the stub; the test confirms
     # the stub fails LOUDLY rather than silently returning wrong rows.
-    from backend.common.models.search import PathPredicate
-    query = _query(PathPredicate(
-        source_urns=["urn:dataset:orders"],
-        target_urns=["urn:dataset:reporting_daily"],
-        max_hops=4,
-    ))
+    from backend.common.models.search import WithinHopsPredicate
+    query = _query(WithinHopsPredicate(urns=["urn:dataset:orders"], hops=2))
     with pytest.raises(CompileError):
         await stub.deep_search(query)
 

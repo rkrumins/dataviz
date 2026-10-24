@@ -16,7 +16,7 @@
 import { json, jsonParseLinter } from '@codemirror/lang-json'
 import { bracketMatching, foldGutter, indentOnInput } from '@codemirror/language'
 import { lintGutter, linter, type Diagnostic } from '@codemirror/lint'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import {
@@ -47,6 +47,8 @@ import {
     encodePredicate,
 } from '@/utils/predicateCodec'
 
+import { editorChrome } from './editor/codeMirrorBase'
+
 
 export interface JsonEditorViewProps {
     /** Back-link target — kept on prop surface for callsite compat. */
@@ -72,6 +74,9 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
 
     const containerRef = useRef<HTMLDivElement>(null)
     const viewRef = useRef<EditorView | null>(null)
+    // The schema linter is swapped in when the schema arrives: built at
+    // mount, the editor would keep the schema-less one it started with.
+    const schemaLint = useMemo(() => new Compartment(), [])
 
     const initialBuffer = useMemo(
         () => encodePredicate(draftPredicate ?? PLACEHOLDER_PREDICATE),
@@ -161,7 +166,7 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
                 autocompletion({ override: [snippetSource] }),
                 lintGutter(),
                 linter(jsonParseLinter()),
-                schemaLinter,
+                schemaLint.of(schemaLinter),
                 json(),
                 keymap.of([
                     ...defaultKeymap,
@@ -174,27 +179,9 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
                         setBuffer(update.state.doc.toString())
                     }
                 }),
-                EditorView.theme({
-                    '&': {
-                        height: '100%',
-                        fontSize: '12px',
-                    },
-                    '.cm-content': {
-                        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                        caretColor: 'var(--ink, #fff)',
-                    },
-                    '.cm-gutters': {
-                        backgroundColor: 'transparent',
-                        borderRight: '1px solid rgba(255,255,255,0.08)',
-                        color: 'var(--ink-muted, #888)',
-                    },
-                    '.cm-activeLineGutter': {
-                        backgroundColor: 'rgba(255,255,255,0.04)',
-                    },
-                    '.cm-activeLine': {
-                        backgroundColor: 'rgba(255,255,255,0.03)',
-                    },
-                }),
+                // The app's colour tokens, so light mode reads as well as dark.
+                editorChrome,
+                EditorView.theme({ '&': { height: '100%', fontSize: '12px' } }),
             ],
         })
 
@@ -208,11 +195,14 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
             view.destroy()
             viewRef.current = null
         }
-        // We intentionally only spin up the editor once; the linter
-        // extension closes over schemaState via the linter ref. Schema
-        // updates re-render via the dispatched effect below.
+        // We intentionally only spin up the editor once; the schema
+        // linter is reconfigured by the effect below when it changes.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
+
+    useEffect(() => {
+        viewRef.current?.dispatch({ effects: schemaLint.reconfigure(schemaLinter) })
+    }, [schemaLint, schemaLinter])
 
     // External writes (visual builder mirrors / template seeds) bump
     // ``draftRevision``. Reformat the buffer to match.
@@ -458,7 +448,7 @@ void ArrowLeft
 //
 // The list is kept in sync with the SearchQuery JSON Schema's
 // discriminator values manually. A schema-derived auto-generator
-// would be cleaner but adds build complexity; with 19 predicate
+// would be cleaner but adds build complexity; with 21 predicate
 // kinds churning rarely, the manual list is the right tradeoff.
 // ---------------------------------------------------------------------------
 
@@ -532,19 +522,35 @@ const PREDICATE_KIND_SNIPPETS: readonly Completion[] = [
         { label: 'path', detail: 'PathPredicate' },
     ),
     snippetCompletion(
+        '{\n  "kind": "path",\n  "sourceWhere": { "kind": "entityType", "values": ["${1:topic}"] },\n  "targetWhere": { "kind": "entityType", "values": ["${2:dataset}"] },\n  "maxHops": ${3:3}\n}',
+        { label: 'pathPattern', detail: 'PathPredicate — every route between two conditions' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "related",\n  "axis": "${1:parent}",\n  "where": { "kind": "entityType", "values": ["${2:domain}"] }\n}',
+        { label: 'related', detail: 'RelatedPredicate — parent, root, child, upstream…' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "related",\n  "axis": "${1:child}",\n  "count": { "op": "${2:gt}", "value": ${3:100} }\n}',
+        { label: 'relatedCount', detail: 'RelatedPredicate — how many relatives' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "is",\n  "refs": [{ "path": ["${1:Country}", "${2:United Kingdom}"] }]\n}',
+        { label: 'is', detail: 'IsPredicate — entities by their path of names' },
+    ),
+    snippetCompletion(
         '{\n  "kind": "group",\n  "op": "${1:and}",\n  "children": [\n    ${2}\n  ]\n}',
         { label: 'group', detail: 'GroupPredicate (AND/OR/NOT)' },
     ),
     snippetCompletion(
         '{\n  "kind": "edgeProperty",\n  "key": "${1:confidence}",\n  "op": "${2:gte}",\n  "value": ${3:0.8}\n}',
-        { label: 'edgeProperty', detail: 'EdgePropertyPredicate (path / withinHops only)' },
+        { label: 'edgeProperty', detail: 'EdgePropertyPredicate (path / withinHops / related)' },
     ),
     snippetCompletion(
         '{\n  "kind": "edgeHasProperty",\n  "key": "${1:confidence}"\n}',
-        { label: 'edgeHasProperty', detail: 'EdgeHasPropertyPredicate (path / withinHops only)' },
+        { label: 'edgeHasProperty', detail: 'EdgeHasPropertyPredicate (path / withinHops / related)' },
     ),
     snippetCompletion(
         '{\n  "kind": "edgeGroup",\n  "op": "${1:and}",\n  "children": [\n    ${2}\n  ]\n}',
-        { label: 'edgeGroup', detail: 'EdgeGroupPredicate (path / withinHops only)' },
+        { label: 'edgeGroup', detail: 'EdgeGroupPredicate (path / withinHops / related)' },
     ),
 ]

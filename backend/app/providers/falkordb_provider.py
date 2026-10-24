@@ -5469,6 +5469,23 @@ class FalkorDBProvider(GraphDataProvider):
     def name(self) -> str:
         return "FalkorDBProvider"
 
+    native_query_engine = "falkordb"
+
+    async def run_readonly_cypher(
+        self, query: str, *, row_cap: int, timeout_ms: int, max_reply_bytes: int,
+    ):
+        """A person's own read-only Cypher, on connections of its own — see
+        ``falkordb_native``. Not through ``_ro_query``: that retries, re-runs a
+        failed replica read on the master, and counts slow replies toward
+        failover, none of which a person's query should do."""
+        from backend.app.providers.falkordb_native import run_native
+        from backend.app.services.native_query.settings import get_native_query_settings
+
+        return await run_native(
+            self, query, row_cap=row_cap, timeout_ms=timeout_ms,
+            max_reply_bytes=max_reply_bytes, pool_size=get_native_query_settings().concurrency,
+        )
+
     def set_containment_edge_types(self, types: List[str], from_ontology: bool = True) -> None:
         """Called by ContextEngine after ontology resolution to inject the
         authoritative containment edge types from the resolver.
@@ -6677,6 +6694,23 @@ class FalkorDBProvider(GraphDataProvider):
         from .falkordb_search.engine import read_ancestor_counts
         await self._ensure_connected()
         return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
+
+    async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
+                                       with_paths=False):
+        """Which entities each name reference names, in ``scope``. See
+        ``falkordb_search/refs.py``."""
+        from .falkordb_search.refs import resolve_refs
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await resolve_refs(self, scope, refs, run=run, data_version=context.data_version,
+                                  confined=confined, with_paths=with_paths)
 
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
@@ -15805,6 +15839,14 @@ class FalkorDBProvider(GraphDataProvider):
             )
         except Exception as exc:                          # noqa: BLE001 — best effort
             logger.debug("FalkorDB replica clients close skipped: %s", exc)
+        # So are the native queries' clients.
+        native_pools = getattr(self, "_native_pools", None)
+        if native_pools is not None:
+            self._native_pools = None
+            try:
+                await asyncio.wait_for(native_pools.aclose(), timeout=_close_timeout)
+            except Exception as exc:                      # noqa: BLE001 — best effort
+                logger.debug("FalkorDB native clients close skipped: %s", exc)
 
         try:
             if hasattr(self, "_redis") and self._redis is not None:

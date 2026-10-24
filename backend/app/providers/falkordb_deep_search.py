@@ -71,7 +71,14 @@ from backend.app.providers.falkordb_provider import (
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
-from backend.common.derived_artifacts import is_derived_label
+from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.edge_properties import (
+    EDGE_NATIVE_KEYS,
+    JSON_OPS,
+    folds,
+    key_needle,
+    value_texts,
+)
 from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
@@ -80,6 +87,8 @@ from backend.common.search_semantics import (
     value_slot,
 )
 from backend.common.models.search import (
+    LINEAGE_AXES,
+    anchor_groups,
     AggregationSpec,
     AncestorRef,
     DegreePredicate,
@@ -242,14 +251,67 @@ class _Compiler:
         # containment classification will raise CompileError on visit.
         self._lineage_edge_types = lineage_edge_types
         self._containment_edge_types = containment_edge_types
+        # Relationships, and any OR / NOT holding one, are evaluated after
+        # the head's clause WHERE: each is a boolean expression a caller
+        # projects on a WITH and filters by (``tail_clauses``), cheapest
+        # first (S0_FINDINGS §15).
+        self.tail: List[str] = []
+        # The entity a leaf tests (``n``, or the relative a relationship's
+        # condition is about) and the edge an edge filter tests.
+        self._var = "n"
+        self._edge_var = "rel"
+        # Inside a projection — a tail stage, a relationship's condition, a
+        # rule's membership column — where a pattern predicate fails, so
+        # degree counts with a comprehension instead.
+        self.projected = False
+        # A relationship whose far end is named and is lineage becomes a
+        # withinHops continuation; off where those can't run (membership).
+        self.anchor_lineage = True
 
     def _next(self) -> str:
         n = self._param_counter
         self._param_counter += 1
         return f"p{n}"
 
+    def _name(self) -> str:
+        """A suffix no other comprehension in the statement uses — from the
+        parameter counter, which a membership statement's rules share: a
+        name used twice makes the second list come back empty."""
+        return self._next()[1:]
+
     def compile(self, predicate) -> str:
-        return self._visit(predicate, in_or=False, at_top_and=True)
+        """The head: the WHERE fragment every candidate is filtered by
+        first. Relationships, and any OR / NOT holding one, go to
+        ``self.tail`` — a comprehension fails in a clause's WHERE, and is
+        built for every row that reaches it, so it runs only on what the
+        head lets through."""
+        if not _has_relation(predicate):
+            return self._visit(predicate, in_or=False, at_top_and=True)
+        head: List[str] = []
+        stages = []
+        for member in _conjuncts(predicate):
+            if not _has_relation(member):
+                head.append(self._visit(member, in_or=False, at_top_and=True))
+                continue
+            if self._anchorable(member):
+                head.append(self._hoist_anchored(member))
+                if member.axis in LINEAGE_AXES:
+                    continue    # the continuation is the whole test
+            stages.append(member)
+        for member in sorted(stages, key=_relation_cost):
+            self.tail.append(self._projected_stage(member))
+        head = [h for h in head if h != "true"]
+        if not head:
+            return "true"
+        return head[0] if len(head) == 1 else "(" + " AND ".join(head) + ")"
+
+    def _projected_stage(self, member) -> str:
+        saved = self.projected
+        self.projected = True
+        try:
+            return self._visit(member, in_or=False, at_top_and=False)
+        finally:
+            self.projected = saved
 
     def _visit(self, p, *, in_or: bool, at_top_and: bool) -> str:
         kind = p.kind
@@ -270,6 +332,10 @@ class _Compiler:
             return self._visit_entity_type(p)
         if kind == "layer":
             return self._visit_layer(p)
+        if kind == "is":
+            return self._visit_is(p)
+        if kind == "related":
+            return self._visit_related(p)
         if kind == "descendantOf":
             if in_or or not at_top_and:
                 raise CompileError(
@@ -277,7 +343,13 @@ class _Compiler:
                     "in v1. Move it to scope.root_urns or split into "
                     "multiple queries."
                 )
-            self.hoisted_root_urns.append(list(p.urns))
+            urns = list(p.urns) + _ref_urns(p.refs, "descendantOf")
+            if not urns:
+                # Its references named nothing: nothing is inside nothing.
+                # An empty set must never reach the scope chain, which
+                # would drop it — and the clamp with it.
+                return "false"
+            self.hoisted_root_urns.append(urns)
             self.hoisted_max_depths.append(p.max_depth)
             return "true"  # scope check enforces the constraint
         if kind == "withinHops":
@@ -352,15 +424,16 @@ class _Compiler:
         #
         # ``description`` / ``tags`` / ``qualifiedName`` stay
         # single-field — those are explicit, pure user targets.
+        v = self._var
         if target == "name":
-            cols = ["n.displayName", "n.qualifiedName"]
+            cols = [f"{v}.displayName", f"{v}.qualifiedName"]
         elif target == "qualifiedName":
-            cols = ["n.qualifiedName"]
+            cols = [f"{v}.qualifiedName"]
         elif target == "description":
-            cols = ["n.description"]
+            cols = [f"{v}.description"]
         elif target == "tags":
             # JSON-stringified array; CONTAINS is acceptable.
-            cols = ["n.tags"]
+            cols = [f"{v}.tags"]
         elif target == "property":
             if not t.property_key:
                 raise CompileError(
@@ -372,7 +445,7 @@ class _Compiler:
             as_property = _text_on_property(t)
             return self._raw_value(
                 self._compile_comparison(
-                    f"n.{_safe_property_name(t.property_key)}", as_property),
+                    f"{v}.{_safe_property_name(t.property_key)}", as_property),
                 as_property,
             )
         elif target == "any":
@@ -383,7 +456,7 @@ class _Compiler:
             # lowercase. displayName/qualifiedName are ORed in directly
             # so a node whose searchableText hasn't been backfilled yet
             # is still found by its name.
-            cols = ["n.searchableText", "n.displayName", "n.qualifiedName"]
+            cols = [f"{v}.searchableText", f"{v}.displayName", f"{v}.qualifiedName"]
         else:
             raise CompileError(f"unknown text target: {target!r}")
 
@@ -426,7 +499,7 @@ class _Compiler:
 
     def _visit_property(self, p) -> str:
         return self._raw_value(
-            self._compile_comparison(f"n.{_safe_property_name(p.key)}", p), p)
+            self._compile_comparison(f"{self._var}.{_safe_property_name(p.key)}", p), p)
 
     def _raw_leaf(self, native: str, key: str, cmp, key_match: str) -> str:
         leaf = RawLeaf(key=key, cmp=cmp, key_match=key_match,
@@ -467,7 +540,7 @@ class _Compiler:
         for v in t.values:
             pn = self._next()
             self.params[pn] = json.dumps(v)
-            per_value.append(f"n.tags CONTAINS ${pn}")
+            per_value.append(f"{self._var}.tags CONTAINS ${pn}")
         if not per_value:
             return "true"
         if t.op == "has" or t.op == "hasAny":
@@ -480,7 +553,7 @@ class _Compiler:
 
     def _visit_has_property(self, h) -> str:
         if h.key_match == "exact":
-            expr = f"EXISTS(n.{_safe_property_name(h.key)})"
+            expr = f"EXISTS({self._var}.{_safe_property_name(h.key)})"
         else:
             # By name: any USER property whose name starts with / contains
             # the text — the platform's own fields (urn, displayName,
@@ -488,7 +561,7 @@ class _Compiler:
             # property called …".
             keyword = "STARTS WITH" if h.key_match == "prefix" else "CONTAINS"
             platform = self._bind(sorted(platform_property_names()))
-            expr = (f"ANY(_k IN keys(n) WHERE NOT _k IN {platform} "
+            expr = (f"ANY(_k IN keys({self._var}) WHERE NOT _k IN {platform} "
                     f"AND toLower(_k) {keyword} {self._bind(fold_case(h.key))})")
         if self.raw_leaves is not None:
             expr = self._raw_leaf(expr, h.key, None, h.key_match)
@@ -501,13 +574,21 @@ class _Compiler:
         # is "dataset" (or any other case) — see the matching
         # ``toLower(l)`` in ``_build_candidate_cypher``.
         self.params[pn] = [str(v).lower() for v in e.values]
-        clause = f"toLower(labels(n)[0]) IN ${pn}"
+        clause = f"toLower(labels({self._var})[0]) IN ${pn}"
         return f"NOT ({clause})" if e.op == "notIn" else clause
 
     def _visit_layer(self, l) -> str:
         pn = self._next()
         self.params[pn] = l.layer_assignment
-        return f"n.layerAssignment = ${pn}"
+        return f"{self._var}.layerAssignment = ${pn}"
+
+    def _visit_is(self, p) -> str:
+        urns = _ref_urns(p.refs, "is")
+        if not urns:
+            return "false"
+        pn = self._next()
+        self.params[pn] = urns
+        return f"{self._var}.urn IN ${pn}"
 
     def _resolve_degree_edge_types(self, predicate) -> List[str]:
         """Resolve the edge-type list for a degree / withinHops predicate.
@@ -575,8 +656,10 @@ class _Compiler:
 
         rel = "|".join(_sanitize_label(t) for t in edge_types)
         direction = d.direction
-        in_p = f"(n)<-[:{rel}]-()"
-        out_p = f"(n)-[:{rel}]->()"
+        if self.projected:
+            return self._projected_degree(d, rel)
+        in_p = f"({self._var})<-[:{rel}]-()"
+        out_p = f"({self._var})-[:{rel}]->()"
 
         if direction == "in":
             pattern: Optional[str] = in_p
@@ -664,8 +747,8 @@ class _Compiler:
             getattr(p, "edge_predicate", None)
         )
         self.hoisted_path = {
-            "source_urns": list(p.source_urns),
-            "target_urns": list(p.target_urns),
+            "source_urns": list(p.source_urns) + _ref_urns(p.source_refs, "a path's sources"),
+            "target_urns": list(p.target_urns) + _ref_urns(p.target_refs, "a path's targets"),
             "direction": p.direction,
             "edge_types": list(edge_types),
             "max_hops": int(p.max_hops),
@@ -674,8 +757,34 @@ class _Compiler:
             # Empty string when no edge_predicate was supplied; injected
             # into the ALL(rel IN relationships(p) WHERE …) block.
             "edge_where": edge_where,
+            # An end given as a condition: the stages that filter it
+            # (``_path_end``); None for an end that is named.
+            "source_where": (None if p.source_where is None
+                             else self._path_end(p.source_where, "s")),
+            "target_where": (None if p.target_where is None
+                             else self._path_end(p.target_where, "t")),
         }
         return "true"
+
+    def _path_end(self, where, var: str) -> List[str]:
+        """A path end's condition on ``var``: the stages its statement
+        projects and filters by — every plain condition in one, then each
+        relationship, cheapest first — evaluated, as a relative's
+        conditions are, for native values only."""
+        saved = (self._var, self.raw_leaves, self.projected)
+        self._var, self.raw_leaves, self.projected = var, None, True
+        try:
+            members = _conjuncts(where)
+            plain = [self._visit(m, in_or=False, at_top_and=False)
+                     for m in members if not _has_relation(m)]
+            related = [self._visit(m, in_or=False, at_top_and=False)
+                       for m in sorted((m for m in members if _has_relation(m)),
+                                       key=_relation_cost)]
+        finally:
+            self._var, self.raw_leaves, self.projected = saved
+        plain = [c for c in plain if c != "true"]
+        stages = ["(" + " AND ".join(plain) + ")"] if plain else []
+        return stages + related
 
     def _visit_within_hops(self, w) -> str:
         """Hoist a WithinHops predicate to a post-candidate MATCH.
@@ -689,11 +798,14 @@ class _Compiler:
         edge_where = self._emit_edge_predicate_fragment(
             getattr(w, "edge_predicate", None)
         )
+        urns = list(w.urns) + _ref_urns(w.refs, "withinHops")
+        if not urns:
+            return "false"   # its references named nothing to be near
         if not edge_types:
             # Empty edge-type set ⇒ no node can be within N hops of
             # anything; short-circuit the whole query.
             self.hoisted_within_hops.append({
-                "urns": list(w.urns),
+                "urns": urns,
                 "hops": int(w.hops),
                 "direction": w.direction,
                 "edge_types": [],
@@ -701,13 +813,199 @@ class _Compiler:
             })
             return "true"
         self.hoisted_within_hops.append({
-            "urns": list(w.urns),
+            "urns": urns,
             "hops": int(w.hops),
             "direction": w.direction,
             "edge_types": list(edge_types),
             "edge_where": edge_where,
         })
         return "true"
+
+    def _projected_degree(self, d, rel: str) -> str:
+        """Degree inside a projection, where a pattern predicate fails:
+        counted with comprehensions (S0_FINDINGS §15)."""
+        k, v = self._name(), self._var
+        sizes = []
+        if d.direction in ("in", "both"):
+            sizes.append(f"size([({v})<-[:{rel}]-(_xd{k}) | 1])")
+        if d.direction in ("out", "both"):
+            sizes.append(f"size([({v})-[:{rel}]->(_xo{k}) | 1])")
+        if not sizes:
+            raise CompileError(f"unknown degree direction: {d.direction!r}")
+        total = sizes[0] if len(sizes) == 1 else "(" + " + ".join(sizes) + ")"
+        return f"{total} {_OP_SYMBOL[d.op]} {self._bind(int(d.value))}"
+
+    # ---- Relationships ----
+
+    def _relation_edge_types(self, p) -> List[str]:
+        """The edges a relationship walks: containment for the tree's axes;
+        for lineage its own types, else every lineage type but the rollups."""
+        if p.axis not in LINEAGE_AXES:
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    f"a {p.axis} relationship requires the provider's containment "
+                    "edge types — ontology resolution must complete before search.")
+            return sorted(self._containment_edge_types)
+        if p.edge_types:
+            return list(p.edge_types)
+        if self._lineage_edge_types is None:
+            raise CompileError(
+                f"an {p.axis} relationship requires the provider's lineage edge "
+                "types — ontology resolution must complete before search.")
+        return sorted(t for t in self._lineage_edge_types if not is_derived_edge_type(t))
+
+    def _anchorable(self, p) -> bool:
+        """A top-level relationship whose far end is named entities: walked
+        from them rather than tested from every candidate alone. Lineage
+        takes anything ``anchor_groups`` reads as named entities — "is X or
+        inside X" included; up the tree, an ``is``."""
+        if (p.kind != "related" or p.quantifier != "any" or p.count is not None
+                or p.where is None):
+            return False
+        if p.axis in LINEAGE_AXES:
+            return self.anchor_lineage and anchor_groups(p.where) is not None
+        return p.where.kind == "is" and p.axis in ("parent", "ancestor", "root")
+
+    def _hoist_anchored(self, p) -> str:
+        """Lineage: a withinHops continuation from the named entities, the
+        whole test. Up the tree: their subtrees clamp the candidates, and
+        the tail keeps the exact test (strict, the depth range, a root's)."""
+        lo, hi = p.hop_range()
+        if p.axis not in LINEAGE_AXES:
+            urns = _ref_urns(p.where.refs, "a relationship")
+            if not urns:
+                return "false"      # its references named nothing
+            self.hoisted_root_urns.append(urns)
+            self.hoisted_max_depths.append(hi)
+            return "true"
+        groups = [{"urns": _ref_urns(g.refs, "a relationship"), "lo": g.lo, "hi": g.hi}
+                  for g in anchor_groups(p.where)]
+        groups = [g for g in groups if g["urns"]]
+        if not groups:
+            return "false"          # its references named nothing
+        entry = {
+            "urns": [u for g in groups for u in g["urns"]],
+            "hops": hi, "min_hops": lo, "strict": True,
+            # The continuation walks from the named entity to the candidate.
+            "direction": {"upstream": "out", "downstream": "in", "neighbor": "both"}[p.axis],
+            "edge_types": self._relation_edge_types(p),
+            "edge_where": self._emit_edge_predicate_fragment(p.edge),
+        }
+        if any(g["hi"] for g in groups):
+            # Not only the entities themselves: what is inside them too,
+            # reached down the containment edges.
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    "a relationship to what is inside an entity requires the provider's "
+                    "containment edge types — ontology resolution must complete before search.")
+            entry["groups"] = groups
+            entry["containment"] = sorted(self._containment_edge_types or ())
+        self.hoisted_within_hops.append(entry)
+        return "true"
+
+    def _visit_related(self, p) -> str:
+        """Whether the entity's relatives along ``p.axis`` meet ``p.where``:
+        a pattern comprehension per entity, each relative tested in its
+        projection (S0_FINDINGS §15). Only ever inside a projection —
+        ``compile`` keeps relationships out of the head."""
+        types = self._relation_edge_types(p)
+        if not types:
+            return _over_no_relatives(p)
+        k, v = self._name(), self._var
+        r = f"_xr{k}"
+        lo, hi = p.hop_range()
+        steps = "" if (lo, hi) == (1, 1) else f"*{lo}..{hi}"
+        rel = "|".join(_sanitize_label(t) for t in types)
+        left, right = _AXIS_ARROWS[p.axis]
+        pattern = f"({v}){left}[:{rel}{steps}]{right}({r})"
+        where = [f"ID({r}) <> ID({v})"]
+        # A route never passes an entity twice. FalkorDB already never walks
+        # on from one it has visited, but a route may end on one; that adds
+        # no relative while the range starts at one hop (a shorter route
+        # reaches it), and a wrong one past it.
+        simple = p.axis in LINEAGE_AXES and lo > 1
+        if p.edge is not None or simple:
+            pattern = f"_xp{k} = {pattern}"
+        if simple:
+            where.append(_distinct_nodes(f"_xp{k}", k))
+        if p.edge is not None:
+            saved = self._edge_var
+            self._edge_var = f"_xe{k}"
+            try:
+                edge = self._visit_edge(p.edge)
+            finally:
+                self._edge_var = saved
+            if steps:
+                where.append(f"ALL(_xe{k} IN relationships(_xp{k}) WHERE {edge})")
+            else:
+                # One step: the edge itself — a list function fewer to plan.
+                pattern = f"({v}){left}[_xe{k}:{rel}]{right}({r})"
+                where.append(edge)
+        filters, test = self._relative_tests(p, r, k)
+        where += filters
+        # A comprehension can't sit in the comprehension's WHERE, so which
+        # ancestors are top-level containers is said in the projection.
+        top = f"size([({r})<-[:{rel}]-(_xy{k}) | 1]) = 0" if p.axis == "root" else None
+
+        def listed(projection: str) -> str:
+            return f"[{pattern} WHERE {' AND '.join(where)} | {projection}]"
+
+        if p.count is not None:
+            meets = " AND ".join(t for t in (top, test) if t)
+            each = f"CASE WHEN {meets} THEN ID({r}) END" if meets else f"ID({r})"
+            # Distinct relatives: a diamond reaches one by two routes.
+            return (f"size(reduce(_xa{k} = [], _xi{k} IN {listed(each)} | CASE WHEN "
+                    f"_xi{k} IS NULL OR _xi{k} IN _xa{k} THEN _xa{k} ELSE _xa{k} + [_xi{k}] "
+                    f"END)) {_OP_SYMBOL[p.count.op]} {self._bind(int(p.count.value))}")
+        if p.quantifier == "all" and p.where is not None:
+            # Folded to null for no relatives, else whether every one meets
+            # it: a reduce, not ALL over a bound list — one list function
+            # fewer to plan. A root's projection is null for an ancestor that
+            # is not a root, which is no relative at all.
+            if top:
+                each = f"CASE WHEN {top} THEN {test or 'true'} END"
+                fold = (f"CASE WHEN _xb{k} IS NULL THEN _xa{k} WHEN _xa{k} IS NULL "
+                        f"THEN _xb{k} ELSE _xa{k} AND _xb{k} END")
+            else:
+                each = test or "true"
+                fold = f"CASE WHEN _xa{k} IS NULL THEN _xb{k} ELSE _xa{k} AND _xb{k} END"
+            return f"coalesce(reduce(_xa{k} = null, _xb{k} IN {listed(each)} | {fold}), false)"
+        meets = " AND ".join(t for t in (top, test) if t) or "true"
+        found = f"ANY(_xb{k} IN {listed(meets)} WHERE _xb{k})"
+        return f"NOT {found}" if p.quantifier == "none" else found
+
+    def _relative_tests(self, p, r: str, k: str) -> Tuple[List[str], Optional[str]]:
+        """``p.where`` on the relative ``r``: its simple tests, which the
+        comprehension's WHERE holds — sparing the projection for relatives
+        that fail them — and the rest as one test for the projection (None:
+        nothing left). Under ``all`` every relative is tested in full: a
+        filter would drop relatives instead of failing them."""
+        if p.where is None:
+            return [], None
+        members = _conjuncts(p.where)
+        if p.quantifier == "all":
+            simple, rest = [], members
+        else:
+            simple = [m for m in members if _is_simple(m)]
+            rest = [m for m in members if not _is_simple(m)]
+        saved = (self._var, self.raw_leaves)
+        # Native values only: the raw-property probe answers for a unit's
+        # own entities, not for their relatives.
+        self._var, self.raw_leaves = r, None
+        try:
+            filters = [self._visit(m, in_or=False, at_top_and=False) for m in simple]
+            tests = [self._visit(m, in_or=False, at_top_and=False) for m in rest]
+        finally:
+            self._var, self.raw_leaves = saved
+        filters = [f for f in filters if f != "true"]
+        tests = [t for t in tests if t != "true"]
+        if not tests:
+            return filters, None
+        # Never null: FalkorDB leaves out of the list a relative whose
+        # projection is null, and "every one" would pass it by rather than
+        # fail it. Not wrapped to short-circuit: what is costly in it, a
+        # nested relationship's list, is built whatever comes before.
+        return filters, f"coalesce({' AND '.join(tests)}, false)"
 
     # ---- Edge-predicate compilation (inside PathPredicate / WithinHops) ----
 
@@ -734,11 +1032,52 @@ class _Compiler:
         raise CompileError(f"unknown edge predicate kind: {kind!r}")
 
     def _visit_edge_property(self, ep) -> str:
-        return self._compile_comparison(f"rel.{_safe_property_name(ep.key)}", ep)
+        if ep.key in EDGE_NATIVE_KEYS:
+            return self._compile_comparison(
+                f"{self._edge_var}.{_safe_property_name(ep.key)}", ep)
+        try:
+            cmp = resolve_predicate(ep)
+        except SemanticsError as exc:
+            raise CompileError(f"edge property {ep.key!r}: {exc}") from exc
+        if cmp.op not in JSON_OPS:
+            raise CompileError(
+                f"edge property {ep.key!r} is kept in the edge's JSON: it can be "
+                f"tested with is set, is, is not or is one of — not {cmp.op!r}")
+        if cmp.op in ("isSet", "isNotSet"):
+            present = self._edge_key_present(ep.key)
+            return present if cmp.op == "isSet" else f"NOT ({present})"
+        # ``"key": <value>`` followed by a comma, or ending the object
+        # (``edge_properties``).
+        text = self._edge_json()
+        if folds(cmp):
+            text = f"toLower({text})"
+        hits = []
+        for value in value_texts(cmp):
+            needle = key_needle(ep.key) + value
+            if folds(cmp):
+                needle = fold_case(needle)
+            hits.append(f"{text} CONTAINS {self._bind(needle + ',')}")
+            hits.append(f"{text} ENDS WITH {self._bind(needle + '}')}")
+        equal = "(" + " OR ".join(hits) + ")"
+        if cmp.op in ("eq", "in"):
+            return equal
+        if cmp.include_missing:
+            return f"NOT {equal}"
+        return f"({self._edge_key_present(ep.key)} AND NOT {equal})"
 
     def _visit_edge_has_property(self, ep) -> str:
-        expr = f"EXISTS(rel.{_safe_property_name(ep.key)})"
+        if ep.key in EDGE_NATIVE_KEYS:
+            expr = f"EXISTS({self._edge_var}.{_safe_property_name(ep.key)})"
+        else:
+            expr = self._edge_key_present(ep.key)
         return f"NOT ({expr})" if ep.negate else expr
+
+    def _edge_json(self) -> str:
+        return f"coalesce({self._edge_var}.properties, '')"
+
+    def _edge_key_present(self, key: str) -> str:
+        """A user property's key, in the edge's JSON."""
+        return f"{self._edge_json()} CONTAINS {self._bind(key_needle(key))}"
 
     def _visit_edge_group(self, ep) -> str:
         if ep.op == "not":
@@ -751,6 +1090,101 @@ class _Compiler:
             return "true"
         sep = " AND " if ep.op == "and" else " OR "
         return "(" + sep.join(self._visit_edge(c) for c in ep.children) + ")"
+
+
+_OP_SYMBOL = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+
+# Which way each axis walks from the entity to its relative.
+_AXIS_ARROWS = {
+    "parent": ("<-", "-"), "ancestor": ("<-", "-"), "root": ("<-", "-"),
+    "child": ("-", "->"), "descendant": ("-", "->"),
+    "upstream": ("<-", "-"), "downstream": ("-", "->"), "neighbor": ("-", "-"),
+}
+
+# What one step along an axis costs a candidate, roughly: up the tree is a
+# parent or two, down it fans out, and lineage fans out at every hop.
+_AXIS_COST = {"parent": 1, "root": 2, "ancestor": 2, "child": 3,
+              "upstream": 4, "downstream": 4, "neighbor": 8, "descendant": 8}
+
+# Tests on one entity with no pattern in them: what a comprehension's WHERE
+# may hold.
+_SIMPLE_KINDS = frozenset({"text", "property", "tag", "hasProperty", "entityType",
+                           "layer", "is", "all"})
+
+
+def _has_relation(p) -> bool:
+    if p.kind == "related":
+        return True
+    return p.kind == "group" and any(_has_relation(c) for c in p.children)
+
+
+def _conjuncts(p) -> List[Any]:
+    """The members of an AND, nested ANDs flattened."""
+    if p.kind == "group" and p.op == "and":
+        return [m for c in p.children for m in _conjuncts(c)]
+    return [p]
+
+
+def _is_simple(p) -> bool:
+    if p.kind == "group":
+        return all(_is_simple(c) for c in p.children)
+    return p.kind in _SIMPLE_KINDS
+
+
+def _relation_cost(p) -> int:
+    """Orders the tail: a cheap stage first spares the dearer ones the rows
+    it rejects."""
+    if p.kind == "group":
+        return sum(_relation_cost(c) for c in p.children)
+    if p.kind != "related":
+        return 0
+    lo, hi = p.hop_range()
+    steps = hi if p.axis in LINEAGE_AXES or p.axis == "descendant" else 1
+    nested = _relation_cost(p.where) if p.where is not None else 0
+    return _AXIS_COST[p.axis] * steps * (1 + nested)
+
+
+def _over_no_relatives(p) -> str:
+    """A relationship along edges the graph has none of: no relatives."""
+    if p.count is not None:
+        v = p.count.value
+        holds = {"eq": v == 0, "neq": v != 0, "gt": False, "gte": v == 0,
+                 "lt": v > 0, "lte": True}[p.count.op]
+        return "true" if holds else "false"
+    return "true" if p.quantifier == "none" else "false"
+
+
+def _distinct_nodes(path: str, k) -> str:
+    """Whether ``path`` visits no entity twice."""
+    return (f"size(nodes({path})) = size(reduce(_xs{k} = [], _xm{k} IN nodes({path}) | "
+            f"CASE WHEN _xm{k} IN _xs{k} THEN _xs{k} ELSE _xs{k} + [_xm{k}] END))")
+
+
+def tail_clauses(tail: List[str], carry: str = "n", alias: str = "_xt") -> str:
+    """A statement's relationship stages, after its head and continuations:
+    each projected on a WITH and filtered, so a row one rejects never pays
+    for the next (S0_FINDINGS §15). ``carry``: what each WITH keeps."""
+    if not tail:
+        return ""
+    stages = " ".join(f"WITH {carry}, {t} AS {alias}{i} WHERE {alias}{i}"
+                      for i, t in enumerate(tail))
+    return f"{stages} WITH {carry}"
+
+
+def _ref_urns(refs, what: str) -> List[str]:
+    """The URNs of name references the service has resolved (it replaces
+    each path with the URNs it names). A path still standing here was never
+    resolved: compiling it to nothing would widen the search instead of
+    narrowing it, so it is refused."""
+    urns: List[str] = []
+    for ref in refs or ():
+        if ref.urn is None:
+            raise CompileError(
+                f"{what}: the name reference '{ref.label()}' was not resolved "
+                "to entities before compiling"
+            )
+        urns.append(ref.urn)
+    return urns
 
 
 def _normalize_sugar_to_degree(p) -> DegreePredicate:
@@ -815,6 +1249,7 @@ def _build_candidate_cypher(
     scope_continuation: str = "",
     within_hops_continuation: str = "",
     scope_pre_filter: str = "",
+    tail: str = "",
 ) -> str:
     """The candidate-selection prefix.
 
@@ -823,10 +1258,11 @@ def _build_candidate_cypher(
       * ``RETURN count(n) AS c``           (count-only)
       * ``MATCH (anc)-[...]->(n) ...``     (aggregation pivot)
 
-    ``within_hops_continuation`` is appended after the scope continuation
-    (so candidates are first scope-clamped, then narrowed to those
-    within N hops of the anchor URN-set). Both continuations end with
-    ``WITH DISTINCT n`` so multiple stack cleanly.
+    ``within_hops_continuation`` follows the predicate and comes before
+    the cap, so the cap counts only candidates within N hops of the
+    anchor URN-set. Both continuations end with ``WITH DISTINCT n`` so
+    multiple stack cleanly. ``tail`` — the relationship stages
+    (``tail_clauses``) — comes after them and before the cap too.
 
     ``scope_pre_filter`` replaces the ``MATCH (n)`` prefix with a
     root-anchored MATCH chain, so the predicate WHERE and the
@@ -870,13 +1306,18 @@ def _build_candidate_cypher(
         where_parts.append(where_fragment)
     if where_parts:
         parts.append("WHERE " + " AND ".join(where_parts))
+    # The hop check narrows the candidates BEFORE the cap: after it, the
+    # cap would count candidates the check then drops, and matches past
+    # the cap would never be seen.
+    if within_hops_continuation:
+        parts.append(within_hops_continuation)
+    if tail:
+        parts.append(tail)
     parts.append(
         "WITH n" if candidate_cap is None else f"WITH n LIMIT {candidate_cap}"
     )
     if scope_continuation:
         parts.append(scope_continuation)
-    if within_hops_continuation:
-        parts.append(within_hops_continuation)
     return " ".join(parts)
 
 
@@ -1222,50 +1663,96 @@ def _build_within_hops_continuation(
 
     Returns (cypher_fragment, params, next_param_id).
     """
-    if not hoisted:
-        return "", {}, next_param_id
+    if any(not entry["edge_types"] for entry in hoisted):
+        # No edges of this class exist → no node reaches anything.
+        # Force a no-match by binding n to nothing.
+        return _NO_REACH, {}, next_param_id
+    parts, params, pid = within_hops_parts(hoisted, next_param_id)
+    return " ".join(parts), params, pid
 
+
+_NO_REACH = "WITH n WHERE false WITH n"
+
+
+def within_hops_walk(entry: Dict[str, Any], idx: int) -> Tuple[str, List[str]]:
+    """The walk one hoisted entry makes from ``anchor`` to ``n``: its
+    pattern, and what every route must meet — the edge filter on each edge,
+    never relating an entity to itself, and passing no entity twice. Shared
+    by the per-candidate continuation and the planner's walk out from the
+    anchors (``plan.reach_plan``), so the two can't disagree."""
+    rel = "|".join(_sanitize_label(t) for t in entry["edge_types"])
+    hops = int(entry["hops"])
+    lo = int(entry.get("min_hops") or 1)
+    direction = entry["direction"]
+    # Bind the variable-length path so we can apply per-edge filters.
+    # Each occurrence gets its own path alias to avoid clashes when
+    # multiple WithinHops predicates AND together.
+    path_alias = f"_whP{idx}"
+    if direction == "out":
+        arrow = f"-[:{rel}*{lo}..{hops}]->"
+    elif direction == "in":
+        arrow = f"<-[:{rel}*{lo}..{hops}]-"
+    else:  # both — undirected; planner walks either side
+        arrow = f"-[:{rel}*{lo}..{hops}]-"
+    conds: List[str] = []
+    edge_where = entry.get("edge_where") or ""
+    if edge_where:
+        conds.append(f"ALL(rel IN relationships({path_alias}) WHERE {edge_where})")
+    # A relationship never relates an entity to itself, a cycle
+    # notwithstanding, and follows routes that pass no entity twice —
+    # which, past one hop, FalkorDB's walk alone does not promise (it
+    # differs with the end it walks from).
+    if entry.get("strict"):
+        conds.append("ID(anchor) <> ID(n)")
+    if lo > 1:
+        conds.append(_distinct_nodes(path_alias, f"_wh{idx}"))
+    return f"{path_alias} = (anchor){arrow}(n)", conds
+
+
+def within_hops_parts(
+    hoisted: List[Dict[str, Any]], next_param_id: int,
+) -> Tuple[List[str], Dict[str, Any], int]:
+    """One continuation per hoisted entry, in order — so a caller that
+    already knows which candidates meet one entry can leave its part out.
+    An entry over no edges is a part that keeps nothing.
+
+    The anchor is one of the entry's URNs; for an entry with ``groups``
+    ("is X or inside X"), one of them or ``lo..hi`` containment levels
+    below one — checked upward from the anchor, a chain with one parent a
+    step."""
     parts: List[str] = []
     params: Dict[str, Any] = {}
     pid = next_param_id
-
     for idx, entry in enumerate(hoisted):
-        edge_types = entry["edge_types"]
-        if not edge_types:
-            # No edges of this class exist → no node reaches anything.
-            # Force a no-match by binding n to nothing.
-            return (
-                "WITH n WHERE false WITH n",
-                params, pid,
+        if not entry["edge_types"]:
+            parts.append(_NO_REACH)
+            continue
+        pattern, conds = within_hops_walk(entry, idx)
+        groups = entry.get("groups")
+        if groups:
+            crel = "|".join(_sanitize_label(t) for t in entry.get("containment") or ())
+            top = max(int(g["hi"]) for g in groups)
+            alts: List[str] = []
+            for g in groups:
+                p = f"_whUrns{pid}"
+                pid += 1
+                params[p] = list(g["urns"])
+                alts.append(f"(_whG{idx}.urn IN ${p} AND length(_whC{idx}) >= {int(g['lo'])} "
+                            f"AND length(_whC{idx}) <= {int(g['hi'])})")
+            parts.append(
+                f"MATCH {pattern} MATCH _whC{idx} = (anchor)<-[:{crel}*0..{top}]-(_whG{idx}) "
+                f"WHERE " + " AND ".join(["(" + " OR ".join(alts) + ")"] + conds)
+                + " WITH DISTINCT n"
             )
-        rel = "|".join(_sanitize_label(t) for t in edge_types)
-        hops = int(entry["hops"])
-        direction = entry["direction"]
+            continue
         urns_param = f"_whUrns{pid}"
         pid += 1
         params[urns_param] = list(entry["urns"])
-        edge_where = entry.get("edge_where") or ""
-        # Bind the variable-length path so we can apply per-edge filters.
-        # Each occurrence gets its own path alias to avoid clashes when
-        # multiple WithinHops predicates AND together.
-        path_alias = f"_whP{idx}"
-        if direction == "out":
-            arrow = f"-[:{rel}*1..{hops}]->"
-        elif direction == "in":
-            arrow = f"<-[:{rel}*1..{hops}]-"
-        else:  # both — undirected; planner walks either side
-            arrow = f"-[:{rel}*1..{hops}]-"
-        pat = f"MATCH {path_alias} = (anchor){arrow}(n)"
-        where_extra = (
-            f" AND ALL(rel IN relationships({path_alias}) WHERE {edge_where})"
-            if edge_where else ""
-        )
         parts.append(
-            f"{pat} WHERE anchor.urn IN ${urns_param}{where_extra} "
-            "WITH DISTINCT n"
+            f"MATCH {pattern} WHERE " + " AND ".join([f"anchor.urn IN ${urns_param}"] + conds)
+            + " WITH DISTINCT n"
         )
-
-    return " ".join(parts), params, pid
+    return parts, params, pid
 
 
 # ---------------------------------------------------------------------------
@@ -1619,12 +2106,20 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     # the candidate cap applies to IN-SCOPE nodes. Feeding the chain as
     # ``scope_continuation`` (post-filter) would cap the graph-wide set first
     # and silently drop in-scope matches for broad predicates.
+    tail = tail_clauses(compiler.tail)
+    if compiler.tail:
+        notes.append(
+            f"{len(compiler.tail)} relationship condition(s) are tested from each "
+            "candidate the other conditions keep, cheapest first. A relationship "
+            "naming its far end by URN or name is walked from there instead."
+        )
     cand_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
         entity_types_param=use_entity_types,
         scope_pre_filter=scope_chain,
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
+        tail=tail,
     )
     uncapped_cypher = _build_candidate_cypher(
         where_fragment=where_fragment,
@@ -1632,6 +2127,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         scope_pre_filter=scope_chain,
         candidate_cap=None,
         within_hops_continuation=wh_continuation,
+        tail=tail,
     )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
@@ -2048,10 +2544,13 @@ async def _discover_edge_metadata(
 ) -> Dict[str, Dict[str, Any]]:
     """Sample edges, return per-edge-type property keys + value samples.
 
-    Returns ``{edgeType: {keys, sampled, valueSamplesByKey}}`` for every
-    edge type seen in the sample. Used by the FE's edge-predicate
+    Returns ``{edgeType: {keys, sampled, valueSamplesByKey, storedAs}}``
+    for every edge type seen in the sample. Used by the FE's edge-predicate
     editor (W2) and by the property-value picker when the user
-    composes a path query against a specific edge type.
+    composes a path query against a specific edge type. A user's
+    properties come out of the edge's JSON (``storedAs`` ``json``: a
+    condition can test them for presence and equality); the platform's
+    fields are ``native``.
     """
     _s = get_deep_search_settings()
     try:
@@ -2078,10 +2577,16 @@ async def _discover_edge_metadata(
             "sampled": 0,
             "value_samples": {},
             "seen_per_key": {},
+            "stored_as": {},
         })
         entry["sampled"] += 1
-        props = getattr(rel, "properties", None) or {}
-        for k, v in props.items():
+        native = dict(getattr(rel, "properties", None) or {})
+        user = _edge_user_properties(native.pop("properties", None))
+        for k in user:
+            entry["stored_as"].setdefault(k, "json")
+        for k in native:
+            entry["stored_as"][k] = "native"
+        for k, v in [*user.items(), *native.items()]:
             entry["keys_set"].add(k)
             if v is None:
                 continue
@@ -2101,6 +2606,7 @@ async def _discover_edge_metadata(
         out[edge_type] = {
             "keys": keys,
             "sampled": entry["sampled"],
+            "storedAs": {k: entry["stored_as"][k] for k in keys},
         }
         if entry["value_samples"]:
             out[edge_type]["valueSamplesByKey"] = {
@@ -2110,47 +2616,71 @@ async def _discover_edge_metadata(
     return out
 
 
+def _edge_user_properties(raw: Any) -> Dict[str, Any]:
+    """A user's properties of an edge, from its JSON text (ADR-026)."""
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _edge_properties(native: Any) -> Dict[str, Any]:
+    """An edge's properties as a reader sees them: a user's, parsed from
+    its JSON, beside the platform's own fields."""
+    props = dict(native or {})
+    return {**_edge_user_properties(props.pop("properties", None)), **props}
+
+
 # ---------------------------------------------------------------------------
 # Main entry — wires everything together
 # ---------------------------------------------------------------------------
 
-def _build_path_cypher(
-    *,
-    direction: str,
-    max_hops: int,
-    edge_where: str = "",
-) -> str:
+def _build_path_cypher(hoisted: Dict[str, Any], *, anchor: str, scope_head: str = "") -> str:
     """Cypher for a PathPredicate query.
 
-    Direction-aware. Filters edge types via ``WHERE type(rel) IN $...``
-    rather than relationship-pattern alternation, so FalkorDB doesn't
-    hit the "Unable to resolve filtered alias" error.
+    ``anchor`` is the end the statement starts from: ``sources`` or
+    ``targets`` sought by ID (``$_pathSrcIds`` / ``$_pathTgtIds``), or
+    ``scope`` — every entity ``scope_head`` binds as ``s``, when both ends
+    are conditions. A condition on an end filters it in stages
+    (``tail_clauses``): the anchored end's before the walk, the other's
+    after it. The walk names its path and keeps routes that pass no entity
+    twice — FalkorDB's own walk lets one end on an entity it passed, and
+    which it finds depends on the end it starts from (S0_FINDINGS §15).
 
-    When ``edge_where`` is non-empty, an additional per-edge predicate
-    (compiled from ``PathPredicate.edge_predicate``) is AND-joined into
-    the ``ALL(rel IN relationships(p) WHERE …)`` block so paths whose
-    edges fail the filter are excluded server-side.
+    ``edge_where`` — compiled from ``PathPredicate.edge_predicate`` — is
+    required of every edge, in ``ALL(rel IN relationships(p) WHERE …)``.
     """
-    if direction == "incoming":
-        pattern = f"(s)<-[*1..{max_hops}]-(t)"
-    elif direction == "any":
-        pattern = f"(s)-[*1..{max_hops}]-(t)"
+    rel = "|".join(_sanitize_label(t) for t in hoisted["edge_types"])
+    hops = int(hoisted["max_hops"])
+    left, right = {"incoming": ("<-", "-"), "any": ("-", "-")}.get(
+        hoisted["direction"], ("-", "->"))
+    source, target = hoisted.get("source_where"), hoisted.get("target_where")
+    if anchor == "sources":
+        parts = ["UNWIND $_pathSrcIds AS _ps MATCH (s) WHERE ID(s) = _ps"]
+    elif anchor == "targets":
+        parts = ["UNWIND $_pathTgtIds AS _pt MATCH (t) WHERE ID(t) = _pt"]
     else:
-        # default outgoing
-        pattern = f"(s)-[*1..{max_hops}]->(t)"
-
-    edge_filter = "type(rel) IN $_pathEdgeTypes"
-    if edge_where:
-        edge_filter = f"{edge_filter} AND ({edge_where})"
-
+        parts = [scope_head]
+    first, carry = (target, "t") if anchor == "targets" else (source, "s")
+    if first:
+        parts.append(tail_clauses(first, carry=carry, alias="_xa"))
+    conds = [_distinct_nodes("p", "_p")]
+    if anchor != "targets" and target is None:
+        conds.append("ID(t) IN $_pathTgtIds")
+    if hoisted.get("edge_where"):
+        conds.append(f"ALL(rel IN relationships(p) WHERE {hoisted['edge_where']})")
+    parts.append(f"MATCH p = (s){left}[:{rel}*1..{hops}]{right}(t) WHERE {' AND '.join(conds)}")
+    second = source if anchor == "targets" else target
+    if second:
+        parts.append(tail_clauses(second, carry="p, s, t", alias="_xz"))
     # Each path: list of {urn, displayName, entityType} for nodes;
     # list of {sourceUrn, targetUrn, edgeType, properties} for edges.
-    return (
-        f"MATCH p = {pattern} "
-        "WHERE s.urn IN $_pathSrc AND t.urn IN $_pathTgt "
-        f"AND ALL(rel IN relationships(p) WHERE {edge_filter}) "
+    parts.append(
+        "WITH p LIMIT $_pathMaxPaths "
         "WITH p, nodes(p) AS ns, relationships(p) AS rs "
-        "LIMIT $_pathMaxPaths "
         "RETURN [n IN ns | { "
         "  urn: n.urn, "
         "  displayName: n.displayName, "
@@ -2164,12 +2694,19 @@ def _build_path_cypher(
         "}] AS edges, "
         "length(p) AS hopCount"
     )
+    return " ".join(parts)
 
 
 async def _run_path_query(
     provider, hoisted: Dict[str, Any], *, timeout_s: float,
+    compiled_params: Optional[Dict[str, Any]] = None, scope=None,
 ) -> Tuple[List[PathHit], bool]:
-    """Execute the hoisted PathPredicate. Returns (paths, truncated)."""
+    """Execute the hoisted PathPredicate. Returns (paths, truncated).
+
+    ``compiled_params`` are the compiler's: an edge filter that compares
+    a value refers to them as ``$pN``. ``scope``: where a path whose ends
+    are both conditions starts."""
+    from backend.app.providers.falkordb_search.plan import _containment, _ids_of, _rel
     edge_types = hoisted.get("edge_types") or []
     if not edge_types:
         # No lineage / containment edge types resolved → no paths can
@@ -2177,17 +2714,32 @@ async def _run_path_query(
         # an empty IN clause.
         return [], False
 
-    cypher = _build_path_cypher(
-        direction=hoisted["direction"],
-        max_hops=hoisted["max_hops"],
-        edge_where=hoisted.get("edge_where") or "",
-    )
-    params = {
-        "_pathSrc": hoisted["source_urns"],
-        "_pathTgt": hoisted["target_urns"],
-        "_pathEdgeTypes": edge_types,
-        "_pathMaxPaths": hoisted["max_paths"],
-    }
+    async def run(cypher: str, params: Dict[str, Any]):
+        return await provider._ro_query(cypher, params=params, timeout=timeout_s)
+
+    labels = await _searchable_labels(provider, timeout_s=timeout_s)
+    params: Dict[str, Any] = {**(compiled_params or {}),
+                              "_pathMaxPaths": hoisted["max_paths"]}
+    # The named ends, sought through the per-label urn indexes: an
+    # unlabelled ``s.urn IN $…`` reads every node.
+    for key, urns, where in (("_pathSrcIds", hoisted["source_urns"], hoisted.get("source_where")),
+                             ("_pathTgtIds", hoisted["target_urns"], hoisted.get("target_where"))):
+        if where is None:
+            params[key] = await _ids_of(run, labels, urns)
+            if not params[key]:
+                return [], False
+    scope_head = ""
+    if hoisted.get("source_where") is None:
+        anchor = "sources"
+    elif hoisted.get("target_where") is None:
+        anchor = "targets"
+    else:
+        anchor = "scope"
+        scope_head = await _path_scope_head(run, labels, scope, _rel(_containment(provider)),
+                                            params)
+        if not scope_head:
+            return [], False
+    cypher = _build_path_cypher(hoisted, anchor=anchor, scope_head=scope_head)
     result = await provider._ro_query(cypher, params=params, timeout=timeout_s)
     rows = result.result_set or []
 
@@ -2210,7 +2762,7 @@ async def _run_path_query(
                 source_urn=str(e.get("sourceUrn", "")),
                 target_urn=str(e.get("targetUrn", "")),
                 edge_type=str(e.get("edgeType", "")),
-                properties=e.get("properties") or {},
+                properties=_edge_properties(e.get("properties")),
             )
             for e in edge_dicts if isinstance(e, dict)
         ]
@@ -2222,6 +2774,28 @@ async def _run_path_query(
 
     truncated = len(paths) >= hoisted["max_paths"]
     return paths, truncated
+
+
+async def _path_scope_head(run, labels, scope, rel: str, params: Dict[str, Any]) -> str:
+    """Binds ``s`` to each entity in the search's scope — where a path whose
+    ends are both conditions starts: under the view's roots, among its
+    visible entities, of its entity types, or anywhere in the data source.
+    Empty when the scope holds nothing."""
+    from backend.app.providers.falkordb_search.plan import _ids_of
+    mode = getattr(scope, "scope_mode", "data_source")
+    if mode == "visible" and scope.visible_urns:
+        params["_pathScope"] = await _ids_of(run, labels, scope.visible_urns)
+        return ("UNWIND $_pathScope AS _pr MATCH (s) WHERE ID(s) = _pr"
+                if params["_pathScope"] else "")
+    if mode == "view" and scope.root_urns and rel:
+        params["_pathScope"] = await _ids_of(run, labels, scope.root_urns)
+        return ("UNWIND $_pathScope AS _pr MATCH (_r) WHERE ID(_r) = _pr "
+                f"MATCH (_r)-[:{rel}*0..{int(scope.max_depth or 12)}]->(s) WITH DISTINCT s"
+                if params["_pathScope"] else "")
+    if mode == "view" and scope.entity_types:
+        params["_pathScope"] = [t.lower() for t in scope.entity_types]
+        return "MATCH (s) WHERE s.urn IS NOT NULL AND toLower(labels(s)[0]) IN $_pathScope"
+    return "MATCH (s) WHERE s.urn IS NOT NULL"
 
 
 def _candidate_prefixes(
@@ -2290,6 +2864,7 @@ def _candidate_prefixes(
         scope_pre_filter=scope_chain,
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
+        tail=tail_clauses(compiler.tail),
     )
     # The same prefix without the cap — the only shape that can answer
     # "how many matches are there really?" once the cap has fired.
@@ -2299,6 +2874,7 @@ def _candidate_prefixes(
         scope_pre_filter=scope_chain,
         candidate_cap=None,
         within_hops_continuation=wh_continuation,
+        tail=tail_clauses(compiler.tail),
     )
     return cand_cypher, uncapped_cypher
 
@@ -2357,6 +2933,7 @@ async def execute_deep_search(
         try:
             paths, truncated = await _run_path_query(
                 provider, compiler.hoisted_path, timeout_s=timeout_s,
+                compiled_params=base_params, scope=query.scope,
             )
             return SearchResultPage(
                 paths=paths,

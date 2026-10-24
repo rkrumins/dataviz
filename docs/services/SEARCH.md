@@ -82,8 +82,10 @@ HTTP `400` with the message intact.
 
 All routes are workspace-scoped under `/api/v1/{ws_id}/graph` and require
 `workspace:datasource:read`, or a `?viewId=` the caller can read (a share link,
-held to that view's `view` scope; `discover` and `values` refuse it). Each takes
-optional `dataSourceId` and `branchId` query parameters.
+held to that view's `view` scope; `discover` and `values` refuse it, and so does
+any query that follows lineage or relationships — `related`, `path`,
+`withinHops`). Each takes optional `dataSourceId` and `branchId` query
+parameters.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -91,6 +93,7 @@ optional `dataSourceId` and `branchId` query parameters.
 | POST | `/search/explain` | Compile a query without executing it; returns Cypher + bound params + the resolved-scope summary. Side-effect-free. |
 | GET | `/search/schema` | The canonical `SearchQuery` JSON Schema (ETag + `X-Schema-Version`), fetched once by the FE and used to drive client-side validation. |
 | GET | `/search/discover` | Sample nodes per label and return the native property keys present (`samplePerLabel`, 1–2000). Labels with nodes but no user keys appear in `blobOnlyLabels`. |
+| POST | `/search/resolve` | What each of up to 32 name references (a path of display names, or a URN) names in the view: how many, and the first 10 with their containers. |
 | GET | `/search/values` | A property's most common values across the view (`viewId`, `key`, `q`, `limit` 1–50) — the value picker's suggestions, bounded to about 1.5 s. |
 | POST | `/search/membership` | Which of up to 1,000 on-screen entities match which of up to 32 display rules. |
 | POST | `/search/counts` | How many entities in the view match each of up to 32 rules, exactly; repeat with the returned `sessions` until every count is complete. |
@@ -99,6 +102,7 @@ optional `dataSourceId` and `branchId` query parameters.
 | POST | `/search/exports` | Write every match to a CSV or NDJSON file; repeat with `sessionId` until complete. Gated by the `graphExportEnabled` feature. |
 | GET | `/search/exports/{sessionId}/download` | Download a finished export with its `token`, for the user who ran it, for an hour. |
 | POST | `/search` | Legacy free-text node search (superseded by `/search/advanced`). |
+| POST | `/search/native` | A person's own read-only Cypher on FalkorDB and Neo4j. Its own access rule (`workspace:native-query:read`, or a View share that opts in), never an API key; see [Native read-only queries: security](/docs/native-queries). |
 
 `/search/advanced` sets response headers `X-Search-Scope-Hash` and, when
 out-of-view URNs were dropped, `X-Search-Dropped-URNs`.
@@ -148,6 +152,8 @@ settings object. Defaults:
 | `DEEP_SEARCH_MAX_TREE_DEPTH` | `6` | Max predicate-tree depth. |
 | `DEEP_SEARCH_MAX_LEAF_COUNT` | `64` | Max leaf predicates per query. |
 | `DEEP_SEARCH_MAX_OR_BRANCH` | `24` | Max branches in an OR group. |
+| `DEEP_SEARCH_MAX_RELATION_DEPTH` | `3` | How deep relationships nest inside one another (a path end's condition counts as one). |
+| `DEEP_SEARCH_RELATION_MAX_HOPS` | `3` | Lineage hops a relationship may follow when it is tested from every candidate (at most `6`). One whose far end is named entities — an `is`, in the top-level AND — is walked from them, up to 10 hops. |
 | `DEEP_SEARCH_CANDIDATE_CAP` | `10000` | Default per-query candidate cap. |
 | `DEEP_SEARCH_CANDIDATE_CAP_MAX` | `100000` | Hard ceiling on the candidate cap. |
 | `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | Not read: the default soft deadline is `options.softDeadlineMs` (`60000`), set per request. |
@@ -193,8 +199,17 @@ property.
   does not yet wire result caching or rate limiting (marked for later
   workstreams in the service); the `DEEP_SEARCH_CACHE_TTL` and
   `DEEP_SEARCH_RATE_LIMIT_PER_MIN` settings exist ahead of that work.
-- Queries that exceed the validation caps (depth / leaves / OR-branch) are
-  rejected with `400` rather than truncated.
+- Queries that exceed the validation caps (depth / leaves / OR-branch,
+  relationship nesting and hops) are rejected with `400` rather than truncated.
+- A relationship tested from every candidate costs a pattern comprehension per
+  candidate that passes the rest of the query, and FalkorDB plans each new
+  statement shape afresh: 130–550 ms the first time for one with a number
+  comparison in a relationship's edge filter, under 50 ms without
+  (`docs/search-engine/S0_FINDINGS.md` §15).
+  One whose far end is named is walked from those entities instead and costs
+  about what `withinHops` does.
+- Edge user properties live in one JSON text per edge (ADR-026): a condition
+  on such a key takes presence and equality only.
 - View scoping is mandatory — a search without a resolvable `scope.viewId`
   fails; this is by design, since cross-view leakage would be a correctness/RBAC
   violation.

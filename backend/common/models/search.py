@@ -31,7 +31,7 @@ Design notes
   model — the service produces meaningful path-into-tree error messages
   the model can't.
 """
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -178,8 +178,85 @@ class MatchAllPredicate(_Base):
     kind: Literal["all"] = "all"
 
 
+# ---------------------------------------------------------------------------
+# Name references — an entity by its place in the containment tree
+# ---------------------------------------------------------------------------
+
+NODE_REF_ANY_DEPTH = "**"
+"""A path segment standing for any number of containment levels, none
+included."""
+
+NODE_REF_MATCHES_MAX = 64
+"""The most entities one reference may name; more is a 400 asking for a
+narrower path."""
+
+
+class NodeRef(_Base):
+    """An entity named by its URN, or by its path of display names.
+
+    A path starts at a top-level entity of the data source (one inside no
+    other) and steps down one containment level per segment:
+    ``["Country", "United Kingdom"]``. ``"**"`` stands for any number of
+    levels, none included — ``["Country", "**", "London"]`` is a London
+    anywhere under Country — and a leading ``"**"`` starts anywhere in the
+    search's scope, so a name unique within the view (or the layer a
+    search is scoped to) is enough. Names compare with the display name,
+    exactly unless ``caseSensitive`` is false (only paths without ``"**"``
+    may ignore case); ``entityType`` narrows the last step. A path that
+    names several entities refers to all of them, at most 64.
+
+    Unlike a URN, a path means the same thing in every environment, so a
+    saved query or rule that uses one survives a library or view moving
+    between them.
+    """
+    urn: Optional[str] = Field(None, min_length=1, max_length=2048)
+    path: Optional[List[str]] = Field(None, min_length=1, max_length=12)
+    entity_type: Optional[str] = Field(
+        None, alias="entityType", min_length=1, max_length=128)
+    case_sensitive: bool = Field(True, alias="caseSensitive")
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "NodeRef":
+        if (self.urn is None) == (self.path is None):
+            raise ValueError("a reference is a urn or a path, not both")
+        if self.urn is not None:
+            if self.entity_type is not None or not self.case_sensitive:
+                raise ValueError("entityType and caseSensitive apply to a path")
+            return self
+        segments = [segment.strip() for segment in self.path]
+        if any(not s or len(s) > 256 for s in segments):
+            raise ValueError("each path segment is 1–256 characters")
+        if segments[-1] == NODE_REF_ANY_DEPTH:
+            raise ValueError("a path ends with a name, not '**'")
+        if any(a == b == NODE_REF_ANY_DEPTH for a, b in zip(segments, segments[1:])):
+            raise ValueError("'**' twice in a row")
+        if NODE_REF_ANY_DEPTH in segments and not self.case_sensitive:
+            raise ValueError("a path with '**' compares names exactly")
+        self.path = segments
+        return self
+
+    def label(self) -> str:
+        """The reference as people read it: "Country / United Kingdom"."""
+        if self.urn is not None:
+            return self.urn
+        text = " / ".join(self.path or [])
+        return f"{text} ({self.entity_type})" if self.entity_type else text
+
+
+class IsPredicate(_Base):
+    """The entities themselves: matches an entity a reference names —
+    ``Country / United Kingdom``, or a URN."""
+    kind: Literal["is"] = "is"
+    refs: List[NodeRef] = Field(min_length=1, max_length=64)
+
+
+def _anchored(urns: List[str], refs: Optional[List[NodeRef]], what: str) -> None:
+    if not urns and not refs:
+        raise ValueError(f"{what} needs urns or refs")
+
+
 class DescendantOfPredicate(_Base):
-    """Clamp matches to the subtree(s) rooted at ``urns``.
+    """Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.
 
     Lives as a predicate (not on ``SearchScope``) so it can sit inside
     OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.
@@ -187,8 +264,14 @@ class DescendantOfPredicate(_Base):
     which the provider may push down as a tighter Cypher anchor.
     """
     kind: Literal["descendantOf"] = "descendantOf"
-    urns: List[str] = Field(min_length=1, max_length=64)
+    urns: List[str] = Field(default_factory=list, max_length=64)
+    refs: Optional[List[NodeRef]] = Field(None, min_length=1, max_length=64)
     max_depth: Optional[int] = Field(None, alias="maxDepth", ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _has_anchors(self) -> "DescendantOfPredicate":
+        _anchored(self.urns, self.refs, "descendantOf")
+        return self
 
 
 class EdgePropertyPredicate(_Base):
@@ -249,7 +332,8 @@ class WithinHopsPredicate(_Base):
     out-edges only, ``'in'`` walks in-edges, ``'both'`` is undirected.
     """
     kind: Literal["withinHops"] = "withinHops"
-    urns: List[str] = Field(min_length=1, max_length=64)
+    urns: List[str] = Field(default_factory=list, max_length=64)
+    refs: Optional[List[NodeRef]] = Field(None, min_length=1, max_length=64)
     hops: int = Field(ge=1, le=10)
     edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")
     direction: Literal["out", "in", "both"] = "both"
@@ -264,6 +348,11 @@ class WithinHopsPredicate(_Base):
                     "edge. ANDs with ``edge_types`` / ``edge_class``. "
                     "Compiles to ``ALL(rel IN relationships(p) WHERE …)``.",
     )
+
+    @model_validator(mode="after")
+    def _has_anchors(self) -> "WithinHopsPredicate":
+        _anchored(self.urns, self.refs, "withinHops")
+        return self
 
 
 class EntityTypePredicate(_Base):
@@ -380,6 +469,14 @@ class HasOutgoingPredicate(_Base):
 PathDirection = Literal["outgoing", "incoming", "any"]
 
 
+PATH_CONDITION_HOPS_MAX = 4
+"""How far a path goes when one of its ends is a condition."""
+
+PATH_CONDITIONS_HOPS_MAX = 3
+"""How far a path goes when both its ends are conditions: its sources are
+then every entity in the search's scope meeting one."""
+
+
 class PathPredicate(_Base):
     """Find paths between source and target nodes.
 
@@ -389,17 +486,27 @@ class PathPredicate(_Base):
     sequences instead of (or in addition to) flat hits / aggregates.
 
     Powers UC3: "find all paths from dataset:orders to dataset:reporting
-    going through ≤4 lineage hops".
+    going through ≤4 lineage hops". Either end may be a condition instead
+    (``sourceWhere``, ``targetWhere``) — "every route from a topic to a
+    dataset through edges in stream mode". A route passes no entity twice.
     """
     kind: Literal["path"] = "path"
     source_urns: List[str] = Field(
-        alias="sourceUrns", min_length=1, max_length=8,
+        default_factory=list, alias="sourceUrns", max_length=8,
         description="Starting nodes. The provider runs a variable-length "
                     "match outward (or inward) from each.",
     )
+    source_refs: Optional[List[NodeRef]] = Field(
+        None, alias="sourceRefs", min_length=1, max_length=8,
+        description="Starting nodes by name path (or URN).",
+    )
     target_urns: List[str] = Field(
-        alias="targetUrns", min_length=1, max_length=8,
+        default_factory=list, alias="targetUrns", max_length=8,
         description="Endpoint nodes. Paths terminate here.",
+    )
+    target_refs: Optional[List[NodeRef]] = Field(
+        None, alias="targetRefs", min_length=1, max_length=8,
+        description="Endpoint nodes by name path (or URN).",
     )
     direction: PathDirection = Field(
         "outgoing",
@@ -428,6 +535,121 @@ class PathPredicate(_Base):
                     "``edge_class``. Compiles to "
                     "``ALL(rel IN relationships(p) WHERE …)``.",
     )
+    source_where: Optional["Predicate"] = Field(
+        None, alias="sourceWhere",
+        description="The starting nodes as a condition instead of named: "
+                    "any entity meeting it — or, when the targets are a "
+                    "condition too, any in the search's scope.",
+    )
+    target_where: Optional["Predicate"] = Field(
+        None, alias="targetWhere",
+        description="The endpoint nodes as a condition instead of named.",
+    )
+
+    @model_validator(mode="after")
+    def _has_ends(self) -> "PathPredicate":
+        for urns, refs, where, what in (
+                (self.source_urns, self.source_refs, self.source_where, "a path's sources"),
+                (self.target_urns, self.target_refs, self.target_where, "a path's targets")):
+            if where is None:
+                _anchored(urns, refs, what)
+            elif urns or refs:
+                raise ValueError(f"{what} are named or a condition, not both")
+        conditions = (self.source_where is not None) + (self.target_where is not None)
+        cap = {1: PATH_CONDITION_HOPS_MAX, 2: PATH_CONDITIONS_HOPS_MAX}.get(conditions)
+        if cap and self.max_hops > cap:
+            if "max_hops" in self.model_fields_set:
+                raise ValueError(f"a path with {'both ends' if conditions == 2 else 'an end'} "
+                                 f"a condition goes at most {cap} hops")
+            self.max_hops = cap     # the default, where it may go
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Relationships — conditions on the entities related to each one
+# ---------------------------------------------------------------------------
+
+RelationAxis = Literal[
+    "parent", "child", "ancestor", "descendant", "root",
+    "upstream", "downstream", "neighbor",
+]
+CONTAINMENT_AXES = ("parent", "child", "ancestor", "descendant", "root")
+LINEAGE_AXES = ("upstream", "downstream", "neighbor")
+
+RELATION_DEPTH_MAX = 20
+"""How far up or down the containment tree an ``ancestor``, ``descendant``
+or ``root`` relationship looks when it names no depth."""
+
+RELATION_ANCHORED_HOPS_MAX = 10
+"""The lineage hops a relationship may follow at most — as far as
+``withinHops``. A relationship whose far end is a condition rather than
+named entities is held to ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) by the
+service: it is tested from every candidate."""
+
+
+class CountSpec(_Base):
+    """How many related entities must meet a relationship's condition."""
+    op: DegreeOp = "gte"
+    value: int = Field(ge=0, le=1_000_000)
+
+
+class RelatedPredicate(_Base):
+    """Entities whose related entities meet a condition.
+
+    ``axis`` says which relatives: up the containment tree (``parent``, any
+    ``ancestor``, the top-level container ``root``), down it (``child``, any
+    ``descendant``), or along lineage — ``upstream`` (what feeds it),
+    ``downstream`` (what it feeds), ``neighbor`` (either way) — one step, or
+    ``minHops`` to ``maxHops``. ``where`` is the condition a relative must
+    meet: any predicate, relationships included, so conditions chain ("feeds
+    a dashboard whose parent is Finance"); without one, any relative will
+    do. A lineage relationship may also require every edge it walks to meet
+    ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
+    the rollups).
+
+    ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
+    ``all`` do — and there is at least one. ``count`` compares how many
+    distinct relatives meet it instead. An entity is never its own relative,
+    a cycle notwithstanding.
+    """
+    kind: Literal["related"] = "related"
+    axis: RelationAxis
+    where: Optional["Predicate"] = None
+    quantifier: Literal["any", "none", "all"] = "any"
+    count: Optional[CountSpec] = None
+    min_hops: int = Field(1, alias="minHops", ge=1, le=RELATION_DEPTH_MAX)
+    max_hops: Optional[int] = Field(None, alias="maxHops", ge=1, le=RELATION_DEPTH_MAX)
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32)
+    edge: Optional[EdgePredicateType] = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "RelatedPredicate":
+        axis, hi = self.axis, self.max_hops
+        if axis in ("parent", "child") and (self.min_hops, hi) not in ((1, None), (1, 1)):
+            raise ValueError(f"{axis} is one step")
+        if axis == "root" and (self.min_hops != 1 or hi is not None):
+            raise ValueError("root takes no hops: it is the top-level container")
+        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types):
+            raise ValueError("edge filters apply to lineage relationships")
+        if hi is not None and hi < self.min_hops:
+            raise ValueError("maxHops is less than minHops")
+        if axis in LINEAGE_AXES and self.hop_range()[1] > RELATION_ANCHORED_HOPS_MAX:
+            raise ValueError(
+                f"a lineage relationship follows at most {RELATION_ANCHORED_HOPS_MAX} hops")
+        if self.count is not None and self.quantifier != "any":
+            raise ValueError("count takes the place of the quantifier")
+        return self
+
+    def hop_range(self) -> Tuple[int, int]:
+        """The steps it follows, fewest and most."""
+        if self.axis in ("parent", "child"):
+            return 1, 1
+        if self.axis == "root":
+            return 1, RELATION_DEPTH_MAX
+        if self.axis in LINEAGE_AXES:
+            return self.min_hops, self.max_hops or self.min_hops
+        return self.min_hops, self.max_hops or RELATION_DEPTH_MAX
 
 
 # ---------------------------------------------------------------------------
@@ -467,12 +689,55 @@ Predicate = Annotated[
         HasOutgoingPredicate,
         PathPredicate,
         MatchAllPredicate,
+        IsPredicate,
+        RelatedPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),
 ]
 
 GroupPredicate.model_rebuild()
+RelatedPredicate.model_rebuild()
+PathPredicate.model_rebuild()
+
+
+class AnchorGroup(NamedTuple):
+    """Entities a lineage walk can start from: those ``refs`` name, taken
+    ``lo`` to ``hi`` containment levels below them — ``0..0`` the entities
+    themselves, ``1..20`` everything inside them, ``0..20`` both."""
+    refs: Tuple[NodeRef, ...]
+    lo: int
+    hi: int
+
+
+def anchor_groups(where: Optional["Predicate"]) -> Optional[List[AnchorGroup]]:
+    """The named entities ``where`` amounts to, when it amounts to named
+    entities and nothing else: ``is``; inside one (``related(ancestor,
+    is)``, any relative, no count); an OR of those. None for any other
+    condition.
+
+    A lineage relationship whose condition is one of these is walked from
+    the entities, as far as ``withinHops``, instead of tested from every
+    candidate — the service's hop limit and the compiler both read it here,
+    so they can't disagree."""
+    if where is None:
+        return None
+    if where.kind == "is":
+        return [AnchorGroup(tuple(where.refs), 0, 0)]
+    if (where.kind == "related" and where.axis == "ancestor" and where.quantifier == "any"
+            and where.count is None and where.where is not None and where.where.kind == "is"):
+        lo, hi = where.hop_range()
+        return [AnchorGroup(tuple(where.where.refs), lo, hi)]
+    if where.kind == "group" and (where.op == "or" or len(where.children) == 1) \
+            and where.op != "not":
+        groups: List[AnchorGroup] = []
+        for child in where.children:
+            sub = anchor_groups(child)
+            if sub is None:
+                return None
+            groups.extend(sub)
+        return groups
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -946,6 +1211,25 @@ class ScopeDiagnostics(_Base):
         description="Human-readable diagnostic notes — e.g. 'view has "
                     "no rootUrns configured; search ran unclamped'.",
     )
+    resolved_refs: List["ResolvedRef"] = Field(
+        default_factory=list, alias="resolvedRefs",
+        description="What each name reference in the predicate named — "
+                    "how many entities, and the first few — so a "
+                    "reference that names none, or several, can be seen.",
+    )
+
+
+class ResolvedRef(_Base):
+    """One name reference in a predicate, and what it named."""
+    at: str = Field(description="Where it sits: ``$.children[0].refs[1]``.")
+    ref: str = Field(description='As people read it: "Country / United Kingdom".')
+    count: int = Field(description="How many entities it names.")
+    ambiguous: bool = Field(description="It names more than one.")
+    samples: List[AncestorRef] = Field(
+        default_factory=list, description="The first few it names (up to 5).")
+
+
+ScopeDiagnostics.model_rebuild()
 
 
 class SearchProgress(_Base):
@@ -1053,6 +1337,7 @@ class SearchExplainResult(_Base):
     effective_root_urns: Optional[List[str]] = Field(None, alias="effective_root_urns", description="Final root URNs after intersecting scope + hoisted (null = no scope).")
     notes: List[str] = Field(default_factory=list, description="Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').")
     resolved_scope: Optional[Dict[str, Any]] = Field(None, alias="resolvedScope", description="Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.")
+    inlined_cypher: Optional[str] = Field(None, alias="inlinedCypher", description="`hits_cypher` with every parameter written as its value — a statement that runs on its own, to copy or edit. Null when a value has no Cypher literal.")
 
 
 class SearchDiscoverLabelInfo(_Base):
@@ -1092,6 +1377,16 @@ class SearchDiscoverEdgeInfo(_Base):
         description=(
             "Distinct values per edge property key. Powers the edge-"
             "predicate editor's value autocomplete in W2."
+        ),
+    )
+    stored_as: Optional[Dict[str, Literal["native", "json"]]] = Field(
+        None,
+        alias="storedAs",
+        description=(
+            "Where the edge keeps each key: ``native`` — the platform's own "
+            "fields, every operator applies — or ``json``, a user's property "
+            "kept in the edge's JSON, which a condition can test with is set, "
+            "is, is not and is one of."
         ),
     )
 
@@ -1178,6 +1473,46 @@ class SearchRuleItem(_Base):
     its predicate."""
     id: str = Field(min_length=1, max_length=128)
     predicate: Predicate
+
+
+SEARCH_RESOLVE_REFS_MAX = 32
+"""Name references one ``POST /search/resolve`` resolves."""
+
+SEARCH_RESOLVE_MATCHES_SHOWN = 10
+"""The entities a resolution lists for each reference."""
+
+
+class SearchResolveRequest(_Base):
+    """``POST /search/resolve``: which entities each name reference names
+    in the view's scope — what the reference picker checks as it is
+    typed, and how it learns the shortest path that names one entity."""
+    scope: SearchScope
+    refs: List[NodeRef] = Field(min_length=1, max_length=SEARCH_RESOLVE_REFS_MAX)
+
+
+class ResolvedEntity(_Base):
+    """One entity a reference names, with the containers it sits in."""
+    urn: str
+    display_name: str = Field(alias="displayName")
+    entity_type: str = Field(alias="entityType")
+    ancestor_path: List[AncestorRef] = Field(
+        default_factory=list, alias="ancestorPath",
+        description="Top-level container first, parent last.")
+
+
+class SearchRefResolution(_Base):
+    count: int = Field(description="How many entities the reference names.")
+    matches: List[ResolvedEntity] = Field(
+        default_factory=list, description="The first few, up to 10.")
+    error: Optional[str] = Field(
+        None, description="Why the reference can't be used — it names too many.")
+
+
+class SearchResolveResult(_Base):
+    results: List[SearchRefResolution] = Field(
+        description="One per requested reference, in the same order.")
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
 
 
 class SearchMembershipRequest(_Base):
@@ -1382,6 +1717,54 @@ class SearchExportResult(_Base):
                     "for an hour, for whoever ran the export.")
 
 
+class NativeQueryRequest(_Base):
+    """A person's own read-only query, in the data source's language
+    (``POST /graph/search/native``)."""
+    query: str = Field(
+        min_length=1, max_length=20_000,
+        description="Cypher. One statement; reads only. Values are written in — no parameters.")
+    limit: Optional[int] = Field(
+        None, ge=1, description="The most rows to show. Held to the server's maximum "
+                                "(``NATIVE_QUERY_MAX_ROWS``); its default when omitted.")
+    timeout_ms: Optional[int] = Field(
+        None, alias="timeoutMs", ge=100,
+        description="How long it may run. Held to the server's maximum "
+                    "(``NATIVE_QUERY_MAX_TIMEOUT_MS``); its default when omitted.")
+
+
+class NativeQueryResponse(_Base):
+    """What a native query answered. Each cell is a plain string, number,
+    true/false or null, or an object with a ``kind`` — node, edge, path, map,
+    list, temporal, point, bytes, number, string, truncated."""
+    engine: Literal["falkordb", "neo4j"]
+    columns: List[str]
+    rows: List[List[Any]]
+    row_count: int = Field(alias="rowCount")
+    truncated: bool = Field(description="More rows matched than are shown.")
+    truncated_reason: Optional[Literal["rows", "size"]] = Field(
+        None, alias="truncatedReason",
+        description="``rows``: past the row limit. ``size``: past the size an answer may be.")
+    limit_applied: int = Field(alias="limitApplied", description="The row limit it ran under.")
+    timeout_ms: int = Field(alias="timeoutMs", description="The time limit it ran under.")
+    executed_query: str = Field(alias="executedQuery",
+                                description="What ran: the query with its row limit written in.")
+    query_hash: str = Field(alias="queryHash")
+    elapsed_ms: int = Field(alias="elapsedMs")
+    notes: List[str] = Field(default_factory=list)
+    request_id: Optional[str] = Field(None, alias="requestId")
+
+
+class NativeQueryErrorDetail(_Base):
+    """The ``detail`` of every refusal and failure of a native query."""
+    code: str
+    message: str
+    request_id: Optional[str] = Field(None, alias="requestId")
+    position: Optional[int] = Field(
+        None, description="Where in the query the problem is, in characters, when known.")
+    permission: Optional[str] = None
+    retry_after_seconds: Optional[int] = Field(None, alias="retryAfterSeconds")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1418,8 +1801,15 @@ class SearchApiContract(_Base):
         None, alias="searchExportRequest")
     search_export_result: Optional[SearchExportResult] = Field(
         None, alias="searchExportResult")
+    search_resolve_request: Optional[SearchResolveRequest] = Field(
+        None, alias="searchResolveRequest")
+    search_resolve_result: Optional[SearchResolveResult] = Field(
+        None, alias="searchResolveResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can
     # import it directly without going through SearchResultPage.
     scope_diagnostics: Optional[ScopeDiagnostics] = Field(None, alias="scopeDiagnostics")
+    native_query_request: Optional[NativeQueryRequest] = Field(None, alias="nativeQueryRequest")
+    native_query_response: Optional[NativeQueryResponse] = Field(None, alias="nativeQueryResponse")
+    native_query_error: Optional[NativeQueryErrorDetail] = Field(None, alias="nativeQueryError")

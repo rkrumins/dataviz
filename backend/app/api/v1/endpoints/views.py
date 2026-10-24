@@ -46,7 +46,7 @@ from backend.app.auth.dependencies import (
 )
 from backend.app.common.single_flight import normalised_principal, read_views_sf
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import ContextModelORM, ViewORM
+from backend.app.db.models import ContextModelORM, ProviderORM, ViewORM
 from backend.app.db.repositories import data_source_repo, grant_repo, view_repo
 from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
@@ -946,7 +946,18 @@ async def get_view(
         ),
         platform_policy=await resolve_enterprise_view_policy(session),
     ))
+    if view.access.can_query_data_source and ds is not None:
+        view.access.native_query_engine = await _native_query_engine(session, ds.provider_id)
     return view
+
+
+async def _native_query_engine(session: AsyncSession, provider_id: Optional[str]) -> Optional[str]:
+    """The engine a native query on a source of this provider runs on, if any."""
+    if not provider_id:
+        return None
+    provider = await session.get(ProviderORM, provider_id)
+    engine = provider.provider_type if provider is not None else None
+    return engine if engine in ("falkordb", "neo4j") else None
 
 
 @router.put("/{view_id}", response_model=ViewResponse)

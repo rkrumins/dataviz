@@ -3055,6 +3055,10 @@ class ResourceGrantORM(Base):
     role_name = Column(Text, nullable=False)      # editor | viewer (narrow)
     granted_at = Column(Text, nullable=False, default=_now)
     granted_by = Column(Text, nullable=True)
+    # A view share that also lets its holder run their own read-only queries
+    # on the view's data source — opted into per share, by someone who may
+    # query that source themselves.
+    can_query_source = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     __table_args__ = (
         UniqueConstraint(
@@ -3076,6 +3080,10 @@ class ResourceGrantORM(Base):
         CheckConstraint(
             "role_name IN ('editor', 'viewer')",
             name="ck_resource_grants_role_name",
+        ),
+        CheckConstraint(
+            "can_query_source = false OR resource_type = 'view'",
+            name="ck_resource_grants_source_query",
         ),
     )
 

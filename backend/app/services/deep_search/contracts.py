@@ -25,6 +25,9 @@ satisfies it):
                                 of a search session (``SearchRunContext``)
                                 and return its page. A provider without it
                                 is searched by ``deep_search``.
+  * ``deep_search_resolve_refs`` — which entities each name reference
+                                (``NodeRef``) names in a scope. A provider
+                                without it can't search by name (501).
 
 ``CompileError`` lives here so the service layer can ``except`` it
 without importing from any provider module. Each provider re-exports

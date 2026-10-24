@@ -222,6 +222,30 @@ const STRUCTURE_ENTRIES: ReadonlyArray<{
         hint: 'These feed something else',
         predicate: { kind: 'hasOutgoing', edgeClass: 'lineage' } as Predicate,
     },
+    {
+        keywords: 'parent container inside under belongs folder domain relationship',
+        icon: 'ArrowUpToLine',
+        title: 'Parent is…',
+        hint: 'A condition on the container one level up',
+        predicate: { kind: 'related', axis: 'parent',
+            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+    },
+    {
+        keywords: 'contains child children holds column relationship',
+        icon: 'FolderTree',
+        title: 'Contains…',
+        hint: 'A condition on what it contains — every one, none, or how many',
+        predicate: { kind: 'related', axis: 'child',
+            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+    },
+    {
+        keywords: 'feeds downstream target reaches consumer dashboard relationship',
+        icon: 'Workflow',
+        title: 'Feeds…',
+        hint: 'A condition on its targets, one hop or several',
+        predicate: { kind: 'related', axis: 'downstream',
+            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+    },
 ]
 
 

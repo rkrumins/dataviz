@@ -641,6 +641,13 @@ def _summary_refresh(p: dict) -> str:
     return f"Requested {what} of {_subject(p)}"
 
 
+def _summary_native_query(p: dict) -> str:
+    outcome = _detail(p, "outcome")
+    if outcome in (None, "ok"):
+        return f"Ran a native query on {_subject(p)}"
+    return f"A native query on {_subject(p)} was not answered ({str(outcome).replace('_', ' ')})"
+
+
 def _summary_flag(p: dict) -> str:
     key = _detail(p, "key") or _subject(p)
     value = _detail(p, "value")
@@ -695,6 +702,7 @@ _EVENT_META.update({
     "workspace.data_source.restored": ("info", _envelope_summary("Restored data source {}")),
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
+    "workspace.data_source.native_query_run": ("info", _summary_native_query),
     "workspace.data_source.moved": ("info", _transfer_summary(
         "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
     "workspace.data_source.move_undone": ("info", _transfer_summary(
@@ -760,6 +768,7 @@ LABELS: dict[str, str] = {
     "workspace.data_source.restored": "Restored a data source",
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
+    "workspace.data_source.native_query_run": "Ran a native query",
     "workspace.data_source.moved": "Moved a data source",
     "workspace.data_source.move_undone": "Undid a data source move",
     "workspace.data_source.transfer_requested": "Requested a data source transfer",
@@ -971,6 +980,10 @@ _FAILURE_TYPES = frozenset({
     "identity.api_key.rejected", "identity.api_key.misuse",
 })
 _DENIED_TYPES = frozenset({"user.access_denied"})
+#: A native query refused by the guard or the engine's read-only check —
+#: the attempts an administrator filters for — as opposed to one that
+#: failed to answer.
+_NATIVE_REFUSALS = frozenset({"native_query_refused", "native_query_write_refused"})
 
 #: Verbs that undo or destroy, for event types with no catalogue severity.
 _WARNING_VERBS = (
@@ -1150,11 +1163,17 @@ def fallback_projection(event_type: str) -> dict[str, Any]:
     }
 
 
-def _outcome(event_type: str) -> str:
+def _outcome(event_type: str, p: Optional[dict] = None) -> str:
     if event_type in _DENIED_TYPES:
         return "denied"
     if event_type in _FAILURE_TYPES:
         return "failure"
+    if event_type == "workspace.data_source.native_query_run" and p is not None:
+        ran = _detail(p, "outcome")
+        if ran in _NATIVE_REFUSALS:
+            return "denied"
+        if ran not in (None, "ok"):
+            return "failure"
     return "success"
 
 
@@ -1193,7 +1212,7 @@ def _project(
         "category": category_of(event_type),
         "audience": _audience(event_type, p, workspace_id),
         "severity": severity_of(event_type),
-        "outcome": _outcome(event_type),
+        "outcome": _outcome(event_type, p),
         "actor_id": actor_id,
         "actor_kind": actor_kind,
         "subject_id": _subject_user(event_type, p),

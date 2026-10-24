@@ -25,10 +25,20 @@ import { type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
-import type { GroupPredicate, Predicate } from '@/types/search'
+import type {
+    EdgePredicateNode,
+    EdgePropertyPredicate,
+    GroupPredicate,
+    NodeRef,
+    Predicate,
+    PropertyPredicate,
+    RelatedPredicate,
+} from '@/types/search'
 
 import { arityOf, isNegative, operatorLabel, predicateType } from '../typed/operators'
 import { describeDuration } from '../typed/valueCodec'
+
+import { axisMeta, hopRange, refLabel } from './relations'
 
 
 // ---------------------------------------------------------------------------
@@ -39,6 +49,9 @@ export interface SentenceOptions {
     /** First word — defaults to "Show me entities". Keeps room for a
      *  future "Find" / "List" variant. */
     leadIn?: string
+    /** The lead-in names one thing ("Anything"), so the verb after it
+     *  agrees: "Anything that has…", not "…that have…". */
+    singular?: boolean
 }
 
 
@@ -54,7 +67,7 @@ export function formatPredicateAsSentence(
             </p>
         )
     }
-    return renderTop(predicate, leadIn)
+    return renderTop(predicate, leadIn, !opts.singular)
 }
 
 
@@ -62,11 +75,11 @@ export function formatPredicateAsSentence(
 // Top-level (decides the framing sentence)
 // ---------------------------------------------------------------------------
 
-function renderTop(p: Predicate, leadIn: string): ReactNode {
+function renderTop(p: Predicate, leadIn: string, many: boolean): ReactNode {
     if (p.kind !== 'group') {
         return (
             <p>
-                {leadIn} where <Inline>{leafSentence(p)}</Inline>.
+                {leadIn} {connector(p, many)} <Inline>{leafSentence(p, many)}</Inline>.
             </p>
         )
     }
@@ -87,7 +100,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
             return (
                 <div>
                     <p>
-                        {leadIn} that <strong className="text-rose-300">do NOT</strong>{' '}
+                        {leadIn} that <strong className="text-rose-300">{many ? 'do' : 'does'} NOT</strong>{' '}
                         match {innerOp === 'or' ? 'any of:' : 'all of:'}
                     </p>
                     <BulletList items={inner.children.map((c) => renderInner(c, /*indent*/ 1))} />
@@ -96,7 +109,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
         }
         return (
             <p>
-                {leadIn} that <strong className="text-rose-300">do NOT</strong>{' '}
+                {leadIn} that <strong className="text-rose-300">{many ? 'do' : 'does'} NOT</strong>{' '}
                 match <Inline>{leafSentence(inner)}</Inline>.
             </p>
         )
@@ -110,7 +123,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
     }
     if (p.children.length === 1) {
         // Single-child group is functionally a leaf — descend.
-        return renderTop(p.children[0], leadIn)
+        return renderTop(p.children[0], leadIn, many)
     }
     const lead = op === 'or'
         ? <>where <strong className="text-amber-300">any</strong> of these is true:</>
@@ -161,6 +174,8 @@ function renderInner(p: Predicate, depth: number): ReactNode {
         return <Inline><em>empty {op === 'or' ? 'ANY' : 'ALL'} group</em></Inline>
     }
     if (p.children.length === 1) return renderInner(p.children[0], depth)
+    const inside = isOrInside(p)
+    if (inside) return <Inline>{isOrInsideSentence(inside)}</Inline>
     // 2+ children — render as inline conjunction when all children are
     // leaves (keeps single-clause bullets compact); otherwise break
     // into a nested bullet list.
@@ -213,12 +228,38 @@ function inlineConjunction(g: GroupPredicate): ReactNode {
 // Leaf → English phrase
 // ---------------------------------------------------------------------------
 
+/** Clauses that begin with a verb — "has a parent", "is inside Finance",
+ *  "is tagged …" — follow "that"; the rest name an attribute ("type is
+ *  dataset") and follow "where". */
+const VERB_CLAUSES = new Set<string>([
+    'tag', 'hasProperty', 'isRoot', 'isLeaf', 'isOrphan', 'hasIncoming', 'hasOutgoing',
+    'descendantOf', 'withinHops', 'path', 'is', 'related', 'degree',
+])
+
+/** The word joining a condition to what it describes. A group of verb
+ *  clauses reads "that (is inside X AND has a source)" — unless it
+ *  describes several, whose verbs it can't make agree. */
+function connector(p: Predicate, many = false): 'that' | 'where' {
+    if (p.kind === 'group') {
+        const verbs = (p.op ?? 'and') !== 'not' && p.children.length > 0
+            && p.children.every((c) => connector(c) === 'that')
+        return verbs && (!many || p.children.length === 1) ? 'that' : 'where'
+    }
+    return p.kind && VERB_CLAUSES.has(p.kind) ? 'that' : 'where'
+}
+
+const ONE = { has: 'has', is: 'is', does: 'does', lies: 'lies' }
+const MANY = { has: 'have', is: 'are', does: 'do', lies: 'lie' }
+
+
 /**
  * Render one predicate leaf as a natural-language phrase fragment.
  * Returns a fragment so the caller composes it inside its own
- * sentence ("their **name contains 't2'**").
+ * sentence ("their **name contains 't2'**"). ``many``: it describes
+ * several entities, so its verb agrees ("have a parent").
  */
-function leafSentence(p: Predicate): ReactNode {
+function leafSentence(p: Predicate, many = false): ReactNode {
+    const v = many ? MANY : ONE
     switch (p.kind) {
         case 'text': {
             const target = p.target ?? 'name'
@@ -258,9 +299,9 @@ function leafSentence(p: Predicate): ReactNode {
         case 'tag': {
             const op = p.op ?? 'hasAny'
             const verb =
-                op === 'hasAll' ? 'tagged with all of'
-                    : op === 'notHas' ? 'NOT tagged with'
-                        : 'tagged'
+                op === 'hasAll' ? `${v.is} tagged with all of`
+                    : op === 'notHas' ? `${v.is} NOT tagged with`
+                        : `${v.is} tagged`
             return (
                 <>
                     {verb} {p.values.map((v, i) => (
@@ -274,7 +315,7 @@ function leafSentence(p: Predicate): ReactNode {
         case 'layer':
             return <>layer is <Value>{p.layerAssignment}</Value></>
         case 'hasProperty': {
-            const has = p.negate ? 'does not have' : 'has'
+            const has = p.negate ? `${v.does} not have` : v.has
             if (p.keyMatch === 'prefix' || p.keyMatch === 'contains') {
                 return <>{has} a property whose name {p.keyMatch === 'prefix' ? 'starts with' : 'contains'} <Value>{p.key}</Value></>
             }
@@ -297,26 +338,44 @@ function leafSentence(p: Predicate): ReactNode {
                 </>
             )
         }
-        case 'isRoot':       return <>has no upstream lineage</>
-        case 'isLeaf':       return <>has no downstream lineage</>
-        case 'isOrphan':     return <>has no lineage edges</>
-        case 'hasIncoming':  return <>has incoming lineage edges</>
-        case 'hasOutgoing':  return <>has outgoing lineage edges</>
-        case 'descendantOf':
-            return <>is inside {p.urns.length === 1
-                ? <Value>{formatUrnLabel(p.urns[0])}</Value>
-                : <><Value>{p.urns.length}</Value> subtrees</>}</>
+        case 'isRoot':       return <>{v.has} no upstream lineage</>
+        case 'isLeaf':       return <>{v.has} no downstream lineage</>
+        case 'isOrphan':     return <>{v.has} no lineage edges</>
+        case 'hasIncoming':  return <>{v.has} incoming lineage edges</>
+        case 'hasOutgoing':  return <>{v.has} outgoing lineage edges</>
+        case 'descendantOf': {
+            const anchors = named(p.urns, p.refs)
+            return <>{v.is} inside {anchors.length === 1
+                ? <Value>{anchors[0]}</Value>
+                : <><Value>{anchors.length}</Value> subtrees</>}</>
+        }
         case 'withinHops': {
             const dirText =
                 p.direction === 'in' ? 'upstream of'
                     : p.direction === 'out' ? 'downstream of'
                         : 'within'
-            return <>is ≤ {p.hops} hop{p.hops === 1 ? '' : 's'} {dirText} <Value>{p.urns[0] ?? '…'}</Value></>
+            return <>{v.is} ≤ {p.hops} hop{p.hops === 1 ? '' : 's'} {dirText} <Value>{named(p.urns, p.refs)[0] ?? '…'}</Value></>
         }
-        case 'path':
-            return <>lies on a path from <Value>{p.sourceUrns[0] ?? '…'}</Value> to <Value>{p.targetUrns[0] ?? '…'}</Value> (≤ {p.maxHops} hops)</>
+        case 'path': {
+            const end = (urns?: string[] | null, refs?: NodeRef[] | null, where?: Predicate | null) => {
+                if (where) return <>anything {connector(where)} {leafOrGroup(where)}</>
+                const names = named(urns, refs)
+                return names.length > 1
+                    ? <>any of {names.map((n, i) => <span key={i}>{i > 0 && ', '}<Value>{n}</Value></span>)}</>
+                    : <Value>{names[0] ?? '…'}</Value>
+            }
+            return <>{v.lies} on a route from {end(p.sourceUrns, p.sourceRefs, p.sourceWhere)} to {end(p.targetUrns, p.targetRefs, p.targetWhere)} (up to {p.maxHops ?? 4} hops)</>
+        }
+        case 'is': {
+            const names = named([], p.refs)
+            return names.length === 1
+                ? <>{v.is} <Value>{names[0]}</Value></>
+                : <>{v.is} one of {names.map((n, i) => <span key={i}>{i > 0 && ', '}<Value>{n}</Value></span>)}</>
+        }
+        case 'related':
+            return relationSentence(p, many)
         case 'degree':
-            return <>has {p.direction ?? 'any'} edges {p.op} {p.value}</>
+            return <>{v.has} {p.direction ?? 'any'} edges {p.op} {p.value}</>
         case 'all':
             return <>every entity is included</>
         case 'group':
@@ -324,6 +383,108 @@ function leafSentence(p: Predicate): ReactNode {
         default:
             return <>(unknown filter)</>
     }
+}
+
+
+/** The entities an end names: its URNs' labels, then its names. */
+function named(urns?: string[] | null, refs?: NodeRef[] | null): string[] {
+    return [...(urns ?? []).map((u) => formatUrnLabel(u)), ...(refs ?? []).map(refLabel)]
+}
+
+
+function leafOrGroup(p: Predicate, many = false): ReactNode {
+    if (p.kind !== 'group') return leafSentence(p, many)
+    const inside = isOrInside(p)
+    return inside ? isOrInsideSentence(inside, many) : renderInner(p, 1)
+}
+
+
+/** The names in "is X or inside X" — what a lineage question about a
+ *  container asks of a relative — or null for any other condition. */
+function isOrInside(p: Predicate): NodeRef[] | null {
+    if (p.kind !== 'group' || p.op !== 'or' || p.children.length !== 2) return null
+    const is = p.children.find((c) => c.kind === 'is')
+    const inside = p.children.find((c) => c.kind === 'related')
+    if (is?.kind !== 'is' || inside?.kind !== 'related' || inside.axis !== 'ancestor'
+        || inside.count || (inside.quantifier ?? 'any') !== 'any'
+        || inside.minHops || inside.maxHops || inside.where?.kind !== 'is') return null
+    return JSON.stringify(inside.where.refs) === JSON.stringify(is.refs) ? is.refs : null
+}
+
+
+/** "is or is inside VBAP" — "are or are inside …" when it describes several. */
+function isOrInsideSentence(refs: NodeRef[], many = false): ReactNode {
+    const v = many ? MANY : ONE
+    const names = named([], refs)
+    return <>{v.is} or {v.is} inside {names.length === 1
+        ? <Value>{names[0]}</Value>
+        : <>one of {names.map((n, i) => <span key={i}>{i > 0 && ', '}<Value>{n}</Value></span>)}</>}</>
+}
+
+
+const COUNT_WORDS: Record<string, string> = {
+    eq: 'exactly', neq: 'other than', gt: 'more than', gte: 'at least', lt: 'fewer than',
+    lte: 'at most',
+}
+
+
+/** "has a parent where type is domain", "has a parent that is Finance",
+ *  "has no source within 3 hops", "has children, every one where …",
+ *  "has more than 100 children that have …" — the relative named for
+ *  what it is, never in or out. The edges walked come last: "has a target
+ *  that is X, through edges where …". */
+function relationSentence(p: RelatedPredicate, many = false): ReactNode {
+    const v = many ? MANY : ONE
+    const meta = axisMeta(p.axis)
+    const [lo, hi] = hopRange(p)
+    const span = lo === hi ? `${hi}` : `${lo}–${hi}`
+    const reach = meta.lineage
+        ? (hi > 1 ? <> within {span} hops</> : null)
+        : meta.hops && (p.minHops || p.maxHops) ? <> {span} levels away</> : null
+    // After a condition, a comma keeps the edges from reading as part of it.
+    const via = p.edge
+        ? <>{p.where ? ',' : ''} through edges where {edgeSentence(p.edge)}</> : null
+    const cond = (several = false) => p.where
+        ? <> {connector(p.where, several)} {leafOrGroup(p.where, several)}</> : null
+    if (p.count) {
+        const n = p.count.value
+        return <>{v.has} {COUNT_WORDS[p.count.op ?? 'gte']} <Value quoted={false}>{n}</Value>{' '}
+            {n === 1 ? meta.noun : meta.plural}{reach}{cond(n !== 1)}{via}</>
+    }
+    if (p.quantifier === 'none') return <>{v.has} <strong className="text-rose-300">no</strong> {meta.noun}{reach}{cond()}{via}</>
+    if (p.quantifier === 'all' && p.where) {
+        const every = <strong className="text-accent-lineage">every one</strong>
+        // "…, every one where type is column"; a verb reads "…, and every one is inside X".
+        return connector(p.where) === 'that'
+            ? <>{v.has} {meta.plural}{reach}, and {every} {leafOrGroup(p.where)}{via}</>
+            : <>{v.has} {meta.plural}{reach}, {every}{cond()}{via}</>
+    }
+    return <>{v.has} a{/^[aeiou]/.test(meta.noun) ? 'n' : ''} {meta.noun}{reach}{cond()}{via}</>
+}
+
+
+function edgeSentence(ep: EdgePredicateNode): ReactNode {
+    if (ep.kind === 'edgeGroup') {
+        if (ep.op === 'not') return <><strong className="text-rose-300">NOT</strong> {edgeSentence(ep.children[0])}</>
+        const join = ep.op === 'or' ? ' or ' : ' and '
+        return <>{ep.children.map((c, i) => <span key={i}>{i > 0 && join}{edgeSentence(c)}</span>)}</>
+    }
+    if (ep.kind === 'edgeHasProperty') {
+        return <>{ep.negate ? 'there is no' : 'there is a'} <Value>{ep.key}</Value></>
+    }
+    const prop = ep as EdgePropertyPredicate
+    const op = prop.op ?? 'eq'
+    const arity = arityOf(op)
+    const type = predicateType({ ...prop, kind: 'property' } as PropertyPredicate)
+    return (
+        <>
+            <Value>{prop.key}</Value> {operatorLabel(op, type)}
+            {arity !== 'none' && arity !== 'duration' && (
+                <>{' '}<PropertyValue value={prop.value} between={op === 'between'}
+                                      bare={BARE_TYPES.has(type) && !TEXT_OPS.has(op)} /></>
+            )}
+        </>
+    )
 }
 
 

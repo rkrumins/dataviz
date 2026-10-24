@@ -6,7 +6,13 @@ intentionally narrower than the global RBAC enum: ``editor`` and
 
   GET    /views/{view_id}/grants                list explicit grants
   POST   /views/{view_id}/grants                add a grant
+  PUT    /views/{view_id}/grants/{grant_id}     change its role, or its source query
   DELETE /views/{view_id}/grants/{grant_id}     remove a grant
+
+A share may also let its holder run their own read-only queries on the
+view's data source (``canQuerySource``). Only someone who may query that
+source themselves can turn it on; anyone who manages the shares can turn it
+off.
 
 Authorization: only the view's creator OR a workspace admin of the
 view's workspace can manage grants. Phase 6 promotes the check from
@@ -23,6 +29,7 @@ an inline call to a router-level FastAPI dependency
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -166,6 +173,31 @@ async def hydrate_subject(
     )
 
 
+def _ensure_can_grant_source_query(
+    *, view: ViewORM, user: User, claims: PermissionClaims,
+) -> None:
+    """Letting a share query the data source takes being able to query it."""
+    ctx = view_access.ViewerContext(user_id=user.id, claims=claims, group_ids=())
+    if view_access.can_grant_source_query(ctx, view):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "missing_permission",
+            "permission": view_access.NATIVE_QUERY_PERMISSION,
+            "scope": {"type": "workspace", "id": view.workspace_id},
+            "message": (
+                "Only someone who can query this view's data source can let a "
+                "share query it"
+            ),
+        },
+    )
+
+
+def _access_words(role: str, can_query_source: bool) -> str:
+    return f"{role}, can query its data source" if can_query_source else role
+
+
 # ── Routes ───────────────────────────────────────────────────────────
 
 @router.get(
@@ -192,6 +224,7 @@ async def list_grants(
                 granted_at=g.granted_at,
                 granted_by=g.granted_by,
                 subject=subject,
+                can_query_source=bool(g.can_query_source),
             )
         )
     return out
@@ -207,9 +240,12 @@ async def create_grant(
     view_id: str,
     body: ViewGrantCreateRequest,
     user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     view: ViewORM = Depends(can_manage_view_grants),
     session: AsyncSession = Depends(get_db_session),
 ):
+    if body.can_query_source:
+        _ensure_can_grant_source_query(view=view, user=user, claims=claims)
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
@@ -244,6 +280,7 @@ async def create_grant(
             subject_id=body.subject_id,
             role_name=body.role,
             granted_by=user.id,
+            can_query_source=body.can_query_source,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -258,6 +295,7 @@ async def create_grant(
             "subject_type": body.subject_type,
             "subject_id": body.subject_id,
             "role": body.role,
+            "can_query_source": body.can_query_source,
             "actor_id": user.id,
         },
     )
@@ -276,7 +314,10 @@ async def create_grant(
         user_ids=recipients,
         kind="view.shared",
         title=f'"{view.name}" was shared with you',
-        body=f"You can open it as a {body.role}.",
+        body=(
+            f"You can open it as a {body.role}, and run read-only queries on its data source."
+            if body.can_query_source else f"You can open it as a {body.role}."
+        ),
         link=f"/views/{view_id}",
         actor_id=user.id,
         resource_type="view",
@@ -285,8 +326,9 @@ async def create_grant(
     await view_activity_repo.record_view_activity(
         session, view_id=view_id, workspace_id=view.workspace_id,
         action="shared", actor=user.id,
-        summary=f"Shared with {subject_label} ({body.role})",
-        changes={"subjectType": body.subject_type, "subjectId": body.subject_id, "role": body.role},
+        summary=f"Shared with {subject_label} ({_access_words(body.role, body.can_query_source)})",
+        changes={"subjectType": body.subject_type, "subjectId": body.subject_id, "role": body.role,
+                 "canQuerySource": body.can_query_source},
     )
     return ViewGrantResponse(
         grant_id=grant.id,
@@ -294,6 +336,7 @@ async def create_grant(
         granted_at=grant.granted_at,
         granted_by=grant.granted_by,
         subject=subject,
+        can_query_source=bool(grant.can_query_source),
     )
 
 
@@ -305,15 +348,19 @@ async def create_grant(
 async def update_grant_role(
     view_id: str,
     grant_id: str,
-    role: str = Body(..., embed=True),
+    role: Optional[str] = Body(None, embed=True),
+    can_query_source: Optional[bool] = Body(None, embed=True, alias="canQuerySource"),
     user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     view: ViewORM = Depends(can_manage_view_grants),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Change an existing grant's role (viewer ↔ editor) in place —
-    no revoke + re-share dance, and the grant's audit trail
-    (granted_at / granted_by) stays intact."""
-    if role not in grant_repo.VALID_GRANT_ROLES:
+    """Change an existing grant's role (viewer ↔ editor), or whether it may
+    query the view's data source, in place — no revoke + re-share dance, and
+    the grant's audit trail (granted_at / granted_by) stays intact."""
+    if role is None and can_query_source is None:
+        raise HTTPException(status_code=422, detail="Send role, canQuerySource, or both")
+    if role is not None and role not in grant_repo.VALID_GRANT_ROLES:
         raise HTTPException(
             status_code=422,
             detail=f"role must be one of: {', '.join(sorted(grant_repo.VALID_GRANT_ROLES))}",
@@ -327,9 +374,13 @@ async def update_grant_role(
         # caller happens to manage must not be reachable here.
         raise HTTPException(status_code=404, detail="Grant not found on this view")
 
-    previous_role = target.role_name
-    if previous_role != role:
-        target.role_name = role
+    previous_role, previous_query = target.role_name, bool(target.can_query_source)
+    new_role = role if role is not None else previous_role
+    new_query = can_query_source if can_query_source is not None else previous_query
+    if new_query and not previous_query:
+        _ensure_can_grant_source_query(view=view, user=user, claims=claims)
+    if (new_role, new_query) != (previous_role, previous_query):
+        target.role_name, target.can_query_source = new_role, new_query
         await session.flush()
         await user_repo.create_outbox_event(
             session,
@@ -340,8 +391,10 @@ async def update_grant_role(
                 "grant_id": grant_id,
                 "subject_type": target.subject_type,
                 "subject_id": target.subject_id,
-                "role": role,
+                "role": new_role,
                 "previous_role": previous_role,
+                "can_query_source": new_query,
+                "previous_can_query_source": previous_query,
                 "actor_id": user.id,
             },
         )
@@ -349,15 +402,16 @@ async def update_grant_role(
             session, target.subject_type, target.subject_id,
         )
         subject_label = subject_for_log.display_name or target.subject_id
+        changes: dict = {"subjectType": target.subject_type, "subjectId": target.subject_id}
+        if new_role != previous_role:
+            changes["role"] = {"from": previous_role, "to": new_role}
+        if new_query != previous_query:
+            changes["canQuerySource"] = {"from": previous_query, "to": new_query}
         await view_activity_repo.record_view_activity(
             session, view_id=view_id, workspace_id=view.workspace_id,
             action="shared", actor=user.id,
-            summary=f"Changed {subject_label} to {role}",
-            changes={
-                "subjectType": target.subject_type,
-                "subjectId": target.subject_id,
-                "role": {"from": previous_role, "to": role},
-            },
+            summary=f"Changed {subject_label} to {_access_words(new_role, new_query)}",
+            changes=changes,
         )
     subject = await hydrate_subject(session, target.subject_type, target.subject_id)
     return ViewGrantResponse(
@@ -366,6 +420,7 @@ async def update_grant_role(
         granted_at=target.granted_at,
         granted_by=target.granted_by,
         subject=subject,
+        can_query_source=bool(target.can_query_source),
     )
 
 

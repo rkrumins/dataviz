@@ -27,6 +27,8 @@
  */
 import type { SearchQuery, SearchScope } from '@/types/search'
 
+import { parseNamePath } from './panel/relations'
+
 
 /**
  * Templates emit a query *without* the required ``scope.viewId`` field —
@@ -213,6 +215,35 @@ export const TEMPLATES: SearchTemplate[] = [
             options: {
                 results: 'hits',
                 pageSize: 50,
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'inside-named-container',
+        label: 'Everything inside a named container',
+        description:
+            'Name the container by its path — "Country / United Kingdom" — ' +
+            'instead of its URN, so the query works in every environment.',
+        icon: 'FolderTree',
+        section: 'find',
+        inputs: [
+            {
+                name: 'containerPath',
+                kind: 'text',
+                label: 'Container (names from the top, / between)',
+                placeholder: 'Country / United Kingdom',
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'descendantOf', urns: [],
+                refs: [{ path: parseNamePath(String(inputs.containerPath || '')) }],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{ by: 'entityType' }],
                 includeAncestorPath: true,
             },
         }),
@@ -458,6 +489,85 @@ export const TEMPLATES: SearchTemplate[] = [
         }),
     },
     {
+        id: 'feeds-a-type',
+        label: 'What feeds a kind of entity',
+        description:
+            'Entities whose lineage reaches an entity of the chosen type ' +
+            'within a few hops — every route counts.',
+        icon: 'Workflow',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'targetType',
+                kind: 'select',
+                label: 'Feeds a',
+                options: [],
+                defaultValue: 'dataset',
+            },
+            {
+                name: 'hops',
+                kind: 'number',
+                label: 'Within hops',
+                defaultValue: 2, min: 1, max: 3,
+            },
+        ],
+        build: (inputs) => {
+            const hops = Math.max(1, Math.min(3, Number(inputs.hops) || 2))
+            return {
+                predicate: {
+                    kind: 'related', axis: 'downstream',
+                    ...(hops > 1 ? { maxHops: hops } : {}),
+                    where: { kind: 'entityType', op: 'in', values: [String(inputs.targetType || 'dataset')] },
+                },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{ by: 'entityType' }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
+    },
+    {
+        id: 'upstream-of-named',
+        label: 'Everything that feeds a named entity',
+        description:
+            'The sources of one entity, named by its path, up to ten hops ' +
+            'upstream — uncapped and counted exactly.',
+        icon: 'GitMerge',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'entityPath',
+                kind: 'text',
+                label: 'Entity (names from the top, / between)',
+                placeholder: 'Sales / orders',
+            },
+            {
+                name: 'hops',
+                kind: 'number',
+                label: 'Up to hops',
+                defaultValue: 3, min: 1, max: 10,
+            },
+        ],
+        build: (inputs) => {
+            const hops = Math.max(1, Math.min(10, Number(inputs.hops) || 3))
+            return {
+                predicate: {
+                    kind: 'related', axis: 'downstream',
+                    ...(hops > 1 ? { maxHops: hops } : {}),
+                    where: { kind: 'is', refs: [{ path: parseNamePath(String(inputs.entityPath || '')) }] },
+                },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{ by: 'entityType' }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
+    },
+    {
         id: 'within-hops-of',
         label: 'Within N hops of a node',
         description:
@@ -656,6 +766,48 @@ export const TEMPLATES: SearchTemplate[] = [
                 },
             }
         },
+    },
+    {
+        id: 'containers-with-tagged-child',
+        label: 'Entities holding something tagged',
+        description:
+            'Entities of a type with at least one child carrying a tag — ' +
+            '"datasets with a PII column".',
+        icon: 'FolderLock',
+        section: 'governance',
+        inputs: [
+            {
+                name: 'entityType',
+                kind: 'select',
+                label: 'Entity type',
+                options: [],
+                defaultValue: 'dataset',
+            },
+            {
+                name: 'tag',
+                kind: 'text',
+                label: 'Child tagged',
+                placeholder: 'PII',
+                defaultValue: 'PII',
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'group', op: 'and', children: [
+                    { kind: 'entityType', op: 'in', values: [String(inputs.entityType || 'dataset')] },
+                    {
+                        kind: 'related', axis: 'child',
+                        where: { kind: 'tag', op: 'hasAny', values: [String(inputs.tag || 'PII').trim()] },
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{ by: 'ancestorType', ancestorEntityTypes: ['domain'], maxBuckets: 20 }],
+                includeAncestorPath: true,
+            },
+        }),
     },
     {
         id: 'untagged-datasets',

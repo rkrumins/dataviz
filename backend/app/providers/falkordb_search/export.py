@@ -308,14 +308,15 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("A path search finds routes, not entities to export.")
-    hops, hop_params = within_hops(compiler)
+    hops, hop_params, hop_parts = within_hops(compiler)
     ctx = Context(
         where=where, params={**compiler.params, **hop_params},
         sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
         max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops, raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+        within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
+        raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)

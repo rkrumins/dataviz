@@ -1,44 +1,33 @@
 /**
- * CypherView — flat, always-visible compiled-Cypher inspector for the
- * Advanced drawer's Cypher tab.
- *
- * Replaces the nested ``CypherDisclosure → QueryStatusBar → Technical
- * details`` toggle chain. The user clicked the `Cypher` button on the
- * results header to see the query that ran against FalkorDB — show
- * them the query immediately, not three more clicks deep.
+ * CypherView — the Query card's Cypher tab: the query in words, and the
+ * Cypher it compiles to — exactly what a run sends (``useCompiledQuery``
+ * builds the run's own request), coloured, with its bound parameters and
+ * the compiler's notes.
  *
  *   ┌─ Compiled Cypher · 482 chars ────────────  [ Copy ] ─┐
- *   │ MATCH (n) WHERE                                       │
- *   │   labels(n)[0] IN $_scopeEntityTypes                  │
- *   │   AND (toLower(toString(n.displayName)) CONTAINS $p0) │
- *   │ WITH n LIMIT 5000 RETURN n                            │
+ *   │ MATCH (n) WHERE …                                     │
  *   └───────────────────────────────────────────────────────┘
  *
- *   ┌─ Bound parameters · 3 ───────────────────────────────┐
- *   │ $p0                  "product"                        │
- *   │ $_scopeEntityTypes   ["dataset", "schemaField"]       │
- *   │ $_rootUrns           []                               │
- *   └───────────────────────────────────────────────────────┘
+ * **Copy** gives the statement with its values written in, so it runs as
+ * it is anywhere Cypher runs. A data source that compiles no Cypher (only
+ * FalkorDB does) says so, instead of a spinner that never stops.
  *
- *   ┌─ Diagnostic notes · 1 ───────────────────────────────┐
- *   │ ⚠ view scope.entity_types had zero overlap with…      │
- *   └───────────────────────────────────────────────────────┘
- *
- * No toggles, no disclosure. Refetches /search/explain when the draft
- * predicate changes (debounced 400 ms) so the user sees the live
- * compiled query as they edit conditions.
+ * Below it, for whoever may query the view's data source: Edit and run,
+ * starting from that same statement (``NativeConsole``).
  */
 import { AlertCircle, AlertTriangle, CheckCircle2, Copy, Info, Loader2 } from 'lucide-react'
-import { type FC, useCallback, useEffect, useRef, useState } from 'react'
+import { type FC, type ReactNode, useCallback, useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useIsDraftMode } from '@/store/branchStore'
 import { useDraftPredicate } from '@/store/searchStore'
-import type { SearchExplainResult, SearchQuery } from '@/types/search'
 
+import { CypherEditor } from '../editor/CypherEditor'
 
-const DEBOUNCE_MS = 400
+import { NativeConsole } from './native/NativeConsole'
+import { useCompiledQuery } from './native/useCompiledQuery'
+import { useNativeQueryEngine } from './native/useNativeQueryEngine'
+import { QuerySentence } from './QuerySentence'
 
 
 export interface CypherViewProps {
@@ -46,113 +35,89 @@ export interface CypherViewProps {
 }
 
 
-type ExplainState =
-    | { status: 'idle' }
-    | { status: 'empty' }   // no draft predicate
-    | { status: 'running' }
-    | { status: 'ok'; result: SearchExplainResult }
-    | { status: 'error'; error: string }
-
-
 export const CypherView: FC<CypherViewProps> = ({ viewId }) => {
-    const predicate = useDraftPredicate()
-    const provider = useGraphProvider()
-    const [state, setState] = useState<ExplainState>({ status: 'idle' })
-    const abortRef = useRef<AbortController | null>(null)
-    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const draft = useDraftPredicate()
+    const compiled = useCompiledQuery(draft, viewId)
+    const nativeEngine = useNativeQueryEngine()
+    const onDraft = useIsDraftMode()
 
-    useEffect(() => {
-        if (!predicate) { setState({ status: 'empty' }); return }
-        if (!(provider instanceof RemoteGraphProvider) || !viewId) {
-            setState({ status: 'idle' }); return
-        }
-        if (timerRef.current) clearTimeout(timerRef.current)
-        timerRef.current = setTimeout(() => {
-            abortRef.current?.abort()
-            const controller = new AbortController()
-            abortRef.current = controller
-            setState({ status: 'running' })
-            // Pass options matching what the runtime search uses
-            // (results='hits'). Without this, the explain endpoint
-            // defaults to results='aggregates' and emits a spurious
-            // "results='aggregates' but no aggregations supplied" note
-            // even though the actual search is fetching hits.
-            const query: SearchQuery = {
-                predicate,
-                scope: { viewId },
-                options: {
-                    results: 'hits',
-                    pageSize: 100,
-                    includeAncestorPath: true,
-                },
-            }
-            provider.searchExplain(query)
-                .then((result) => {
-                    if (controller.signal.aborted) return
-                    setState({ status: 'ok', result })
-                })
-                .catch((e: unknown) => {
-                    if (controller.signal.aborted) return
-                    setState({
-                        status: 'error',
-                        error: e instanceof Error ? e.message : String(e),
-                    })
-                })
-        }, DEBOUNCE_MS)
-        return () => {
-            if (timerRef.current) clearTimeout(timerRef.current)
-        }
-    }, [predicate, provider, viewId])
-
-    if (state.status === 'empty') {
-        return (
-            <EmptyState message="Add at least one condition in the Query card to see the compiled Cypher." />
+    let body: ReactNode
+    if (compiled.status === 'empty') {
+        body = <Notice>Add a condition to see the Cypher it runs as.</Notice>
+    } else if (compiled.status === 'unsupported') {
+        body = (
+            <Notice>
+                This data source doesn't show a compiled query — searches on it aren't run
+                as Cypher here.
+            </Notice>
         )
-    }
-    if (state.status === 'idle' || state.status === 'running') {
-        return (
+    } else if (compiled.status === 'compiling') {
+        body = (
             <div className={cn(
                 'flex items-center gap-2 px-3 py-3 rounded-xl',
                 'border border-glass-border/50 bg-canvas-base/30',
                 'text-[12px] text-ink-muted',
             )}>
                 <Loader2 className="w-4 h-4 animate-spin text-accent-lineage" />
-                Compiling query against FalkorDB…
+                Compiling the query…
             </div>
         )
-    }
-    if (state.status === 'error') {
-        return (
+    } else if (compiled.status === 'error') {
+        body = (
             <div className={cn(
                 'flex items-start gap-2 px-3 py-3 rounded-xl',
                 'border border-rose-500/40 bg-rose-500/10',
-                'text-[12px] text-rose-300',
+                'text-[12px] text-rose-700 dark:text-rose-300',
             )}>
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                 <div className="flex flex-col gap-0.5">
-                    <span className="font-semibold">Compilation failed</span>
-                    <span className="opacity-90">{state.error}</span>
+                    <span className="font-semibold">It didn't compile</span>
+                    <span className="opacity-90">{compiled.message}</span>
                 </div>
             </div>
         )
+    } else {
+        const { result } = compiled
+        const cypher = result.hits_cypher || result.cypher
+        const params = result.params ?? {}
+        const notes = result.notes ?? []
+        body = (
+            <>
+                <SuccessRibbon noteCount={notes.length} />
+                <Block
+                    title="Compiled Cypher"
+                    subtitle={`${cypher.length.toLocaleString()} chars`}
+                    copy={result.inlinedCypher ?? cypher}
+                    copyLabel={result.inlinedCypher ? 'Copy with values' : 'Copy'}
+                >
+                    <CypherEditor
+                        value={prettyPrintCypher(cypher)}
+                        readOnly
+                        ariaLabel="Compiled Cypher"
+                        className="max-h-72 overflow-y-auto custom-scrollbar -mx-3 -my-2.5"
+                    />
+                </Block>
+                {typeof result.candidate_cap === 'number' && <CandidateCapHint cap={result.candidate_cap} />}
+                {Object.keys(params).length > 0 && <ParamsBlock params={params} />}
+                {notes.length > 0 && <NotesBlock notes={notes} />}
+            </>
+        )
     }
-
-    const { result } = state
-    const cypher = result.hits_cypher || result.cypher
-    const params = result.params ?? {}
-    const notes = result.notes ?? []
-    const paramCount = Object.keys(params).length
-    const candidateCap = result.candidate_cap
 
     return (
         <div className="flex flex-col gap-3">
-            <SuccessRibbon noteCount={notes.length} />
-            <CypherBlock cypher={cypher} />
-            {typeof candidateCap === 'number' && (
-                <CandidateCapHint cap={candidateCap} />
+            <QuerySentence draftPredicate={draft} />
+            {body}
+            {nativeEngine && (
+                <NativeConsole
+                    viewId={viewId}
+                    engine={nativeEngine}
+                    seed={compiled.status === 'ok' ? compiled.result.inlinedCypher ?? null : null}
+                    unavailable={onDraft
+                        ? 'Native queries read the published graph. Switch the view to main to run one.'
+                        : null}
+                />
             )}
-            {paramCount > 0 && <ParamsBlock params={params} />}
-            {notes.length > 0 && <NotesBlock notes={notes} />}
         </div>
     )
 }
@@ -168,15 +133,10 @@ function CandidateCapHint({ cap }: { cap: number }) {
             <Info className="w-3 h-3 mt-0.5 shrink-0 text-accent-lineage/70" />
             <span>
                 The trailing{' '}
-                <span className="font-mono text-ink">
-                    WITH n LIMIT {cap.toLocaleString()}
-                </span>
-                {' '}is the <span className="text-ink">candidate cap</span> —
-                a hard ceiling on how many nodes FalkorDB evaluates before
-                materialising results. If a search hits the cap, the panel
-                shows a "Truncated" banner; refine your filters to narrow
-                the candidate set so every match is returned and highlighted
-                on the canvas.
+                <span className="font-mono text-ink">WITH n LIMIT {cap.toLocaleString()}</span>
+                {' '}is the <span className="text-ink">candidate cap</span> — the most entities
+                one statement looks at. A large view is searched in parts, each its own
+                statement, so every match is still found.
             </span>
         </div>
     )
@@ -192,36 +152,17 @@ function SuccessRibbon({ noteCount }: { noteCount: number }) {
         <div className={cn(
             'flex items-center gap-2 px-3 py-2 rounded-lg',
             'border border-emerald-500/30 bg-emerald-500/[0.06]',
-            'text-[11.5px] text-emerald-300 font-medium',
+            'text-[11.5px] text-emerald-700 dark:text-emerald-300 font-medium',
         )}>
             <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-            Compiled successfully — this is the exact query FalkorDB will run.
+            Compiled — this is the query a run sends.
             {noteCount > 0 && (
-                <span className="ml-auto text-[10.5px] text-amber-300/90 inline-flex items-center gap-1">
+                <span className="ml-auto text-[10.5px] text-amber-700 dark:text-amber-300/90 inline-flex items-center gap-1">
                     <AlertTriangle className="w-3 h-3" />
                     {noteCount} note{noteCount === 1 ? '' : 's'} below
                 </span>
             )}
         </div>
-    )
-}
-
-
-function CypherBlock({ cypher }: { cypher: string }) {
-    return (
-        <Block
-            title="Compiled Cypher"
-            subtitle={`${cypher.length.toLocaleString()} chars`}
-            copy={cypher}
-        >
-            <pre className={cn(
-                'text-[11.5px] font-mono text-ink leading-relaxed',
-                'whitespace-pre-wrap break-words',
-                'max-h-72 overflow-y-auto custom-scrollbar',
-            )}>
-                {prettyPrintCypher(cypher)}
-            </pre>
-        </Block>
     )
 }
 
@@ -243,9 +184,7 @@ function ParamsBlock({ params }: { params: Record<string, unknown> }) {
                         )}
                     >
                         <span className="text-accent-lineage shrink-0">${k}</span>
-                        <span className="flex-1 min-w-0 text-ink/90 break-all">
-                            {formatValue(v)}
-                        </span>
+                        <span className="flex-1 min-w-0 text-ink/90 break-all">{formatValue(v)}</span>
                     </div>
                 ))}
             </div>
@@ -256,22 +195,11 @@ function ParamsBlock({ params }: { params: Record<string, unknown> }) {
 
 function NotesBlock({ notes }: { notes: string[] }) {
     return (
-        <Block
-            title="Diagnostic notes"
-            subtitle={`${notes.length}`}
-            copy={notes.join('\n\n')}
-            tone="amber"
-        >
+        <Block title="Diagnostic notes" subtitle={`${notes.length}`} copy={notes.join('\n\n')} tone="amber">
             <ul className="flex flex-col gap-2">
                 {notes.map((n, i) => (
-                    <li
-                        key={i}
-                        className={cn(
-                            'flex items-start gap-2 text-[11.5px] leading-snug',
-                            'text-amber-200/95',
-                        )}
-                    >
-                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0 text-amber-400" />
+                    <li key={i} className="flex items-start gap-2 text-[11.5px] leading-snug text-amber-800 dark:text-amber-200/95">
+                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0 text-amber-500" />
                         <span>{n}</span>
                     </li>
                 ))}
@@ -286,13 +214,14 @@ function NotesBlock({ notes }: { notes: string[] }) {
 // ---------------------------------------------------------------------------
 
 function Block({
-    title, subtitle, copy, tone = 'default', children,
+    title, subtitle, copy, copyLabel = 'Copy', tone = 'default', children,
 }: {
     title: string
     subtitle?: string
     copy: string
+    copyLabel?: string
     tone?: 'default' | 'amber'
-    children: React.ReactNode
+    children: ReactNode
 }) {
     const [copied, setCopied] = useState(false)
     const handleCopy = useCallback(async () => {
@@ -312,46 +241,38 @@ function Block({
                 ? 'border-amber-500/30 bg-amber-500/[0.04]'
                 : 'border-glass-border/60 bg-canvas-base/40',
         )}>
-            <div className={cn(
-                'flex items-center justify-between gap-2 px-3 py-2',
-                'border-b border-glass-border/40',
-            )}>
+            <div className={cn('flex items-center justify-between gap-2 px-3 py-2', 'border-b border-glass-border/40')}>
                 <div className="flex items-baseline gap-2 min-w-0">
                     <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
                         {title}
                     </span>
                     {subtitle && (
-                        <span className="text-[10.5px] text-ink-muted/70 tabular-nums">
-                            · {subtitle}
-                        </span>
+                        <span className="text-[10.5px] text-ink-muted/70 tabular-nums">· {subtitle}</span>
                     )}
                 </div>
                 <button
                     type="button"
                     onClick={handleCopy}
-                    title={copied ? 'Copied' : `Copy ${title.toLowerCase()}`}
+                    title={copied ? 'Copied' : `${copyLabel}: ${title.toLowerCase()}`}
                     className={cn(
                         'inline-flex items-center gap-1 px-2 py-0.5 rounded-md shrink-0',
-                        'text-[10.5px] font-medium',
+                        'text-[10.5px] font-medium transition-colors',
                         copied
-                            ? 'bg-emerald-500/20 text-emerald-300'
+                            ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
                             : 'bg-glass/40 text-ink-muted hover:text-ink hover:bg-glass/60',
-                        'transition-colors',
                     )}
                 >
                     <Copy className="w-3 h-3" />
-                    {copied ? 'Copied' : 'Copy'}
+                    {copied ? 'Copied' : copyLabel}
                 </button>
             </div>
-            <div className="px-3 py-2.5">
-                {children}
-            </div>
+            <div className="px-3 py-2.5">{children}</div>
         </div>
     )
 }
 
 
-function EmptyState({ message }: { message: string }) {
+function Notice({ children }: { children: ReactNode }) {
     return (
         <div className={cn(
             'flex items-start gap-2 px-3 py-4 rounded-xl',
@@ -359,7 +280,7 @@ function EmptyState({ message }: { message: string }) {
             'text-[12px] text-ink-muted leading-relaxed',
         )}>
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-accent-lineage/70" />
-            {message}
+            <span>{children}</span>
         </div>
     )
 }
@@ -371,8 +292,8 @@ function EmptyState({ message }: { message: string }) {
 
 /**
  * Light-touch Cypher prettifier: keep the original string but insert
- * newlines after the major keywords so the user can read the
- * statement at a glance. Doesn't reformat semantics.
+ * newlines before the major keywords so the statement reads at a glance.
+ * Doesn't reformat semantics.
  */
 function prettyPrintCypher(cypher: string): string {
     return cypher

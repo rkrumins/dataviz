@@ -593,6 +593,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/RBAC.md?raw'),
   },
   {
+    slug: 'native-queries',
+    section: 'security-identity',
+    title: 'Native Read-Only Queries',
+    description: 'People running their own Cypher: who can, what may run, the limits, the record, and database hardening',
+    importFn: () => import('@docs/NATIVE_QUERIES.md?raw'),
+  },
+  {
     slug: 'sso',
     section: 'security-identity',
     title: 'SSO (Operator Guide)',

@@ -497,6 +497,46 @@ def can_manage_grants(ctx: ViewerContext, view: ViewORM) -> bool:
     )
 
 
+#: Running one's own read-only queries on a workspace's data sources.
+NATIVE_QUERY_PERMISSION = "workspace:native-query:read"
+
+
+def may_query_sources(ctx: ViewerContext, workspace_id: str) -> bool:
+    """Run one's own read-only queries on ``workspace_id``'s data sources: a
+    reader of them who also holds the native query permission, which an
+    administrator can take from any role. Never through an API key."""
+    if ctx.is_anonymous or ctx.claims.key_scope is not None:
+        return False
+    return has_permission(
+        ctx.claims, NATIVE_QUERY_PERMISSION, workspace_id=workspace_id,
+    ) and has_permission(
+        ctx.claims, "workspace:datasource:read", workspace_id=workspace_id,
+    )
+
+
+async def can_query_view_source(
+    session: AsyncSession, ctx: ViewerContext, view: ViewORM,
+) -> bool:
+    """Query the data source behind ``view``: as one who may query the
+    workspace's sources, or through a share of this view — to them or a group
+    they are in — that opts in. An org-wide or workspace-wide view never
+    does: the opt-in is per share, decided by the person sharing."""
+    if ctx.is_anonymous or ctx.claims.key_scope is not None:
+        return False
+    if may_query_sources(ctx, view.workspace_id):
+        return True
+    return await grant_repo.has_source_query_grant(
+        session, view_id=view.id, user_id=ctx.user_id, group_ids=list(ctx.group_ids),
+    )
+
+
+def can_grant_source_query(ctx: ViewerContext, view: ViewORM) -> bool:
+    """Let a share of ``view`` query its data source: one who manages the
+    view's shares and may query that source themselves — no one hands on a
+    reach they don't have."""
+    return can_manage_grants(ctx, view) and may_query_sources(ctx, view.workspace_id)
+
+
 def can_restore_view(ctx: ViewerContext, view: ViewORM) -> bool:
     """Restoring a soft-deleted view is a workspace-admin operation —
     matches the action matrix."""
@@ -571,6 +611,8 @@ async def compute_access_envelope(
         "publishBlockedBy": gate.blocked_by,
         "enterpriseAvailable": gate.enterprise_available or already_published,
         "canAnswerPublishRequest": can_answer_publish_request(ctx, view),
+        "canQueryDataSource": await can_query_view_source(session, ctx, view),
+        "canGrantSourceQuery": can_grant_source_query(ctx, view),
         "accessVia": via,
         "dataAccess": (
             "full"
@@ -714,5 +756,8 @@ __all__ = [
     "can_request_publish",
     "can_answer_publish_request",
     "can_manage_grants",
+    "may_query_sources",
+    "can_query_view_source",
+    "can_grant_source_query",
     "can_restore_view",
 ]

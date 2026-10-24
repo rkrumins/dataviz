@@ -1,0 +1,19 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      {
+        "kind": "path",
+        "sourceWhere": { "kind": "entityType", "op": "in", "values": ["topic"] },
+        "targetWhere": { "kind": "entityType", "op": "in", "values": ["dataset"] },
+        "edgePredicate": { "kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream" },
+        "direction": "outgoing",
+        "maxHops": 3,
+        "maxPaths": 64
+      }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "paths" }
+}

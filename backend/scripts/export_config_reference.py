@@ -483,6 +483,7 @@ RULES = (
     ("backend/app/services/top_level_cache.py", "graph"),
     ("backend/app/services/context_engine.py", "graph"),
     ("backend/app/services/deep_search/", "graph"),
+    ("backend/app/services/native_query/", "graph"),
     ("backend/app/api/v1/endpoints/graph.py", "graph"),
     ("backend/app/api/v1/endpoints/redis_config.py", "graph"),
     ("backend/app/services/aggregation/", "aggregation"),

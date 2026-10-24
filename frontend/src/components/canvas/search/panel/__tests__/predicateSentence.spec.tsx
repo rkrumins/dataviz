@@ -8,9 +8,11 @@
 import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import type { Predicate } from '@/types/search'
 
 import { formatPredicateAsSentence } from '../predicateSentence'
+import { QuerySentence } from '../QuerySentence'
 
 
 function leaf(value: string): Predicate {
@@ -182,9 +184,9 @@ describe('predicateSentence — property values read as what they are', () => {
 
     it('reads a search by property name', () => {
         expect(rendered({ kind: 'hasProperty', key: 'owner', keyMatch: 'contains' } as Predicate))
-            .toContain('has a property whose name contains "owner"')
+            .toContain('entities that have a property whose name contains "owner"')
         expect(rendered({ kind: 'hasProperty', key: 'pii', keyMatch: 'prefix', negate: true } as Predicate))
-            .toContain('does not have a property whose name starts with "pii"')
+            .toContain('entities that do not have a property whose name starts with "pii"')
     })
 
     it('shows a range as both ends and a list as its items', () => {
@@ -196,5 +198,91 @@ describe('predicateSentence — property values read as what they are', () => {
         const text = rendered(prop('contains', ''))
         expect(text).toContain('"gvHash" contains …')
         expect(text).not.toContain('""')
+    })
+})
+
+
+describe('predicateSentence — relationships and names', () => {
+    const type = (value: string): Predicate => ({ kind: 'entityType', op: 'in', values: [value] })
+    const named = (...path: string[]): Predicate => ({ kind: 'is', refs: [{ path }] })
+    const plain = (p: Predicate, opts?: Parameters<typeof formatPredicateAsSentence>[1]) => {
+        const { container } = render(<>{formatPredicateAsSentence(p, opts)}</>)
+        return (container.textContent ?? '').replace(/\s+/g, ' ').replace(/["“”]/g, '')
+    }
+
+    // As the panel's one-line summary reads them.
+    it.each<[string, Predicate, string]>([
+        ['a parent', { kind: 'related', axis: 'parent', where: type('domain') },
+            'Anything that has a parent where type is domain.'],
+        ['a named parent', { kind: 'related', axis: 'parent', where: named('Finance') },
+            'Anything that has a parent that is Finance.'],
+        ['the top-level container', { kind: 'related', axis: 'root', where: named('Country') },
+            'Anything that has a top-level container that is Country.'],
+        ['no source', { kind: 'related', axis: 'upstream', quantifier: 'none' }, 'Anything that has no source.'],
+        ['every child', { kind: 'related', axis: 'child', quantifier: 'all', where: type('column') },
+            'Anything that has children, every one where type is column.'],
+        ['every child, by a verb', { kind: 'related', axis: 'child', quantifier: 'all',
+            where: { kind: 'related', axis: 'upstream' } },
+            'Anything that has children, and every one has a source.'],
+        ['a count', { kind: 'related', axis: 'child', count: { op: 'gt', value: 100 }, where: type('column') },
+            'Anything that has more than 100 children where type is column.'],
+        ['a count, by a verb', { kind: 'related', axis: 'child', count: { op: 'gt', value: 2 },
+            where: { kind: 'related', axis: 'upstream' } },
+            'Anything that has more than 2 children that have a source.'],
+        ['one of a count', { kind: 'related', axis: 'upstream', count: { op: 'eq', value: 1 } },
+            'Anything that has exactly 1 source.'],
+        ['hops and edges', { kind: 'related', axis: 'downstream', maxHops: 3,
+            edge: { kind: 'edgeProperty', key: 'mode', op: 'eq', value: 'stream' } },
+            'Anything that has a target within 1–3 hops through edges where mode is stream.'],
+        ['edges after the condition', { kind: 'related', axis: 'downstream',
+            where: { kind: 'related', axis: 'ancestor', where: named('Tableau') },
+            edge: { kind: 'edgeProperty', key: 'logic', op: 'eq', value: 'Direct Query' } },
+            'Anything that has a target that has an ancestor that is Tableau, through edges where logic is Direct Query.'],
+        ['a container question', { kind: 'related', axis: 'upstream', maxHops: 3,
+            where: { kind: 'group', op: 'or', children: [named('Sales'),
+                { kind: 'related', axis: 'ancestor', where: named('Sales') }] } },
+            'Anything that has a source within 1–3 hops that is or is inside Sales.'],
+        ['edges after every one', { kind: 'related', axis: 'downstream', quantifier: 'all',
+            where: type('column'), edge: { kind: 'edgeProperty', key: 'mode', op: 'eq', value: 'stream' } },
+            'Anything that has targets, every one where type is column, through edges where mode is stream.'],
+        ['levels', { kind: 'related', axis: 'ancestor', minHops: 2, maxHops: 4 },
+            'Anything that has an ancestor 2–4 levels away.'],
+        ['a named entity', named('Sales', 'orders'), 'Anything that is Sales / orders.'],
+        ['named entities', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }, 'Anything that is one of a, b.'],
+        ['inside by name', { kind: 'descendantOf', urns: [], refs: [{ path: ['Country', 'UK'] }] },
+            'Anything that is inside Country / UK.'],
+        ['lineage', { kind: 'hasIncoming' }, 'Anything that has incoming lineage edges.'],
+        ['a tag', { kind: 'tag', op: 'hasAny', values: ['PII'] }, 'Anything that is tagged #PII.'],
+        ['routes', { kind: 'path', sourceUrns: [], sourceRefs: [{ path: ['**', 'channel'] }], targetUrns: [],
+            targetWhere: { kind: 'related', axis: 'ancestor', where: named('Commerce') }, maxHops: 2 },
+            'Anything that lies on a route from ** / channel to anything that has an ancestor that is Commerce (up to 2 hops).'],
+    ])('reads %s', (_, p, sentence) => {
+        expect(plain(p, { leadIn: 'Anything', singular: true })).toBe(sentence)
+    })
+
+    it('makes its verbs agree with a lead-in naming several', () => {
+        expect(plain({ kind: 'related', axis: 'parent', where: named('Finance') }))
+            .toBe('Show me entities that have a parent that is Finance.')
+        expect(plain({ kind: 'group', op: 'not', children: [type('column')] }, { leadIn: 'Anything', singular: true }))
+            .toBe('Anything that does NOT match type is column.')
+    })
+
+    it('names an entity by the name it is remembered by, not its URN', () => {
+        rememberUrnLabels([{ urn: 'urn:li:container:commerce_b2417b80', displayName: 'Commerce' }])
+        expect(plain({ kind: 'related', axis: 'downstream', maxHops: 3,
+            where: { kind: 'is', refs: [{ urn: 'urn:li:container:commerce_b2417b80' }] } },
+        { leadIn: 'Anything', singular: true }))
+            .toBe('Anything that has a target within 1–3 hops that is Commerce.')
+    })
+})
+
+
+describe('QuerySentence — the container a query looks inside', () => {
+    it('shows a container named by its path as the scope chip', () => {
+        const { container } = render(<QuerySentence draftPredicate={{ kind: 'group', op: 'and', children: [
+            leaf('orders'),
+            { kind: 'descendantOf', urns: [], refs: [{ path: ['Country', 'UK'] }] },
+        ] }} />)
+        expect(container.textContent).toContain('inside Country / UK')
     })
 })

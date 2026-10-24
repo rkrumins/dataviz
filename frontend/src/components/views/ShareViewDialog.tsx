@@ -31,7 +31,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     X, Link2, Check, UserPlus, UserCog, Users2,
-    Search, Loader2, Eye, Pencil, Trash2, Lock, Send, Clock,
+    Search, Loader2, Eye, Pencil, Trash2, Lock, Send, Clock, Database,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -60,6 +60,7 @@ import {
 } from '@/services/userDirectoryService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { useBrand } from '@/store/branding'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { buildViewShareUrl } from '@/lib/viewShareLink'
@@ -142,6 +143,12 @@ export function ShareViewDialog({
     const canPublish = envelope ? envelope.canPublish : publishPerm
     const canManageGrants = envelope ? envelope.canManageGrants : true
     const canChangeVisibility = envelope ? envelope.canChangeVisibility : true
+    // A share may also let its holder query the view's data source — offered
+    // to whoever may query it themselves. Turning it OFF stays open to anyone
+    // who manages the shares.
+    const nativeQueries = useFeature('nativeQueryEnabled')
+    const canGrantSourceQuery = nativeQueries && (envelope?.canGrantSourceQuery ?? false)
+    const sourceName = liveView?.dataSourceName ?? 'its data source'
     const canRequestPublish = envelope?.canRequestPublish ?? false
     const canAnswerRequest = envelope?.canAnswerPublishRequest ?? false
     // WHICH control is asking. Three identical grey tiles mean three
@@ -331,6 +338,21 @@ export function ShareViewDialog({
         } catch (err) {
             setGrants(prev)
             notify('error', err instanceof Error ? err.message : 'Failed to change role')
+        } finally {
+            setBusyGrantId(null)
+        }
+    }
+
+    const handleToggleSourceQuery = async (grant: ViewGrantResponse, next: boolean) => {
+        setBusyGrantId(grant.grantId)
+        const prev = grants
+        setGrants(g => (g ?? []).map(x => x.grantId === grant.grantId ? { ...x, canQuerySource: next } : x))
+        try {
+            const updated = await viewGrantsService.setSourceQuery(viewId, grant.grantId, next)
+            setGrants(g => (g ?? []).map(x => x.grantId === grant.grantId ? updated : x))
+        } catch (err) {
+            setGrants(prev)
+            notify('error', err instanceof Error ? err.message : 'Failed to change the share')
         } finally {
             setBusyGrantId(null)
         }
@@ -645,6 +667,12 @@ export function ShareViewDialog({
                                     <p className="text-[11px] text-ink-muted mt-0.5">
                                         Adds access on top of the visibility above. Editors can edit; viewers can read.
                                     </p>
+                                    {canGrantSourceQuery && (
+                                        <p className="text-[11px] text-ink-muted mt-0.5">
+                                            <span className="font-semibold text-ink">Query data</span> lets someone run
+                                            read-only queries on everything in {sourceName} — not just this view.
+                                        </p>
+                                    )}
                                 </div>
                                 {canManageGrants && grants && grants.length > 0 && (
                                     <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold border border-glass-border text-ink-muted bg-glass-base/40">
@@ -717,6 +745,27 @@ export function ShareViewDialog({
                                                                     <p className="text-[11px] text-ink-muted truncate">{g.subject.secondary}</p>
                                                                 )}
                                                             </div>
+                                                            {nativeQueries && (canGrantSourceQuery || g.canQuerySource) && (
+                                                                <button
+                                                                    type="button"
+                                                                    role="switch"
+                                                                    aria-checked={Boolean(g.canQuerySource)}
+                                                                    onClick={() => void handleToggleSourceQuery(g, !g.canQuerySource)}
+                                                                    disabled={isBusy || (!g.canQuerySource && !canGrantSourceQuery)}
+                                                                    title={g.canQuerySource
+                                                                        ? `Can run read-only queries on everything in ${sourceName}, not just this view. Click to stop.`
+                                                                        : `Let ${name} run read-only queries on everything in ${sourceName}, not just this view.`}
+                                                                    className={cn(
+                                                                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold transition-colors shrink-0 border disabled:opacity-50',
+                                                                        g.canQuerySource
+                                                                            ? 'border-accent-lineage/40 bg-accent-lineage/10 text-accent-lineage'
+                                                                            : 'border-transparent text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                                    )}
+                                                                >
+                                                                    <Database className="w-3 h-3" />
+                                                                    Query data
+                                                                </button>
+                                                            )}
                                                             {/* Role — editable in place */}
                                                             <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 shrink-0">
                                                                 {GRANT_ROLES.map(({ id, label, icon: RIcon }) => (

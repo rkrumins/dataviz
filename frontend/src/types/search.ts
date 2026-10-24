@@ -55,6 +55,14 @@ import type {
     HasOutgoingPredicate as GenHasOutgoingPredicate,
     PathPredicate as GenPathPredicate,
     MatchAllPredicate as GenMatchAllPredicate,
+    IsPredicate as GenIsPredicate,
+    RelatedPredicate as GenRelatedPredicate,
+    CountSpec as GenCountSpec,
+    NodeRef as GenNodeRef,
+    ResolvedRef as GenResolvedRef,
+    SearchResolveRequest as GenSearchResolveRequest,
+    SearchResolveResult as GenSearchResolveResult,
+    SearchRefResolution as GenSearchRefResolution,
     GroupPredicate as GenGroupPredicate,
     EdgePropertyPredicate as GenEdgePropertyPredicate,
     EdgeHasPropertyPredicate as GenEdgeHasPropertyPredicate,
@@ -80,6 +88,9 @@ import type {
     SearchRuleCount as GenSearchRuleCount,
     SearchExportRequest as GenSearchExportRequest,
     SearchExportResult as GenSearchExportResult,
+    NativeQueryRequest as GenNativeQueryRequest,
+    NativeQueryResponse as GenNativeQueryResponse,
+    NativeQueryErrorDetail as GenNativeQueryErrorDetail,
 } from './generated/searchquery'
 
 
@@ -103,6 +114,13 @@ export type HasIncomingPredicate = GenHasIncomingPredicate
 export type HasOutgoingPredicate = GenHasOutgoingPredicate
 export type PathPredicate = GenPathPredicate
 export type MatchAllPredicate = GenMatchAllPredicate
+/** An entity named by its path of display names, or by its URN. */
+export type NodeRef = GenNodeRef
+export type IsPredicate = GenIsPredicate
+/** Entities whose related entities — up or down the containment tree,
+ *  or along lineage — meet a condition. */
+export type RelatedPredicate = GenRelatedPredicate
+export type CountSpec = GenCountSpec
 export type GroupPredicate = GenGroupPredicate
 export type EdgePropertyPredicate = GenEdgePropertyPredicate
 export type EdgeHasPropertyPredicate = GenEdgeHasPropertyPredicate
@@ -144,6 +162,10 @@ export type AggregationSpec = GenAggregationSpec
 export type SearchScope = GenSearchScope
 export type SearchOptions = GenSearchOptions
 export type SearchQuery = GenSearchQuery
+export type ResolvedRef = GenResolvedRef
+export type SearchResolveRequest = GenSearchResolveRequest
+export type SearchResolveResult = GenSearchResolveResult
+export type SearchRefResolution = GenSearchRefResolution
 
 
 // ---------------------------------------------------------------------------
@@ -256,6 +278,12 @@ export type SearchCatalogResult = RequireKeys<
 /** ``POST /search/exports`` — every match of a search, written to a file. */
 export type SearchExportRequest = GenSearchExportRequest
 export type SearchExportResult = RequireKeys<GenSearchExportResult, 'rows' | 'columns' | 'format'>
+
+/** ``POST /search/native`` — a person's own read-only Cypher. */
+export type NativeQueryRequest = GenNativeQueryRequest
+export type NativeQueryResponse = RequireKeys<GenNativeQueryResponse, 'notes'>
+/** The ``detail`` of every refusal and failure of a native query. */
+export type NativeQueryErrorDetail = GenNativeQueryErrorDetail
 
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },

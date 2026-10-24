@@ -176,6 +176,21 @@ def test_who_acted_and_who_it_happened_to(event_type, payload, actor, kind, subj
     assert (out["actor_id"], out["actor_kind"], out["subject_id"]) == (actor, kind, subject)
 
 
+@pytest.mark.parametrize("ran, outcome", [
+    ("ok", "success"),
+    ("native_query_refused", "denied"),          # LOAD CSV, a write, a plugin…
+    ("native_query_write_refused", "denied"),    # Neo4j's own plan check
+    ("native_query_timeout", "failure"),
+    ("native_query_too_large", "failure"),
+])
+def test_a_native_query_run_is_denied_when_refused_and_failed_when_unanswered(ran, outcome):
+    out = catalogue.project(event_type="workspace.data_source.native_query_run", event_version=2,
+                            payload={"actor_id": "usr_1", "workspace_id": "ws_1",
+                                     "target_type": "data_source", "target_id": "ds_1",
+                                     "details": {"outcome": ran}})
+    assert (out["outcome"], out["category"], out["audience"]) == (outcome, "data", "workspace")
+
+
 def test_a_recorder_envelope_is_read_without_a_per_type_extractor():
     out = catalogue.project(event_type="workspace.versioning.enabled", event_version=2, payload={
         "actor_id": "usr_1", "workspace_id": "ws_1", "data_source_id": "ds_1",

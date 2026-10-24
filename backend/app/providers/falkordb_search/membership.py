@@ -156,10 +156,15 @@ def _compile(provider, items, errors, *, raw: bool = False
     for item_id, predicate in items:
         compiler = _build_compiler_for_provider(provider)
         compiler._param_counter = counter
+        # Every rule is a column of the RETURN: a projection, where degree
+        # needs its comprehension form, and no hop continuation can run.
+        compiler.projected = True
+        compiler.anchor_lineage = False
         if raw:
             compiler.raw_leaves = []
         try:
-            where = compiler.compile(predicate)
+            where = " AND ".join(f"({w})" for w in [compiler.compile(predicate),
+                                                    *compiler.tail] if w != "true")
         except CompileError as exc:
             errors[item_id] = str(exc)
             continue

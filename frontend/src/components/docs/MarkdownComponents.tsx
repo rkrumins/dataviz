@@ -47,6 +47,7 @@ export const filenameMap: Record<string, string> = {
   'TESTING_AND_CI.md': 'testing-and-ci',
   'CONFIGURATION.md': 'configuration',
   'SECURITY_OVERVIEW.md': 'security-overview',
+  'NATIVE_QUERIES.md': 'native-queries',
   'SSO_BACKCHANNEL_CONTRACT.md': 'sso-backchannel-contract',
   'API_GUIDE.md': 'api-guide',
   'GRAPH_METADATA_API.md': 'graph-metadata-api',

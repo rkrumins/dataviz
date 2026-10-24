@@ -89,10 +89,10 @@ server works out the View's boundary itself, whatever the browser sends.
 
 ### Building a query
 
-An empty query card shows a search field ("add a filter") and example queries
-drawn from this View's own data. Pick a suggestion — an entity type, a tag, a
-property or one of its values — and it becomes a filter row. Or use **Add
-filter**:
+An empty query card shows a search field ("add a filter"), example queries
+drawn from this View's own data, and every filter, grouped as below. Pick a
+suggestion — an entity type, a tag, a property or one of its values — or a
+filter, and it becomes a filter row. Later, use **Add filter**:
 
 | Category | Filters |
 | --- | --- |
@@ -100,7 +100,8 @@ filter**:
 | **Structure** | Entity type is… · Root in view is… · Inside Subtree |
 | **Tags & properties** | Tag is… · Has property… · Property compares to… |
 | **Graph shape** | No upstream lineage · No downstream lineage · No lineage edges · Has upstream lineage · Has downstream lineage |
-| **Advanced** | Path from A to B · Within N hops of… · Number of edges… · Every entity · AND group · OR group · NOT group |
+| **Relationships** | Parent is… · Top-level container is… · Any container above it… · Contains… · Fed by… · Feeds… · Is a named entity… · Inside a container named… |
+| **Advanced** | Paths from A to B · Within N hops of… · Number of edges… · Every entity · AND group · OR group · NOT group |
 
 Rows are joined with **AND**; click an **AND** between them to match any row
 (**OR**) instead. Select several rows to **Group as AND / OR** on their own, or
@@ -133,11 +134,71 @@ ignoring case unless you tick **Match case**.
 > missing value, blank text or an empty list; **is not set** finds only a
 > missing one.
 
+### Relationships
+
+A **relationship** filter finds entities by the entities related to them:
+"datasets **whose parent is** a domain", "tables that **contain** a column
+tagged PII", "anything that **feeds** a dashboard within three hops". Pick one
+under **Add filter → Relationships**, then choose in the row:
+
+- **Which relatives** — **Parent** (the container one level up), **Any
+  ancestor**, **Top-level container**, **Child**, **Any descendant**, **Source
+  (upstream)** (what feeds it), **Target (downstream)** (what it feeds), or
+  **Linked either way**.
+- **How many** — **Has a** (at least one matches), **Has no**, **Every** (every
+  one matches — and there is one), or **Count** (at least, more than, exactly …
+  *N* of them).
+- **How far** — for lineage, how many hops (1 to 3; up to 10 when the far end
+  is an entity you name); for ancestors and descendants, how many levels.
+- **Through edges** — for lineage, only edges that meet a condition, such as
+  `confidence` at least 0.8 or `mode` is `stream`. For a property an edge keeps
+  among its own user properties, the choices are **is set**, **is not set**,
+  **is**, **is not**, **is one of** and **is none of**.
+- **Where the relative…** — the relative's own filters, in a builder of its
+  own. Anything a query can say goes there, other relationships included — up
+  to three relationships deep: "feeds a dashboard **whose parent is**
+  *Finance*".
+
+With no condition, any relative will do: **Has no** **Source** finds entities
+nothing feeds.
+
+**Name an entity instead of using its URN.** **Is a named entity…** and
+**Inside a container named…** take a path of names from the top —
+`Country / United Kingdom` — and say as you type how many entities it names
+(**1 entity**, **3 entities**, **not found**). `**` stands for any number of
+levels (`Country / ** / London`), and starting with `**` finds a name anywhere
+in the View (`** / orders`). Because names mean the same everywhere, a saved
+search or rule that uses them keeps working when it moves to another View or
+environment. A path that names several entities uses all of them; one that
+names nothing matches nothing.
+
+**Paths from A to B** lists the routes between two ends, each end entities you
+name or **Any entity where…** a condition: "every route from a topic to a
+dataset, through edges in stream mode". The results become the routes. With an
+end a condition, routes go up to 4 hops; with both, 3.
+
 ### Code mode
 
 Switch the query card from **Visual** to **Code** to type the query instead.
-Both modes edit the same query, so you can move between them freely. Press
-`⌘↵` / `Ctrl+Enter` (or click away) to apply.
+Both modes edit the same query, so you can move between them freely, and the
+card reopens in the mode you used last. Press `⌘↵` / `Ctrl+Enter` (or click
+away) to apply, and `Esc` to undo your edit.
+
+The editor helps as you type:
+
+- **Colours** show how each word is read — a keyword, a property, a value, a
+  relationship — and a red underline marks where a query stops making sense,
+  with the reason below it.
+- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is: entity
+  types after `type:`, tags after `tag:`, a property's values after
+  `owner =`, edge properties inside `.via(`, and entities by name after `@"`.
+  They come from this View's own data.
+- **Reads as** says the query in words, and lists any words that will be
+  searched as plain text in names.
+- **Examples** insert a ready-made condition at the cursor.
+
+A query that doesn't read is never applied: the one you had stays until you fix
+it.
 
 | You type | It means |
 | --- | --- |
@@ -157,11 +218,70 @@ Both modes edit the same query, so you can move between them freely. Press
 | `"Asset Owner" = Bob` | A property name with spaces, quoted |
 | `… AS NUMBER` · `… MATCH CASE` · `… INCLUDING MISSING` | After a property comparison: its type, case-sensitivity, and whether entities without the property match |
 | `a AND (b OR c)` · `NOT tag:PII` · `!tag:PII` | Grouping; words side by side mean AND |
+| `parent(type:domain)` · `root(@"Country")` · `ancestor(region = EMEA)` | Its parent is a domain · its top-level container is *Country* · any container above it has region EMEA |
+| `child(type:column tag:PII)` · `descendant*..3(tag:PII)` | It contains a PII column · something PII up to three levels down |
+| `upstream(type:topic)` · `downstream*..3(type:dashboard)` · `neighbor()` | Fed by a topic · feeds a dashboard within 3 hops · linked either way |
+| `every child(description IS NOT EMPTY)` · `no upstream()` | Every one matches (and there is one) · none does |
+| `count(child(type:column)) > 100` | How many relatives match |
+| `upstream(…).via(confidence >= 0.8)` | Every edge walked meets the condition |
+| `@"Country/United Kingdom"` · `inside @"Country/**/London"` | The entity named by that path · anything inside it (`\/` is a slash in a name, `\\` a backslash) |
+
+A relationship word counts only when `(` follows it directly: `root cause` and
+`parent (x)` are still a search for the words. Hops read like Cypher: `*2`
+(exactly two), `*..3` (one to three), `*2..4`, and `*2..` for two levels or
+more up or down the tree.
 
 Anything the words can't spell — within N hops, a path, a depth-limited
 subtree — appears as its own JSON, such as `{"kind": "withinHops", …}`, and
 you can paste JSON there yourself. A quoted value always stays text:
 `code = "007"` looks for the text `007`, not the number 7.
+
+### The Cypher tab
+
+**Cypher** shows the query in words and the Cypher it runs as — exactly what a
+search sends — with its bound parameters and any notes from the compiler.
+**Copy with values** gives the statement with its values written in, so it runs
+as it is anywhere Cypher runs. A data source that isn't searched as Cypher says
+so instead.
+
+### Your own Cypher
+
+If you may query the View's data source, the Cypher tab also offers **Edit and
+run**: write your own read-only Cypher and run it on the data source, on
+FalkorDB and Neo4j. It starts from the search's Cypher with its values written
+in, so changing one thing and running it is the first thing it offers.
+
+1. Choose **Edit and run**, change the query (or write a new one), and pick
+   **Rows** (50, 200 or 1,000) and **Time** (5, 10 or 30 seconds).
+2. Press **Run** (`⌘↵` / `Ctrl+Enter`). **Cancel** stops it.
+3. Read the answer as a table. A node, an edge or a path is a chip that opens
+   to its properties; a map or a list opens to its entries. The footer says how
+   many rows came back and, when the answer was cut, why: more rows matched, or
+   it was too large to show whole.
+4. **Highlight on canvas** lights up the entities the answer names (any column
+   holding nodes, or their `urn`). **Clear highlight** puts them out.
+
+Things to know:
+
+- **It reads the whole data source**, not only this View — including entities
+  the View leaves out and internal bookkeeping such as rollup edges.
+- **It only reads.** A query that would write, change the database, read files
+  or URLs, call a plugin (`apoc.*`, `gds.*`) or use `$parameters` is refused
+  before it runs, and the place in the query is underlined. `CALL` takes only
+  the schema listings (`db.labels()`, `db.relationshipTypes()`,
+  `db.propertyKeys()` …) and the full-text and vector index queries.
+- **Every run is recorded** in the workspace's activity log, with its query,
+  including the ones that are refused.
+- **A run is never repeated for you.** If it fails, run it again yourself.
+- On a **draft**, **Edit and run** is off: native queries read the published
+  graph. Switch the View to main.
+
+Who may: everyone whose role reads the workspace's data sources, through the
+native query permission (`workspace:native-query:read`) an administrator can
+remove from a role; and someone a View is shared with directly, when the share
+has **Query data** on (see
+[Let someone query the data source](/guide/managing-views#let-someone-query-the-data-source)). How it is kept safe is
+in [Native read-only queries: security](/docs/native-queries).
 
 ### Running
 
@@ -198,6 +318,10 @@ it took, and holds the canvas controls:
 The canvas keeps your matches highlighted after you close the panel, until you
 clear the search or switch View. Collapsed containers show **N matches inside**.
 
+A match found through a lineage relationship offers **How it matches**: the
+routes from it to the relatives it was matched by, drawn as paths. **Undo**
+brings the results back.
+
 Below the bar, matches are grouped (by layer in a Context View, by parent on
 the other canvases). A group's **Search inside this group** adds an *Inside
 Subtree* filter for it. **Load more** fetches the next thousand; **Load all**
@@ -214,6 +338,19 @@ spreadsheet) or **NDJSON** file. Each row starts with the URN, name, type and
 qualified name; add up to 200 property columns from the View's properties. The
 file is prepared on the server and downloads when it's ready. (No **Export**?
 Your administrator has turned off **Export graph data**.)
+
+### Questions from the canvas
+
+Right-click an entity in a Context View to ask about it without building
+anything: **Everything inside this**, **Its children**, **What feeds this**,
+**What this feeds** (each three hops; change it in the row), or **Routes from
+this to…**, which opens the builder for you to say where to. On a container —
+a table, a schema, a domain — the lineage questions take in everything inside
+it, since a dataset's lineage often runs through its columns: **What this
+feeds** is what it, or anything in it, feeds. With several
+entities selected, right-click one of them for **What all *N* feed** and **What
+feeds all *N***. Each opens the panel on an ordinary query you can refine,
+save or turn into a rule.
 
 ---
 
@@ -265,7 +402,8 @@ tab. To put one library on every View of a data source, see
 **Tag** on the query card turns the query into a
 [display rule](/guide/display-rules): every match gets a coloured chip on the
 canvas, for everyone who opens the View. It needs at least one complete filter
-and permission to edit the View. A rule can't use *Within N hops* or a *Path*.
+and permission to edit the View. A rule can't use *Within N hops*, a *Path*, or
+a lineage relationship of more than one hop.
 
 ---
 
@@ -282,6 +420,9 @@ and permission to edit the View. A rule can't use *Within N hops* or a *Path*.
 | `J` / `↓` · `K` / `↑` | Panel (outside a text field) | Next / previous match |
 | `Enter` | Panel (outside a text field) | Reveal the current match on the canvas |
 | `⌘↵` / `Ctrl+Enter` | Code mode | Apply what you typed |
+| `Esc` | Code mode | Undo your edit (closes the suggestions first) |
+| `Ctrl+Space` | Code mode | Show suggestions |
+| `⌘↵` / `Ctrl+Enter` | Your own Cypher | Run it |
 
 ---
 
@@ -340,11 +481,51 @@ Tag is `Certified`.
 tag:PII AND NOT tag:Certified
 ```
 
-**Everything three hops downstream of a table.** **Add filter → Advanced →
-Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
+**Everything three hops downstream of a table.** Right-click the table and
+choose **What this feeds**, or **Add filter → Relationships → Fed by…**, pick
+**Is a named entity…** as its condition and type the table's path:
 
-```json
-{"kind": "withinHops", "urns": ["urn:li:dataset:orders"], "hops": 3, "direction": "out", "edgeClass": "lineage"}
+```text
+upstream*..3(@"Sales/orders")
+```
+
+**Datasets in a domain, by its name.** **Inside a container named…**
+`Sales`, then Entity type is `dataset`.
+
+```text
+inside @"Sales" type:dataset
+```
+
+**Tables with a PII column.** Entity type is `table`, then **Contains…** with
+Tag is `PII` as its condition.
+
+```text
+type:table child(tag:PII)
+```
+
+**Tables where every column is described.**
+
+```text
+type:table every child(type:column description IS NOT EMPTY)
+```
+
+**Wide tables.** More than 100 columns:
+
+```text
+type:table count(child(type:column)) > 100
+```
+
+**What feeds a dashboard, through trusted edges.**
+
+```text
+downstream*..3(type:dashboard).via(confidence >= 0.8)
+```
+
+**Everything fed from inside one country.** Fed by something, within two
+hops, whose container somewhere above is *Country / United Kingdom*:
+
+```text
+upstream*..2(ancestor(@"Country/United Kingdom"))
 ```
 
 ---
@@ -356,10 +537,18 @@ Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
 | Filters in one query | 64 |
 | Nesting depth of groups | 6 levels |
 | Filters directly inside one OR group | 24 |
-| *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT); one *Path* per query |
+| *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
+| Relationships inside relationships | 3 deep |
+| Lineage hops in a relationship | 3; 10 when its far end is an entity you name, at the top level |
+| Entities one name path names | 64 |
+| Routes a *Path* lists | 128 |
 | Saved searches per View | 500 (names unique in the View, up to 120 characters) |
 | Recent searches kept per View | 10, plus any you pin |
 | Export columns | 200 properties |
+| Your own Cypher: rows | 200 by default, 1,000 at most |
+| Your own Cypher: time | 10 s by default, 30 s at most |
+| Your own Cypher: runs | 20 a minute per person; 2 at once per data source |
+| Your own Cypher: query and answer | 20,000 characters; an answer of up to 8 MiB, each text value up to 2,000 characters and each list or map up to 100 entries |
 
 ---
 
@@ -372,10 +561,18 @@ Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
 | "*This view has no boundaries yet, so searching for a word on its own…*" | A plain word over **Everything**, in a View that doesn't limit itself to any entities or types, would read the whole data source | Add a type, tag or property filter, or set **Look in** to **Name** |
 | "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |
+| "*… names no entity*" under **No matches**, or **not found** on a name | A name path is spelled differently, or starts below the top | Start at a top-level entity and name each container on the way down, or start with `**` |
+| "*… follows lineage 4 hops, tested from every candidate: at most 3*" | A relationship whose far end is a condition goes 3 hops | Name the far end (**Is a named entity…**) to go up to 10, or use fewer hops |
+| "*This link can't follow lineage or relationships*" | You opened the View through a share link | Open it as a member of the workspace |
 | The count reads **N+** or the results say they stopped | The answer was still being counted when the time ran out | Run it again, or narrow it; **Load all** fetches every match |
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |
 | "*A query named … is already saved*" | Names are unique in a View (ignoring case) | Choose another name |
 | **Export** is missing | The **Export graph data** feature is off | Ask your administrator |
+| No **Edit and run** on the Cypher tab | You may not query this data source, it isn't FalkorDB or Neo4j, or **Native read-only queries** is off | Ask an administrator for the permission, or the View's owner to turn on **Query data** on your share |
+| "*… reads files or URLs, and native queries only read*", "*… writes to the graph …*" | Your own Cypher used something native queries refuse | Remove what the underlined place names |
+| "*More rows matched — these are the first …*" | The answer had more rows than **Rows** allows | Raise **Rows**, or narrow the query |
+| "*The answer was too large to show whole*", "*… needs more memory than one query may use*" | Whole nodes or long lists made the answer too big | Return properties (`n.name`) instead of whole nodes, or fewer rows |
+| "*You've run a lot of queries in a short time*" | 20 runs a minute is the limit | Wait a moment |
 
 ---
 
@@ -389,3 +586,5 @@ Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
   Views, or Views between environments.
 - [Search & Display Rules Reference](/docs/feature-search-and-rules-reference) — when
   you need the query language, every endpoint and scripting.
+- [Native read-only queries: security](/docs/native-queries) — when you
+  review or operate **Edit and run**.
