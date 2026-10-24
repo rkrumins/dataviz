@@ -125,7 +125,7 @@ wherever it stands as a clause; back it up on the database as below.
 | Time | 10 s; at most 30 s | `NATIVE_QUERY_DEFAULT_TIMEOUT_MS`, `NATIVE_QUERY_MAX_TIMEOUT_MS` (up to 60 s, under the 120 s budget of `/graph/` routes) |
 | Runs per person | 20 a minute | `NATIVE_QUERY_RATE` (`429`, with `Retry-After`) |
 | Runs at once, per data source, per API process | 2 | `NATIVE_QUERY_CONCURRENCY` (`429` after a 2 s wait) |
-| FalkorDB reply read off the socket | 16 MiB | `NATIVE_QUERY_MAX_REPLY_BYTES` — the connection is dropped past it, so the API process never holds more (`422`) |
+| FalkorDB reply read off the socket | 16 MiB | `NATIVE_QUERY_MAX_REPLY_BYTES` — reading stops and the connection is dropped past it (`422`). What was read is held as Python values, which for very many small values take about five times as much: 76 MiB at the 16 MiB default, measured |
 | Query text | 20,000 characters | — |
 | Response | 8 MiB of rows (`truncatedReason: "size"`) | — |
 | One value | Text 2,000 characters; lists and maps 100 entries, 4 levels deep; paths 100 steps | — |
