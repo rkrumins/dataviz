@@ -147,6 +147,33 @@ function reconcile(): void {
 }
 
 /**
+ * True when this tab was hidden at a moment every surface needed a
+ * refresh. It does it when it is next looked at.
+ */
+let refreshOwed = false
+
+/**
+ * Refresh every surface, whatever the versions say, for when they cannot
+ * be trusted; see `check`.
+ *
+ * Only a visible tab does it at once, as the surfaces' own timers did
+ * before the feed. A hidden one puts it off until it is looked at. No
+ * version is recorded, because the versions are what is in doubt.
+ */
+function refreshEverything(): void {
+  if (typeof document !== 'undefined' && document.hidden) {
+    refreshOwed = true
+    return
+  }
+  refreshOwed = false
+  const now = Date.now()
+  for (const sub of subscriptions) {
+    if (sub.inFlight || now - sub.lastFiredAt < sub.minIntervalMs) continue
+    void fire(sub, [])
+  }
+}
+
+/**
  * Bumped whenever the stream pushes something. Used to discard a manifest
  * response that was already in flight when a push landed — see
  * `pollChangeFeed`.
@@ -460,6 +487,59 @@ function broadcastVersions(next: ChangeVersions): void {
   }
 }
 
+/**
+ * How many of the feed's checks must fail in a row before it stops
+ * waiting for the versions to move and refreshes every surface on each
+ * check instead. One failure is usually a blip; three is an outage.
+ */
+const FAILED_CHECKS_BEFORE_REFRESHING = 3
+
+/** The feed's checks that have failed in a row, in this tab. */
+let failedChecks = 0
+
+/**
+ * A check for changes: the leader's, on its interval, or a follower's
+ * whose leader has gone quiet. The leader shares the outcome with the
+ * other tabs.
+ *
+ * The versions cannot be trusted across a failed check. The server
+ * answers 503 while its change registry (Redis) is unreachable, and a
+ * change made meanwhile is never counted: its bump fails and is dropped.
+ * Waiting for the versions to move would leave every surface as it was
+ * until the registry came back, and a change made during the outage would
+ * not show even then. So after a few failures in a row, each check
+ * refreshes every surface instead, and the first to succeed after any
+ * failure does it once more, for whatever the failures hid.
+ */
+async function check(isLeader: boolean): Promise<void> {
+  const refreshEveryTab = () => {
+    if (isLeader) {
+      try {
+        openChannel()?.postMessage({ refreshEverything: true })
+      } catch {
+        // The other tabs check for themselves once the leader has been
+        // quiet for a while.
+      }
+    }
+    refreshEverything()
+  }
+
+  try {
+    await pollChangeFeed()
+  } catch {
+    failedChecks += 1
+    if (failedChecks >= FAILED_CHECKS_BEFORE_REFRESHING) refreshEveryTab()
+    return
+  }
+  // Versions first, so the other tabs wake what moved before refreshing
+  // the rest.
+  if (isLeader) broadcastVersions(versions)
+  if (failedChecks > 0) {
+    failedChecks = 0
+    refreshEveryTab()
+  }
+}
+
 /** How often a visible tab tells the leader that somebody is looking. */
 const PRESENCE_INTERVAL_MS = 30_000
 /**
@@ -526,11 +606,6 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
   // one heartbeat's grace before concluding that nobody is there.
   lastPresenceAt = Date.now()
 
-  const publish = async () => {
-    await pollChangeFeed()
-    broadcastVersions(versions)
-  }
-
   // Gated on whether ANY tab in the browser is visible, not on this
   // one. The leader works on behalf of every tab, and it is whichever
   // tab won the lock — very often a background one while the user reads
@@ -548,14 +623,7 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
       paused = true
       return
     }
-    try {
-      await publish()
-    } catch {
-      // A failed manifest read is not worth reporting: surfaces keep
-      // what they have and the next tick tries again. The server answers
-      // 503 here when its registry is unreachable, which is deliberately
-      // not the same as "nothing changed".
-    }
+    await check(true)
     if (myEpoch !== transportEpoch) return
     pollTimer = setTimeout(tick, withJitter(checkIntervalMs))
   }
@@ -577,7 +645,7 @@ function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
   const unsubscribeVisible = onAppVisible(() => {
     if (myEpoch !== transportEpoch) return
     if (paused) resume()
-    else void publish().catch(() => {})
+    else void check(true)
   })
 
   return () => {
@@ -624,6 +692,10 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
     if (next && typeof next === 'object') {
       lastHeardFromLeader = Date.now()
       applyPushedVersions(next)
+    } else if (ev.data?.refreshEverything === true) {
+      // The leader cannot trust the versions just now; see `check`.
+      lastHeardFromLeader = Date.now()
+      refreshEverything()
     }
   }
   openChannel()?.addEventListener('message', onMessage)
@@ -643,7 +715,7 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
     const visible = typeof document === 'undefined' || !document.hidden
     const silentFor = Date.now() - lastHeardFromLeader
     if (stopWork === null && visible && silentFor > LEADER_SILENCE_CHECKS * checkIntervalMs) {
-      void pollChangeFeed().catch(() => {})
+      void check(false)
     }
     watchdog = setTimeout(watch, withJitter(checkIntervalMs))
   }
@@ -707,15 +779,21 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
  * carries (60s unless changed, 15s to 10 minutes), and stops while no tab
  * in the browser is visible. So even fully degraded — no stream, no
  * leader election — a tab makes one request per interval rather than
- * the seven its surfaces used to.
+ * the seven its surfaces used to. Only while the manifest itself keeps
+ * failing does a visible tab make those seven again (see `check`).
  */
 export function startChangeFeed(options?: { stream?: boolean }): () => void {
   const myEpoch = ++transportEpoch
   const useStream = options?.stream ?? typeof EventSource !== 'undefined'
   const stopWork = startWithLeaderElection(myEpoch, useStream)
+  // A refresh this tab put off while hidden; see `refreshEverything`.
+  const unsubscribeVisible = onAppVisible(() => {
+    if (refreshOwed) refreshEverything()
+  }, { minIntervalMs: 0 })
 
   return () => {
     transportEpoch += 1
+    unsubscribeVisible()
     stopWork()
   }
 }
@@ -727,6 +805,8 @@ export function __resetChangeFeedForTests(): void {
   seeded = false
   pushGeneration = 0
   lastPresenceAt = 0
+  failedChecks = 0
+  refreshOwed = false
   checkIntervalMs = POLLING_INTERVALS.changeManifest
   try {
     channel?.close()

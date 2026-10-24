@@ -529,3 +529,180 @@ describe('change feed check interval', () => {
     again()
   })
 })
+
+/**
+ * A manifest that keeps failing.
+ *
+ * The server answers 503 while its change registry is unreachable, and a
+ * change made meanwhile is never counted. Waiting for the versions to move
+ * would leave every surface as it was until the registry came back, and
+ * the outage's changes would not show even then.
+ */
+describe('change feed while the manifest keeps failing', () => {
+  /** Jitter is pinned to nothing, so a check is exactly one interval. */
+  const ONE_CHECK = 60_000
+
+  function setHidden(hidden: boolean) {
+    Object.defineProperty(document, 'hidden', { value: hidden, configurable: true })
+  }
+
+  /** This tab follows; another tab leads and never lets go. */
+  function anotherTabLeads() {
+    const locks = new FakeLockManager()
+    void locks.request('nx-change-feed-leader', () => new Promise<void>(() => {}))
+    vi.stubGlobal('navigator', { locks })
+  }
+
+  beforeEach(() => {
+    __resetChangeFeedForTests()
+    fetchChangeManifest.mockReset()
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
+    FakeBroadcastChannel.instances = []
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+    vi.stubGlobal('navigator', { locks: new FakeLockManager() })
+    vi.stubGlobal('EventSource', InertEventSource)
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+  })
+
+  afterEach(() => {
+    setHidden(false)
+    __resetChangeFeedForTests()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('refreshes every surface on each check from the third failure until one succeeds', async () => {
+    const banner = vi.fn()
+    const bell = vi.fn()
+    subscribeToTopic('announcements', banner, { minIntervalMs: 0 })
+    subscribeToTopic('notif:usr_1', bell, { minIntervalMs: 0 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    fetchChangeManifest.mockRejectedValue(new Error('503'))
+    // One or two failures is usually a blip: surfaces keep what they have.
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 2)
+    expect(banner).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect([banner.mock.calls.length, bell.mock.calls.length]).toEqual([1, 1])
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect([banner.mock.calls.length, bell.mock.calls.length]).toEqual([2, 2])
+
+    // The manifest answers, with versions the outage left unmoved. Once
+    // more, for whatever changed after the last failed check...
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 1 } })
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect([banner.mock.calls.length, bell.mock.calls.length]).toEqual([3, 3])
+    // ...and then only when a version moves.
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 3)
+    expect([banner.mock.calls.length, bell.mock.calls.length]).toEqual([3, 3])
+    stop()
+  })
+
+  it('refreshes once when the manifest answers after a single failure', async () => {
+    const banner = vi.fn()
+    subscribeToTopic('announcements', banner, { minIntervalMs: 0 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    fetchChangeManifest.mockRejectedValueOnce(new Error('503'))
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect(banner).not.toHaveBeenCalled()
+
+    // Same version as before the failure, which is exactly what a change
+    // made while the registry was unreachable looks like.
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect(banner).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 3)
+    expect(banner).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('tells the other tabs to refresh too, after the versions', async () => {
+    const otherTab = new FakeBroadcastChannel('nx-change-feed')
+    const heard: Array<Record<string, unknown>> = []
+    otherTab.addEventListener('message', (ev) => {
+      if (!ev.data?.present) heard.push(ev.data)
+    })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    heard.length = 0
+
+    fetchChangeManifest.mockRejectedValue(new Error('503'))
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 3)
+    expect(heard).toEqual([{ refreshEverything: true }])
+
+    // Versions first, so the other tabs wake what moved before
+    // refreshing the rest.
+    fetchChangeManifest.mockResolvedValue({ topics: { announcements: 2 } })
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect(heard.slice(1)).toEqual([
+      { versions: { announcements: 2 } },
+      { refreshEverything: true },
+    ])
+    stop()
+  })
+
+  it('refreshes a follower when the leader says to', async () => {
+    anotherTabLeads()
+    const banner = vi.fn()
+    subscribeToTopic('announcements', banner, { minIntervalMs: 0 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    new FakeBroadcastChannel('nx-change-feed').postMessage({ refreshEverything: true })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(banner).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('puts it off in a hidden tab until somebody looks, and then only once', async () => {
+    anotherTabLeads()
+    setHidden(true)
+    const banner = vi.fn()
+    subscribeToTopic('announcements', banner, { minIntervalMs: 0 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    new FakeBroadcastChannel('nx-change-feed').postMessage({ refreshEverything: true })
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect(banner).not.toHaveBeenCalled()
+
+    const lookAgain = async () => {
+      setHidden(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      setHidden(false)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(200)
+    }
+    await lookAgain()
+    expect(banner).toHaveBeenCalledTimes(1)
+    await lookAgain()
+    expect(banner).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('falls back the same way in a follower checking for itself', async () => {
+    // The leader went quiet (see above), so this visible tab checks on
+    // its own, and those checks fail too.
+    anotherTabLeads()
+    const banner = vi.fn()
+    subscribeToTopic('announcements', banner, { minIntervalMs: 0 })
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+
+    fetchChangeManifest.mockRejectedValue(new Error('503'))
+    // Silent past two and a half intervals, it checks at 180s and 240s...
+    await vi.advanceTimersByTimeAsync(ONE_CHECK * 4)
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(3)
+    expect(banner).not.toHaveBeenCalled()
+    // ...and its third failure, at 300s, refreshes.
+    await vi.advanceTimersByTimeAsync(ONE_CHECK)
+    expect(banner).toHaveBeenCalledTimes(1)
+    stop()
+  })
+})
