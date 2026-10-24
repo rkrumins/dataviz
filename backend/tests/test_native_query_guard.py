@@ -242,7 +242,7 @@ def test_the_guard_never_crashes_on_any_text():
             try:
                 check(text, engine=engine)
             except NativeQueryError:
-                pass
+                pass  # A refusal is an answer; any other exception fails the test.
 
 
 def test_a_keyword_counts_only_where_a_keyword_stands():
