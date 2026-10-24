@@ -18,6 +18,7 @@
     "harness": "vite --port 5199 --strictPort",
     "harness:shot": "node scripts/harness-shot.mjs",
     "harness:analytics": "node scripts/analytics-shot.mjs",
+    "harness:search": "node scripts/search-shot.mjs",
     "probe:drawer": "node scripts/app-probe-drawer.mjs",
     "probe:fold": "node scripts/app-probe-fold.mjs",
     "probe:ghosts": "node scripts/app-probe-ghosts.mjs"
