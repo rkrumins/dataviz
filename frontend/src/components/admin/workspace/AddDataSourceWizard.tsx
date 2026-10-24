@@ -28,6 +28,7 @@ import { useQuery } from '@tanstack/react-query'
 import { workspaceService } from '@/services/workspaceService'
 import { NodeIdentityField, isIdentityOverridden, isNameOverridden } from '@/components/dataSource/NodeIdentity'
 import { catalogService } from '@/services/catalogService'
+import { useAuthStore } from '@/store/auth'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
@@ -46,6 +47,7 @@ export function AddDataSourceWizard({
     catalogItems,
     providers,
     ontologies,
+    onMoveWithViews,
 }: {
     isOpen: boolean
     workspaceId: string
@@ -55,6 +57,8 @@ export function AddDataSourceWizard({
     catalogItems: PickableCatalogItem[]
     providers: ProviderResponse[]
     ontologies: OntologyDefinitionResponse[]
+    /** A source with views, from a workspace the caller also runs: the move wizard takes it. */
+    onMoveWithViews?: (item: PickableCatalogItem) => void
 }) {
     const [step, setStep] = useState<string>('source')
     const [catalogItemId, setCatalogItemId] = useState('')
@@ -85,6 +89,8 @@ export function AddDataSourceWizard({
     const items: PickableCatalogItem[] = bindingsQuery.data ?? catalogItems
 
     const selected = items.find(c => c.id === catalogItemId)
+    // Moving a source WITH its views needs admin rights in both workspaces.
+    const can = useAuthStore(s => s.can)
     const chosenOntology = ontologies.find(o => o.id === ontologyId)
 
     // Picking a source that ALREADY belongs to another workspace is a MOVE, not an
@@ -283,6 +289,11 @@ export function AddDataSourceWizard({
                         onSelect={setCatalogItemId}
                         currentWorkspaceId={workspaceId}
                         allowMove
+                        canMoveWithViews={item => !!item.boundWorkspaceId
+                            && can('workspace:admin', item.boundWorkspaceId) && can('workspace:admin', workspaceId)}
+                        onMoveWithViews={onMoveWithViews
+                            ? item => { reset(); onClose(); onMoveWithViews(item) }
+                            : undefined}
                     />
                     {catalogItemId && (
                         <div>

@@ -75,6 +75,7 @@ tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_data_source_list_versioning.py
 tests/test_data_source_move.py
+tests/test_data_source_transfers.py
 tests/test_default_data_source_ids.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py

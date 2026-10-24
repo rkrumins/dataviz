@@ -517,7 +517,8 @@
       "posture": "security",
       "serverGates": [
         "GET /workspace-directory \u2014 refused while off",
-        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed"
+        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed",
+        "GET \u2026/data-sources/{ds}/move-destinations, move-preview, and moving or asking to move a data source \u2014 offer or accept a workspace the person cannot open only while this is on and the workspace is listed (404 otherwise)"
       ],
       "uiSurfaces": [
         "The Find a workspace tab on Workspaces, and its entry in search",

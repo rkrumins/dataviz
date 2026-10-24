@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,9 @@ from backend.app.db.repositories import (
     binding_repo, role_repo, user_repo, view_repo, profiling_repo, access_request_repo,
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
-from backend.app.services import profiling_series, template_access, workspace_visibility
+from backend.app.services import (
+    data_source_transfer, profiling_series, template_access, workspace_visibility,
+)
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     invalidate_node_identity,
@@ -72,6 +74,7 @@ from backend.common.models.management import (
     WorkspaceDataSourceImpactResponse,
     WorkspaceImpactResponse,
     DataSourceMoveRequest,
+    DataSourceTransferResponse,
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
@@ -532,6 +535,9 @@ async def delete_workspace(
     await access_request_repo.deny_open_for_target(
         session, target_type="workspace", target_id=workspace_id,
         resolver_id=user.id, note="The workspace was deleted",
+    )
+    await data_source_transfer.cancel_open_for_workspace(
+        session, workspace_id, actor=user.id, note="The workspace was deleted.",
     )
 
     await provider_registry.evict_workspace(workspace_id, session)
@@ -1002,6 +1008,9 @@ async def remove_data_source(
             session, "workspace.data_source.removed", **recorder.data_source_target(ds),
             details={"permanent": True},
         )
+        await data_source_transfer.cancel_open_for_source(
+            session, ds_id, actor=_user.id, note="The data source was deleted.",
+        )
         await data_source_repo.delete_data_source(session, ds_id)
         return
 
@@ -1024,6 +1033,9 @@ async def remove_data_source(
     await recorder.record_for_request(
         session, "workspace.data_source.removed", **recorder.data_source_target(ds),
         details={"permanent": False},
+    )
+    await data_source_transfer.cancel_open_for_source(
+        session, ds_id, actor=_user.id, note="The data source was deleted.",
     )
     logger.info("data source %s moved to trash by %s (restorable for %s days)",
                 ds_id, _user.id, gv_config.PURGE_GRACE_DAYS)
@@ -1063,7 +1075,7 @@ async def restore_data_source(
 
 @router.post(
     "/{workspace_id}/data-sources/{ds_id}/move",
-    response_model=DataSourceResponse,
+    response_model=DataSourceTransferResponse,
 )
 async def move_data_source(
     workspace_id: str = Path(...),
@@ -1073,127 +1085,23 @@ async def move_data_source(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Re-home a data source into another workspace — ONLY if nothing is built on it.
+    """Re-home a data source into another workspace, with everything built on it.
 
-    A catalog item belongs to exactly one workspace (``uq_ds_catalog_item``), and it
-    is allocated at onboarding. Getting that allocation wrong currently has no
-    remedy short of detaching, which is destructive. This is the remedy, restricted
-    to the case where it is provably safe.
+    It used to move only a source nothing was built on, and for a sound reason: a view names
+    its workspace too. Move the source alone and its views read it from a workspace it no
+    longer lives in, through a workspace-scoped access check that no longer describes it. So
+    the views (trashed ones too), their history, the versioned graph and the aggregation state
+    now move with it — see ``services/data_source_transfer.py``.
 
-    WHY ZERO VIEWS IS NOT A CONSERVATIVE CHOICE BUT THE ONLY CORRECT ONE:
-
-      * ``views.data_source_id`` is ON DELETE SET NULL. Detach-and-re-add does not
-        delete the old workspace's views — it silently ORPHANS them: alive, pointing
-        at nothing.
-      * Moving the row in place (what this does) keeps ``data_source_id`` valid, but
-        a view still carries ``workspace_id = A`` while its source now lives in B.
-        Members of A would be reading B's data through a workspace-scoped RBAC check
-        that no longer describes reality.
-
-    Soft-deleted views count. Restoring one afterwards would recreate exactly the
-    situation above, so a source with a view in the trash cannot move either.
-
-    A versioned source's graph moves with it: the graph records its workspace, and every
-    tenant check on it reads that. It moves last — after the flush has caught a clash — so
-    when version control refuses (it is busy, or holds drafts or reviews by people of this
-    workspace) or can't be reached, the request fails and the move rolls back whole.
-
-    Requires datasource:manage on BOTH workspaces — the decorator covers the source
-    workspace; the target is checked below. Moving a source INTO a workspace you
-    don't administer would otherwise be a way to plant data in it.
+    Authority is checked in BOTH workspaces, never just the one in the path: moving a source
+    INTO a workspace you don't run would be a way to plant data in it. A source with views takes
+    ``workspace:admin`` in both, because the move re-homes other people's work and changes who
+    can read it; a source with nothing on it takes ``workspace:datasource:manage`` in both.
+    Someone who administers only the source asks instead (``POST …/transfer-requests``).
     """
-    ds = await data_source_repo.get_data_source_orm(session, ds_id)
-    if not ds or ds.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
-
-    target_id = req.target_workspace_id
-    if target_id == workspace_id:
-        raise HTTPException(status_code=422, detail="The data source is already in this workspace")
-
-    target = await workspace_repo.get_workspace_orm(session, target_id)
-    if not target:
-        raise HTTPException(status_code=404, detail=f"Workspace '{target_id}' not found")
-
-    if not has_permission(claims, "workspace:datasource:manage", workspace_id=target_id):
-        raise HTTPException(
-            status_code=403,
-            detail=f"You don't have permission to add data sources to '{target.name}'",
-        )
-
-    # THE precondition. Counts trashed views too — see the docstring.
-    view_count = (await session.execute(
-        select(func.count())
-        .select_from(ViewORM)
-        .where(ViewORM.data_source_id == ds_id)
-    )).scalar_one()
-    if view_count:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{view_count} view{'s are' if view_count != 1 else ' is'} built on this "
-                "data source. Moving it would leave them reading a source in another "
-                "workspace. Delete or rebuild them first."
-            ),
-        )
-
-    # A workspace can't hold the same provider+graph twice (uq_ds_ws_prov_graph).
-    if ds.provider_id and ds.graph_name:
-        clash = (await session.execute(
-            select(WorkspaceDataSourceORM.id).where(
-                WorkspaceDataSourceORM.workspace_id == target_id,
-                WorkspaceDataSourceORM.provider_id == ds.provider_id,
-                WorkspaceDataSourceORM.graph_name == ds.graph_name,
-                # A tombstone in the target workspace must not raise a 409 naming a data source
-                # the user cannot see and cannot get rid of. (uq_ds_ws_prov_graph_live agrees.)
-                WorkspaceDataSourceORM.deleted_at.is_(None),
-            )
-        )).first()
-        if clash:
-            raise HTTPException(
-                status_code=409,
-                detail=f"'{target.name}' already has this graph connected",
-            )
-
-    source_ws_name = (await workspace_repo.get_workspace_orm(session, workspace_id)).name
-
-    # The row keeps its id, so stats, polling config and aggregation state follow it
-    # for free. Only its owner changes.
-    ds.workspace_id = target_id
-    ds.is_primary = False  # primacy is per-workspace; it isn't inherited
-    await session.flush()
-
-    from backend.app.services.versioning import purge_worker
-    try:
-        graph_id = await purge_worker.rehome_graph_for_data_source(
-            data_source_id=ds_id, to_workspace_id=target_id)
-    except purge_worker.MoveBlocked as blocked:
-        raise HTTPException(status_code=409, detail=str(blocked))
-    except Exception:
-        logger.exception("could not move the versioned graph of %s", ds_id)
-        raise HTTPException(
-            status_code=503,
-            detail="The version store is unavailable, so this can't be moved right now. "
-                   "Nothing has been changed. Try again shortly.")
-
-    # Both workspaces' cached provider handles now describe the wrong shape.
-    await provider_registry.evict_workspace(workspace_id, session)
-    await provider_registry.evict_workspace(target_id, session)
-
-    await user_repo.create_outbox_event(
-        session,
-        event_type="workspace.datasource.moved",
-        payload={
-            "data_source_id": ds_id,
-            "from_workspace_id": workspace_id,
-            "from_workspace_name": source_ws_name,
-            "to_workspace_id": target_id,
-            "to_workspace_name": target.name,
-            "actor_id": user.id,
-            "graph_id": graph_id,  # its version history, moved with it; None when external
-        },
-    )
-
-    return await data_source_repo.get_data_source(session, ds_id)
+    row = await data_source_transfer.move(session, ds_id=ds_id, from_ws_id=workspace_id,
+                                          claims=claims, user_id=user.id, req=req)
+    return (await data_source_transfer.to_responses(session, [row], claims, user_id=user.id))[0]
 
 
 @router.get("/{workspace_id}/data-sources/{ds_id}/impact", response_model=WorkspaceDataSourceImpactResponse)

@@ -6,9 +6,9 @@ each with the head of ``main``. A source that is absent is not versioned there.
 
 A graph in the trash answers none of its routes, and answers them again once restored.
 
-Moving a data source files its graph — and the graph's jobs — under the new workspace, unless
-version control is busy with it or holds drafts or reviews; and the reaper files a graph left
-behind by an earlier move under its source's workspace, trashing it if the source is in the
+Moving a data source files its graph — and the graph's jobs — under the new workspace, open
+drafts and reviews included, unless version control is busy with it; and the reaper files a graph
+left behind by an earlier move under its source's workspace, trashing it if the source is in the
 trash, without ever removing a source row whose graph still stands.
 """
 import asyncio
@@ -138,26 +138,30 @@ async def _a_move_carries_the_graph() -> None:
         s.add(models.JobORM(job_type="export", graph_id=gid, workspace_id="ws_a",
                             data_source_id=ds, status="completed"))
 
-    # someone's open draft holds it back, and nothing is written
-    draft = await svc.open_draft(graph_id=gid, owner="bob")
-    with pytest.raises(purge_worker.MoveBlocked, match="1 open draft is on this .* abandon it first"):
-        await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
-    assert (await _graph(gid))[0] == "ws_a"
-    await svc.abandon_draft(graph_id=gid, branch_id=draft, actor="bob")
-
-    # so does version control at work on it
+    # version control at work on it holds a person's move back, and nothing is written
     async with db.graphver_session() as s:
         busy = models.JobORM(job_type="export", graph_id=gid, workspace_id="ws_a",
                              data_source_id=ds, status="running")
         s.add(busy)
     with pytest.raises(purge_worker.MoveBlocked, match="busy"):
         await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b")
+    assert (await _graph(gid))[0] == "ws_a"
+    # ...but not putting back what a failed move changed, nor the reaper: the source is where it is
+    assert await purge_worker.rehome_graph_for_data_source(
+        data_source_id=ds, to_workspace_id="ws_b", refuse_busy=False) == gid
+    assert await purge_worker.rehome_graph_for_data_source(
+        data_source_id=ds, to_workspace_id="ws_a", refuse_busy=False) == gid
+    assert (await _graph(gid))[0] == "ws_a"
     async with db.graphver_session() as s:
         (await s.get(models.JobORM, busy.id)).status = "completed"
 
-    # free of both, the graph and its jobs move; moving again changes nothing
+    # someone's open draft goes with it, still open: the move's preview names its owner if they
+    # can't reach the new workspace. The graph and every job move; moving again changes nothing
+    draft = await svc.open_draft(graph_id=gid, owner="bob")
     assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == gid
     assert await _graph(gid) == ("ws_b", None, None, {"ws_b"})
+    async with db.graphver_session() as s:
+        assert (await s.get(models.BranchORM, draft)).status == "open"
     assert await purge_worker.rehome_graph_for_data_source(data_source_id=ds, to_workspace_id="ws_b") == gid
 
     # its history answers where it went, and only there

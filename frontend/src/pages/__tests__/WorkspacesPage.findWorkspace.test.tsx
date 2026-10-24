@@ -11,9 +11,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listWorkspaces, listToAnswer, auth } = vi.hoisted(() => ({
+const { listWorkspaces, listToAnswer, listIncoming, auth } = vi.hoisted(() => ({
     listWorkspaces: vi.fn(),
     listToAnswer: vi.fn(),
+    listIncoming: vi.fn(),
     auth: { canCreate: false, answers: false },
 }))
 
@@ -39,6 +40,7 @@ vi.mock('@/components/workspaces/WorkspaceDirectory', () => ({
 vi.mock('@/components/access/ReviewRequestsPanel', () => ({
     ReviewRequestsPanel: () => <div>the requests</div>,
 }))
+vi.mock('@/services/dataSourceTransferService', () => ({ dataSourceTransferService: { listIncoming } }))
 vi.mock('@/services/accessRequestsService', async (orig) => ({
     ...(await orig<typeof import('@/services/accessRequestsService')>()),
     accessRequestsService: { listToAnswer },
@@ -51,7 +53,9 @@ vi.mock('@/store/auth', () => ({
             permissions: { ws: auth.answers ? { w1: ['workspace:members:add'] } : {} },
         }),
 }))
-vi.mock('@/components/admin/WorkspaceCard', () => ({
+vi.mock('@/components/admin/WorkspaceCard', async (orig) => ({
+    // The workspace tiles (monogram, accent) are shared with the transfer rows.
+    ...(await orig<typeof import('@/components/admin/WorkspaceCard')>()),
     WorkspaceCard: ({ ws }: { ws: { id: string; name: string } }) => <div>{ws.name}</div>,
 }))
 
@@ -79,6 +83,7 @@ beforeEach(() => {
     auth.canCreate = false
     auth.answers = false
     listToAnswer.mockResolvedValue([])
+    listIncoming.mockResolvedValue([])
     useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, workspaceDirectoryEnabled: true } })
 })
 
@@ -131,5 +136,26 @@ describe('WorkspacesPage — Find a workspace', () => {
         await user.click(requests)
         expect(await screen.findByText('the requests')).toBeInTheDocument()
         expect(listToAnswer).toHaveBeenCalledWith({ status: 'open', workspaceId: undefined })
+    })
+
+    it('counts data sources waiting to move in on the Requests tab, and lists them above access requests', async () => {
+        const user = userEvent.setup()
+        auth.answers = true
+        listToAnswer.mockResolvedValue([{ id: 'ar_1' }])
+        listIncoming.mockResolvedValue([{
+            id: 'xfer_1', kind: 'request', status: 'pending',
+            dataSource: { id: 'ds_orders', name: 'Orders', type: 'data_source' },
+            fromWorkspace: { id: 'ws_fin', name: 'Finance' }, toWorkspace: { id: 'w1', name: 'Sales Analytics' },
+            createdBy: { id: 'usr_ana', name: 'Ana Admin' }, createdAt: '2026-01-01T00:00:00Z',
+            expiresAt: '2026-01-15T00:00:00Z', viewCount: 2, reason: null, canDecline: true,
+        }])
+        listWorkspaces.mockResolvedValue([SALES])
+        renderPage()
+        const requests = await screen.findByRole('tab', { name: /Requests/ })
+        await waitFor(() => expect(requests).toHaveTextContent('2'))
+        await user.click(requests)
+        expect(await screen.findByText('Data sources waiting to move in')).toBeInTheDocument()
+        expect(screen.getByText('Orders')).toBeInTheDocument()
+        expect(screen.getByText('the requests')).toBeInTheDocument()
     })
 })

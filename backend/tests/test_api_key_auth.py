@@ -483,6 +483,14 @@ async def test_endpoints_off_the_surface_are_refused(client, db_session):
         # Opening or closing the emergency password window: a door for
         # people, never for a key.
         (method, "/api/v1/admin/sso/config/password-fallback") for method in ("POST", "DELETE")
+    ] + [
+        # Moving a data source re-homes other people's work and changes who
+        # can read it: people decide that, in both workspaces.
+        ("GET", "/api/v1/admin/workspaces/ws_a/data-sources/ds_a/move-preview?to=ws_b"),
+        ("POST", "/api/v1/admin/workspaces/ws_a/data-sources/ds_a/move"),
+        ("POST", "/api/v1/admin/workspaces/ws_a/data-sources/ds_a/transfer-requests"),
+        ("POST", "/api/v1/admin/data-source-transfers/xfer_a/accept"),
+        ("POST", "/api/v1/admin/data-source-transfers/xfer_a/undo"),
     ]
     for method, path in calls:
         response = await client.request(method, path, headers=key.headers)

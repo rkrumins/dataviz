@@ -25,6 +25,7 @@
  *   VITE_TIMEOUT_CANVAS_BOOTSTRAP_MS
  *   VITE_TIMEOUT_SEARCH_ADVANCED_MS
  *   VITE_TIMEOUT_VIEW_TRANSFER_MS
+ *   VITE_TIMEOUT_DATA_SOURCE_MOVE_MS
  *   VITE_TIMEOUT_PROVIDER_HEALTH_MS
  *   VITE_TIMEOUT_ADMIN_LIST_MS
  *   VITE_TIMEOUT_LINEAGE_FOCUS_MS
@@ -146,6 +147,11 @@ export const TIMEOUTS = {
   // backend's own 120s tier (a large view's identity check is legitimately slow), so the client
   // outlasts it and nginx's 180s outlasts both: the server's structured error always arrives.
   VIEW_TRANSFER_MS:     readMs('VITE_TIMEOUT_VIEW_TRANSFER_MS',    150_000, _LONG),
+  // Moving a data source to another workspace, accepting a request to, and undoing one: each
+  // rewrites every view on the source in one transaction, in the backend's own 120s tier. The
+  // client outlasts it, as for view transfers, so the server's answer always arrives — and a
+  // move that finished after all is what a retry gets back.
+  DATA_SOURCE_MOVE_MS:  readMs('VITE_TIMEOUT_DATA_SOURCE_MOVE_MS', 150_000, _LONG),
   // /search/advanced. A request runs at most 100s server-side (the
   // engine's request cap, inside the 120s graph tier) and still returns
   // partial results when its soft deadline passes — give the client

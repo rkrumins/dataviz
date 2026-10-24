@@ -147,6 +147,22 @@ async def get_data_source_orm(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def hold_in_workspace(session: AsyncSession, ds_id: str, workspace_id: str) -> bool:
+    """Whether the live data source ``ds_id`` is in ``workspace_id`` — keeping it there until the
+    transaction ends, because something is being built on it.
+
+    The row is read ``FOR KEY SHARE``. A move holds the source ``FOR UPDATE``, so this waits the
+    move out and then re-reads the row: a view can't be born in the workspace its source just
+    left. A move that starts after this waits for the view instead, and takes it along.
+    """
+    found = await session.scalar(
+        select(WorkspaceDataSourceORM.id)
+        .where(WorkspaceDataSourceORM.id == ds_id,
+               WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
+        .with_for_update(read=True, key_share=True))
+    return found is not None
+
+
 async def get_primary_data_source(
     session: AsyncSession, workspace_id: str
 ) -> Optional[WorkspaceDataSourceORM]:
