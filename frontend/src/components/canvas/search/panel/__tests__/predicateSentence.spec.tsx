@@ -277,6 +277,73 @@ describe('predicateSentence — relationships and names', () => {
 })
 
 
+describe('predicateSentence — every kind, word for word', () => {
+    const type = (value: string): Predicate => ({ kind: 'entityType', op: 'in', values: [value] })
+    const text = (target: string, match: string, value: string): Predicate =>
+        ({ kind: 'text', value, target, match, caseSensitive: false, boost: 1 } as Predicate)
+    const plain = (p: Predicate, singular = true) => {
+        const { container } = render(<>{formatPredicateAsSentence(p, singular
+            ? { leadIn: 'Anything', singular: true } : {})}</>)
+        return (container.textContent ?? '').replace(/\s+/g, ' ').replace(/["“”]/g, '')
+    }
+
+    it.each<[string, Predicate, string]>([
+        ['name contains', text('name', 'substring', 't2'), 'Anything where name contains t2.'],
+        ['qualified name exactly', text('qualifiedName', 'exact', 'a.b'),
+            'Anything where qualified name is exactly a.b.'],
+        ['description starts with', text('description', 'prefix', 'x'),
+            'Anything where description starts with x.'],
+        ['tags end with', text('tags', 'suffix', 'y'), 'Anything where tags ends with y.'],
+        ['any field', text('any', 'substring', 'z'), 'Anything where any text field contains z.'],
+        ['one type', type('dataset'), 'Anything where type is dataset.'],
+        ['not these types', { kind: 'entityType', op: 'notIn', values: ['dataset', 'column'] },
+            'Anything where type is not one of dataset / column.'],
+        ['all of these tags', { kind: 'tag', op: 'hasAll', values: ['PII', 'GDPR'] },
+            'Anything that is tagged with all of #PII, #GDPR.'],
+        ['not tagged', { kind: 'tag', op: 'notHas', values: ['PII'] },
+            'Anything that is NOT tagged with #PII.'],
+        ['a layer', { kind: 'layer', layerAssignment: 'gold' }, 'Anything where layer is gold.'],
+        ['a property set', { kind: 'hasProperty', key: 'owner' } as Predicate,
+            'Anything that has a owner property.'],
+        ['a property missing', { kind: 'hasProperty', key: 'owner', negate: true } as Predicate,
+            'Anything that does not have a owner property.'],
+        ['no upstream', { kind: 'isRoot' }, 'Anything that has no upstream lineage.'],
+        ['no downstream', { kind: 'isLeaf' }, 'Anything that has no downstream lineage.'],
+        ['no lineage', { kind: 'isOrphan' }, 'Anything that has no lineage edges.'],
+        ['downstream lineage', { kind: 'hasOutgoing' }, 'Anything that has outgoing lineage edges.'],
+        ['near, downstream', { kind: 'withinHops', urns: [], refs: [{ path: ['Sales'] }], hops: 2,
+            direction: 'out' } as Predicate, 'Anything that is ≤ 2 hops downstream of Sales.'],
+        ['near, either way', { kind: 'withinHops', urns: [], refs: [{ path: ['Sales'] }], hops: 1,
+            direction: 'both' } as Predicate, 'Anything that is ≤ 1 hop within Sales.'],
+        ['edge count', { kind: 'degree', direction: 'in', op: 'gte', value: 3 } as Predicate,
+            'Anything that has in edges gte 3.'],
+        ['no child', { kind: 'related', axis: 'child', quantifier: 'none', where: type('column') },
+            'Anything that has no child where type is column.'],
+        ['a descendant', { kind: 'related', axis: 'descendant', where: type('column') },
+            'Anything that has a descendant where type is column.'],
+        ['linked either way', { kind: 'related', axis: 'neighbor', maxHops: 2 },
+            'Anything that has a linked entity within 1–2 hops.'],
+        ['several subtrees', { kind: 'descendantOf', urns: [], refs: [{ path: ['a'] }, { path: ['b'] }] },
+            'Anything that is inside 2 subtrees.'],
+        ['routes between named', { kind: 'path', sourceUrns: [], targetUrns: [],
+            sourceRefs: [{ path: ['a'] }, { path: ['b'] }], targetRefs: [{ path: ['c'] }] } as Predicate,
+            'Anything that lies on a route from any of a, b to c (up to 4 hops).'],
+        ['a NOT inside all', { kind: 'group', op: 'and', children: [type('dataset'),
+            { kind: 'group', op: 'not', children: [{ kind: 'tag', op: 'hasAny', values: ['PII'] }] }] },
+            'Anything where all of these are true:type is datasetNOT is tagged #PII'],
+        ['an any-of inside all', { kind: 'group', op: 'and', children: [type('dataset'),
+            { kind: 'group', op: 'or', children: [text('name', 'substring', 'a'), text('name', 'substring', 'b')] }] },
+            'Anything where all of these are true:type is dataset(name contains a OR name contains b)'],
+    ])('reads %s', (_, p, sentence) => {
+        expect(plain(p)).toBe(sentence)
+    })
+
+    it('reads a shape for several entities', () => {
+        expect(plain({ kind: 'isLeaf' }, false)).toBe('Show me entities that have no downstream lineage.')
+    })
+})
+
+
 describe('QuerySentence — the container a query looks inside', () => {
     it('shows a container named by its path as the scope chip', () => {
         const { container } = render(<QuerySentence draftPredicate={{ kind: 'group', op: 'and', children: [
