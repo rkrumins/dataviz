@@ -238,6 +238,98 @@ describe('change feed follower', () => {
 })
 
 /**
+ * A leader that stops without leaving.
+ *
+ * A browser can freeze a background tab without closing it, and a frozen
+ * tab keeps its lock, so no other tab takes over. The tab being looked at
+ * must not wait for broadcasts that never come.
+ */
+describe('a follower whose leader has gone quiet', () => {
+  function setHidden(hidden: boolean) {
+    Object.defineProperty(document, 'hidden', { value: hidden, configurable: true })
+  }
+
+  beforeEach(() => {
+    __resetChangeFeedForTests()
+    fetchChangeManifest.mockReset()
+    fetchChangeManifest.mockResolvedValue({ topics: {} })
+    FakeBroadcastChannel.instances = []
+    const locks = new FakeLockManager()
+    // Another tab holds leadership and never lets go, as a frozen tab does.
+    void locks.request('nx-change-feed-leader', () => new Promise<void>(() => {}))
+    vi.stubGlobal('navigator', { locks })
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+    vi.stubGlobal('EventSource', InertEventSource)
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    setHidden(false)
+    __resetChangeFeedForTests()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('checks for itself while visible, once the leader has been silent a while', async () => {
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(1) // the startup read
+
+    // Two intervals of silence is still the leader's business.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(1)
+
+    // Past two and a half, it checks, and keeps checking every interval.
+    await vi.advanceTimersByTimeAsync(120_000)
+    const quiet = fetchChangeManifest.mock.calls.length
+    expect(quiet).toBeGreaterThan(1)
+    await vi.advanceTimersByTimeAsync(78_001)
+    expect(fetchChangeManifest.mock.calls.length).toBeGreaterThan(quiet)
+    stop()
+  })
+
+  it('leaves the checking to a leader it keeps hearing from', async () => {
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(0)
+    const leader = new FakeBroadcastChannel('nx-change-feed')
+
+    for (let i = 0; i < 10; i++) {
+      leader.postMessage({ versions: {} })
+      await vi.advanceTimersByTimeAsync(60_000)
+    }
+
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('does not check while hidden, however long the silence', async () => {
+    setHidden(true)
+    const stop = startChangeFeed({ stream: false })
+
+    await vi.advanceTimersByTimeAsync(600_000)
+
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it('gives the leader a fresh wait when the tab comes back', async () => {
+    // Hidden for ten minutes, nobody looking, so the leader was rightly
+    // paused. Its broadcast follows our presence; checking at once would
+    // only duplicate it.
+    setHidden(true)
+    const stop = startChangeFeed({ stream: false })
+    await vi.advanceTimersByTimeAsync(600_000)
+
+    setHidden(false)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(fetchChangeManifest).toHaveBeenCalledTimes(1)
+    stop()
+  })
+})
+
+/**
  * Nobody looking, nothing asked.
  *
  * The leader is often a background tab working for a visible one, so it

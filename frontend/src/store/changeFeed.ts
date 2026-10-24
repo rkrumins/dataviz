@@ -473,6 +473,13 @@ const PRESENCE_TTL_MS = 75_000
 let lastPresenceAt = 0
 
 /**
+ * How many check intervals a visible follower waits without hearing from
+ * the leader before it checks for itself. The leader broadcasts after every
+ * check, so silence this long means it has stopped.
+ */
+const LEADER_SILENCE_CHECKS = 2.5
+
+/**
  * Tell the leader, while this tab is visible, that somebody is looking.
  *
  * Every tab does this, leader included (it costs no requests: the
@@ -608,13 +615,39 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
   }
 
   // Followers apply what the leader learns. A follower opens no stream
-  // and runs no timer, so its steady-state cost is zero.
+  // and makes no request while the leader is heard, so its steady-state
+  // cost is zero.
+  let lastHeardFromLeader = Date.now()
   const onMessage = (ev: MessageEvent) => {
     if (myEpoch !== transportEpoch) return
     const next = ev.data?.versions
-    if (next && typeof next === 'object') applyPushedVersions(next)
+    if (next && typeof next === 'object') {
+      lastHeardFromLeader = Date.now()
+      applyPushedVersions(next)
+    }
   }
   openChannel()?.addEventListener('message', onMessage)
+
+  // A leader can stop without leaving: a browser that freezes a background
+  // tab keeps its lock, so nobody takes over, and the tab being looked at
+  // would wait for broadcasts that never come. So a visible follower that
+  // has heard nothing for a while checks for itself, every interval, until
+  // the leader is heard again. Coming back to the tab restarts the wait:
+  // a leader paused because nobody was looking resumes on our presence.
+  const unsubscribeVisible = onAppVisible(() => {
+    lastHeardFromLeader = Date.now()
+  }, { minIntervalMs: 0 })
+  let watchdog: ReturnType<typeof setTimeout> | null = null
+  const watch = () => {
+    if (abandoned || myEpoch !== transportEpoch) return
+    const visible = typeof document === 'undefined' || !document.hidden
+    const silentFor = Date.now() - lastHeardFromLeader
+    if (stopWork === null && visible && silentFor > LEADER_SILENCE_CHECKS * checkIntervalMs) {
+      void pollChangeFeed().catch(() => {})
+    }
+    watchdog = setTimeout(watch, withJitter(checkIntervalMs))
+  }
+  watchdog = setTimeout(watch, withJitter(checkIntervalMs))
 
   // One read on startup regardless of role: a tab opened mid-session
   // holds nothing, and waiting for the leader's next broadcast would
@@ -645,6 +678,8 @@ function startWithLeaderElection(myEpoch: number, useStream: boolean): () => voi
   return () => {
     abandoned = true
     stopPresence()
+    unsubscribeVisible()
+    if (watchdog) clearTimeout(watchdog)
     openChannel()?.removeEventListener('message', onMessage)
     stopWork?.()
     stopWork = null
