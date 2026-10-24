@@ -227,6 +227,7 @@ their series are complete: alert on those.
 | `cooperative_cancels_observed_total{kind}` | counter | worker | Running jobs that honoured a cancel |
 | `stuck_jobs_redispatched_total{kind,outcome}` | counter | control plane | Recovery of stalled jobs: `auto_resumed`, `marked_failed`, `pending_abandoned`, `auto_resume_exhausted` |
 | `aggregation_job_history_pruned_total{outcome}` | counter | control plane | The job-history retention sweep: `swept`, `capped`, `failed` |
+| `api_key_housekeeping_steps_total{step,outcome}` | counter | control plane | The hourly API key pass, step by step, each `done` or `failed`: `service_accounts` (whether each [service account](/guide/service-accounts) still has a manager — what pauses its keys after the grace period), `expiry_reminders`, `usage_prune`. A step that fails doesn't stop the others |
 | `job_events_emitted_total{kind,type}`, `job_events_emit_errors_total{kind,type,stage}` | counter | processes that run jobs | Job progress events, and failures to record or publish them |
 | `graph_store_command_calls{endpoint,role,command}`, `graph_store_command_usec_per_call{…}` | gauge | the process that swept the graph-store topology | Per node and command, since the node started — use `rate()` of the calls with the per-call time beside it |
 | `metrics_series_dropped_total{metric}` | counter | any | A metric reached its cap of 500 label sets and dropped series |
@@ -303,6 +304,7 @@ A starter set, built from what the platform exports. Tune the windows to your tr
 | API keys can't be checked | `sum(increase(api_key_requests_total{outcome="api_keys_unavailable"}[5m]))` | Above 0 | The database or the feature switches can't be read, so every request with a key gets `503` |
 | Keys being guessed | `sum(increase(api_key_requests_total{outcome="invalid_api_key"}[15m]))` | Well above your usual | Tokens nobody issued are being tried. Each address is already limited; a steady climb means many addresses |
 | Integrations paused | `sum(increase(api_key_requests_total{outcome=~"owner_reauth_required\|api_key_unmanaged"}[1h]))` | Above 0, rising | Keys stopped because their owners haven't signed in through single sign-on recently, or password sign-in was switched off — owners resume them by signing in — or because a service account has had no manager for longer than its grace period, which appointing one ends |
+| Service accounts unchecked | `sum(increase(api_key_housekeeping_steps_total{step="service_accounts",outcome="done"}[3h]))` | 0 | The hourly check of who manages each service account hasn't completed for three hours, so one whose last manager's sign-in lapsed keeps its keys working past its grace period. The control plane's log says why (`API key housekeeping: service_accounts failed`) |
 | Restarts | Container restart count | Any, sustained | Crash loops hide behind healthy averages |
 
 Postgres, Redis and the graph store's own memory aren't exported by the platform; use your

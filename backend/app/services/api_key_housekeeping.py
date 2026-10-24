@@ -10,12 +10,15 @@ The reminder follows the key's own expiry. A deployment's maximum lifetime,
 lowered after a key was made, takes effect at once and is the admin's to
 announce.
 
-Each pass also checks that every service account still has a manager in good
-standing (``service_account_standing.sweep``): a manager's sign-in window
-lapses with time alone, with no request to notice it.
+Each pass first checks that every service account still has a manager in
+good standing (``service_account_standing.sweep``): a manager's sign-in window
+lapses with time alone, with no request to notice it, and that check is what
+pauses the account's keys.
 
 Runs on the CONTROLPLANE/DEV role only, like the other sweepers, and claims
-an advisory lock per pass so two processes never send the same reminder.
+an advisory lock for each step of a pass so two processes never send the same
+reminder. Each step commits on its own: one that fails is logged and counted
+(``api_key_housekeeping_steps_total``), and the others still run.
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.advisory import claim_this_pass
+from backend.app.jobs.metrics import increment as metrics_increment
 from backend.app.db.repositories import (
     api_key_repo,
     api_key_usage_repo,
@@ -109,42 +113,64 @@ async def remind_once(session: AsyncSession) -> int:
     return reminded
 
 
+async def _service_accounts(session: AsyncSession) -> None:
+    lost, reminded = await service_account_standing.sweep(session)
+    if lost or reminded:
+        logger.info(
+            "Service accounts: %d lost their last manager, %d reminded of their keys pausing",
+            lost, reminded,
+        )
+
+
+async def _expiry_reminders(session: AsyncSession) -> None:
+    reminded = await remind_once(session)
+    if reminded:
+        logger.info("Sent %d API key expiry reminder(s)", reminded)
+
+
+#: A pass, most important first: whether a service account still has a
+#: manager decides whether its keys work.
+_STEPS = (
+    ("service_accounts", _service_accounts),
+    ("expiry_reminders", _expiry_reminders),
+    ("usage_prune", lambda session: api_key_usage_repo.prune(session)),
+)
+
+
+async def _run_step(session_factory, step: str, run) -> bool:
+    """One step of a pass, committed on its own. Returns False when another
+    process holds the pass. A step that fails is logged and counted, so a
+    check that stops working shows, and the next step runs regardless."""
+    try:
+        async with session_factory() as session:
+            if not await claim_this_pass(session, "auth:api-key-housekeeping"):
+                return False
+            await run(session)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the other steps, and the loop, carry on
+        logger.warning("API key housekeeping: %s failed: %s", step, exc, exc_info=True)
+        metrics_increment("api_key_housekeeping_steps_total", step=step, outcome="failed")
+        return True
+    metrics_increment("api_key_housekeeping_steps_total", step=step, outcome="done")
+    return True
+
+
 async def run_sweeper(
     session_factory,
     shutdown: asyncio.Event,
     *,
     interval: float = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
-    """Background loop until ``shutdown`` is set: remind owners of keys about
-    to expire, check that service accounts still have managers, and drop
-    usage counts past their retention. A failed pass is logged and retried on
+    """Background loop until ``shutdown`` is set: check that service accounts
+    still have managers, remind owners of keys about to expire, and drop
+    usage counts past their retention. A failed step is logged and retried on
     the next tick."""
     logger.info("API key housekeeping started (interval=%.0fs)", interval)
     while not shutdown.is_set():
-        try:
-            async with session_factory() as session:
-                if await claim_this_pass(session, "auth:api-key-housekeeping"):
-                    reminded = await remind_once(session)
-                    if reminded:
-                        logger.info("Sent %d API key expiry reminder(s)", reminded)
-                    # Each step commits before the next, so one that fails
-                    # cannot take the earlier ones back with it. A commit lets
-                    # the pass go, so the next step claims it again.
-                    await session.commit()
-                    if await claim_this_pass(session, "auth:api-key-housekeeping"):
-                        lost, pausing = await service_account_standing.sweep(session)
-                        if lost or pausing:
-                            logger.info(
-                                "Service accounts: %d lost their last manager, %d pause soon",
-                                lost, pausing,
-                            )
-                        await session.commit()
-                    if await claim_this_pass(session, "auth:api-key-housekeeping"):
-                        await api_key_usage_repo.prune(session)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — loop must survive blips
-            logger.warning("API key housekeeping failed: %s", exc, exc_info=True)
+        for step, run in _STEPS:
+            if not await _run_step(session_factory, step, run):
+                break  # another process is running this pass
 
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=interval)

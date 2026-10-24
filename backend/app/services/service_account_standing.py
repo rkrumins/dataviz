@@ -35,6 +35,9 @@ from backend.common.service_accounts import DEFAULT_GRACE_DAYS, grace_days, is_s
 
 #: How far ahead of its keys pausing the administrators are reminded.
 REMIND_AHEAD = timedelta(days=3)
+#: Past this many accounts at once — a sign-in window shortened, someone who
+#: managed many suspended — the administrators get one notice, not one each.
+DIGEST_OVER = 5
 #: The switches a key request reads (``api_key_auth._policy``), read here by
 #: name: the control plane runs the sweep and must not import the request path.
 _SSO_WINDOW_FLAG = "apiKeySsoSignInWindow"
@@ -96,7 +99,23 @@ async def refresh(
         passwords_allowed=rules.passwords_allowed, account_ids=account_ids,
     )
     accounts = await service_account_repo.unmanaged_accounts(session, lost)
-    if accounts:
+    if len(accounts) > DIGEST_OVER:
+        pauses = now + timedelta(days=rules.grace_days)
+        await notification_repo.notify(
+            session, user_ids=await binding_repo.platform_admin_user_ids(session),
+            kind="service_account_unmanaged",
+            title=f"{len(accounts)} service accounts have no manager left",
+            body=(
+                f"Nobody who manages {_some(accounts)} can act for them any more. "
+                + (
+                    f"Their keys keep working until {pauses.date().isoformat()}; appoint managers "
+                    "to keep them working." if rules.grace_days > 0
+                    else "Their keys are paused until each has a manager again."
+                )
+            ),
+            link="/admin/service-accounts", resource_type="service_account",
+        )
+    elif accounts:
         admins = await binding_repo.platform_admin_user_ids(session)
         for account in accounts:
             if rules.grace_days > 0:
@@ -119,11 +138,18 @@ async def refresh(
     return lost
 
 
+def _some(accounts) -> str:
+    """A few accounts by name, and how many more."""
+    named = ", ".join(f"“{a.name}”" for a in accounts[:3])
+    return named if len(accounts) <= 3 else f"{named} and {len(accounts) - 3} more"
+
+
 async def remind_pausing(
     session: AsyncSession, *, now: Optional[datetime] = None, rules: Optional[Policy] = None,
 ) -> int:
     """Remind the administrators of accounts whose keys pause within three
-    days for want of a manager — once per lapse. Returns how many."""
+    days for want of a manager — or, the grace period shortened, have paused
+    already — once as that time draws near. Returns how many."""
     now = now or datetime.now(timezone.utc)
     rules = rules or await policy(session)
     due = await service_account_repo.due_pause_reminder(
@@ -132,18 +158,38 @@ async def remind_pausing(
     if not due:
         return 0
     admins = await binding_repo.platform_admin_user_ids(session)
-    for account in due:
-        pauses = _instant(account.unmanaged_since) + timedelta(days=rules.grace_days)
+    if len(due) > DIGEST_OVER:
         await notification_repo.notify(
             session, user_ids=admins, kind="service_account_pausing",
-            title="A service account's keys pause soon",
+            title=f"{len(due)} service accounts still have no manager",
             body=(
-                f"“{account.name}” still has no manager. Its keys stop working on "
-                f"{pauses.date().isoformat()} unless you appoint one."
+                f"The keys of {_some(due)} stop working {rules.grace_days} days after their last "
+                "manager went — within three days, or already. Appoint managers and they work again "
+                "at once."
             ),
-            link=_admin_link(account.id), resource_type="service_account", resource_id=account.id,
-            dedupe_unread=True,
+            link="/admin/service-accounts", resource_type="service_account",
         )
+    else:
+        for account in due:
+            pauses = _instant(account.unmanaged_since) + timedelta(days=rules.grace_days)
+            day = pauses.date().isoformat()
+            # No unread check: a reminder is due once each time the pause draws
+            # near, and a lengthened grace period moves that, so an earlier
+            # one still unread says the wrong day.
+            await notification_repo.notify(
+                session, user_ids=admins, kind="service_account_pausing",
+                title=(
+                    "A service account's keys pause soon" if pauses > now
+                    else "A service account's keys have paused"
+                ),
+                body=(
+                    f"“{account.name}” still has no manager. Its keys stop working on {day} "
+                    "unless you appoint one." if pauses > now
+                    else f"“{account.name}” still has no manager, so its keys stopped working on "
+                    f"{day}. Appoint one and they work again at once."
+                ),
+                link=_admin_link(account.id), resource_type="service_account", resource_id=account.id,
+            )
     await service_account_repo.mark_pause_reminded(session, [a.id for a in due], now=now)
     return len(due)
 

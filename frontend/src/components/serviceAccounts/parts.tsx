@@ -7,6 +7,11 @@
  * it. When the last one goes its keys keep working until `pausesAt`, then
  * pause until a manager is appointed. One chip says the most pressing of
  * those facts, and its tip says what follows from it.
+ *
+ * Whether the keys work follows `pausesAt`, as the server decides it: set
+ * when the account was found with nobody — at once by any change to its
+ * managers, within the hour when a manager's sign-in lapses or comes back.
+ * `managed` is who can act this minute, which can run ahead of it.
  */
 import { User, Users } from 'lucide-react'
 
@@ -34,18 +39,24 @@ export function standingOf(
     if (account.status === 'disabled') {
         return { tone: 'neutral', label: 'Disabled', detail: 'Its keys don’t work until an administrator enables it.' }
     }
-    if (!account.managed) {
-        if (account.pausesAt && new Date(account.pausesAt) > now) {
-            return {
-                tone: 'warning',
-                label: `Needs a manager — keys pause ${formatDay(account.pausesAt, now)}`,
-                detail: 'Nobody who manages it can act for it now. Its keys work until then; appointing a manager keeps them working.',
-            }
-        }
+    if (account.pausesAt && new Date(account.pausesAt) <= now) {
         return {
             tone: 'danger',
             label: 'Needs a manager — keys paused',
-            detail: 'Nobody manages it, so its keys are refused. They work again as soon as an administrator appoints a manager.',
+            detail: account.managed
+                ? 'Someone can act for it again: its keys work again within the hour.'
+                : 'Nobody manages it, so its keys are refused. They work again as soon as an administrator appoints a manager.',
+        }
+    }
+    if (!account.managed) {
+        return account.pausesAt ? {
+            tone: 'warning',
+            label: `Needs a manager — keys pause ${formatDay(account.pausesAt, now)}`,
+            detail: 'Nobody who manages it can act for it now. Its keys work until then; appointing a manager keeps them working.',
+        } : {
+            tone: 'warning',
+            label: 'Needs a manager',
+            detail: 'Nobody who manages it can act for it now. Its keys still work, and pause some days after this is noticed unless a manager is appointed.',
         }
     }
     if (account.singleManager) {

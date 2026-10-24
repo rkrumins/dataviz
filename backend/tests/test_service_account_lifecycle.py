@@ -9,11 +9,14 @@ managers and an hourly sweep keep it current, and tell the administrators.
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.sql import Select
 
 from backend.app.db.models import (
     GroupMemberORM,
@@ -27,7 +30,7 @@ from backend.app.db.models import (
     UserORM,
 )
 from backend.app.db.repositories import api_key_repo, role_repo, service_account_repo
-from backend.app.services import permission_service, service_account_standing
+from backend.app.services import api_key_housekeeping, permission_service, service_account_standing
 from backend.auth_service.core import api_keys
 from backend.auth_service.interface import InvalidCredentials
 from backend.auth_service.service import LocalIdentityService
@@ -204,15 +207,148 @@ async def test_admins_are_reminded_three_days_before_the_keys_pause(db_session):
     await db_session.commit()
 
     rules = service_account_standing.Policy(window_days=30, passwords_allowed=True, grace_days=14)
-    assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=rules) == 1
-    [note] = await _notes(db_session, "service_account_pausing")
-    assert note.resource_id == "svc_due"
+    assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=rules) == 2
+    titles = {n.resource_id: n.title for n in await _notes(db_session, "service_account_pausing")}
+    # One whose keys have paused already, never told — the sweep was down,
+    # say — is told that.
+    assert titles == {
+        "svc_due": "A service account's keys pause soon",
+        "svc_paused": "A service account's keys have paused",
+    }
     assert (await db_session.get(ServiceAccountORM, "svc_due")).pause_reminded_at
     # Once per lapse.
     assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=rules) == 0
     # With no grace there is nothing to warn of.
     instant = service_account_standing.Policy(window_days=30, passwords_allowed=True, grace_days=0)
     assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=instant) == 0
+
+
+async def test_a_reminder_follows_the_grace_period_when_it_changes(db_session):
+    await _platform_admin(db_session)
+    db_session.add_all(_account("svc_job", since=_ago(12)))
+    db_session.add_all(_account("svc_new", since=_ago(12)))
+    await db_session.commit()
+
+    def grace(days: int):
+        return service_account_standing.Policy(window_days=30, passwords_allowed=True, grace_days=days)
+
+    async def told() -> list[tuple[str, str]]:
+        return [(n.resource_id, n.title) for n in await _notes(db_session, "service_account_pausing")]
+
+    # Reminded under 14 days, of the pause two days out — svc_new too.
+    assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=grace(14)) == 2
+    # Lengthened to 30: nothing is due until the new day draws near, then it is.
+    assert await service_account_standing.remind_pausing(db_session, now=NOW, rules=grace(30)) == 0
+    later = NOW + timedelta(days=16)
+    assert await service_account_standing.remind_pausing(db_session, now=later, rules=grace(30)) == 2
+    assert (await told())[2:] == [
+        ("svc_job", "A service account's keys pause soon"), ("svc_new", "A service account's keys pause soon"),
+    ]
+    assert (NOW + timedelta(days=18)).date().isoformat() in (await _notes(db_session, "service_account_pausing"))[2].body
+
+    # Shortened past it: the keys have paused, and the administrators hear so, once.
+    (await db_session.get(ServiceAccountORM, "svc_new")).pause_reminded_at = None
+    await db_session.commit()
+    assert await service_account_standing.remind_pausing(db_session, now=later, rules=grace(10)) == 1
+    assert (await told())[4:] == [("svc_new", "A service account's keys have paused")]
+    assert await service_account_standing.remind_pausing(db_session, now=later, rules=grace(10)) == 0
+
+
+async def test_many_accounts_at_once_are_one_notice_for_the_administrators(db_session):
+    """A sign-in window shortened, or someone who managed a dozen accounts
+    suspended: one notice each for the lapse and the reminder, not a dozen."""
+    await _platform_admin(db_session)
+    db_session.add(_person("usr_mgr"))
+    accounts = [f"svc_{n}" for n in range(6)]
+    for account in accounts:
+        db_session.add_all(_account(account))
+    await db_session.flush()
+    for account in accounts:
+        db_session.add(ServiceAccountManagerORM(service_account_id=account, user_id="usr_mgr"))
+    (await db_session.get(UserORM, "usr_mgr")).status = "suspended"
+    await db_session.commit()
+
+    rules = service_account_standing.Policy(window_days=30, passwords_allowed=True, grace_days=14)
+    assert await service_account_standing.refresh(db_session, now=NOW, rules=rules) == accounts
+    [note] = await _notes(db_session, "service_account_unmanaged")
+    assert note.title == "6 service accounts have no manager left"
+    assert "“Account svc_0”, “Account svc_1”, “Account svc_2” and 3 more" in note.body
+    assert (NOW + timedelta(days=14)).date().isoformat() in note.body
+
+    later = NOW + timedelta(days=12)
+    assert await service_account_standing.remind_pausing(db_session, now=later, rules=rules) == 6
+    [reminder] = await _notes(db_session, "service_account_pausing")
+    assert reminder.title == "6 service accounts still have no manager"
+    assert await service_account_standing.remind_pausing(db_session, now=later, rules=rules) == 0
+
+
+async def test_standing_is_read_only_once_the_accounts_are_locked(db_session, monkeypatch):
+    """Two refreshes at once — a route's and the sweep's — must not stamp an
+    account from a list of managers the other has just changed: each locks
+    the rows, in one order, before it reads who manages them."""
+    db_session.add_all(_account("svc_b") + _account("svc_a"))
+    await db_session.commit()
+    seen = []
+    execute = db_session.execute
+
+    async def _recording(statement, *args, **kwargs):
+        seen.append(statement)
+        return await execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", _recording)
+    await service_account_repo.refresh_standing(
+        db_session, now=NOW, window_days=30, passwords_allowed=True, account_ids=["svc_b", "svc_a"],
+    )
+    lock, read = seen[0], seen[1]
+    assert isinstance(lock, Select) and lock._for_update_arg is not None
+    assert "ORDER BY service_accounts.user_id" in str(lock)
+    assert isinstance(read, Select) and read._for_update_arg is None
+
+
+async def test_the_hourly_pass_checks_standing_first_and_a_failing_step_stops_nothing(
+    db_session, monkeypatch,
+):
+    shutdown = asyncio.Event()
+    ran, counted = [], []
+
+    async def _standing_fails(_session, **_kw):
+        ran.append("service_accounts")
+        raise RuntimeError("the database went away")
+
+    async def _reminders(_session):
+        ran.append("expiry_reminders")
+        return 0
+
+    async def _prune(_session):
+        ran.append("usage_prune")
+        shutdown.set()
+        return 0
+
+    @asynccontextmanager
+    async def _transaction():
+        try:
+            yield db_session
+            await db_session.commit()
+        except BaseException:
+            await db_session.rollback()
+            raise
+
+    monkeypatch.setattr(service_account_standing, "sweep", _standing_fails)
+    monkeypatch.setattr(api_key_housekeeping, "remind_once", _reminders)
+    monkeypatch.setattr(api_key_housekeeping.api_key_usage_repo, "prune", _prune)
+    monkeypatch.setattr(
+        api_key_housekeeping, "metrics_increment",
+        lambda name, value=1.0, **labels: counted.append((name, labels["step"], labels["outcome"])),
+    )
+    await asyncio.wait_for(
+        api_key_housekeeping.run_sweeper(_transaction, shutdown, interval=3600), timeout=10,
+    )
+    assert ran == ["service_accounts", "expiry_reminders", "usage_prune"]
+    assert counted == [
+        ("api_key_housekeeping_steps_total", "service_accounts", "failed"),
+        ("api_key_housekeeping_steps_total", "expiry_reminders", "done"),
+        ("api_key_housekeeping_steps_total", "usage_prune", "done"),
+    ]
 
 
 async def test_with_no_grace_the_admins_hear_the_keys_are_paused(db_session):

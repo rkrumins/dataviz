@@ -112,6 +112,7 @@ async def refresh_standing(
     a stamp already there is when it was first noticed); one that has a manager
     again is cleared, with its reminder. Returns the accounts that have just
     lost their last manager, so the caller can tell the administrators."""
+    lock = select(ServiceAccountORM.user_id).order_by(ServiceAccountORM.user_id).with_for_update()
     stmt = select(
         ServiceAccountORM.user_id, ServiceAccountORM.unmanaged_since,
         managed(
@@ -123,7 +124,13 @@ async def refresh_standing(
         wanted = sorted(set(account_ids))
         if not wanted:
             return []
+        lock = lock.where(ServiceAccountORM.user_id.in_(wanted))
         stmt = stmt.where(ServiceAccountORM.user_id.in_(wanted))
+    # The rows are locked first, always in the same order, and who manages
+    # them read after: that read then sees whatever a concurrent change
+    # committed while this one waited, so no refresh stamps an account from
+    # a list of managers another has just changed.
+    await session.execute(lock)
     rows = (await session.execute(stmt)).all()
     lost = [r.user_id for r in rows if not r.managed and r.unmanaged_since is None]
     regained = [r.user_id for r in rows if r.managed and r.unmanaged_since is not None]
@@ -137,7 +144,7 @@ async def refresh_standing(
     if regained:
         await session.execute(
             update(ServiceAccountORM)
-            .where(ServiceAccountORM.user_id.in_(regained))
+            .where(ServiceAccountORM.user_id.in_(regained), ServiceAccountORM.unmanaged_since.is_not(None))
             .values(unmanaged_since=None, pause_reminded_at=None)
             .execution_options(synchronize_session=False)
         )
@@ -176,24 +183,37 @@ async def due_pause_reminder(
     session: AsyncSession, *, now: datetime, grace_days: int, ahead: timedelta,
 ) -> list[Unmanaged]:
     """Enabled accounts whose keys pause within ``ahead`` for want of a
-    manager, and whose administrators have not been reminded yet. None when
-    there is no grace to warn within."""
+    manager — or have paused already — and whose administrators have not
+    been reminded since that time drew near. A grace period lengthened after
+    a reminder brings another nearer the new date; one shortened past it is
+    still told of. None when there is no grace to warn within."""
     if grace_days <= 0:
         return []
     pauses_by = (now - timedelta(days=grace_days) + ahead).isoformat()
-    paused_by = (now - timedelta(days=grace_days)).isoformat()
     rows = (await session.execute(
-        select(ServiceAccountORM.user_id, UserORM.first_name, ServiceAccountORM.unmanaged_since)
+        select(
+            ServiceAccountORM.user_id, UserORM.first_name, ServiceAccountORM.unmanaged_since,
+            ServiceAccountORM.pause_reminded_at,
+        )
         .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
         .where(
             ServiceAccountORM.unmanaged_since.is_not(None),
             ServiceAccountORM.unmanaged_since <= pauses_by,
-            ServiceAccountORM.unmanaged_since > paused_by,
-            ServiceAccountORM.pause_reminded_at.is_(None),
             UserORM.status == "active", UserORM.deleted_at.is_(None),
         )
+        .order_by(func.lower(UserORM.first_name), ServiceAccountORM.user_id)
     )).all()
-    return [Unmanaged(id=r[0], name=r[1], unmanaged_since=r[2]) for r in rows]
+    due = []
+    for account_id, name, since, reminded in rows:
+        draws_near = _aware(since) + timedelta(days=grace_days) - ahead
+        if reminded is None or _aware(reminded) < draws_near:
+            due.append(Unmanaged(id=account_id, name=name, unmanaged_since=since))
+    return due
+
+
+def _aware(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 async def mark_pause_reminded(session: AsyncSession, account_ids: list[str], *, now: datetime) -> None:
