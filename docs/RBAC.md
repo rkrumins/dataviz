@@ -521,9 +521,13 @@ one of its data sources is.
 - **A service account's keys.** A service account (an id starting `svc_`) is resolved like a
   person, but keeps only its direct workspace bindings: no groups and no global roles, so no
   shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
-  administers the workspace nor lets people in. Its managers make keys that act as it, whatever
-  they can reach themselves: appointing a manager delegates the account's access, and whoever
-  controls a managing team's membership controls that delegation. See [Service
+  administers the workspace nor lets people in, and what is requestable is applied again at
+  resolution, so a role later widened to administer brings it none of that. Its managers make
+  keys that act as it, whatever they can reach themselves: appointing a manager delegates the
+  account's access, so it takes being able to grant each of the account's roles; and whoever
+  controls a managing team's membership controls that delegation, so adding someone to a team
+  that manages a service account takes `system:service-accounts:manage` as well as
+  `system:groups:manage`, and an access-request approval never adds anyone to one. See [Service
   Accounts](/guide/service-accounts).
 
 ## 403 body

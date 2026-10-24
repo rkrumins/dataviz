@@ -59,7 +59,9 @@ Its keys pick a new role up within half a minute.
 
 Those roles are all it has. Nothing else can be shared with it — a view, a
 template or a draft — and should someone later widen a role it holds to
-administer a workspace or let people in, it gets none of that. In a workspace
+administer a workspace or let people in, it gets none of that. A view it made
+is its own only while it holds a role in that view's workspace: take the role
+away and the view is out of its reach too. In a workspace
 whose identity provider decides who is in it, its role is not an exception
 that ends within 90 days: the provider doesn't know the account, so the role
 is your decision here, and it lasts until you take it away.
@@ -76,7 +78,14 @@ anyone remembering it.
 
 The trade-off is said wherever you choose one: **anyone in the team can make
 keys that act as the account**. Whoever controls the team's membership
-controls that, too.
+controls that, too — so once a team manages a service account, only an
+administrator of service accounts can add someone to it: not a team
+administrator alone, and never by approving an access request. Those who
+answer for the account are told whenever someone joins. A team your identity
+provider keeps changes as the provider says.
+
+A manager can do whatever the account can, so appointing one — or handing an
+account over — takes being able to grant each of its roles yourself.
 
 ### Disabling
 
@@ -99,12 +108,16 @@ Who manages an account, and its roles, are an administrator's to change.
 Someone allowed to manage users (a super admin) can make, rotate and revoke an
 account's keys without managing it; its managers are told when they do.
 
-What concerns the account is told to its managers — or, while it has none,
-to its administrators — naming it: misuse of a key, a key about to expire, an
-administrator revoking one, disabling or enabling the account, and anything
-said to the account itself, such as a workspace removing its access, an end
-date set on that access or its coming end, or a decision on a publication it
-asked for. Nobody reads the account's own inbox.
+What concerns the account is told to those who answer for it, naming it:
+the people who manage it themselves and, about a key, whoever made it while
+they still answer for it. An account managed only through a team tells up to
+25 of its members, the most recently active first, rather than the whole team;
+while nobody answers for it, its administrators are told instead. That covers
+misuse of a key, a key about to expire, a key revoked by an administrator or
+by whatever held it, disabling or enabling the account, and anything said to
+the account itself, such as a workspace removing its access, an end date set
+on that access or its coming end, or a decision on a publication it asked
+for. Nobody reads the account's own inbox.
 
 ---
 
@@ -113,21 +126,35 @@ asked for. Nobody reads the account's own inbox.
 Three things keep an integration from stopping because its person left.
 
 1. **Hand over when they leave.** Suspending someone on **Administration →
-   Users** lists the service accounts they manage, says which nobody else
-   manages, and names the keys they made. Choose a successor — a person or a
-   team — and **Hand over and suspend**. **Administration → Service accounts →
-   Hand over…** does the same without suspending anyone.
+   Users** lists every service account their leaving touches: those they
+   manage themselves, which a hand-over moves; those they manage through a
+   team, which keeps its seat; and those they made a key for that still works.
+   It says which nobody else manages, and names the keys they made. Choose a
+   successor — a person or a team — and **Hand over and suspend**.
+   **Administration → Service accounts → Hand over…** does the same without
+   suspending anyone.
 2. **The safety net.** When an account's last manager in good standing goes —
    suspended, removed, out of their team, or no longer signing in — every
    super admin and org admin is told at once. Its keys keep working for the
    grace period, **14 days** unless changed under **Administration → Features →
    Authentication → Keep a service account's keys working after its last
    manager goes** (at once, 7, 14 or 30 days), and the administrators are
-   reminded three days before they pause. Appointing a manager resumes them at
-   once. Standing is checked whenever managers change and once an hour, so a
-   lapse that comes with time alone is noticed within the hour.
-3. **Rotate what they made.** Keys the leaver made may still be in their
-   hands: the hand-over lists them, so the new manager can rotate them.
+   reminded three days before they pause — again nearer the new day if the
+   grace period is lengthened, and once that they have paused if it is
+   shortened past it. When more than five accounts lose their last manager at
+   once — a sign-in window shortened, say — the administrators get one notice
+   naming them, not one each. Appointing a manager resumes the keys at once.
+   Standing is checked whenever managers change and once an hour, first in
+   that hour's pass, so a lapse that comes with time alone is noticed within
+   the hour; [Observability](/docs/observability) says how to be alerted if
+   that check stops completing.
+3. **Revoke or rotate what they made.** Keys the leaver made may still be in
+   their hands. Suspending them offers to revoke every one at once (that takes
+   `system:users:manage`); whoever answers for each account is told, to make
+   a new key for whatever used it. Otherwise rotate them. And whenever someone
+   who made keys that still work stops answering for an account — removed as
+   its manager, taken out of its team or the team deleted, suspended, or made
+   a break-glass account — those who still answer for it are told.
 
 ---
 
@@ -147,7 +174,9 @@ Two refusals say something particular about a service account:
 Secret scanners find both kinds with `nx[ps]at_[0-9A-Za-z]{38}`.
 
 A service account's key can't review or approve a pull request: approving is
-a person's call, and its managers would otherwise approve through it.
+a person's call, and its managers would otherwise approve through it. For the
+same reason, nobody approves a pull request opened through an account they
+manage.
 
 ---
 

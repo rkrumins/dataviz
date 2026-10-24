@@ -278,6 +278,12 @@ that access on their next request.
 > grants Super Admin, or delete it. Joining such a group makes someone a Super
 > Admin, so an **Org Admin** who tries is told only a Super Admin can.
 
+> **Note:** A group that manages a [service account](/guide/service-accounts)
+> lets everyone in it make keys that act as the account. Adding someone to it
+> takes the permission to look after service accounts as well, and the
+> account's managers are told; approving an access request never adds anyone
+> to such a group.
+
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
 > groups to an invite link, so new people land in them.
@@ -370,7 +376,7 @@ Each row has the actions for that account's state:
 | **Mark as system account** | Make it a break-glass account (see below). |
 | **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly; a password you set is one they replace the next time they sign in. |
 | **End sessions** | Sign them out everywhere, now. They can sign straight back in. Their API keys keep working — revoke those under **Administration → API keys**. |
-| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. If they manage service accounts, the dialog lists them and offers to hand them to a successor first. |
+| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. If they manage service accounts — themselves or through a team — or made keys for one that still work, the dialog lists them, offers to hand their own seats to a successor first, and to revoke the keys they made. |
 
 Clicking a row opens that person's access drawer, which leads with an
 **Activity** block:
@@ -541,10 +547,11 @@ workspace's **People with access** list.
 ## Admin checklist for someone leaving
 
 - [ ] **Hand over their service accounts** — suspending them on **User
-      Management** lists the ones they manage and hands them to a successor.
-      Prefer a team: it outlives the next leaver too.
-- [ ] **Rotate the service account keys they made** — the hand-over names them;
-      they may have kept a copy.
+      Management** lists the ones they manage and hands their own seats to a
+      successor. Prefer a team: it outlives the next leaver too.
+- [ ] **Revoke the service account keys they made** — the same dialog lists
+      them, on any account, and revokes them in one step; they may have kept a
+      copy. Whoever answers for each account is told, to make a new key.
 - [ ] **Revoke their own API keys** under **Administration → API keys** if
       anything still uses one.
 
