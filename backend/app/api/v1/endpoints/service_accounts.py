@@ -466,6 +466,12 @@ async def disable_service_account(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already disabled")
     await user_repo.update_user_status(session, account_id, "suspended")
     await _record(session, "disabled", account_id, user.first_name, changed_by=admin.id)
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_disabled",
+        title="An administrator disabled it, and its keys have stopped",
+        body="No key it holds works, and none can be made, until it is enabled. Nothing was revoked.",
+        actor_id=admin.id, resource_type="service_account", resource_id=account_id,
+    )
     return await _detail(session, account_id)
 
 
@@ -481,6 +487,12 @@ async def enable_service_account(
     await user_repo.update_user_status(session, account_id, "active")
     await _record(session, "enabled", account_id, user.first_name, changed_by=admin.id)
     await service_account_standing.refresh(session, [account_id])
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_enabled",
+        title="An administrator enabled it again",
+        body="Its keys work as they did before it was disabled.",
+        actor_id=admin.id, resource_type="service_account", resource_id=account_id,
+    )
     return await _detail(session, account_id)
 
 

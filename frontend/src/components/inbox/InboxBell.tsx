@@ -191,7 +191,8 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         tile: 'bg-rose-500/10',
     },
     // Service accounts: one left with nobody answering for it, its keys
-    // about to pause, a new manager, a key made by someone who isn't one.
+    // about to pause, a new manager, a key made by someone who isn't one,
+    // and an administrator disabling or enabling it.
     service_account_unmanaged: {
         Icon: ShieldAlert,
         icon: 'text-amber-500',
@@ -211,6 +212,16 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: KeySquare,
         icon: 'text-sky-500',
         tile: 'bg-sky-500/10',
+    },
+    service_account_disabled: {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    service_account_enabled: {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
     },
 }
 

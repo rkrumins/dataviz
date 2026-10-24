@@ -220,6 +220,17 @@ async def test_an_account_is_renamed_disabled_and_enabled(test_client, db_sessio
         "identity.service_account.updated", "identity.service_account.disabled",
         "identity.service_account.enabled",
     ]
+    # Its managers hear of both: their integration stops, then works again.
+    told = (await db_session.execute(
+        select(NotificationORM.user_id, NotificationORM.kind, NotificationORM.title)
+        .where(NotificationORM.kind.in_(("service_account_disabled", "service_account_enabled")))
+        .order_by(NotificationORM.kind)
+    )).all()
+    assert [tuple(r) for r in told] == [
+        ("usr_ada", "service_account_disabled",
+         "For “Nightly sync”: An administrator disabled it, and its keys have stopped"),
+        ("usr_ada", "service_account_enabled", "For “Nightly sync”: An administrator enabled it again"),
+    ]
 
 
 # ── Workspace roles ─────────────────────────────────────────────────
@@ -327,11 +338,6 @@ async def test_a_service_account_is_not_one_of_the_people(test_client, db_sessio
     })
     assert bound.status_code == 409
 
-    # Nobody reads a service account's inbox.
-    assert await notification_repo.notify(
-        db_session, user_ids=[svc], kind="anything", title="hello",
-    ) == 0
-
 
 async def test_nothing_is_shared_with_a_service_account(test_client, db_session, people):
     """Its access is the workspace roles on its own page: a view or a draft
@@ -365,6 +371,45 @@ async def test_nothing_is_shared_with_a_service_account(test_client, db_session,
         await service.open_pr(source_graph_id="g_fork", actor=ADMIN, reviewers=[svc])
     with pytest.raises(AccessDenied):
         await service.open_draft_mr(graph_id="g_sa", branch_id="b_sa", actor=ADMIN, reviewers=[svc])
+
+
+# ── What is said to it ──────────────────────────────────────────────
+
+
+async def _told(db_session, kind: str) -> list[tuple[str, str, str]]:
+    rows = (await db_session.execute(
+        select(NotificationORM.user_id, NotificationORM.title, NotificationORM.link)
+        .where(NotificationORM.kind == kind)
+    )).all()
+    return [tuple(r) for r in rows]
+
+
+async def test_what_is_said_to_an_account_reaches_those_who_answer_for_it(
+    test_client, db_session, people,
+):
+    """Nobody reads a service account's own inbox. A workspace admin removing
+    its access is told to its managers instead — and while it has none, to
+    its administrators."""
+    svc = (await _create(test_client))["id"]
+    granted = await test_client.post(f"{BASE}/{svc}/roles", json={
+        "workspaceId": "ws_x", "role": "workspace_viewer",
+    })
+    removed = await test_client.delete(
+        f"/api/v1/admin/workspaces/ws_x/members/{granted.json()['bindingId']}",
+    )
+    assert removed.status_code == 204, removed.text
+    assert await _told(db_session, "workspace.member_removed") == [
+        ("usr_ada", "For “Metadata sync”: You no longer have access to Sales", f"/me/service-accounts/{svc}"),
+    ]
+
+    (await db_session.get(UserORM, "usr_ada")).status = "suspended"
+    await db_session.commit()
+    assert await notification_repo.notify(
+        db_session, user_ids=[svc], kind="anything", title="hello",
+    ) == 1
+    assert await _told(db_session, "anything") == [
+        (ADMIN, "For “Metadata sync”: hello", "/admin/service-accounts"),
+    ]
 
 
 # ── For managers ────────────────────────────────────────────────────
