@@ -71,6 +71,7 @@ export const VIEW_ACTION_LABELS: Record<string, string> = {
     publish_requested: 'Asked to publish',
     publish_denied: 'Publish refused',
     admin_viewed: 'Opened by an admin',
+    moved: 'Moved to another workspace',
 }
 
 /** Graph stores and catalogues a data source can come from. */

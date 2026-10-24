@@ -13,8 +13,9 @@ Within that:
   swaps CHECKs, builds a partial index on the small ``access_requests`` and
   seeds a permission and a role; ``20261019_1600_access_life`` adds nullable
   columns and a constant default, swaps a CHECK and creates two empty
-  tables), since on a database upgrading through them the lock is also held
-  while they run;
+  tables; ``20261020_1000_ds_transfers`` adds an empty table with its indexes
+  and swaps ``view_activity_log``'s action CHECK), since on a database
+  upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -40,7 +41,8 @@ _LAST = "20261014_1200_aal_api_key.py"
 _NEXT = "20261018_1200_layout_templates"
 _THEN = "20261018_1300_tpl_lifecycle"
 _AFTER = "20261019_1000_ws_access"
-_HEAD = "20261019_1600_access_life"
+_LATER = "20261019_1600_access_life"
+_HEAD = "20261020_1000_ds_transfers"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -52,6 +54,7 @@ _ON_LIVE_TABLES = {
     f"{_NEXT}.py": ("upgrade", "downgrade"),
     f"{_THEN}.py": ("upgrade", "downgrade"),
     f"{_AFTER}.py": ("upgrade", "downgrade"),
+    f"{_LATER}.py": ("upgrade", "downgrade"),
     f"{_HEAD}.py": ("upgrade", "downgrade"),
 }
 
@@ -128,12 +131,13 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_the_chain_ends_four_cheap_revisions_after_the_ledger_revision():
+def test_the_chain_ends_five_cheap_revisions_after_the_ledger_revision():
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _AFTER
+    assert script.get_revision(_HEAD).down_revision == _LATER
+    assert script.get_revision(_LATER).down_revision == _AFTER
     assert script.get_revision(_AFTER).down_revision == _THEN
     assert script.get_revision(_THEN).down_revision == _NEXT
     assert script.get_revision(_NEXT).down_revision == _LAST[:-3]

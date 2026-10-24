@@ -50,11 +50,11 @@ import inspect
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import func, select, text, update
 
 from . import config, db, job_lease
 from .job_lease import Draining, Lease, Superseded
-from .models import BranchORM, GraphORM, JobORM, MergeRequestORM, ProjectionStateORM, _now
+from .models import GraphORM, JobORM, ProjectionStateORM, _now
 
 logger = logging.getLogger(__name__)
 
@@ -547,18 +547,27 @@ async def rehome_graph_for_data_source(*, data_source_id: str, to_workspace_id: 
 
     Keyed by the data source alone (one graph each), so a retried move lands the same way. With
     ``refuse_busy`` — a person moving the source — it refuses (:class:`MoveBlocked`, nothing
-    written) while version control is busy on the graph or holds work by people of the workspace
-    it is leaving. The reaper heals with it off: the source already lives elsewhere, so what is on
-    its graph belongs there too. ``tombstone_by`` also puts a still-live graph in the trash, as
-    that actor — for a source in the trash whose own delete missed its graph.
+    written) while version control is busy on the graph, or a failed attempt to turn it on waits
+    to be resumed or cancelled. Open drafts and review requests go with it. The reaper, and a
+    failed move putting the graph back, run with it off: the source lives where it lives, so what
+    is on its graph belongs there too. ``tombstone_by`` also puts a still-live graph in the trash,
+    as that actor — for a source in the trash whose own delete missed its graph.
+
+    Takes the lock merges and publishes take (``GraphVersioningService._lock_graph``), so none
+    lands mid-move, waiting for it at most a few seconds.
     """
     sf = session_factory or db.graphver_session
     async with sf() as s:
+        postgres = s.bind.dialect.name == "postgresql"
+        if postgres:
+            await s.execute(text("SET LOCAL lock_timeout = '5s'"))
         graph = (await s.execute(select(GraphORM).where(
             GraphORM.data_source_id == data_source_id).with_for_update())).scalars().first()
         if graph is None:
             return None
         if graph.workspace_id != to_workspace_id:
+            if postgres:
+                await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph.id))))
             if refuse_busy:
                 reason = await _why_graph_stays(s, graph.id)
                 if reason:
@@ -574,7 +583,9 @@ async def rehome_graph_for_data_source(*, data_source_id: str, to_workspace_id: 
 
 
 async def _why_graph_stays(s, graph_id: str) -> Optional[str]:
-    """Why a person can't move this graph to another workspace right now, or None."""
+    """Why a person can't move this graph to another workspace right now, or None. Open drafts
+    and review requests don't hold it back: they move with it, and the move's preview names any
+    draft whose owner can't open the new workspace (``services/data_source_transfer.py``)."""
     busy = await s.scalar(select(func.count()).select_from(JobORM).where(
         JobORM.graph_id == graph_id, JobORM.status.in_(("pending", "running"))))
     if busy:
@@ -585,21 +596,6 @@ async def _why_graph_stays(s, graph_id: str) -> Optional[str]:
     if stalled:
         return ("Turning on version control for this data source didn't finish. Resume or "
                 "cancel it first.")
-    drafts = await s.scalar(select(func.count()).select_from(BranchORM).where(
-        BranchORM.graph_id == graph_id, BranchORM.kind.in_(("draft", "fork_draft")),
-        BranchORM.status.in_(("open", "publishing"))))
-    reviews = await s.scalar(select(func.count()).select_from(MergeRequestORM).where(
-        or_(MergeRequestORM.graph_id == graph_id, MergeRequestORM.target_graph_id == graph_id),
-        MergeRequestORM.status.notin_(("merged", "closed"))))
-    if drafts or reviews:
-        work = " and ".join(part for part in (
-            f"{drafts} open draft{'s' if drafts != 1 else ''}" if drafts else "",
-            f"{reviews} open review request{'s' if reviews != 1 else ''}" if reviews else "",
-        ) if part)
-        them = "it" if drafts + reviews == 1 else "them"
-        return (f"{work} {'is' if them == 'it' else 'are'} on this data source's version "
-                f"history. Publish or abandon {them} first: the people working on {them} may not "
-                f"reach {them} in the other workspace.")
     return None
 
 
@@ -725,8 +721,9 @@ class Reaper:
         the purge — and so does a move whose data source failed to commit after its graph had
         moved. The management database decides tenancy, so the graph follows its source, tombstone
         and all: a source in the trash whose graph is still live gets the delete it missed. Only
-        graphs untouched for ``REHOME_SETTLE_SECS`` are considered, so a move in flight is left
-        to finish; a graph whose source row is gone is the purge's business, not this."""
+        graphs untouched for ``REHOME_SETTLE_SECS`` are considered, and a source whose row a move
+        holds is skipped for the pass, so a move in flight is left to finish; a graph whose source
+        row is gone is the purge's business, not this."""
         from backend.app.db.models import WorkspaceDataSourceORM as DS
 
         async with self._gv() as gs:
@@ -749,11 +746,26 @@ class Reaper:
             home = homes.get(ds_id)
             if home is None or home[0] == ws_id:
                 continue
-            to_ws, source_deleted = home
-            await rehome_graph_for_data_source(
-                data_source_id=ds_id, to_workspace_id=to_ws, refuse_busy=False,
-                tombstone_by="reaper" if source_deleted and not graph_deleted else None,
-                session_factory=self._gv)
+            async with Session() as s:
+                # Held while the graph is re-filed, so no move of the source starts in between;
+                # one a move already holds is left to it, and looked at again next pass.
+                held = (await s.execute(
+                    select(DS.workspace_id, DS.deleted_at).where(DS.id == ds_id)
+                    .with_for_update(skip_locked=True))).first()
+                if held is None or held[0] == ws_id:
+                    continue
+                to_ws, source_deleted = held
+                try:
+                    await rehome_graph_for_data_source(
+                        data_source_id=ds_id, to_workspace_id=to_ws, refuse_busy=False,
+                        tombstone_by="reaper" if source_deleted and not graph_deleted else None,
+                        session_factory=self._gv)
+                except Exception as exc:
+                    logger.warning("reaper: %s's graph is filed under %s and can't be re-filed "
+                                   "under %s yet: %s", ds_id, ws_id, to_ws, exc)
+                    continue
+                finally:
+                    await s.rollback()                  # nothing written here; frees the row
             refiled += 1
             logger.info("reaper: %s's graph was filed under %s; its source lives in %s — re-filed",
                         ds_id, ws_id, to_ws)

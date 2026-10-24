@@ -85,6 +85,10 @@ export function CatalogItemPicker({
     currentWorkspaceId,
     /** Offer to re-home an unused source owned by another workspace. */
     allowMove,
+    /** Whether the caller may move this source WITH its views (they run both workspaces). */
+    canMoveWithViews,
+    /** Hand a source with views to the move wizard instead of selecting it here. */
+    onMoveWithViews,
 }: {
     items: PickableCatalogItem[]
     providers: ProviderResponse[]
@@ -95,6 +99,8 @@ export function CatalogItemPicker({
     skipHint?: string
     currentWorkspaceId?: string
     allowMove?: boolean
+    canMoveWithViews?: (item: PickableCatalogItem) => boolean
+    onMoveWithViews?: (item: PickableCatalogItem) => void
 }) {
     const [query, setQuery] = useState('')
     const [showTaken, setShowTaken] = useState(false)
@@ -119,8 +125,17 @@ export function CatalogItemPicker({
     }, [items, query])
 
     const nothingAtAll = items.length === 0
+    // Built on, and in a workspace the caller also runs: the move wizard takes it
+    // from here, views, history and access included.
+    const movableWithViews = (i: PickableCatalogItem) => Boolean(
+        allowMove && onMoveWithViews && canMoveWithViews?.(i)
+        && i.boundWorkspaceId && i.boundDataSourceId
+        && i.boundWorkspaceId !== currentWorkspaceId
+        && (i.boundViewCount ?? 0) > 0,
+    )
+    const withViewsCount = items.filter(movableWithViews).length
     const movableCount = allowMove
-        ? items.filter(i => isMovable(i, currentWorkspaceId)).length
+        ? items.filter(i => isMovable(i, currentWorkspaceId)).length + withViewsCount
         : 0
     const noneFree = !nothingAtAll
         && filtered.available.length === 0
@@ -201,6 +216,25 @@ export function CatalogItemPicker({
                     // Owned elsewhere and UNUSED — it can be re-homed. That's the
                     // remedy for "it was onboarded into the wrong workspace", which
                     // previously had none short of a destructive detach.
+                    if (movableWithViews(item)) {
+                        return (
+                            <PickerCard
+                                key={item.id}
+                                selected={false}
+                                onClick={() => onMoveWithViews?.(item)}
+                                icon={<Logo className="w-4 h-4" />}
+                                title={item.name}
+                                subtitle={`In ${item.boundWorkspaceName ?? 'another workspace'} · views and history come too`}
+                                badge={
+                                    <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+                                        <MoveRight className="w-2.5 h-2.5" />
+                                        Move with {views} view{views === 1 ? '' : 's'}
+                                    </span>
+                                }
+                            />
+                        )
+                    }
+
                     if (movable) {
                         return (
                             <PickerCard
@@ -232,7 +266,7 @@ export function CatalogItemPicker({
                                 : views > 0
                                     // Say WHY it can't move — otherwise "why is this
                                     // one greyed out and that one isn't" is a mystery.
-                                    ? `Used by ${item.boundWorkspaceName ?? 'another workspace'} · ${views} view${views === 1 ? '' : 's'} built on it`
+                                    ? `Used by ${item.boundWorkspaceName ?? 'another workspace'} · ${views} view${views === 1 ? '' : 's'} built on it${allowMove ? ' · its admins can move it' : ''}`
                                     : `Used by ${item.boundWorkspaceName ?? 'another workspace'}`}
                             badge={<Link2Off className="w-3 h-3" />}
                         />
@@ -254,7 +288,9 @@ export function CatalogItemPicker({
                             {movableCount} source{movableCount === 1 ? '' : 's'} can be moved here
                         </span>
                         <span className="block text-xs text-slate-600 dark:text-slate-400">
-                            Allocated elsewhere, but nothing is built on {movableCount === 1 ? 'it' : 'them'} yet
+                            {withViewsCount > 0
+                                ? 'Allocated elsewhere — anything built on them comes too'
+                                : `Allocated elsewhere, but nothing is built on ${movableCount === 1 ? 'it' : 'them'} yet`}
                         </span>
                     </span>
                     <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />

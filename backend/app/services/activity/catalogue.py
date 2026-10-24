@@ -647,6 +647,17 @@ def _summary_flag(p: dict) -> str:
     return f"Feature '{key}' set to {json.dumps(value)}" if value is not None else f"Feature '{key}' changed"
 
 
+def _transfer_summary(leaving: str, arriving: str) -> Callable[[dict], str]:
+    """A data-source transfer is recorded once in each workspace; the summary reads from the
+    side it is filed under. ``leaving`` / ``arriving`` hold ``{s}`` (the source) and ``{ws}``
+    (the other workspace)."""
+    def _build(p: dict) -> str:
+        from_side = bool(p.get("workspace_id")) and p.get("workspace_id") == _detail(p, "fromWorkspaceId")
+        other = _detail(p, "toWorkspaceName" if from_side else "fromWorkspaceName") or "another workspace"
+        return (leaving if from_side else arriving).format(s=_subject(p), ws=other)
+    return _build
+
+
 _EVENT_META.update({
     # ── operations: ingestion and aggregation, by a person
     "aggregation.job.triggered": ("info", _summary_job_triggered),
@@ -684,6 +695,20 @@ _EVENT_META.update({
     "workspace.data_source.restored": ("info", _envelope_summary("Restored data source {}")),
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
+    "workspace.data_source.moved": ("info", _transfer_summary(
+        "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
+    "workspace.data_source.move_undone": ("info", _transfer_summary(
+        "Undid the move of {s}: it came back from {ws}", "Undid the move of {s}: it went back to {ws}")),
+    "workspace.data_source.transfer_requested": ("info", _transfer_summary(
+        "Asked {ws} to take data source {s}", "{ws} asked to move data source {s} here")),
+    "workspace.data_source.transfer_declined": ("info", _transfer_summary(
+        "{ws} declined data source {s}", "Declined data source {s} from {ws}")),
+    # Explicitly info: "cancelled" would otherwise read as a warning.
+    "workspace.data_source.transfer_cancelled": ("info", _transfer_summary(
+        "Cancelled the request to move {s} to {ws}", "The request to move {s} here from {ws} was cancelled")),
+    "workspace.data_source.transfer_expired": ("info", _transfer_summary(
+        "The request to move {s} to {ws} expired unanswered",
+        "The request to move {s} here from {ws} expired unanswered")),
     "workspace.versioning.enabled": ("info", _envelope_summary("Turned on version control for {}")),
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
@@ -735,6 +760,12 @@ LABELS: dict[str, str] = {
     "workspace.data_source.restored": "Restored a data source",
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
+    "workspace.data_source.moved": "Moved a data source",
+    "workspace.data_source.move_undone": "Undid a data source move",
+    "workspace.data_source.transfer_requested": "Requested a data source transfer",
+    "workspace.data_source.transfer_declined": "Declined a data source transfer",
+    "workspace.data_source.transfer_cancelled": "Cancelled a data source transfer",
+    "workspace.data_source.transfer_expired": "A data source transfer expired",
     "workspace.datasource.moved": "Moved a data source",
     "workspace.versioning.enabled": "Turned on version control",
     "workspace.versioning.retried": "Retried version control",
